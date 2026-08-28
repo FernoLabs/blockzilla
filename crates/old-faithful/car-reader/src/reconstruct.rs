@@ -403,6 +403,19 @@ impl RawDataFrame {
         self.append_reassembled(out, dataframes, visited)
     }
 
+    /// Reassemble one dataframe without allowing the output to exceed `limit`.
+    pub fn reassemble_bytes_into_bounded(
+        &self,
+        dataframes: &HashMap<Cid36, StandaloneDataFrame>,
+        out: &mut Vec<u8>,
+        visited: &mut HashSet<Cid36>,
+        limit: usize,
+    ) -> Result<(), ReconstructError> {
+        out.clear();
+        visited.clear();
+        self.append_reassembled_bounded(out, dataframes, visited, limit)
+    }
+
     fn append_reassembled(
         &self,
         out: &mut Vec<u8>,
@@ -430,6 +443,60 @@ impl RawDataFrame {
 
         Ok(())
     }
+
+    fn append_reassembled_bounded(
+        &self,
+        out: &mut Vec<u8>,
+        dataframes: &HashMap<Cid36, StandaloneDataFrame>,
+        visited: &mut HashSet<Cid36>,
+        limit: usize,
+    ) -> Result<(), ReconstructError> {
+        extend_bounded(out, &self.data, limit)?;
+
+        for next in &self.next {
+            if let Some(inline) = next.inline_raw_bytes() {
+                extend_bounded(out, inline, limit)?;
+                continue;
+            }
+
+            let cid = next.require_car_cid()?;
+            if !visited.insert(cid) {
+                return Err(ReconstructError::DataFrameCycle(cid));
+            }
+            let frame = dataframes
+                .get(&cid)
+                .ok_or(ReconstructError::MissingDataFrame(cid))?;
+            frame
+                .frame
+                .append_reassembled_bounded(out, dataframes, visited, limit)?;
+            visited.remove(&cid);
+        }
+
+        Ok(())
+    }
+}
+
+fn extend_bounded(
+    output: &mut Vec<u8>,
+    bytes: &[u8],
+    limit: usize,
+) -> Result<(), ReconstructError> {
+    let end =
+        output
+            .len()
+            .checked_add(bytes.len())
+            .ok_or(ReconstructError::DataFrameBytesLimit {
+                required: usize::MAX,
+                limit,
+            })?;
+    if end > limit {
+        return Err(ReconstructError::DataFrameBytesLimit {
+            required: end,
+            limit,
+        });
+    }
+    output.extend_from_slice(bytes);
+    Ok(())
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -528,6 +595,17 @@ impl RawTransactionNode {
         self.data.reassemble_bytes_into(dataframes, out, visited)
     }
 
+    pub fn transaction_bytes_into_bounded(
+        &self,
+        dataframes: &HashMap<Cid36, StandaloneDataFrame>,
+        out: &mut Vec<u8>,
+        visited: &mut HashSet<Cid36>,
+        limit: usize,
+    ) -> Result<(), ReconstructError> {
+        self.data
+            .reassemble_bytes_into_bounded(dataframes, out, visited, limit)
+    }
+
     pub fn metadata_bytes_into(
         &self,
         dataframes: &HashMap<Cid36, StandaloneDataFrame>,
@@ -536,6 +614,17 @@ impl RawTransactionNode {
     ) -> Result<(), ReconstructError> {
         self.metadata
             .reassemble_bytes_into(dataframes, out, visited)
+    }
+
+    pub fn metadata_bytes_into_bounded(
+        &self,
+        dataframes: &HashMap<Cid36, StandaloneDataFrame>,
+        out: &mut Vec<u8>,
+        visited: &mut HashSet<Cid36>,
+        limit: usize,
+    ) -> Result<(), ReconstructError> {
+        self.metadata
+            .reassemble_bytes_into_bounded(dataframes, out, visited, limit)
     }
 }
 
@@ -891,12 +980,55 @@ impl LosslessCarBlock {
         self.scratch.clear();
     }
 
+    pub(crate) fn unterminated_block_group_error(&self) -> Option<ReconstructError> {
+        let transactions = self.tx_by_cid.len();
+        let entries = self.entry_by_cid.len();
+        let rewards = self.rewards_by_cid.len();
+        let dataframes = self.dataframes.len();
+        (transactions != 0 || entries != 0 || rewards != 0 || dataframes != 0).then_some(
+            ReconstructError::UnterminatedBlockGroup {
+                transactions,
+                entries,
+                rewards,
+                dataframes,
+            },
+        )
+    }
+
     pub fn read_entry_payload_into<R: Read>(
         &mut self,
         reader: &mut R,
         payload_len: usize,
         location: NodeLocation,
         cid_bytes: [u8; 36],
+    ) -> CarReadResult<bool> {
+        self.read_entry_payload_into_inner(reader, payload_len, location, cid_bytes, None)
+    }
+
+    pub(crate) fn read_entry_payload_into_bounded<R: Read>(
+        &mut self,
+        reader: &mut R,
+        payload_len: usize,
+        location: NodeLocation,
+        cid_bytes: [u8; 36],
+        max_transactions_per_block: usize,
+    ) -> CarReadResult<bool> {
+        self.read_entry_payload_into_inner(
+            reader,
+            payload_len,
+            location,
+            cid_bytes,
+            Some(max_transactions_per_block),
+        )
+    }
+
+    fn read_entry_payload_into_inner<R: Read>(
+        &mut self,
+        reader: &mut R,
+        payload_len: usize,
+        location: NodeLocation,
+        cid_bytes: [u8; 36],
+        max_transactions_per_block: Option<usize>,
     ) -> CarReadResult<bool> {
         if payload_len == 0 {
             return Err(CarReadError::UnexpectedEof(format!(
@@ -938,12 +1070,106 @@ impl LosslessCarBlock {
                 Ok(false)
             }
             RawNode::Block(block) => {
-                self.finalize(block)
-                    .map_err(|err| CarReadError::InvalidData(err.to_string()))?;
+                if let Some(limit) = max_transactions_per_block {
+                    self.finalize_bounded(block, limit)
+                        .map_err(|err| CarReadError::InvalidData(err.to_string()))?;
+                } else {
+                    self.finalize(block)
+                        .map_err(|err| CarReadError::InvalidData(err.to_string()))?;
+                }
                 Ok(true)
             }
             RawNode::Subset(_) | RawNode::Epoch(_) => Ok(false),
         }
+    }
+
+    fn finalize_bounded(
+        &mut self,
+        block: RawBlockNode,
+        max_transactions_per_block: usize,
+    ) -> Result<(), ReconstructError> {
+        self.validate_bounded_references(&block, max_transactions_per_block)?;
+        self.finalize(block)
+    }
+
+    fn validate_bounded_references(
+        &self,
+        block: &RawBlockNode,
+        max_transactions_per_block: usize,
+    ) -> Result<(), ReconstructError> {
+        if block.entries.len() > self.entry_by_cid.len() {
+            return Err(ReconstructError::ReferenceCountExceedsAvailableNodes {
+                kind: "entry",
+                references: block.entries.len(),
+                available_nodes: self.entry_by_cid.len(),
+            });
+        }
+
+        let mut transaction_references = 0usize;
+        for entry_ref in &block.entries {
+            let entry_cid = entry_ref.require_car_cid()?;
+            let entry = self
+                .entry_by_cid
+                .get(&entry_cid)
+                .ok_or(ReconstructError::MissingEntry(entry_cid))?;
+            transaction_references = transaction_references
+                .checked_add(entry.transactions.len())
+                .ok_or(ReconstructError::TransactionReferenceCountOverflow)?;
+            if transaction_references > max_transactions_per_block {
+                return Err(ReconstructError::TransactionReferenceCountLimit {
+                    count: transaction_references,
+                    limit: max_transactions_per_block,
+                });
+            }
+        }
+        if transaction_references > self.tx_by_cid.len() {
+            return Err(ReconstructError::ReferenceCountExceedsAvailableNodes {
+                kind: "transaction",
+                references: transaction_references,
+                available_nodes: self.tx_by_cid.len(),
+            });
+        }
+
+        // Each block entry is one PoH entry and each transaction CID can occur
+        // only once in a valid Solana block. Reject repeated references before
+        // cloning their retained nodes into canonical order.
+        let mut entry_cids = HashSet::new();
+        entry_cids.try_reserve(block.entries.len()).map_err(|_| {
+            ReconstructError::ReferenceSetAllocation {
+                kind: "entry",
+                count: block.entries.len(),
+            }
+        })?;
+        let mut transaction_cids = HashSet::new();
+        transaction_cids
+            .try_reserve(transaction_references)
+            .map_err(|_| ReconstructError::ReferenceSetAllocation {
+                kind: "transaction",
+                count: transaction_references,
+            })?;
+
+        for entry_ref in &block.entries {
+            let entry_cid = entry_ref.require_car_cid()?;
+            if !entry_cids.insert(entry_cid) {
+                return Err(ReconstructError::DuplicateEntryReference(entry_cid));
+            }
+            let entry = self
+                .entry_by_cid
+                .get(&entry_cid)
+                .ok_or(ReconstructError::MissingEntry(entry_cid))?;
+            for transaction_ref in &entry.transactions {
+                let transaction_cid = transaction_ref.require_car_cid()?;
+                if !transaction_cids.insert(transaction_cid) {
+                    return Err(ReconstructError::DuplicateTransactionReference(
+                        transaction_cid,
+                    ));
+                }
+                if !self.tx_by_cid.contains_key(&transaction_cid) {
+                    return Err(ReconstructError::MissingTransaction(transaction_cid));
+                }
+            }
+        }
+        Ok(())
     }
 
     fn finalize(&mut self, block: RawBlockNode) -> Result<(), ReconstructError> {
@@ -1273,7 +1499,27 @@ pub enum ReconstructError {
         rewards: usize,
         dataframes: usize,
     },
+    TransactionReferenceCountOverflow,
+    TransactionReferenceCountLimit {
+        count: usize,
+        limit: usize,
+    },
+    ReferenceCountExceedsAvailableNodes {
+        kind: &'static str,
+        references: usize,
+        available_nodes: usize,
+    },
+    ReferenceSetAllocation {
+        kind: &'static str,
+        count: usize,
+    },
+    DuplicateEntryReference(Cid36),
+    DuplicateTransactionReference(Cid36),
     DataFrameCycle(Cid36),
+    DataFrameBytesLimit {
+        required: usize,
+        limit: usize,
+    },
     CidMismatch {
         kind: &'static str,
         expected: Cid36,
@@ -1319,7 +1565,36 @@ impl fmt::Display for ReconstructError {
                 f,
                 "unterminated block group: txs={transactions} entries={entries} rewards={rewards} dataframes={dataframes}"
             ),
+            ReconstructError::TransactionReferenceCountOverflow => {
+                write!(f, "transaction reference count overflow")
+            }
+            ReconstructError::TransactionReferenceCountLimit { count, limit } => write!(
+                f,
+                "transaction reference count {count} exceeds configured limit {limit}"
+            ),
+            ReconstructError::ReferenceCountExceedsAvailableNodes {
+                kind,
+                references,
+                available_nodes,
+            } => write!(
+                f,
+                "{kind} reference count {references} exceeds {available_nodes} available nodes"
+            ),
+            ReconstructError::ReferenceSetAllocation { kind, count } => write!(
+                f,
+                "could not reserve {count} {kind} references for bounded reconstruction"
+            ),
+            ReconstructError::DuplicateEntryReference(cid) => {
+                write!(f, "duplicate block entry reference {cid}")
+            }
+            ReconstructError::DuplicateTransactionReference(cid) => {
+                write!(f, "duplicate block transaction reference {cid}")
+            }
             ReconstructError::DataFrameCycle(cid) => write!(f, "dataframe cycle at {cid}"),
+            ReconstructError::DataFrameBytesLimit { required, limit } => write!(
+                f,
+                "reassembled dataframe needs {required} bytes, configured limit is {limit}"
+            ),
             ReconstructError::CidMismatch {
                 kind,
                 expected,

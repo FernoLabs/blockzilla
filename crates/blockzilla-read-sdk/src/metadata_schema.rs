@@ -10,8 +10,20 @@ use blockzilla_format::{
     CompactInnerInstructions, CompactLogStream, CompactMetaV1, CompactPubkey, CompactReturnData,
     CompactReward, CompactTokenBalance, CompactTransactionError, wincode_leb128_config,
 };
+use sha2::{Digest as _, Sha256};
 use thiserror::Error;
 use wincode::{SchemaRead, SchemaWrite};
+
+use crate::{RangeSource, SourceError, manifest::GenerationManifest};
+
+/// The manifest object that selects the legacy raw transaction-error grammar.
+pub const COMPACT_V2_LEGACY_METADATA_SCHEMA_MARKER_FILE: &str =
+    "archive-v2-metadata-schema-legacy-raw-error-v1.marker";
+pub const COMPACT_V2_LEGACY_METADATA_SCHEMA_MARKER_SIZE: u64 = 58;
+pub const COMPACT_V2_LEGACY_METADATA_SCHEMA_MARKER_SHA256: &str =
+    "5ac1903c359744924575edb73cfda3b73e819bb0b23914356906ecd3e0884567";
+pub const COMPACT_V2_LEGACY_METADATA_SCHEMA_MARKER_BYTES: &[u8; 58] =
+    include_bytes!("../assets/archive-v2-metadata-schema-legacy-raw-error-v1.marker");
 
 /// The one transaction-metadata grammar selected for a Compact V2 generation.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -25,6 +37,46 @@ pub enum CompactV2MetadataSchema {
 
 #[derive(Debug, Error)]
 pub enum CompactV2MetadataSchemaError {
+    #[error("invalid Compact V2 generation manifest: {0}")]
+    InvalidManifest(String),
+
+    #[error("cannot read Compact V2 metadata-schema marker: {0}")]
+    Source(#[from] SourceError),
+
+    #[error(
+        "Compact V2 metadata-schema marker is present but {COMPACT_V2_LEGACY_METADATA_SCHEMA_MARKER_FILE} is not bound by the generation manifest"
+    )]
+    MarkerNotManifestBound,
+
+    #[error(
+        "generation manifest binds {COMPACT_V2_LEGACY_METADATA_SCHEMA_MARKER_FILE}, but the source object is missing"
+    )]
+    BoundMarkerMissing,
+
+    #[error("an unpublished source cannot select a historical Compact V2 metadata grammar")]
+    UnpublishedHistoricalMarker,
+
+    #[error("metadata-schema marker manifest size is {actual}, expected {expected}")]
+    MarkerManifestSize { expected: u64, actual: u64 },
+
+    #[error("metadata-schema marker manifest SHA-256 is {actual}, expected {expected}")]
+    MarkerManifestDigest {
+        expected: &'static str,
+        actual: String,
+    },
+
+    #[error("metadata-schema marker object size is {actual}, expected {expected}")]
+    MarkerObjectSize { expected: u64, actual: u64 },
+
+    #[error("metadata-schema marker object SHA-256 is {actual}, expected {expected}")]
+    MarkerObjectDigest {
+        expected: &'static str,
+        actual: String,
+    },
+
+    #[error("metadata-schema marker bytes do not equal the required marker bytes")]
+    MarkerObjectBytes,
+
     #[error("cannot decode exact {schema:?} Compact V2 metadata: {message}")]
     Decode {
         schema: CompactV2MetadataSchema,
@@ -33,6 +85,96 @@ pub enum CompactV2MetadataSchemaError {
 
     #[error("cannot decode the stored transaction error in legacy Compact V2 metadata: {0}")]
     LegacyTransactionError(String),
+}
+
+/// Select one metadata grammar from a published generation manifest.
+///
+/// A missing marker selects the current typed-error grammar. A present marker
+/// is effective only when the manifest binds its exact name, size, and digest.
+pub fn select_compact_v2_metadata_schema<S: RangeSource>(
+    source: &S,
+    manifest: &GenerationManifest,
+) -> Result<CompactV2MetadataSchema, CompactV2MetadataSchemaError> {
+    manifest
+        .validate()
+        .map_err(|error| CompactV2MetadataSchemaError::InvalidManifest(error.to_string()))?;
+    select_metadata_schema(source, Some(manifest))
+}
+
+/// Select the current grammar for an explicit unpublished fixture.
+///
+/// Historical grammar selection for a trusted unpublished source must be an
+/// explicit caller choice through `ArchiveReader::open_trusted_with_schemas`.
+pub fn select_unpublished_compact_v2_metadata_schema<S: RangeSource>(
+    source: &S,
+) -> Result<CompactV2MetadataSchema, CompactV2MetadataSchemaError> {
+    select_metadata_schema(source, None)
+}
+
+fn select_metadata_schema<S: RangeSource>(
+    source: &S,
+    manifest: Option<&GenerationManifest>,
+) -> Result<CompactV2MetadataSchema, CompactV2MetadataSchemaError> {
+    let source_size = source.size(COMPACT_V2_LEGACY_METADATA_SCHEMA_MARKER_FILE)?;
+    let binding =
+        manifest.and_then(|manifest| manifest.file(COMPACT_V2_LEGACY_METADATA_SCHEMA_MARKER_FILE));
+
+    match (source_size, binding) {
+        (Some(_), None) if manifest.is_some() => {
+            return Err(CompactV2MetadataSchemaError::MarkerNotManifestBound);
+        }
+        (Some(_), None) => {
+            return Err(CompactV2MetadataSchemaError::UnpublishedHistoricalMarker);
+        }
+        (None, Some(_)) => return Err(CompactV2MetadataSchemaError::BoundMarkerMissing),
+        (None, None) => return Ok(CompactV2MetadataSchema::CurrentTypedError),
+        (Some(source_size), Some(binding)) => {
+            if binding.size != COMPACT_V2_LEGACY_METADATA_SCHEMA_MARKER_SIZE {
+                return Err(CompactV2MetadataSchemaError::MarkerManifestSize {
+                    expected: COMPACT_V2_LEGACY_METADATA_SCHEMA_MARKER_SIZE,
+                    actual: binding.size,
+                });
+            }
+            if binding.sha256 != COMPACT_V2_LEGACY_METADATA_SCHEMA_MARKER_SHA256 {
+                return Err(CompactV2MetadataSchemaError::MarkerManifestDigest {
+                    expected: COMPACT_V2_LEGACY_METADATA_SCHEMA_MARKER_SHA256,
+                    actual: binding.sha256.clone(),
+                });
+            }
+            if source_size != COMPACT_V2_LEGACY_METADATA_SCHEMA_MARKER_SIZE {
+                return Err(CompactV2MetadataSchemaError::MarkerObjectSize {
+                    expected: COMPACT_V2_LEGACY_METADATA_SCHEMA_MARKER_SIZE,
+                    actual: source_size,
+                });
+            }
+        }
+    }
+
+    let bytes = source.read_all_bounded(
+        COMPACT_V2_LEGACY_METADATA_SCHEMA_MARKER_FILE,
+        COMPACT_V2_LEGACY_METADATA_SCHEMA_MARKER_SIZE as usize,
+    )?;
+    let actual_digest = hex_lower_sha256(&bytes);
+    if actual_digest != COMPACT_V2_LEGACY_METADATA_SCHEMA_MARKER_SHA256 {
+        return Err(CompactV2MetadataSchemaError::MarkerObjectDigest {
+            expected: COMPACT_V2_LEGACY_METADATA_SCHEMA_MARKER_SHA256,
+            actual: actual_digest,
+        });
+    }
+    if bytes.as_slice() != COMPACT_V2_LEGACY_METADATA_SCHEMA_MARKER_BYTES {
+        return Err(CompactV2MetadataSchemaError::MarkerObjectBytes);
+    }
+    Ok(CompactV2MetadataSchema::LegacyRawError)
+}
+
+fn hex_lower_sha256(bytes: &[u8]) -> String {
+    let digest = Sha256::digest(bytes);
+    let mut out = String::with_capacity(64);
+    for byte in digest {
+        out.push(char::from_digit((byte >> 4) as u32, 16).expect("hex nibble"));
+        out.push(char::from_digit((byte & 0x0f) as u32, 16).expect("hex nibble"));
+    }
+    out
 }
 
 /// Exact historical shape before `CompactMetaV1.err` became typed.
@@ -117,8 +259,125 @@ pub fn decode_compact_v2_metadata(
 
 #[cfg(test)]
 mod tests {
+    use std::path::Path;
+
     use super::*;
     use blockzilla_format::{CompactInstructionError, CompactTransactionError};
+    use tempfile::TempDir;
+
+    use crate::{
+        LocalRangeSource,
+        manifest::{GenerationFile, compute_generation_digest},
+    };
+
+    fn manifest(marker: Option<GenerationFile>) -> GenerationManifest {
+        let mut manifest = GenerationManifest {
+            schema_version: 1,
+            cluster_id: "mainnet-beta".to_owned(),
+            epoch: 900,
+            generation_id: "test".to_owned(),
+            generation_digest: "0".repeat(64),
+            slots_per_epoch: 432_000,
+            complete: true,
+            files: marker.into_iter().collect(),
+        };
+        manifest.generation_digest = compute_generation_digest(&manifest).unwrap();
+        manifest
+    }
+
+    fn marker_binding() -> GenerationFile {
+        GenerationFile {
+            name: COMPACT_V2_LEGACY_METADATA_SCHEMA_MARKER_FILE.to_owned(),
+            size: COMPACT_V2_LEGACY_METADATA_SCHEMA_MARKER_SIZE,
+            sha256: COMPACT_V2_LEGACY_METADATA_SCHEMA_MARKER_SHA256.to_owned(),
+        }
+    }
+
+    fn write_marker(root: &Path, bytes: &[u8]) {
+        std::fs::write(
+            root.join(COMPACT_V2_LEGACY_METADATA_SCHEMA_MARKER_FILE),
+            bytes,
+        )
+        .unwrap();
+    }
+
+    #[test]
+    fn marker_constants_bind_the_exact_metadata_schema_bytes() {
+        assert_eq!(
+            COMPACT_V2_LEGACY_METADATA_SCHEMA_MARKER_BYTES.len() as u64,
+            COMPACT_V2_LEGACY_METADATA_SCHEMA_MARKER_SIZE
+        );
+        assert_eq!(
+            hex_lower_sha256(COMPACT_V2_LEGACY_METADATA_SCHEMA_MARKER_BYTES),
+            COMPACT_V2_LEGACY_METADATA_SCHEMA_MARKER_SHA256
+        );
+    }
+
+    #[test]
+    fn absent_metadata_marker_selects_current_schema() {
+        let dir = TempDir::new().unwrap();
+        let source = LocalRangeSource::new(dir.path());
+        assert_eq!(
+            select_compact_v2_metadata_schema(&source, &manifest(None)).unwrap(),
+            CompactV2MetadataSchema::CurrentTypedError
+        );
+    }
+
+    #[test]
+    fn legacy_metadata_marker_must_be_manifest_bound() {
+        let dir = TempDir::new().unwrap();
+        write_marker(dir.path(), COMPACT_V2_LEGACY_METADATA_SCHEMA_MARKER_BYTES);
+        let source = LocalRangeSource::new(dir.path());
+        assert!(matches!(
+            select_compact_v2_metadata_schema(&source, &manifest(None)).unwrap_err(),
+            CompactV2MetadataSchemaError::MarkerNotManifestBound
+        ));
+        assert!(matches!(
+            select_unpublished_compact_v2_metadata_schema(&source).unwrap_err(),
+            CompactV2MetadataSchemaError::UnpublishedHistoricalMarker
+        ));
+    }
+
+    #[test]
+    fn bound_legacy_metadata_marker_checks_manifest_and_object() {
+        let dir = TempDir::new().unwrap();
+        write_marker(dir.path(), COMPACT_V2_LEGACY_METADATA_SCHEMA_MARKER_BYTES);
+        let source = LocalRangeSource::new(dir.path());
+        assert_eq!(
+            select_compact_v2_metadata_schema(&source, &manifest(Some(marker_binding()))).unwrap(),
+            CompactV2MetadataSchema::LegacyRawError
+        );
+
+        let mut wrong_binding = marker_binding();
+        wrong_binding.sha256 = "0".repeat(64);
+        assert!(matches!(
+            select_compact_v2_metadata_schema(&source, &manifest(Some(wrong_binding))).unwrap_err(),
+            CompactV2MetadataSchemaError::MarkerManifestDigest { .. }
+        ));
+
+        let missing = TempDir::new().unwrap();
+        assert!(matches!(
+            select_compact_v2_metadata_schema(
+                &LocalRangeSource::new(missing.path()),
+                &manifest(Some(marker_binding())),
+            )
+            .unwrap_err(),
+            CompactV2MetadataSchemaError::BoundMarkerMissing
+        ));
+
+        let corrupt = TempDir::new().unwrap();
+        let mut bytes = COMPACT_V2_LEGACY_METADATA_SCHEMA_MARKER_BYTES.to_vec();
+        bytes[0] ^= 1;
+        write_marker(corrupt.path(), &bytes);
+        assert!(matches!(
+            select_compact_v2_metadata_schema(
+                &LocalRangeSource::new(corrupt.path()),
+                &manifest(Some(marker_binding())),
+            )
+            .unwrap_err(),
+            CompactV2MetadataSchemaError::MarkerObjectDigest { .. }
+        ));
+    }
 
     fn current_metadata(err: Option<CompactTransactionError>) -> CompactMetaV1 {
         CompactMetaV1 {

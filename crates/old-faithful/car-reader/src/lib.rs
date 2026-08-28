@@ -182,6 +182,10 @@ pub mod error;
 pub mod genesis;
 pub mod metadata_decoder;
 pub mod node;
+#[cfg(feature = "query-sdk")]
+pub mod query_sdk;
+#[cfg(feature = "query-sdk-http")]
+pub mod query_sdk_http;
 pub mod reader;
 pub mod reconstruct;
 pub mod short_vec;
@@ -191,7 +195,7 @@ pub mod versioned_transaction;
 
 pub use car_block_group::{CarBlockGroup, TransactionFrame};
 pub use car_stream::CarStream;
-pub use reader::CarBlockReader;
+pub use reader::{CarBlockReader, LosslessBlockReadLimits};
 
 pub mod confirmed_block {
     include!(concat!(

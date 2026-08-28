@@ -4,6 +4,11 @@
 serves Birdeye-shaped HTTP routes. It is an experimental example, not a
 supported market-data service or part of Blockzilla's archive contract.
 
+This older example reads Compact V2 wire files directly. It does not use the
+common archive read SDK and is not the recommended SDK example. Start with
+[Archive formats and the read SDK](../../docs/reference/archive-formats-and-read-sdk.md)
+and the [archive token-event example](../archive-token-events/README.md).
+
 ## Run
 
 Build an index:

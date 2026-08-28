@@ -10,6 +10,12 @@ pub enum Error {
     #[error("invalid generation manifest: {0}")]
     InvalidManifest(String),
 
+    #[error("Compact V2 message schema error: {0}")]
+    MessageSchema(#[from] crate::message_schema::CompactV2MessageSchemaError),
+
+    #[error("Compact V2 metadata schema error: {0}")]
+    MetadataSchema(#[from] crate::metadata_schema::CompactV2MetadataSchemaError),
+
     #[error("generation is not complete")]
     IncompleteGeneration,
 

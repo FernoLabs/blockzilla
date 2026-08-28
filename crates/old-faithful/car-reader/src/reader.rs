@@ -67,6 +67,19 @@ pub enum CarPayloadRead {
     Full,
 }
 
+/// Caller-selected limits for one lossless block scan.
+///
+/// These limits stop declared CAR payload sizes before the lossless reader
+/// allocates their bodies. They do not make legacy CAR decoding suitable for
+/// untrusted input; callers must still require an operator-trusted source.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct LosslessBlockReadLimits {
+    pub max_entry_payload_bytes: usize,
+    pub max_block_payload_bytes: usize,
+    pub max_entries_per_block: usize,
+    pub max_transactions_per_block: usize,
+}
+
 impl<R: Read> CarBlockReader<R> {
     /// Create a CAR reader with a specific internal I/O buffer size.
     pub fn with_capacity(inner: R, io_buf_bytes: usize) -> Self {
@@ -91,11 +104,50 @@ impl<R: Read> CarBlockReader<R> {
         Ok(out)
     }
 
+    /// Read a CAR header only when its declared payload fits `max_header_bytes`.
+    pub fn read_header_bytes_bounded(&mut self, max_header_bytes: usize) -> CarReadResult<Vec<u8>> {
+        if max_header_bytes == 0 {
+            return Err(CarReadError::InvalidData(
+                "CAR header byte limit must be nonzero".to_string(),
+            ));
+        }
+        let (header_len, header_varint) = read_uvarint64_with_bytes(&mut self.reader)?;
+        let header_len = usize::try_from(header_len)
+            .map_err(|_| CarReadError::InvalidData("CAR header exceeds usize".to_string()))?;
+        if header_len > max_header_bytes {
+            return Err(CarReadError::InvalidData(format!(
+                "CAR header {header_len} bytes exceeds configured limit {max_header_bytes}"
+            )));
+        }
+        let mut output = header_varint;
+        let start = output.len();
+        let total = start
+            .checked_add(header_len)
+            .ok_or_else(|| CarReadError::InvalidData("CAR header size overflow".to_string()))?;
+        output.resize(total, 0u8);
+        self.reader
+            .read_exact(&mut output[start..])
+            .map_err(|error| CarReadError::Io(error.to_string()))?;
+        self.offset = self
+            .offset
+            .checked_add(u64::try_from(output.len()).map_err(|_| {
+                CarReadError::InvalidData("CAR header size exceeds u64".to_string())
+            })?)
+            .ok_or_else(|| CarReadError::InvalidData("CAR offset overflow".to_string()))?;
+        Ok(output)
+    }
+
     /// Read and discard the CAR header.
     ///
     /// Call this once before reading entries or blocks from a normal CAR file.
     pub fn skip_header(&mut self) -> CarReadResult<()> {
         let _ = self.read_header_bytes()?;
+        Ok(())
+    }
+
+    /// Read and discard a CAR header under an explicit payload limit.
+    pub fn skip_header_bounded(&mut self, max_header_bytes: usize) -> CarReadResult<()> {
+        let _ = self.read_header_bytes_bounded(max_header_bytes)?;
         Ok(())
     }
 
@@ -216,6 +268,126 @@ impl<R: Read> CarBlockReader<R> {
             )?;
             self.offset += payload_len as u64;
             self.entry_index += 1;
+            if done {
+                return Ok(true);
+            }
+        }
+    }
+
+    /// Read one CID-resolved block with explicit raw-payload limits.
+    ///
+    /// The existing unbounded method is kept for compatibility. Query adapters
+    /// should use this method and must still label the source operator-trusted.
+    pub fn read_until_block_lossless_bounded(
+        &mut self,
+        out: &mut crate::reconstruct::LosslessCarBlock,
+        limits: LosslessBlockReadLimits,
+    ) -> CarReadResult<bool> {
+        if limits.max_entry_payload_bytes == 0
+            || limits.max_block_payload_bytes == 0
+            || limits.max_entries_per_block == 0
+            || limits.max_transactions_per_block == 0
+        {
+            return Err(CarReadError::InvalidData(
+                "lossless block read limits must be nonzero".to_string(),
+            ));
+        }
+
+        out.clear();
+        let mut block_payload_bytes = 0usize;
+        let mut block_entries = 0usize;
+
+        loop {
+            let entry_offset = self.offset;
+            let current_entry_index = self.entry_index;
+            let entry_len = match read_uvarint64_with_len(&mut self.reader) {
+                Ok((value, varint_len)) => {
+                    self.offset = self
+                        .offset
+                        .checked_add(u64::try_from(varint_len).map_err(|_| {
+                            CarReadError::InvalidData("CAR varint length exceeds u64".to_string())
+                        })?)
+                        .ok_or_else(|| {
+                            CarReadError::InvalidData("CAR offset overflow".to_string())
+                        })?;
+                    usize::try_from(value).map_err(|_| {
+                        CarReadError::InvalidData("entry length exceeds usize".to_string())
+                    })?
+                }
+                // A valid Old Faithful CAR can end with subset and epoch index
+                // nodes after its last block. Those nodes are not retained in
+                // this pending block group. A retained transaction, entry,
+                // reward, or dataframe without a block is truncated input.
+                Err(CarReadError::Eof) => {
+                    if let Some(error) = out.unterminated_block_group_error() {
+                        return Err(CarReadError::InvalidData(error.to_string()));
+                    }
+                    return Ok(false);
+                }
+                Err(error) => return Err(error),
+            };
+            let payload_len = entry_len
+                .checked_sub(CAR_CID_LEN)
+                .ok_or_else(|| CarReadError::InvalidData("entry_len < cid_len".to_string()))?;
+            if payload_len > limits.max_entry_payload_bytes {
+                return Err(CarReadError::InvalidData(format!(
+                    "CAR entry payload {payload_len} exceeds configured limit {}",
+                    limits.max_entry_payload_bytes
+                )));
+            }
+            block_payload_bytes =
+                block_payload_bytes
+                    .checked_add(payload_len)
+                    .ok_or_else(|| {
+                        CarReadError::InvalidData(
+                            "CAR block payload byte count overflow".to_string(),
+                        )
+                    })?;
+            if block_payload_bytes > limits.max_block_payload_bytes {
+                return Err(CarReadError::InvalidData(format!(
+                    "CAR block payload bytes {block_payload_bytes} exceed configured limit {}",
+                    limits.max_block_payload_bytes
+                )));
+            }
+            block_entries = block_entries.checked_add(1).ok_or_else(|| {
+                CarReadError::InvalidData("CAR block entry count overflow".to_string())
+            })?;
+            if block_entries > limits.max_entries_per_block {
+                return Err(CarReadError::InvalidData(format!(
+                    "CAR block entry count {block_entries} exceeds configured limit {}",
+                    limits.max_entries_per_block
+                )));
+            }
+
+            let mut cid_buf = [0u8; CAR_CID_LEN];
+            self.reader.read_exact(&mut cid_buf)?;
+            self.offset = self
+                .offset
+                .checked_add(u64::try_from(cid_buf.len()).map_err(|_| {
+                    CarReadError::InvalidData("CAR CID length exceeds u64".to_string())
+                })?)
+                .ok_or_else(|| CarReadError::InvalidData("CAR offset overflow".to_string()))?;
+
+            let done = out.read_entry_payload_into_bounded(
+                &mut self.reader,
+                payload_len,
+                crate::reconstruct::NodeLocation {
+                    entry_index: current_entry_index,
+                    car_offset: entry_offset,
+                },
+                cid_buf,
+                limits.max_transactions_per_block,
+            )?;
+            self.offset = self
+                .offset
+                .checked_add(u64::try_from(payload_len).map_err(|_| {
+                    CarReadError::InvalidData("CAR payload length exceeds u64".to_string())
+                })?)
+                .ok_or_else(|| CarReadError::InvalidData("CAR offset overflow".to_string()))?;
+            self.entry_index = self
+                .entry_index
+                .checked_add(1)
+                .ok_or_else(|| CarReadError::InvalidData("CAR entry index overflow".to_string()))?;
             if done {
                 return Ok(true);
             }
@@ -545,7 +717,7 @@ pub fn read_uvarint64_with_bytes<R: BufRead>(r: &mut R) -> CarReadResult<(u64, V
 
         let buf = r.fill_buf().map_err(|e| CarReadError::Io(e.to_string()))?;
         if buf.is_empty() {
-            if x != 0 {
+            if i != 0 {
                 return Err(CarReadError::UnexpectedEof(
                     "EOF while reading uvarint".to_string(),
                 ));
@@ -588,7 +760,7 @@ pub fn read_uvarint64_with_len<R: BufRead>(r: &mut R) -> CarReadResult<(u64, usi
 
         let buf = r.fill_buf().map_err(|e| CarReadError::Io(e.to_string()))?;
         if buf.is_empty() {
-            if x != 0 {
+            if i != 0 {
                 return Err(CarReadError::UnexpectedEof(
                     "EOF while reading uvarint".to_string(),
                 ));
@@ -633,7 +805,10 @@ pub fn read_uvarint64_with_len<R: BufRead>(r: &mut R) -> CarReadResult<(u64, usi
 mod tests {
     use std::io::{self, BufReader, Cursor, Read};
 
-    use super::{CarBlockReader, CarPayloadRead, append_exact_from_bufread, entry_payload_slice};
+    use super::{
+        CarBlockReader, CarPayloadRead, append_exact_from_bufread, entry_payload_slice,
+        read_uvarint64_with_bytes, read_uvarint64_with_len,
+    };
     use crate::error::CarReadError;
 
     fn framing_car(payloads: &[&[u8]]) -> Vec<u8> {
@@ -649,6 +824,21 @@ mod tests {
             car.extend_from_slice(payload);
         }
         car
+    }
+
+    #[test]
+    fn partial_zero_payload_varint_is_unexpected_eof() {
+        let mut with_len = Cursor::new([0x80]);
+        assert!(matches!(
+            read_uvarint64_with_len(&mut with_len),
+            Err(CarReadError::UnexpectedEof(_))
+        ));
+
+        let mut with_bytes = Cursor::new([0x80]);
+        assert!(matches!(
+            read_uvarint64_with_bytes(&mut with_bytes),
+            Err(CarReadError::UnexpectedEof(_))
+        ));
     }
 
     #[test]
@@ -703,7 +893,6 @@ mod tests {
 
         assert_eq!(entry.prefix, [0xaa, 0xbb]);
         assert_eq!(entry.payload, Some(payload.as_slice()));
-        drop(entry);
         assert_eq!(scratch.capacity(), capacity);
         assert_eq!(reader.offset, car.len() as u64);
         assert_eq!(reader.entry_index, 1);
@@ -770,7 +959,6 @@ mod tests {
         assert_eq!(entry.payload, payload);
         assert_eq!(entry.payload_len, payload.len());
         assert_eq!(entry.total_len, 1 + 36 + payload.len());
-        drop(entry);
 
         assert_eq!(scratch.capacity(), capacity);
         assert_eq!(reader.offset, car.len() as u64);
@@ -796,7 +984,6 @@ mod tests {
             .unwrap();
         assert_eq!(prefix.prefix, [1, 2, 3]);
         assert!(prefix.payload.is_none());
-        drop(prefix);
 
         let full = reader
             .read_entry_payload_select_with_scratch(&mut scratch, 1, |initial| {
@@ -807,7 +994,6 @@ mod tests {
             .unwrap();
         assert_eq!(full.prefix, second);
         assert_eq!(full.payload, Some(second.as_slice()));
-        drop(full);
 
         assert_eq!(scratch.capacity(), capacity);
         assert_eq!(reader.offset, car.len() as u64);

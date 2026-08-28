@@ -16,7 +16,11 @@ path = "src/main.rs"
 [dependencies]
 anyhow = "1.0.102"
 blockzilla-format = { path = "../blockzilla-format" }
-blockzilla-read-sdk = { path = "../blockzilla-read-sdk" }
+blockzilla-index-archive-format = { path = "../blockzilla-index-archive-format" }
+blockzilla-query-sdk = { path = "../blockzilla-query-sdk" }
+blockzilla-read-sdk = { path = "../blockzilla-read-sdk", features = ["http"] }
+blockzilla-user-program-index = { version = "0.2.0", path = "../blockzilla-user-program-index" }
+of-car-reader = { path = "../old-faithful/car-reader", default-features = false, features = ["zstd-native"] }
 bs58 = "0.5.1"
 clap = { version = "4.6.1", features = ["derive"] }
 pprof = { version = "0.15.0", features = ["flamegraph"] }
@@ -32,4 +36,5 @@ wincode = { version = "=0.6.1", features = ["derive"] }
 zstd = "0.13.3"
 
 [dev-dependencies]
+ed25519-dalek = "2.2.0"
 tempfile = "3.24.0"

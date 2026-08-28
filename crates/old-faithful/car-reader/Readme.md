@@ -1,5 +1,9 @@
 # of-car-reader
 
+For the Blockzilla common CAR, Compact V2, and Indexer V3 API, start with
+[`Archive formats and the read SDK`](../../../docs/reference/archive-formats-and-read-sdk.md).
+This README gives the direct CAR reader details.
+
 Streaming readers for Ferno/Old Faithful Solana CAR archives.
 
 Use this crate to:
@@ -54,6 +58,8 @@ transaction iterators, raw entry scanning, rewards, and feature flags:
 - `zstd-wasm` enables wasm-compatible zstd decoding primitives.
 - `genesis` enables Solana genesis archive parsing.
 - `compact-index` enables compact Old Faithful index parsing.
+- `query-sdk` enables `CarInstructionSource` and the common ordered query API.
+- `query-sdk-http` adds the bounded concurrent HTTPS stream for that adapter.
 - `reader` builds the diagnostic `reader` binary.
 
 Default features: `genesis`, `zstd-native`.

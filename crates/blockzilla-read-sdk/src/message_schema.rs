@@ -1,8 +1,8 @@
 //! Exact Compact V2 hot-message grammar selection and decoding.
 //!
 //! Compact V2 did not change its outer format version when two instruction
-//! fallback variants were added. A small manifest-bound object selects the
-//! earlier enum order. Readers must never infer this choice from message data.
+//! fallback variants were added. Manifest-bound marker objects select the
+//! exact enum order. Readers must never infer this choice from message data.
 
 use blockzilla_format::{
     ArchiveV2ComputeBudgetInstructionData, ArchiveV2HotInstruction, ArchiveV2HotInstructionData,
@@ -16,7 +16,19 @@ use smallvec::SmallVec;
 use thiserror::Error;
 use wincode::{SchemaRead, SchemaWrite};
 
-use crate::{RangeSource, SourceError, manifest::GenerationManifest};
+use crate::{
+    RangeSource, SourceError,
+    manifest::{GenerationFile, GenerationManifest},
+};
+
+/// The manifest object that explicitly selects the current/Post message enum order.
+pub const COMPACT_V2_CURRENT_MESSAGE_SCHEMA_MARKER_FILE: &str =
+    "archive-v2-message-schema-current-v1.marker";
+pub const COMPACT_V2_CURRENT_MESSAGE_SCHEMA_MARKER_SIZE: u64 = 52;
+pub const COMPACT_V2_CURRENT_MESSAGE_SCHEMA_MARKER_SHA256: &str =
+    "68a1662310dcb2af23c1de1ace2f8f067e77e3d8601fe6377f140d27ee351142";
+pub const COMPACT_V2_CURRENT_MESSAGE_SCHEMA_MARKER_BYTES: &[u8; 52] =
+    include_bytes!("../assets/archive-v2-message-schema-current-v1.marker");
 
 /// The manifest object that selects the exact 2026-05-24 message enum order.
 pub const COMPACT_V2_MAY24_MESSAGE_SCHEMA_MARKER_FILE: &str =
@@ -59,6 +71,26 @@ pub enum CompactV2MessageSchemaError {
     )]
     BoundMarkerMissing,
 
+    #[error(
+        "Compact V2 message-schema marker is present but {COMPACT_V2_CURRENT_MESSAGE_SCHEMA_MARKER_FILE} is not bound by the generation manifest"
+    )]
+    CurrentMarkerNotManifestBound,
+
+    #[error(
+        "generation manifest binds {COMPACT_V2_CURRENT_MESSAGE_SCHEMA_MARKER_FILE}, but the source object is missing"
+    )]
+    BoundCurrentMarkerMissing,
+
+    #[error(
+        "an unpublished source cannot contain an explicit current Compact V2 message-schema marker"
+    )]
+    UnpublishedCurrentMarker,
+
+    #[error(
+        "generation contains both current and May24 Compact V2 message-schema markers; exactly one is permitted"
+    )]
+    MessageSchemaMarkerConflict,
+
     #[error("an unpublished source cannot select a historical Compact V2 message grammar")]
     UnpublishedHistoricalMarker,
 
@@ -84,7 +116,7 @@ pub enum CompactV2MessageSchemaError {
     MarkerObjectBytes,
 
     #[error(
-        "mainnet epoch {epoch} predates the current Compact V2 message grammar but has no manifest-bound message-schema marker"
+        "mainnet epoch {epoch} requires an explicit Compact V2 message grammar but has no manifest-bound current or May24 marker"
     )]
     HistoricalMainnetMarkerMissing { epoch: u64 },
 
@@ -97,8 +129,8 @@ pub enum CompactV2MessageSchemaError {
 
 /// Select one grammar from a published generation manifest and its bytes.
 ///
-/// A present marker is effective only when the manifest binds its exact name,
-/// size, and digest. The object bytes are then checked independently.
+/// Exactly one present marker is effective only when the manifest binds its
+/// exact name, size, and digest. The object bytes are checked independently.
 pub fn select_compact_v2_message_schema<S: RangeSource>(
     source: &S,
     manifest: &GenerationManifest,
@@ -128,61 +160,136 @@ fn select_message_schema<S: RangeSource>(
     epoch: u64,
     cluster_id: &str,
 ) -> Result<CompactV2MessageSchema, CompactV2MessageSchemaError> {
-    let source_size = source.size(COMPACT_V2_MAY24_MESSAGE_SCHEMA_MARKER_FILE)?;
-    let binding =
+    let may24_source_size = source.size(COMPACT_V2_MAY24_MESSAGE_SCHEMA_MARKER_FILE)?;
+    let current_source_size = source.size(COMPACT_V2_CURRENT_MESSAGE_SCHEMA_MARKER_FILE)?;
+    let may24_binding =
         manifest.and_then(|manifest| manifest.file(COMPACT_V2_MAY24_MESSAGE_SCHEMA_MARKER_FILE));
+    let current_binding =
+        manifest.and_then(|manifest| manifest.file(COMPACT_V2_CURRENT_MESSAGE_SCHEMA_MARKER_FILE));
 
-    match (source_size, binding) {
-        (Some(_), None) if manifest.is_some() => {
-            return Err(CompactV2MessageSchemaError::MarkerNotManifestBound);
-        }
-        (Some(_), None) => {
-            return Err(CompactV2MessageSchemaError::UnpublishedHistoricalMarker);
-        }
-        (None, Some(_)) => return Err(CompactV2MessageSchemaError::BoundMarkerMissing),
-        (None, None) => {
-            if cluster_id == "mainnet-beta" && MAY24_MAINNET_EPOCHS.contains(&epoch) {
-                return Err(CompactV2MessageSchemaError::HistoricalMainnetMarkerMissing { epoch });
-            }
-            return Ok(CompactV2MessageSchema::Current);
-        }
-        (Some(source_size), Some(binding)) => {
-            if binding.size != COMPACT_V2_MAY24_MESSAGE_SCHEMA_MARKER_SIZE {
-                return Err(CompactV2MessageSchemaError::MarkerManifestSize {
-                    expected: COMPACT_V2_MAY24_MESSAGE_SCHEMA_MARKER_SIZE,
-                    actual: binding.size,
-                });
-            }
-            if binding.sha256 != COMPACT_V2_MAY24_MESSAGE_SCHEMA_MARKER_SHA256 {
-                return Err(CompactV2MessageSchemaError::MarkerManifestDigest {
-                    expected: COMPACT_V2_MAY24_MESSAGE_SCHEMA_MARKER_SHA256,
-                    actual: binding.sha256.clone(),
-                });
-            }
-            if source_size != COMPACT_V2_MAY24_MESSAGE_SCHEMA_MARKER_SIZE {
-                return Err(CompactV2MessageSchemaError::MarkerObjectSize {
-                    expected: COMPACT_V2_MAY24_MESSAGE_SCHEMA_MARKER_SIZE,
-                    actual: source_size,
-                });
-            }
-        }
-    }
-
-    let bytes = source.read_all_bounded(
-        COMPACT_V2_MAY24_MESSAGE_SCHEMA_MARKER_FILE,
-        COMPACT_V2_MAY24_MESSAGE_SCHEMA_MARKER_SIZE as usize,
+    let may24_active = validate_marker_presence(
+        manifest.is_some(),
+        MessageSchemaMarkerKind::May24,
+        may24_source_size,
+        may24_binding,
     )?;
+    let current_active = validate_marker_presence(
+        manifest.is_some(),
+        MessageSchemaMarkerKind::Current,
+        current_source_size,
+        current_binding,
+    )?;
+
+    if may24_active && current_active {
+        return Err(CompactV2MessageSchemaError::MessageSchemaMarkerConflict);
+    }
+    if may24_active {
+        validate_marker_object(
+            source,
+            may24_source_size.expect("active marker has a source object"),
+            may24_binding.expect("active marker has a manifest binding"),
+            COMPACT_V2_MAY24_MESSAGE_SCHEMA_MARKER_FILE,
+            COMPACT_V2_MAY24_MESSAGE_SCHEMA_MARKER_SIZE,
+            COMPACT_V2_MAY24_MESSAGE_SCHEMA_MARKER_SHA256,
+            COMPACT_V2_MAY24_MESSAGE_SCHEMA_MARKER_BYTES,
+        )?;
+        return Ok(CompactV2MessageSchema::May24PreUnknownFallbacks);
+    }
+    if current_active {
+        validate_marker_object(
+            source,
+            current_source_size.expect("active marker has a source object"),
+            current_binding.expect("active marker has a manifest binding"),
+            COMPACT_V2_CURRENT_MESSAGE_SCHEMA_MARKER_FILE,
+            COMPACT_V2_CURRENT_MESSAGE_SCHEMA_MARKER_SIZE,
+            COMPACT_V2_CURRENT_MESSAGE_SCHEMA_MARKER_SHA256,
+            COMPACT_V2_CURRENT_MESSAGE_SCHEMA_MARKER_BYTES,
+        )?;
+        return Ok(CompactV2MessageSchema::Current);
+    }
+    if cluster_id == "mainnet-beta" && MAY24_MAINNET_EPOCHS.contains(&epoch) {
+        return Err(CompactV2MessageSchemaError::HistoricalMainnetMarkerMissing { epoch });
+    }
+    Ok(CompactV2MessageSchema::Current)
+}
+
+#[derive(Debug, Clone, Copy)]
+enum MessageSchemaMarkerKind {
+    Current,
+    May24,
+}
+
+fn validate_marker_presence(
+    published: bool,
+    kind: MessageSchemaMarkerKind,
+    source_size: Option<u64>,
+    binding: Option<&GenerationFile>,
+) -> Result<bool, CompactV2MessageSchemaError> {
+    match (source_size, binding) {
+        (Some(_), Some(_)) => Ok(true),
+        (None, None) => Ok(false),
+        (Some(_), None) if !published => Err(match kind {
+            MessageSchemaMarkerKind::Current => {
+                CompactV2MessageSchemaError::UnpublishedCurrentMarker
+            }
+            MessageSchemaMarkerKind::May24 => {
+                CompactV2MessageSchemaError::UnpublishedHistoricalMarker
+            }
+        }),
+        (Some(_), None) => Err(match kind {
+            MessageSchemaMarkerKind::Current => {
+                CompactV2MessageSchemaError::CurrentMarkerNotManifestBound
+            }
+            MessageSchemaMarkerKind::May24 => CompactV2MessageSchemaError::MarkerNotManifestBound,
+        }),
+        (None, Some(_)) => Err(match kind {
+            MessageSchemaMarkerKind::Current => {
+                CompactV2MessageSchemaError::BoundCurrentMarkerMissing
+            }
+            MessageSchemaMarkerKind::May24 => CompactV2MessageSchemaError::BoundMarkerMissing,
+        }),
+    }
+}
+
+fn validate_marker_object<S: RangeSource>(
+    source: &S,
+    source_size: u64,
+    binding: &GenerationFile,
+    file: &'static str,
+    expected_size: u64,
+    expected_digest: &'static str,
+    expected_bytes: &'static [u8],
+) -> Result<(), CompactV2MessageSchemaError> {
+    if binding.size != expected_size {
+        return Err(CompactV2MessageSchemaError::MarkerManifestSize {
+            expected: expected_size,
+            actual: binding.size,
+        });
+    }
+    if binding.sha256 != expected_digest {
+        return Err(CompactV2MessageSchemaError::MarkerManifestDigest {
+            expected: expected_digest,
+            actual: binding.sha256.clone(),
+        });
+    }
+    if source_size != expected_size {
+        return Err(CompactV2MessageSchemaError::MarkerObjectSize {
+            expected: expected_size,
+            actual: source_size,
+        });
+    }
+    let bytes = source.read_all_bounded(file, expected_size as usize)?;
     let actual_digest = hex_lower_sha256(&bytes);
-    if actual_digest != COMPACT_V2_MAY24_MESSAGE_SCHEMA_MARKER_SHA256 {
+    if actual_digest != expected_digest {
         return Err(CompactV2MessageSchemaError::MarkerObjectDigest {
-            expected: COMPACT_V2_MAY24_MESSAGE_SCHEMA_MARKER_SHA256,
+            expected: expected_digest,
             actual: actual_digest,
         });
     }
-    if bytes.as_slice() != COMPACT_V2_MAY24_MESSAGE_SCHEMA_MARKER_BYTES {
+    if bytes.as_slice() != expected_bytes {
         return Err(CompactV2MessageSchemaError::MarkerObjectBytes);
     }
-    Ok(CompactV2MessageSchema::May24PreUnknownFallbacks)
+    Ok(())
 }
 
 /// Decode one complete message with the generation-selected exact grammar.
@@ -351,11 +458,7 @@ mod tests {
         manifest::{GenerationFile, compute_generation_digest},
     };
 
-    fn manifest(
-        cluster_id: &str,
-        epoch: u64,
-        marker: Option<GenerationFile>,
-    ) -> GenerationManifest {
+    fn manifest(cluster_id: &str, epoch: u64, files: Vec<GenerationFile>) -> GenerationManifest {
         let mut manifest = GenerationManifest {
             schema_version: 1,
             cluster_id: cluster_id.to_owned(),
@@ -364,13 +467,13 @@ mod tests {
             generation_digest: "0".repeat(64),
             slots_per_epoch: 432_000,
             complete: true,
-            files: marker.into_iter().collect(),
+            files,
         };
         manifest.generation_digest = compute_generation_digest(&manifest).unwrap();
         manifest
     }
 
-    fn marker_binding() -> GenerationFile {
+    fn may24_marker_binding() -> GenerationFile {
         GenerationFile {
             name: COMPACT_V2_MAY24_MESSAGE_SCHEMA_MARKER_FILE.to_owned(),
             size: COMPACT_V2_MAY24_MESSAGE_SCHEMA_MARKER_SIZE,
@@ -378,16 +481,28 @@ mod tests {
         }
     }
 
-    fn write_marker(root: &Path, bytes: &[u8]) {
-        std::fs::write(
-            root.join(COMPACT_V2_MAY24_MESSAGE_SCHEMA_MARKER_FILE),
-            bytes,
-        )
-        .unwrap();
+    fn current_marker_binding() -> GenerationFile {
+        GenerationFile {
+            name: COMPACT_V2_CURRENT_MESSAGE_SCHEMA_MARKER_FILE.to_owned(),
+            size: COMPACT_V2_CURRENT_MESSAGE_SCHEMA_MARKER_SIZE,
+            sha256: COMPACT_V2_CURRENT_MESSAGE_SCHEMA_MARKER_SHA256.to_owned(),
+        }
+    }
+
+    fn write_marker(root: &Path, name: &str, bytes: &[u8]) {
+        std::fs::write(root.join(name), bytes).unwrap();
     }
 
     #[test]
     fn marker_constants_bind_the_exact_bytes() {
+        assert_eq!(
+            COMPACT_V2_CURRENT_MESSAGE_SCHEMA_MARKER_BYTES.len() as u64,
+            COMPACT_V2_CURRENT_MESSAGE_SCHEMA_MARKER_SIZE
+        );
+        assert_eq!(
+            hex_lower_sha256(COMPACT_V2_CURRENT_MESSAGE_SCHEMA_MARKER_BYTES),
+            COMPACT_V2_CURRENT_MESSAGE_SCHEMA_MARKER_SHA256
+        );
         assert_eq!(
             COMPACT_V2_MAY24_MESSAGE_SCHEMA_MARKER_BYTES.len() as u64,
             COMPACT_V2_MAY24_MESSAGE_SCHEMA_MARKER_SIZE
@@ -401,9 +516,13 @@ mod tests {
     #[test]
     fn marker_must_be_manifest_bound() {
         let dir = TempDir::new().unwrap();
-        write_marker(dir.path(), COMPACT_V2_MAY24_MESSAGE_SCHEMA_MARKER_BYTES);
+        write_marker(
+            dir.path(),
+            COMPACT_V2_MAY24_MESSAGE_SCHEMA_MARKER_FILE,
+            COMPACT_V2_MAY24_MESSAGE_SCHEMA_MARKER_BYTES,
+        );
         let source = LocalRangeSource::new(dir.path());
-        let error = select_compact_v2_message_schema(&source, &manifest("mainnet-beta", 0, None))
+        let error = select_compact_v2_message_schema(&source, &manifest("mainnet-beta", 0, vec![]))
             .unwrap_err();
         assert!(matches!(
             error,
@@ -420,22 +539,26 @@ mod tests {
     #[test]
     fn bound_marker_checks_manifest_and_object() {
         let dir = TempDir::new().unwrap();
-        write_marker(dir.path(), COMPACT_V2_MAY24_MESSAGE_SCHEMA_MARKER_BYTES);
+        write_marker(
+            dir.path(),
+            COMPACT_V2_MAY24_MESSAGE_SCHEMA_MARKER_FILE,
+            COMPACT_V2_MAY24_MESSAGE_SCHEMA_MARKER_BYTES,
+        );
         let source = LocalRangeSource::new(dir.path());
         assert_eq!(
             select_compact_v2_message_schema(
                 &source,
-                &manifest("mainnet-beta", 0, Some(marker_binding())),
+                &manifest("mainnet-beta", 0, vec![may24_marker_binding()]),
             )
             .unwrap(),
             CompactV2MessageSchema::May24PreUnknownFallbacks
         );
 
-        let mut wrong_binding = marker_binding();
+        let mut wrong_binding = may24_marker_binding();
         wrong_binding.sha256 = "0".repeat(64);
         let error = select_compact_v2_message_schema(
             &source,
-            &manifest("mainnet-beta", 0, Some(wrong_binding)),
+            &manifest("mainnet-beta", 0, vec![wrong_binding]),
         )
         .unwrap_err();
         assert!(matches!(
@@ -446,10 +569,14 @@ mod tests {
         let corrupt = TempDir::new().unwrap();
         let mut bytes = COMPACT_V2_MAY24_MESSAGE_SCHEMA_MARKER_BYTES.to_vec();
         bytes[0] ^= 1;
-        write_marker(corrupt.path(), &bytes);
+        write_marker(
+            corrupt.path(),
+            COMPACT_V2_MAY24_MESSAGE_SCHEMA_MARKER_FILE,
+            &bytes,
+        );
         let error = select_compact_v2_message_schema(
             &LocalRangeSource::new(corrupt.path()),
-            &manifest("mainnet-beta", 0, Some(marker_binding())),
+            &manifest("mainnet-beta", 0, vec![may24_marker_binding()]),
         )
         .unwrap_err();
         assert!(matches!(
@@ -459,12 +586,119 @@ mod tests {
     }
 
     #[test]
+    fn explicit_current_marker_selects_current_for_early_mainnet() {
+        let dir = TempDir::new().unwrap();
+        write_marker(
+            dir.path(),
+            COMPACT_V2_CURRENT_MESSAGE_SCHEMA_MARKER_FILE,
+            COMPACT_V2_CURRENT_MESSAGE_SCHEMA_MARKER_BYTES,
+        );
+        let source = LocalRangeSource::new(dir.path());
+        assert_eq!(
+            select_compact_v2_message_schema(
+                &source,
+                &manifest("mainnet-beta", 0, vec![current_marker_binding()]),
+            )
+            .unwrap(),
+            CompactV2MessageSchema::Current
+        );
+
+        let mut wrong_binding = current_marker_binding();
+        wrong_binding.sha256 = "0".repeat(64);
+        let error = select_compact_v2_message_schema(
+            &source,
+            &manifest("mainnet-beta", 0, vec![wrong_binding]),
+        )
+        .unwrap_err();
+        assert!(matches!(
+            error,
+            CompactV2MessageSchemaError::MarkerManifestDigest { .. }
+        ));
+
+        let corrupt = TempDir::new().unwrap();
+        let mut bytes = COMPACT_V2_CURRENT_MESSAGE_SCHEMA_MARKER_BYTES.to_vec();
+        bytes[0] ^= 1;
+        write_marker(
+            corrupt.path(),
+            COMPACT_V2_CURRENT_MESSAGE_SCHEMA_MARKER_FILE,
+            &bytes,
+        );
+        let error = select_compact_v2_message_schema(
+            &LocalRangeSource::new(corrupt.path()),
+            &manifest("mainnet-beta", 0, vec![current_marker_binding()]),
+        )
+        .unwrap_err();
+        assert!(matches!(
+            error,
+            CompactV2MessageSchemaError::MarkerObjectDigest { .. }
+        ));
+    }
+
+    #[test]
+    fn current_marker_must_be_bound_and_present() {
+        let unbound = TempDir::new().unwrap();
+        write_marker(
+            unbound.path(),
+            COMPACT_V2_CURRENT_MESSAGE_SCHEMA_MARKER_FILE,
+            COMPACT_V2_CURRENT_MESSAGE_SCHEMA_MARKER_BYTES,
+        );
+        let error = select_compact_v2_message_schema(
+            &LocalRangeSource::new(unbound.path()),
+            &manifest("mainnet-beta", 0, vec![]),
+        )
+        .unwrap_err();
+        assert!(matches!(
+            error,
+            CompactV2MessageSchemaError::CurrentMarkerNotManifestBound
+        ));
+
+        let missing = TempDir::new().unwrap();
+        let error = select_compact_v2_message_schema(
+            &LocalRangeSource::new(missing.path()),
+            &manifest("mainnet-beta", 0, vec![current_marker_binding()]),
+        )
+        .unwrap_err();
+        assert!(matches!(
+            error,
+            CompactV2MessageSchemaError::BoundCurrentMarkerMissing
+        ));
+    }
+
+    #[test]
+    fn current_and_may24_markers_conflict() {
+        let dir = TempDir::new().unwrap();
+        write_marker(
+            dir.path(),
+            COMPACT_V2_CURRENT_MESSAGE_SCHEMA_MARKER_FILE,
+            COMPACT_V2_CURRENT_MESSAGE_SCHEMA_MARKER_BYTES,
+        );
+        write_marker(
+            dir.path(),
+            COMPACT_V2_MAY24_MESSAGE_SCHEMA_MARKER_FILE,
+            COMPACT_V2_MAY24_MESSAGE_SCHEMA_MARKER_BYTES,
+        );
+        let error = select_compact_v2_message_schema(
+            &LocalRangeSource::new(dir.path()),
+            &manifest(
+                "mainnet-beta",
+                0,
+                vec![current_marker_binding(), may24_marker_binding()],
+            ),
+        )
+        .unwrap_err();
+        assert!(matches!(
+            error,
+            CompactV2MessageSchemaError::MessageSchemaMarkerConflict
+        ));
+    }
+
+    #[test]
     fn unmarked_early_mainnet_fails_closed() {
         let dir = TempDir::new().unwrap();
         let source = LocalRangeSource::new(dir.path());
         for epoch in MAY24_MAINNET_EPOCHS {
             let error =
-                select_compact_v2_message_schema(&source, &manifest("mainnet-beta", epoch, None))
+                select_compact_v2_message_schema(&source, &manifest("mainnet-beta", epoch, vec![]))
                     .unwrap_err();
             assert!(matches!(
                 error,
@@ -472,7 +706,7 @@ mod tests {
             ));
         }
         assert_eq!(
-            select_compact_v2_message_schema(&source, &manifest("mainnet-beta", 822, None),)
+            select_compact_v2_message_schema(&source, &manifest("mainnet-beta", 822, vec![]),)
                 .unwrap(),
             CompactV2MessageSchema::Current
         );
@@ -482,7 +716,7 @@ mod tests {
     fn unmarked_mainnet_epoch_two_fails_closed() {
         let dir = TempDir::new().unwrap();
         let source = LocalRangeSource::new(dir.path());
-        let error = select_compact_v2_message_schema(&source, &manifest("mainnet-beta", 2, None))
+        let error = select_compact_v2_message_schema(&source, &manifest("mainnet-beta", 2, vec![]))
             .unwrap_err();
         assert!(matches!(
             error,

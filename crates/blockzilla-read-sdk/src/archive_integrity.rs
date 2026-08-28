@@ -26,7 +26,8 @@ use sha2::{Digest, Sha256, block_api::compress256};
 use thiserror::Error;
 
 use crate::{
-    ArchiveReader, BorrowedDecodedBlock, Error as ReaderError, OrderedParallelBlockConfig,
+    ArchiveReader, BorrowedDecodedBlock, Error as ReaderError,
+    MAX_ORDERED_PARALLEL_RETAINED_DECOMPRESSED_BYTES, OrderedParallelBlockConfig,
     OrderedParallelBlockStats, PinnedLocalRangeSource, RangeSource, SourceError,
 };
 
@@ -83,6 +84,180 @@ pub struct ArchiveIntegrityConfig {
     pub poh_schema: PohSidecarSchema,
     pub max_hash_rounds_per_block: u64,
     pub max_total_hash_rounds: u64,
+}
+
+/// Bounds for the read-only, full-generation Archive V2 PoH preflight.
+///
+/// This pass decodes and binds every source frame, but it does not recompute
+/// PoH entry hashes. Observed work counts are resource requirements for this
+/// exact pinned generation; they are not protocol schedule claims.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct ArchiveV2PohPreflightConfig {
+    pub epoch: u64,
+    pub slots_per_epoch: u64,
+    pub workers: usize,
+}
+
+/// The exact source Wincode grammar admitted by a complete PoH preflight.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
+pub enum ArchiveV2PohWireProfile {
+    CurrentWincode055,
+    LegacyNoSignatureCountWincode055,
+}
+
+/// Read-only structural attestation for one complete, pinned Archive V2 PoH
+/// source. A successful report is safe to use only with the generation and
+/// PoH digest recorded here.
+#[derive(Debug, Clone, Serialize)]
+pub struct ArchiveV2PohPreflightReport {
+    pub complete_source: bool,
+    pub cluster_id: String,
+    pub generation_id: String,
+    pub generation_digest: String,
+    pub epoch: u64,
+    pub slots_per_epoch: u64,
+    pub source_total_blocks: usize,
+    pub poh_file_bytes: u64,
+    pub poh_sha256: String,
+    pub frames_bound: u64,
+    pub entries_bound: u64,
+    pub transactions_bound: u64,
+    pub signatures_derived: u64,
+    pub blockhash_registry_records: u64,
+    pub blockhash_registry_offset: u64,
+    pub wire_profile: ArchiveV2PohWireProfile,
+    pub poh_schema: PohSidecarSchema,
+    pub current_exact_signature_evidence_entries: u64,
+    pub current_all_zero_derived_evidence_entries: u64,
+    pub max_num_hashes_per_entry: u64,
+    pub max_entries_per_block: u64,
+    pub max_effective_hash_rounds_per_block: u64,
+    pub max_effective_hash_rounds_block_id: u32,
+    pub max_effective_hash_rounds_slot: u64,
+    pub total_effective_hash_rounds: u128,
+    pub absolute_num_hashes_per_entry_guard: u64,
+    pub reader: IntegrityReaderReport,
+    pub elapsed_millis: u64,
+    pub hash_recomputation: &'static str,
+    #[serde(skip)]
+    seal: [u8; HASH_BYTES],
+}
+
+/// One source PoH block from a second pass that is structurally bound to a
+/// successful preflight. Entry hashes are source data and were not replayed.
+#[derive(Debug, Clone, Copy)]
+pub struct StructurallyAttestedArchiveV2PohBlock<'a> {
+    pub sequence: usize,
+    pub row: ArchiveV2HotBlockIndexRow,
+    pub source_frame: &'a [u8],
+    pub source_wire_profile: PohWireProfile,
+    pub source_signature_profile: PohSidecarSchema,
+    pub record: &'a WincodeArchiveV2PohRecord,
+    pub transaction_signature_prefixes: &'a [u32],
+    pub expected_final_hash: [u8; HASH_BYTES],
+    pub effective_hash_rounds: u64,
+}
+
+/// Read-only observer for one complete structural PoH stream. Every `observe`
+/// call is tentative and must not publish or commit results. Only `finish`
+/// means that exact EOF, digest, counts, schema and source stability matched.
+/// The observer must not retain borrowed slices after `observe` returns.
+pub trait ArchiveV2PohStructuralObserver: Send {
+    fn observe(&mut self, block: StructurallyAttestedArchiveV2PohBlock<'_>) -> IntegrityResult<()>;
+
+    fn finish(&mut self) -> IntegrityResult<()> {
+        Ok(())
+    }
+}
+
+/// Result of a second structural pass bound to one preflight report.
+#[derive(Debug, Clone, Serialize)]
+pub struct ArchiveV2PohStructuralStreamReport {
+    pub complete_source: bool,
+    pub generation_digest: String,
+    pub poh_sha256: String,
+    pub poh_schema: PohSidecarSchema,
+    pub frames_bound: u64,
+    pub entries_bound: u64,
+    pub transactions_bound: u64,
+    pub signatures_derived: u64,
+    pub blockhash_registry_records: u64,
+    pub blockhash_registry_offset: u64,
+    pub max_effective_hash_rounds_per_block: u64,
+    pub max_effective_hash_rounds_block_id: u32,
+    pub max_effective_hash_rounds_slot: u64,
+    pub total_effective_hash_rounds: u128,
+    pub reader: IntegrityReaderReport,
+    pub elapsed_millis: u64,
+    pub cryptographic_entry_recompute: &'static str,
+    pub source_entry_hash_status: &'static str,
+}
+
+/// One block after the production Archive V2 integrity verifier has checked
+/// its catalog identity, signature partition, every source PoH entry hash, and
+/// final blockhash. All slices are valid only for the observer call.
+#[derive(Debug, Clone, Copy)]
+pub struct VerifiedArchiveV2PohBlock<'a> {
+    pub sequence: usize,
+    pub row: ArchiveV2HotBlockIndexRow,
+    pub source_frame: &'a [u8],
+    pub source_wire_profile: PohWireProfile,
+    pub source_signature_profile: PohSidecarSchema,
+    pub record: &'a WincodeArchiveV2PohRecord,
+    pub transaction_signature_prefixes: &'a [u32],
+    pub signature_bytes: &'a [u8],
+    pub start_hash: [u8; HASH_BYTES],
+    pub expected_final_hash: [u8; HASH_BYTES],
+    pub max_effective_hashes: u64,
+}
+
+/// Read-only extension point for measurement tools. The verifier calls this
+/// in catalog order inside its bounded PoH Rayon pool. An observer must not
+/// retain borrowed slices after `observe` returns.
+pub trait ArchiveV2PohObserver: Send {
+    fn observe(&mut self, block: VerifiedArchiveV2PohBlock<'_>) -> IntegrityResult<()>;
+
+    fn finish(&mut self) -> IntegrityResult<()> {
+        Ok(())
+    }
+}
+
+#[derive(Debug, Default)]
+struct NoopPohObserver;
+
+impl ArchiveV2PohObserver for NoopPohObserver {
+    fn observe(&mut self, _block: VerifiedArchiveV2PohBlock<'_>) -> IntegrityResult<()> {
+        Ok(())
+    }
+}
+
+/// Bounds for the inexpensive Archive V2 blockhash-continuity pass.
+///
+/// This pass does not read the PoH or signature sidecars. For a nonzero epoch,
+/// callers must supply the immediately preceding published epoch so the full
+/// 300-row boundary can be checked.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct ArchiveContinuityConfig {
+    pub epoch: u64,
+    pub slots_per_epoch: u64,
+    pub selected_blocks: usize,
+    pub workers: usize,
+}
+
+#[derive(Debug, Clone, Serialize)]
+pub struct ArchiveContinuityReport {
+    pub complete_source: bool,
+    pub selected_blocks: usize,
+    pub source_total_blocks: usize,
+    pub blockhash_registry_records: u64,
+    pub blockhash_registry_offset: u64,
+    pub chain_blocks_verified: u64,
+    pub predecessor_boundary_checked: bool,
+    pub predecessor_tail_records_verified: u64,
+    pub reader: IntegrityReaderReport,
+    pub elapsed_millis: u64,
+    pub blockhash_continuity: &'static str,
+    pub block_decode_worker_threads: usize,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -214,20 +389,129 @@ struct OrderedIntegrityState {
     entry_jobs: Vec<EntryJobRange>,
 }
 
+#[derive(Debug, Default)]
+struct OrderedContinuityState {
+    position: usize,
+    previous_slot_and_id: Option<(u64, u32)>,
+    blocks_verified: u64,
+}
+
+#[derive(Debug, Clone, Copy, Default)]
+struct PohPreflightFrameStats {
+    entries: u64,
+    transactions: u64,
+    signatures: u64,
+    max_num_hashes_per_entry: u64,
+    max_entries_per_block: u64,
+    effective_hash_rounds: u64,
+    current_exact_possible: bool,
+    current_all_zero_possible: bool,
+    current_exact_evidence_entries: u64,
+    current_all_zero_evidence_entries: u64,
+}
+
+#[derive(Debug)]
+struct PohPreflightCandidate {
+    possible: bool,
+    first_failure: Option<String>,
+    frames: u64,
+    entries: u64,
+    transactions: u64,
+    signatures: u64,
+    max_num_hashes_per_entry: u64,
+    max_entries_per_block: u64,
+    max_effective_hash_rounds_per_block: u64,
+    max_effective_hash_rounds_block_id: u32,
+    max_effective_hash_rounds_slot: u64,
+    total_effective_hash_rounds: u128,
+    current_exact_possible: bool,
+    current_all_zero_possible: bool,
+    current_exact_evidence_entries: u64,
+    current_all_zero_evidence_entries: u64,
+}
+
+impl Default for PohPreflightCandidate {
+    fn default() -> Self {
+        Self {
+            possible: true,
+            first_failure: None,
+            frames: 0,
+            entries: 0,
+            transactions: 0,
+            signatures: 0,
+            max_num_hashes_per_entry: 0,
+            max_entries_per_block: 0,
+            max_effective_hash_rounds_per_block: 0,
+            max_effective_hash_rounds_block_id: 0,
+            max_effective_hash_rounds_slot: 0,
+            total_effective_hash_rounds: 0,
+            current_exact_possible: true,
+            current_all_zero_possible: true,
+            current_exact_evidence_entries: 0,
+            current_all_zero_evidence_entries: 0,
+        }
+    }
+}
+
+#[derive(Debug, Default)]
+struct OrderedPohPreflightState {
+    position: usize,
+    previous_slot_and_id: Option<(u64, u32)>,
+    current: PohPreflightCandidate,
+    legacy: PohPreflightCandidate,
+    current_only_frames: u64,
+    legacy_only_frames: u64,
+    dual_profile_frames: u64,
+    neither_profile_frames: u64,
+    poh_file_bytes: u64,
+    poh_hasher: Sha256,
+}
+
 struct StrictFramedReader<R> {
     reader: R,
-    payload: Vec<u8>,
+    frame: Vec<u8>,
+}
+
+struct PositionedFileReader {
+    file: File,
+    position: u64,
+}
+
+impl PositionedFileReader {
+    const fn new(file: File) -> Self {
+        Self { file, position: 0 }
+    }
+}
+
+impl Read for PositionedFileReader {
+    fn read(&mut self, bytes: &mut [u8]) -> std::io::Result<usize> {
+        let read = self.file.read_at(bytes, self.position)?;
+        self.position = self.position.checked_add(read as u64).ok_or_else(|| {
+            std::io::Error::new(
+                std::io::ErrorKind::InvalidData,
+                "PoH positional read offset overflow",
+            )
+        })?;
+        Ok(read)
+    }
+}
+
+#[derive(Debug, Clone, Copy)]
+struct StrictPohFrame<'a> {
+    exact: &'a [u8],
+    payload: &'a [u8],
 }
 
 impl<R: Read> StrictFramedReader<R> {
     fn new(reader: R) -> Self {
         Self {
             reader,
-            payload: Vec::new(),
+            frame: Vec::new(),
         }
     }
 
-    fn read_payload(&mut self, frame: usize) -> IntegrityResult<Option<&[u8]>> {
+    fn read_exact_frame(&mut self, frame: usize) -> IntegrityResult<Option<StrictPohFrame<'_>>> {
+        self.frame.clear();
         let mut value = 0u32;
         let mut prefix_length = 0usize;
         for shift in [0u32, 7, 14, 21, 28] {
@@ -248,6 +532,7 @@ impl<R: Read> StrictFramedReader<R> {
                 )));
             }
             prefix_length += 1;
+            self.frame.push(byte[0]);
             let payload = u32::from(byte[0] & 0x7f);
             if shift == 28 && payload > 0x0f {
                 return Err(ArchiveIntegrityError::Invalid(format!(
@@ -267,20 +552,882 @@ impl<R: Read> StrictFramedReader<R> {
                         "PoH frame {frame} declares {length} bytes, above the {MAX_POH_FRAME_BYTES}-byte limit"
                     )));
                 }
-                self.payload.resize(length, 0);
+                self.frame.resize(prefix_length + length, 0);
                 self.reader
-                    .read_exact(&mut self.payload)
+                    .read_exact(&mut self.frame[prefix_length..])
                     .map_err(|source| ArchiveIntegrityError::Io {
                         object: ARCHIVE_V2_POH_FILE,
                         source,
                     })?;
-                return Ok(Some(&self.payload));
+                return Ok(Some(StrictPohFrame {
+                    exact: &self.frame,
+                    payload: &self.frame[prefix_length..],
+                }));
             }
         }
         Err(ArchiveIntegrityError::Invalid(format!(
             "PoH frame {frame} length prefix is too long"
         )))
     }
+
+    fn read_payload(&mut self, frame: usize) -> IntegrityResult<Option<&[u8]>> {
+        Ok(self
+            .read_exact_frame(frame)?
+            .map(|exact_frame| exact_frame.payload))
+    }
+}
+
+/// Scan and structurally attest the complete pinned Archive V2 PoH source.
+///
+/// The scan tries both historical Wincode grammars for every frame and admits
+/// exactly one generation-wide grammar and signature-count interpretation. It
+/// performs no PoH hash rounds and reads no transaction signature bytes.
+pub fn preflight_archive_v2_poh(
+    reader: &ArchiveReader<PinnedLocalRangeSource>,
+    config: ArchiveV2PohPreflightConfig,
+) -> IntegrityResult<ArchiveV2PohPreflightReport> {
+    let started = Instant::now();
+    let total_blocks = reader.index().rows.len();
+    validate_common_config(
+        reader,
+        config.epoch,
+        config.slots_per_epoch,
+        total_blocks,
+        config.workers,
+    )?;
+
+    let poh_file_bytes = reader
+        .source()
+        .size(ARCHIVE_V2_POH_FILE)?
+        .ok_or_else(|| ArchiveIntegrityError::Invalid("poh.wincode is missing".to_owned()))?;
+    if poh_file_bytes == 0 {
+        return Err(ArchiveIntegrityError::Invalid(
+            "poh.wincode is empty".to_owned(),
+        ));
+    }
+    let (blockhashes, registry_records, registry_offset) =
+        read_blockhash_registry(reader, config.epoch)?;
+    if config.epoch == 0 {
+        validate_predecessor_boundary(
+            reader,
+            None,
+            config.epoch,
+            config.slots_per_epoch,
+            &blockhashes,
+            registry_offset,
+        )?;
+    }
+    let poh_file = required_pinned_file(reader.source(), ARCHIVE_V2_POH_FILE)?;
+    let mut poh_reader = StrictFramedReader::new(BufReader::with_capacity(
+        POH_READER_BUFFER_BYTES,
+        PositionedFileReader::new(poh_file),
+    ));
+    let mut state = OrderedPohPreflightState::default();
+
+    let reader_stats = reader.process_borrowed_blocks_parallel_ordered(
+        Range {
+            start: 0,
+            end: total_blocks,
+        },
+        ordered_integrity_block_config(config.workers),
+        |_| Ok(IntegrityWorker::default()),
+        |worker, _sequence, block| project_integrity_block(worker, block),
+        |sequence, block| {
+            validate_chain_block(
+                sequence,
+                &block,
+                registry_offset,
+                None,
+                state.position,
+                state.previous_slot_and_id,
+            )?;
+            let source_frame = poh_reader.read_exact_frame(sequence)?.ok_or_else(|| {
+                ArchiveIntegrityError::Invalid(format!(
+                    "poh.wincode ended before block {sequence} slot {}",
+                    block.row.slot
+                ))
+            })?;
+            state.poh_file_bytes = state
+                .poh_file_bytes
+                .checked_add(source_frame.exact.len() as u64)
+                .ok_or_else(|| {
+                    ArchiveIntegrityError::Invalid("PoH source byte count overflow".to_owned())
+                })?;
+            state.poh_hasher.update(source_frame.exact);
+            let expected_final_hash = blockhash_at(&blockhashes, sequence, registry_offset)?;
+
+            let current = inspect_poh_preflight_payload(
+                sequence,
+                &block,
+                source_frame.payload,
+                expected_final_hash,
+                PohSidecarSchema::Current,
+            );
+            let legacy = inspect_poh_preflight_payload(
+                sequence,
+                &block,
+                source_frame.payload,
+                expected_final_hash,
+                PohSidecarSchema::LegacyNoSignatureCount,
+            );
+            let current_ok = current.is_ok();
+            let legacy_ok = legacy.is_ok();
+            match (current_ok, legacy_ok) {
+                (true, false) => {
+                    state.current_only_frames = checked_increment(
+                        state.current_only_frames,
+                        "current-only PoH frame count",
+                    )?;
+                }
+                (false, true) => {
+                    state.legacy_only_frames =
+                        checked_increment(state.legacy_only_frames, "legacy-only PoH frame count")?;
+                }
+                (true, true) => {
+                    state.dual_profile_frames = checked_increment(
+                        state.dual_profile_frames,
+                        "dual-profile PoH frame count",
+                    )?;
+                }
+                (false, false) => {
+                    state.neither_profile_frames =
+                        checked_increment(state.neither_profile_frames, "invalid PoH frame count")?;
+                }
+            }
+            state.current.observe(sequence, block.row, current)?;
+            state.legacy.observe(sequence, block.row, legacy)?;
+            state.previous_slot_and_id = Some((block.row.slot, block.blockhash_id));
+            state.position += 1;
+            Ok(())
+        },
+    )?;
+
+    if state.position != total_blocks || reader_stats.block_count != total_blocks as u64 {
+        return Err(ArchiveIntegrityError::Invalid(format!(
+            "PoH preflight completed {} ordered blocks and reader completed {}, expected {total_blocks}",
+            state.position, reader_stats.block_count
+        )));
+    }
+    if poh_reader.read_exact_frame(total_blocks)?.is_some() {
+        return Err(ArchiveIntegrityError::Invalid(format!(
+            "poh.wincode has a trailing frame after {total_blocks} indexed blocks"
+        )));
+    }
+    if state.poh_file_bytes != poh_file_bytes {
+        return Err(ArchiveIntegrityError::Invalid(format!(
+            "PoH preflight consumed {} bytes, but poh.wincode has {poh_file_bytes} bytes",
+            state.poh_file_bytes
+        )));
+    }
+
+    let (wire_profile, poh_schema, selected) = select_poh_preflight_candidate(&state)?;
+    if selected.frames != total_blocks as u64 {
+        return Err(ArchiveIntegrityError::Invalid(format!(
+            "selected PoH profile bound {} frames, expected {total_blocks}",
+            selected.frames
+        )));
+    }
+    if selected.total_effective_hash_rounds == 0 {
+        return Err(ArchiveIntegrityError::Invalid(
+            "PoH generation has no effective hash-round evidence".to_owned(),
+        ));
+    }
+    let poh_digest: [u8; HASH_BYTES] = state.poh_hasher.clone().finalize().into();
+    reader.source().verify_unchanged()?;
+    let binding = reader.binding();
+    let mut report = ArchiveV2PohPreflightReport {
+        complete_source: true,
+        cluster_id: reader.manifest().cluster_id.clone(),
+        generation_id: reader.manifest().generation_id.clone(),
+        generation_digest: hex32(&binding.generation_digest),
+        epoch: config.epoch,
+        slots_per_epoch: config.slots_per_epoch,
+        source_total_blocks: total_blocks,
+        poh_file_bytes,
+        poh_sha256: hex32(&poh_digest),
+        frames_bound: selected.frames,
+        entries_bound: selected.entries,
+        transactions_bound: selected.transactions,
+        signatures_derived: selected.signatures,
+        blockhash_registry_records: registry_records,
+        blockhash_registry_offset: registry_offset,
+        wire_profile,
+        poh_schema,
+        current_exact_signature_evidence_entries: selected.current_exact_evidence_entries,
+        current_all_zero_derived_evidence_entries: selected.current_all_zero_evidence_entries,
+        max_num_hashes_per_entry: selected.max_num_hashes_per_entry,
+        max_entries_per_block: selected.max_entries_per_block,
+        max_effective_hash_rounds_per_block: selected.max_effective_hash_rounds_per_block,
+        max_effective_hash_rounds_block_id: selected.max_effective_hash_rounds_block_id,
+        max_effective_hash_rounds_slot: selected.max_effective_hash_rounds_slot,
+        total_effective_hash_rounds: selected.total_effective_hash_rounds,
+        absolute_num_hashes_per_entry_guard: MAX_REPLAY_NUM_HASHES_PER_ENTRY,
+        reader: reader_stats.into(),
+        elapsed_millis: duration_millis(started.elapsed()),
+        hash_recomputation: "not-run",
+        seal: [0; HASH_BYTES],
+    };
+    report.seal = compute_poh_preflight_report_seal(&report)?;
+    Ok(report)
+}
+
+/// Stream the same complete PoH generation again after a successful
+/// preflight, without replaying any entry hash.
+///
+/// The second pass rejects any source, schema, registry, identity, count, work
+/// or digest difference from `preflight` before it finishes the observer.
+pub fn stream_preflighted_archive_v2_poh<O: ArchiveV2PohStructuralObserver>(
+    reader: &ArchiveReader<PinnedLocalRangeSource>,
+    preflight: &ArchiveV2PohPreflightReport,
+    workers: usize,
+    observer: &mut O,
+) -> IntegrityResult<ArchiveV2PohStructuralStreamReport> {
+    let started = Instant::now();
+    validate_preflight_stream_binding(reader, preflight, workers)?;
+    reader.source().verify_unchanged()?;
+    let total_blocks = reader.index().rows.len();
+    let (blockhashes, registry_records, registry_offset) =
+        read_blockhash_registry(reader, preflight.epoch)?;
+    if registry_records != preflight.blockhash_registry_records
+        || registry_offset != preflight.blockhash_registry_offset
+    {
+        return Err(ArchiveIntegrityError::Invalid(format!(
+            "second-pass blockhash registry shape ({registry_records}, {registry_offset}) differs from preflight ({}, {})",
+            preflight.blockhash_registry_records, preflight.blockhash_registry_offset
+        )));
+    }
+    if preflight.epoch == 0 {
+        validate_predecessor_boundary(
+            reader,
+            None,
+            preflight.epoch,
+            preflight.slots_per_epoch,
+            &blockhashes,
+            registry_offset,
+        )?;
+    }
+
+    let poh_file = required_pinned_file(reader.source(), ARCHIVE_V2_POH_FILE)?;
+    let mut poh_reader = StrictFramedReader::new(BufReader::with_capacity(
+        POH_READER_BUFFER_BYTES,
+        PositionedFileReader::new(poh_file),
+    ));
+    let mut position = 0usize;
+    let mut previous_slot_and_id = None;
+    let mut totals = PohPreflightCandidate::default();
+    let mut poh_file_bytes = 0u64;
+    let mut poh_hasher = Sha256::new();
+    let wire_profile = poh_wire_profile_for_schema(preflight.poh_schema);
+
+    let reader_stats = reader.process_borrowed_blocks_parallel_ordered(
+        Range {
+            start: 0,
+            end: total_blocks,
+        },
+        ordered_integrity_block_config(workers),
+        |_| Ok(IntegrityWorker::default()),
+        |worker, _sequence, block| project_integrity_block(worker, block),
+        |sequence, block| {
+            validate_chain_block(
+                sequence,
+                &block,
+                registry_offset,
+                None,
+                position,
+                previous_slot_and_id,
+            )?;
+            let source_frame = poh_reader.read_exact_frame(sequence)?.ok_or_else(|| {
+                ArchiveIntegrityError::Invalid(format!(
+                    "second-pass poh.wincode ended before block {sequence} slot {}",
+                    block.row.slot
+                ))
+            })?;
+            poh_file_bytes = poh_file_bytes
+                .checked_add(source_frame.exact.len() as u64)
+                .ok_or_else(|| {
+                    ArchiveIntegrityError::Invalid(
+                        "second-pass PoH source byte count overflow".to_owned(),
+                    )
+                })?;
+            poh_hasher.update(source_frame.exact);
+            let expected_final_hash = blockhash_at(&blockhashes, sequence, registry_offset)?;
+            let record = decode_poh_payload_exact(source_frame.payload, preflight.poh_schema)
+                .map_err(|error| {
+                    ArchiveIntegrityError::Invalid(format!(
+                        "second-pass decode PoH block {sequence} slot {}: {error}",
+                        block.row.slot
+                    ))
+                })?;
+            let stats = inspect_poh_preflight_record(
+                sequence,
+                &block,
+                &record,
+                expected_final_hash,
+                preflight.poh_schema,
+            )?;
+            match preflight.poh_schema {
+                PohSidecarSchema::Current if !stats.current_exact_possible => {
+                    return Err(ArchiveIntegrityError::Invalid(format!(
+                        "second-pass PoH block {sequence} no longer has exact current signature counts"
+                    )));
+                }
+                PohSidecarSchema::CurrentAllZeroDerived
+                    if !stats.current_all_zero_possible =>
+                {
+                    return Err(ArchiveIntegrityError::Invalid(format!(
+                        "second-pass PoH block {sequence} no longer has all-zero stored signature counts"
+                    )));
+                }
+                _ => {}
+            }
+            totals.observe_stats(sequence, block.row, stats)?;
+            observer.observe(StructurallyAttestedArchiveV2PohBlock {
+                sequence,
+                row: block.row,
+                source_frame: source_frame.exact,
+                source_wire_profile: wire_profile,
+                source_signature_profile: preflight.poh_schema,
+                record: &record,
+                transaction_signature_prefixes: &block.signature_prefixes,
+                expected_final_hash,
+                effective_hash_rounds: stats.effective_hash_rounds,
+            })?;
+            previous_slot_and_id = Some((block.row.slot, block.blockhash_id));
+            position += 1;
+            Ok(())
+        },
+    )?;
+
+    if position != total_blocks || reader_stats.block_count != total_blocks as u64 {
+        return Err(ArchiveIntegrityError::Invalid(format!(
+            "second PoH pass completed {position} ordered blocks and reader completed {}, expected {total_blocks}",
+            reader_stats.block_count
+        )));
+    }
+    if poh_reader.read_exact_frame(total_blocks)?.is_some() {
+        return Err(ArchiveIntegrityError::Invalid(format!(
+            "second-pass poh.wincode has a trailing frame after {total_blocks} indexed blocks"
+        )));
+    }
+    let poh_digest: [u8; HASH_BYTES] = poh_hasher.finalize().into();
+    let poh_sha256 = hex32(&poh_digest);
+    validate_preflight_stream_totals(preflight, &totals, poh_file_bytes, &poh_sha256)?;
+    reader.source().verify_unchanged()?;
+    observer.finish()?;
+    reader.source().verify_unchanged()?;
+
+    Ok(ArchiveV2PohStructuralStreamReport {
+        complete_source: true,
+        generation_digest: preflight.generation_digest.clone(),
+        poh_sha256,
+        poh_schema: preflight.poh_schema,
+        frames_bound: totals.frames,
+        entries_bound: totals.entries,
+        transactions_bound: totals.transactions,
+        signatures_derived: totals.signatures,
+        blockhash_registry_records: registry_records,
+        blockhash_registry_offset: registry_offset,
+        max_effective_hash_rounds_per_block: totals.max_effective_hash_rounds_per_block,
+        max_effective_hash_rounds_block_id: totals.max_effective_hash_rounds_block_id,
+        max_effective_hash_rounds_slot: totals.max_effective_hash_rounds_slot,
+        total_effective_hash_rounds: totals.total_effective_hash_rounds,
+        reader: reader_stats.into(),
+        elapsed_millis: duration_millis(started.elapsed()),
+        cryptographic_entry_recompute: "not-run",
+        source_entry_hash_status: "structurally-bound-source-values-not-cryptographically-replayed",
+    })
+}
+
+fn validate_preflight_stream_binding(
+    reader: &ArchiveReader<PinnedLocalRangeSource>,
+    preflight: &ArchiveV2PohPreflightReport,
+    workers: usize,
+) -> IntegrityResult<()> {
+    if compute_poh_preflight_report_seal(preflight)? != preflight.seal {
+        return Err(ArchiveIntegrityError::Invalid(
+            "PoH preflight report fields differ from its private SDK seal".to_owned(),
+        ));
+    }
+    validate_common_config(
+        reader,
+        preflight.epoch,
+        preflight.slots_per_epoch,
+        reader.index().rows.len(),
+        workers,
+    )?;
+    let binding = reader.binding();
+    let expected_wire = match preflight.poh_schema {
+        PohSidecarSchema::Current | PohSidecarSchema::CurrentAllZeroDerived => {
+            ArchiveV2PohWireProfile::CurrentWincode055
+        }
+        PohSidecarSchema::LegacyNoSignatureCount => {
+            ArchiveV2PohWireProfile::LegacyNoSignatureCountWincode055
+        }
+    };
+    let current_poh_bytes = reader
+        .source()
+        .size(ARCHIVE_V2_POH_FILE)?
+        .ok_or_else(|| ArchiveIntegrityError::Invalid("poh.wincode is missing".to_owned()))?;
+    if !preflight.complete_source
+        || preflight.cluster_id != reader.manifest().cluster_id
+        || preflight.generation_id != reader.manifest().generation_id
+        || preflight.generation_digest != hex32(&binding.generation_digest)
+        || preflight.source_total_blocks != reader.index().rows.len()
+        || preflight.frames_bound != reader.index().rows.len() as u64
+        || preflight.poh_file_bytes != current_poh_bytes
+        || preflight.wire_profile != expected_wire
+        || preflight.absolute_num_hashes_per_entry_guard != MAX_REPLAY_NUM_HASHES_PER_ENTRY
+        || preflight.hash_recomputation != "not-run"
+        || preflight.max_effective_hash_rounds_per_block == 0
+        || preflight.total_effective_hash_rounds == 0
+    {
+        return Err(ArchiveIntegrityError::Invalid(
+            "PoH preflight report does not bind the current pinned generation and structural policy"
+                .to_owned(),
+        ));
+    }
+    Ok(())
+}
+
+fn compute_poh_preflight_report_seal(
+    report: &ArchiveV2PohPreflightReport,
+) -> IntegrityResult<[u8; HASH_BYTES]> {
+    let encoded = serde_json::to_vec(report).map_err(|error| {
+        ArchiveIntegrityError::Invalid(format!(
+            "serialize PoH preflight report for private seal: {error}"
+        ))
+    })?;
+    let mut hasher = Sha256::new();
+    hasher.update(b"blockzilla/archive-v2-poh-preflight-report-seal\0");
+    hasher.update((encoded.len() as u64).to_le_bytes());
+    hasher.update(encoded);
+    Ok(hasher.finalize().into())
+}
+
+fn validate_preflight_stream_totals(
+    preflight: &ArchiveV2PohPreflightReport,
+    totals: &PohPreflightCandidate,
+    poh_file_bytes: u64,
+    poh_sha256: &str,
+) -> IntegrityResult<()> {
+    if totals.frames != preflight.frames_bound
+        || totals.entries != preflight.entries_bound
+        || totals.transactions != preflight.transactions_bound
+        || totals.signatures != preflight.signatures_derived
+        || totals.max_num_hashes_per_entry != preflight.max_num_hashes_per_entry
+        || totals.max_entries_per_block != preflight.max_entries_per_block
+        || totals.max_effective_hash_rounds_per_block
+            != preflight.max_effective_hash_rounds_per_block
+        || totals.max_effective_hash_rounds_block_id != preflight.max_effective_hash_rounds_block_id
+        || totals.max_effective_hash_rounds_slot != preflight.max_effective_hash_rounds_slot
+        || totals.total_effective_hash_rounds != preflight.total_effective_hash_rounds
+        || totals.current_exact_evidence_entries
+            != preflight.current_exact_signature_evidence_entries
+        || totals.current_all_zero_evidence_entries
+            != preflight.current_all_zero_derived_evidence_entries
+        || poh_file_bytes != preflight.poh_file_bytes
+        || poh_sha256 != preflight.poh_sha256
+    {
+        return Err(ArchiveIntegrityError::Invalid(
+            "second PoH pass identity, digest, count, schema, or work totals differ from preflight"
+                .to_owned(),
+        ));
+    }
+    Ok(())
+}
+
+const fn poh_wire_profile_for_schema(schema: PohSidecarSchema) -> PohWireProfile {
+    match schema {
+        PohSidecarSchema::Current | PohSidecarSchema::CurrentAllZeroDerived => {
+            PohWireProfile::ArchiveV2CurrentWincode055
+        }
+        PohSidecarSchema::LegacyNoSignatureCount => {
+            PohWireProfile::ArchiveV2LegacyNoSignatureCountWincode055
+        }
+    }
+}
+
+fn select_poh_preflight_candidate(
+    state: &OrderedPohPreflightState,
+) -> IntegrityResult<(
+    ArchiveV2PohWireProfile,
+    PohSidecarSchema,
+    &PohPreflightCandidate,
+)> {
+    match (state.current.possible, state.legacy.possible) {
+        (true, true) => {
+            return Err(ArchiveIntegrityError::Invalid(format!(
+                "PoH full-generation wire grammar is ambiguous: current and legacy both bind every frame; dual-profile frames={}",
+                state.dual_profile_frames
+            )));
+        }
+        (false, false) => {
+            let category = if state.current_only_frames > 0 && state.legacy_only_frames > 0 {
+                "mixed"
+            } else {
+                "invalid"
+            };
+            let current_failure = state
+                .current
+                .first_failure
+                .as_deref()
+                .unwrap_or("current grammar does not cover the full generation");
+            let legacy_failure = state
+                .legacy
+                .first_failure
+                .as_deref()
+                .unwrap_or("legacy grammar does not cover the full generation");
+            return Err(ArchiveIntegrityError::Invalid(format!(
+                "PoH full-generation wire grammar is {category}: current={current_failure}; legacy={legacy_failure}; current-only frames={}, legacy-only frames={}, dual frames={}, invalid frames={}",
+                state.current_only_frames,
+                state.legacy_only_frames,
+                state.dual_profile_frames,
+                state.neither_profile_frames
+            )));
+        }
+        (false, true) => {
+            return Ok((
+                ArchiveV2PohWireProfile::LegacyNoSignatureCountWincode055,
+                PohSidecarSchema::LegacyNoSignatureCount,
+                &state.legacy,
+            ));
+        }
+        (true, false) => {}
+    }
+
+    match (
+        state.current.current_exact_possible,
+        state.current.current_all_zero_possible,
+    ) {
+        (true, true) => Err(ArchiveIntegrityError::Invalid(
+            "PoH current wire grammar has no signature-count evidence: every stored and derived entry count is zero"
+                .to_owned(),
+        )),
+        (true, false) => Ok((
+            ArchiveV2PohWireProfile::CurrentWincode055,
+            PohSidecarSchema::Current,
+            &state.current,
+        )),
+        (false, true) => Ok((
+            ArchiveV2PohWireProfile::CurrentWincode055,
+            PohSidecarSchema::CurrentAllZeroDerived,
+            &state.current,
+        )),
+        (false, false) => {
+            let current_failure = state
+                .current
+                .first_failure
+                .as_deref()
+                .unwrap_or("current grammar binds every frame");
+            Err(ArchiveIntegrityError::Invalid(format!(
+                "PoH current wire grammar has mixed or invalid signature-count semantics: {current_failure}; exact evidence entries={}, all-zero-derived evidence entries={}",
+                state.current.current_exact_evidence_entries,
+                state.current.current_all_zero_evidence_entries
+            )))
+        }
+    }
+}
+
+impl PohPreflightCandidate {
+    fn observe(
+        &mut self,
+        sequence: usize,
+        row: ArchiveV2HotBlockIndexRow,
+        result: IntegrityResult<PohPreflightFrameStats>,
+    ) -> IntegrityResult<()> {
+        let stats = match result {
+            Ok(stats) => stats,
+            Err(error) => {
+                if self.possible {
+                    self.possible = false;
+                    self.first_failure = Some(error.to_string());
+                }
+                return Ok(());
+            }
+        };
+        if !self.possible {
+            return Ok(());
+        }
+        self.observe_stats(sequence, row, stats)
+    }
+
+    fn observe_stats(
+        &mut self,
+        sequence: usize,
+        row: ArchiveV2HotBlockIndexRow,
+        stats: PohPreflightFrameStats,
+    ) -> IntegrityResult<()> {
+        let first_frame = self.frames == 0;
+        self.frames = checked_increment(self.frames, "PoH candidate frame count")?;
+        self.entries =
+            checked_add_preflight_u64(self.entries, stats.entries, "PoH candidate entry count")?;
+        self.transactions = checked_add_preflight_u64(
+            self.transactions,
+            stats.transactions,
+            "PoH candidate transaction count",
+        )?;
+        self.signatures = checked_add_preflight_u64(
+            self.signatures,
+            stats.signatures,
+            "PoH candidate signature count",
+        )?;
+        self.max_num_hashes_per_entry = self
+            .max_num_hashes_per_entry
+            .max(stats.max_num_hashes_per_entry);
+        self.max_entries_per_block = self.max_entries_per_block.max(stats.max_entries_per_block);
+        if first_frame || stats.effective_hash_rounds > self.max_effective_hash_rounds_per_block {
+            self.max_effective_hash_rounds_per_block = stats.effective_hash_rounds;
+            self.max_effective_hash_rounds_block_id = row.block_id;
+            self.max_effective_hash_rounds_slot = row.slot;
+        }
+        self.total_effective_hash_rounds = self
+            .total_effective_hash_rounds
+            .checked_add(u128::from(stats.effective_hash_rounds))
+            .ok_or_else(|| {
+                ArchiveIntegrityError::Invalid(format!(
+                    "PoH candidate total effective hash rounds overflow at block {sequence}"
+                ))
+            })?;
+        self.current_exact_possible &= stats.current_exact_possible;
+        self.current_all_zero_possible &= stats.current_all_zero_possible;
+        self.current_exact_evidence_entries = checked_add_preflight_u64(
+            self.current_exact_evidence_entries,
+            stats.current_exact_evidence_entries,
+            "current exact signature evidence entry count",
+        )?;
+        self.current_all_zero_evidence_entries = checked_add_preflight_u64(
+            self.current_all_zero_evidence_entries,
+            stats.current_all_zero_evidence_entries,
+            "current all-zero-derived signature evidence entry count",
+        )?;
+        Ok(())
+    }
+}
+
+fn inspect_poh_preflight_payload(
+    sequence: usize,
+    block: &ProjectedIntegrityBlock,
+    payload: &[u8],
+    expected_final_hash: [u8; HASH_BYTES],
+    schema: PohSidecarSchema,
+) -> IntegrityResult<PohPreflightFrameStats> {
+    let record = decode_poh_payload_exact(payload, schema).map_err(|error| {
+        ArchiveIntegrityError::Invalid(format!(
+            "PoH block {sequence} does not match {schema:?}: {error}"
+        ))
+    })?;
+    inspect_poh_preflight_record(sequence, block, &record, expected_final_hash, schema)
+}
+
+fn inspect_poh_preflight_record(
+    sequence: usize,
+    block: &ProjectedIntegrityBlock,
+    record: &WincodeArchiveV2PohRecord,
+    expected_final_hash: [u8; HASH_BYTES],
+    schema: PohSidecarSchema,
+) -> IntegrityResult<PohPreflightFrameStats> {
+    if record.block_id != block.row.block_id || record.slot != block.row.slot {
+        return Err(ArchiveIntegrityError::Invalid(format!(
+            "PoH block {sequence} {schema:?} identity ({}, {}) differs from hot index ({}, {})",
+            record.block_id, record.slot, block.row.block_id, block.row.slot
+        )));
+    }
+    if record.entries.is_empty() {
+        return Err(ArchiveIntegrityError::Invalid(format!(
+            "PoH block {sequence} slot {} {schema:?} record has no entries",
+            block.row.slot
+        )));
+    }
+    let final_hash = record.entries.last().expect("nonempty checked").hash;
+    if final_hash != expected_final_hash {
+        return Err(ArchiveIntegrityError::Invalid(format!(
+            "PoH block {sequence} slot {} {schema:?} final hash {} differs from blockhash registry {}",
+            block.row.slot,
+            hex32(&final_hash),
+            hex32(&expected_final_hash)
+        )));
+    }
+
+    let current_wire = schema != PohSidecarSchema::LegacyNoSignatureCount;
+    let mut stats = PohPreflightFrameStats {
+        entries: record.entries.len() as u64,
+        transactions: u64::from(block.row.tx_count),
+        signatures: u64::from(block.row.signature_count),
+        max_entries_per_block: record.entries.len() as u64,
+        current_exact_possible: true,
+        current_all_zero_possible: true,
+        ..PohPreflightFrameStats::default()
+    };
+    let mut tx_cursor = 0usize;
+    for (entry_index, entry) in record.entries.iter().enumerate() {
+        if entry.num_hashes > MAX_REPLAY_NUM_HASHES_PER_ENTRY {
+            return Err(ArchiveIntegrityError::Invalid(format!(
+                "PoH block {sequence} slot {} entry {entry_index} declares {} hashes, above absolute guard {}",
+                block.row.slot, entry.num_hashes, MAX_REPLAY_NUM_HASHES_PER_ENTRY
+            )));
+        }
+        stats.max_num_hashes_per_entry = stats.max_num_hashes_per_entry.max(entry.num_hashes);
+        let effective_hashes = entry.num_hashes.max(u64::from(entry.tx_count > 0));
+        stats.effective_hash_rounds = stats
+            .effective_hash_rounds
+            .checked_add(effective_hashes)
+            .ok_or_else(|| {
+                ArchiveIntegrityError::Invalid(format!(
+                    "PoH block {sequence} effective hash-round count overflow"
+                ))
+            })?;
+        let tx_end = tx_cursor
+            .checked_add(entry.tx_count as usize)
+            .ok_or_else(|| {
+                ArchiveIntegrityError::Invalid(format!(
+                    "PoH block {sequence} entry {entry_index} transaction range overflow"
+                ))
+            })?;
+        if tx_end >= block.signature_prefixes.len() {
+            return Err(ArchiveIntegrityError::Invalid(format!(
+                "PoH block {sequence} entry {entry_index} consumes transactions through {tx_end}, block has {}",
+                block.row.tx_count
+            )));
+        }
+        let first_signature = block.signature_prefixes[tx_cursor];
+        let last_signature = block.signature_prefixes[tx_end];
+        let derived_signature_count =
+            last_signature.checked_sub(first_signature).ok_or_else(|| {
+                ArchiveIntegrityError::Invalid(format!(
+                    "PoH block {sequence} entry {entry_index} signature partition decreases"
+                ))
+            })?;
+        if (entry.tx_count == 0 && derived_signature_count != 0)
+            || (entry.tx_count > 0 && derived_signature_count < entry.tx_count)
+        {
+            return Err(ArchiveIntegrityError::Invalid(format!(
+                "PoH block {sequence} entry {entry_index} partitions {} transactions into {derived_signature_count} signatures",
+                entry.tx_count
+            )));
+        }
+        if current_wire {
+            let exact = entry.signature_count == derived_signature_count;
+            let all_zero = entry.signature_count == 0;
+            stats.current_exact_possible &= exact;
+            stats.current_all_zero_possible &= all_zero;
+            if derived_signature_count > 0 && exact {
+                stats.current_exact_evidence_entries = checked_increment(
+                    stats.current_exact_evidence_entries,
+                    "current exact signature evidence entry count",
+                )?;
+            }
+            if derived_signature_count > 0 && all_zero {
+                stats.current_all_zero_evidence_entries = checked_increment(
+                    stats.current_all_zero_evidence_entries,
+                    "current all-zero-derived signature evidence entry count",
+                )?;
+            }
+        }
+        tx_cursor = tx_end;
+    }
+    if tx_cursor != block.row.tx_count as usize {
+        return Err(ArchiveIntegrityError::Invalid(format!(
+            "PoH block {sequence} entries consume {tx_cursor} of {} transactions",
+            block.row.tx_count
+        )));
+    }
+    Ok(stats)
+}
+
+fn checked_increment(value: u64, field: &str) -> IntegrityResult<u64> {
+    checked_add_preflight_u64(value, 1, field)
+}
+
+fn checked_add_preflight_u64(left: u64, right: u64, field: &str) -> IntegrityResult<u64> {
+    left.checked_add(right)
+        .ok_or_else(|| ArchiveIntegrityError::Invalid(format!("{field} overflow")))
+}
+
+/// Verify Archive V2 block-header continuity and the full predecessor
+/// boundary without reading PoH entries or transaction signatures.
+///
+/// The source is generic so the same verifier can use a pinned local
+/// generation, an HTTP range source, or a verified local/remote overlay.
+pub fn verify_archive_v2_blockhash_continuity<S: RangeSource>(
+    reader: &ArchiveReader<S>,
+    predecessor: Option<&ArchiveReader<S>>,
+    config: ArchiveContinuityConfig,
+) -> IntegrityResult<ArchiveContinuityReport> {
+    let started = Instant::now();
+    let total_blocks = reader.index().rows.len();
+    validate_common_config(
+        reader,
+        config.epoch,
+        config.slots_per_epoch,
+        config.selected_blocks,
+        config.workers,
+    )?;
+
+    let (blockhashes, registry_records, registry_offset) =
+        read_blockhash_registry(reader, config.epoch)?;
+    let (_, predecessor_parent_slot, tail_records_verified) = validate_predecessor_boundary(
+        reader,
+        predecessor,
+        config.epoch,
+        config.slots_per_epoch,
+        &blockhashes,
+        registry_offset,
+    )?;
+
+    let mut state = OrderedContinuityState::default();
+    let reader_stats = reader.process_borrowed_blocks_parallel_ordered(
+        Range {
+            start: 0,
+            end: config.selected_blocks,
+        },
+        ordered_integrity_block_config(config.workers),
+        |_| Ok(IntegrityWorker::default()),
+        |worker, _sequence, block| project_integrity_block(worker, block),
+        |sequence, block| {
+            validate_chain_block(
+                sequence,
+                &block,
+                registry_offset,
+                predecessor_parent_slot,
+                state.position,
+                state.previous_slot_and_id,
+            )?;
+            state.previous_slot_and_id = Some((block.row.slot, block.blockhash_id));
+            state.position += 1;
+            state.blocks_verified = state.blocks_verified.saturating_add(1);
+            Ok(())
+        },
+    )?;
+
+    if state.position != config.selected_blocks
+        || state.blocks_verified != config.selected_blocks as u64
+        || reader_stats.block_count != config.selected_blocks as u64
+    {
+        return Err(ArchiveIntegrityError::Invalid(format!(
+            "continuity pass completed {} ordered blocks and reader completed {}, expected {}",
+            state.blocks_verified, reader_stats.block_count, config.selected_blocks
+        )));
+    }
+
+    let complete = config.selected_blocks == total_blocks;
+    Ok(ArchiveContinuityReport {
+        complete_source: complete,
+        selected_blocks: config.selected_blocks,
+        source_total_blocks: total_blocks,
+        blockhash_registry_records: registry_records,
+        blockhash_registry_offset: registry_offset,
+        chain_blocks_verified: state.blocks_verified,
+        predecessor_boundary_checked: config.epoch > 0,
+        predecessor_tail_records_verified: tail_records_verified,
+        reader: reader_stats.into(),
+        elapsed_millis: duration_millis(started.elapsed()),
+        blockhash_continuity: if complete {
+            "complete"
+        } else {
+            "prefix-complete"
+        },
+        block_decode_worker_threads: config.workers,
+    })
 }
 
 /// Verify block-header continuity, the predecessor boundary, and every PoH
@@ -293,39 +1440,30 @@ pub fn verify_archive_v2_integrity(
     predecessor: Option<&ArchiveReader<PinnedLocalRangeSource>>,
     config: ArchiveIntegrityConfig,
 ) -> IntegrityResult<ArchiveIntegrityReport> {
+    verify_archive_v2_integrity_with_observer(reader, predecessor, config, &mut NoopPohObserver)
+}
+
+/// Run the production integrity verifier and expose each verified PoH block to
+/// one bounded, ordered, read-only observer.
+pub fn verify_archive_v2_integrity_with_observer<O: ArchiveV2PohObserver>(
+    reader: &ArchiveReader<PinnedLocalRangeSource>,
+    predecessor: Option<&ArchiveReader<PinnedLocalRangeSource>>,
+    config: ArchiveIntegrityConfig,
+    observer: &mut O,
+) -> IntegrityResult<ArchiveIntegrityReport> {
     let started = Instant::now();
     let total_blocks = reader.index().rows.len();
-    if config.selected_blocks == 0 || config.selected_blocks > total_blocks {
-        return Err(ArchiveIntegrityError::Invalid(format!(
-            "selected block count {} is outside 1..={total_blocks}",
-            config.selected_blocks
-        )));
-    }
-    if config.workers == 0 || config.workers > 64 {
-        return Err(ArchiveIntegrityError::Invalid(
-            "integrity workers must be in 1..=64".to_owned(),
-        ));
-    }
-    if config.slots_per_epoch == 0 {
-        return Err(ArchiveIntegrityError::Invalid(
-            "slots-per-epoch must be positive".to_owned(),
-        ));
-    }
+    validate_common_config(
+        reader,
+        config.epoch,
+        config.slots_per_epoch,
+        config.selected_blocks,
+        config.workers,
+    )?;
     if config.max_hash_rounds_per_block == 0 || config.max_total_hash_rounds == 0 {
         return Err(ArchiveIntegrityError::Invalid(
             "PoH per-block and total hash-round limits must be positive".to_owned(),
         ));
-    }
-    if reader.manifest().epoch != config.epoch
-        || reader.manifest().slots_per_epoch != config.slots_per_epoch
-    {
-        return Err(ArchiveIntegrityError::Invalid(format!(
-            "integrity config epoch/schedule ({}, {}) differs from source manifest ({}, {})",
-            config.epoch,
-            config.slots_per_epoch,
-            reader.manifest().epoch,
-            reader.manifest().slots_per_epoch
-        )));
     }
     let hashes_per_slot = config.poh.hashes_per_slot()?;
     validate_genesis_poh_bounds(reader, config.poh)?;
@@ -361,8 +1499,10 @@ pub fn verify_archive_v2_integrity(
     }
     let signature_file = required_pinned_file(reader.source(), ARCHIVE_V2_SIGNATURES_FILE)?;
     let poh_file = required_pinned_file(reader.source(), ARCHIVE_V2_POH_FILE)?;
-    let mut poh_reader =
-        StrictFramedReader::new(BufReader::with_capacity(POH_READER_BUFFER_BYTES, poh_file));
+    let mut poh_reader = StrictFramedReader::new(BufReader::with_capacity(
+        POH_READER_BUFFER_BYTES,
+        PositionedFileReader::new(poh_file),
+    ));
     let pool = rayon::ThreadPoolBuilder::new()
         .num_threads(config.workers)
         .thread_name(|index| format!("archive-integrity-poh-{index}"))
@@ -379,12 +1519,7 @@ pub fn verify_archive_v2_integrity(
             start: 0,
             end: config.selected_blocks,
         },
-        OrderedParallelBlockConfig {
-            decode_workers: config.workers,
-            discard_rewards: true,
-            max_blocks_per_batch: 1_024,
-            ..OrderedParallelBlockConfig::default()
-        },
+        ordered_integrity_block_config(config.workers),
         |_| Ok(IntegrityWorker::default()),
         |worker, _sequence, block| project_integrity_block(worker, block),
         |sequence, block| {
@@ -403,9 +1538,11 @@ pub fn verify_archive_v2_integrity(
                 config.poh_schema,
                 &pool,
                 &mut state,
+                observer,
             )
         },
     )?;
+    pool.install(|| observer.finish())?;
 
     if config.selected_blocks == total_blocks {
         let trailing = poh_reader.read_payload(config.selected_blocks)?;
@@ -466,6 +1603,52 @@ pub fn verify_archive_v2_integrity(
         block_decode_worker_threads: config.workers,
         poh_recompute_worker_threads: config.workers,
     })
+}
+
+fn validate_common_config<S: RangeSource>(
+    reader: &ArchiveReader<S>,
+    epoch: u64,
+    slots_per_epoch: u64,
+    selected_blocks: usize,
+    workers: usize,
+) -> IntegrityResult<()> {
+    let total_blocks = reader.index().rows.len();
+    if selected_blocks == 0 || selected_blocks > total_blocks {
+        return Err(ArchiveIntegrityError::Invalid(format!(
+            "selected block count {selected_blocks} is outside 1..={total_blocks}"
+        )));
+    }
+    if workers == 0 || workers > 64 {
+        return Err(ArchiveIntegrityError::Invalid(
+            "integrity workers must be in 1..=64".to_owned(),
+        ));
+    }
+    if slots_per_epoch == 0 {
+        return Err(ArchiveIntegrityError::Invalid(
+            "slots-per-epoch must be positive".to_owned(),
+        ));
+    }
+    if reader.manifest().epoch != epoch || reader.manifest().slots_per_epoch != slots_per_epoch {
+        return Err(ArchiveIntegrityError::Invalid(format!(
+            "integrity config epoch/schedule ({epoch}, {slots_per_epoch}) differs from source manifest ({}, {})",
+            reader.manifest().epoch,
+            reader.manifest().slots_per_epoch
+        )));
+    }
+    Ok(())
+}
+
+fn ordered_integrity_block_config(workers: usize) -> OrderedParallelBlockConfig {
+    OrderedParallelBlockConfig {
+        decode_workers: workers,
+        compressed_buffer_count: workers.clamp(1, 3),
+        uncompressed_batch_budget_bytes: 256 * 1024 * 1024,
+        retained_decompressed_bytes_per_worker: (32 * 1024 * 1024)
+            .min(MAX_ORDERED_PARALLEL_RETAINED_DECOMPRESSED_BYTES / workers),
+        discard_rewards: true,
+        max_blocks_per_batch: 1_024,
+        ..OrderedParallelBlockConfig::default()
+    }
 }
 
 fn project_integrity_block(
@@ -573,7 +1756,7 @@ fn consume_integrity_block(
     sequence: usize,
     block: ProjectedIntegrityBlock,
     signature_file: &File,
-    poh_reader: &mut StrictFramedReader<BufReader<File>>,
+    poh_reader: &mut StrictFramedReader<BufReader<PositionedFileReader>>,
     blockhashes: &[u8],
     registry_offset: u64,
     first_start_hash: [u8; HASH_BYTES],
@@ -584,68 +1767,30 @@ fn consume_integrity_block(
     expected_poh_schema: PohSidecarSchema,
     pool: &rayon::ThreadPool,
     state: &mut OrderedIntegrityState,
+    observer: &mut impl ArchiveV2PohObserver,
 ) -> IntegrityResult<()> {
-    if sequence != state.position || block.row.block_id as usize != sequence {
-        return Err(ArchiveIntegrityError::Invalid(format!(
-            "block sequence {sequence} does not match ordered position {} or block id {}",
-            state.position, block.row.block_id
-        )));
-    }
-    let expected_id = u64::try_from(sequence)
-        .ok()
-        .and_then(|value| value.checked_add(registry_offset))
-        .ok_or_else(|| ArchiveIntegrityError::Invalid("blockhash id overflow".to_owned()))?;
-    if u64::from(block.blockhash_id) != expected_id {
-        return Err(ArchiveIntegrityError::Invalid(format!(
-            "block {sequence} slot {} has blockhash_id {}, expected {expected_id}",
-            block.row.slot, block.blockhash_id
-        )));
-    }
-    if let Some((previous_slot, previous_id)) = state.previous_slot_and_id {
-        if block.previous_blockhash_id != previous_id {
-            return Err(ArchiveIntegrityError::Invalid(format!(
-                "block {sequence} slot {} has previous_blockhash_id {}, previous block id is {previous_id}",
-                block.row.slot, block.previous_blockhash_id
-            )));
-        }
-        if block.parent_slot != previous_slot {
-            return Err(ArchiveIntegrityError::Invalid(format!(
-                "block {sequence} slot {} has parent_slot {}, previous block slot is {previous_slot}",
-                block.row.slot, block.parent_slot
-            )));
-        }
-    } else if let Some(expected_parent_slot) = predecessor_parent_slot
-        && block.parent_slot != expected_parent_slot
-    {
-        return Err(ArchiveIntegrityError::Invalid(format!(
-            "first block slot {} has parent_slot {}, predecessor tail ends at slot {expected_parent_slot}",
-            block.row.slot, block.parent_slot
-        )));
-    } else if registry_offset == 1 && block.parent_slot != 0 {
-        return Err(ArchiveIntegrityError::Invalid(format!(
-            "epoch-0 first block slot {} has parent_slot {}, expected genesis slot 0",
-            block.row.slot, block.parent_slot
-        )));
-    }
-    if sequence == 0 && block.previous_blockhash_id != 0 {
-        return Err(ArchiveIntegrityError::Invalid(format!(
-            "first block slot {} has previous_blockhash_id {}, expected boundary id 0",
-            block.row.slot, block.previous_blockhash_id
-        )));
-    }
+    validate_chain_block(
+        sequence,
+        &block,
+        registry_offset,
+        predecessor_parent_slot,
+        state.position,
+        state.previous_slot_and_id,
+    )?;
 
-    let payload = poh_reader.read_payload(sequence)?.ok_or_else(|| {
+    let source_frame = poh_reader.read_exact_frame(sequence)?.ok_or_else(|| {
         ArchiveIntegrityError::Invalid(format!(
             "PoH sidecar ended before block {sequence} slot {}",
             block.row.slot
         ))
     })?;
-    let poh = decode_poh_payload_exact(payload, expected_poh_schema).map_err(|error| {
-        ArchiveIntegrityError::Invalid(format!(
-            "decode PoH record for block {sequence} slot {}: {error}",
-            block.row.slot
-        ))
-    })?;
+    let poh =
+        decode_poh_payload_exact(source_frame.payload, expected_poh_schema).map_err(|error| {
+            ArchiveIntegrityError::Invalid(format!(
+                "decode PoH record for block {sequence} slot {}: {error}",
+                block.row.slot
+            ))
+        })?;
     if poh.block_id != block.row.block_id || poh.slot != block.row.slot {
         return Err(ArchiveIntegrityError::Invalid(format!(
             "PoH record block {} slot {} does not match block {sequence} slot {}",
@@ -854,6 +1999,30 @@ fn consume_integrity_block(
         )));
     }
 
+    let source_wire_profile = match expected_poh_schema {
+        PohSidecarSchema::Current | PohSidecarSchema::CurrentAllZeroDerived => {
+            PohWireProfile::ArchiveV2CurrentWincode055
+        }
+        PohSidecarSchema::LegacyNoSignatureCount => {
+            PohWireProfile::ArchiveV2LegacyNoSignatureCountWincode055
+        }
+    };
+    pool.install(|| {
+        observer.observe(VerifiedArchiveV2PohBlock {
+            sequence,
+            row: block.row,
+            source_frame: source_frame.exact,
+            source_wire_profile,
+            source_signature_profile: expected_poh_schema,
+            record: &poh,
+            transaction_signature_prefixes: &block.signature_prefixes,
+            signature_bytes: &state.signature_bytes,
+            start_hash: block_start_hash,
+            expected_final_hash: expected_blockhash,
+            max_effective_hashes: block_hash_budget,
+        })
+    })?;
+
     if expected_poh_schema == PohSidecarSchema::LegacyNoSignatureCount {
         state.legacy_poh_records = state.legacy_poh_records.saturating_add(1);
     }
@@ -870,6 +2039,65 @@ fn consume_integrity_block(
     state.hash_rounds_recomputed = total_after_block;
     state.previous_slot_and_id = Some((block.row.slot, block.blockhash_id));
     state.position += 1;
+    Ok(())
+}
+
+fn validate_chain_block(
+    sequence: usize,
+    block: &ProjectedIntegrityBlock,
+    registry_offset: u64,
+    predecessor_parent_slot: Option<u64>,
+    ordered_position: usize,
+    previous_slot_and_id: Option<(u64, u32)>,
+) -> IntegrityResult<()> {
+    if sequence != ordered_position || block.row.block_id as usize != sequence {
+        return Err(ArchiveIntegrityError::Invalid(format!(
+            "block sequence {sequence} does not match ordered position {ordered_position} or block id {}",
+            block.row.block_id
+        )));
+    }
+    let expected_id = u64::try_from(sequence)
+        .ok()
+        .and_then(|value| value.checked_add(registry_offset))
+        .ok_or_else(|| ArchiveIntegrityError::Invalid("blockhash id overflow".to_owned()))?;
+    if u64::from(block.blockhash_id) != expected_id {
+        return Err(ArchiveIntegrityError::Invalid(format!(
+            "block {sequence} slot {} has blockhash_id {}, expected {expected_id}",
+            block.row.slot, block.blockhash_id
+        )));
+    }
+    if let Some((previous_slot, previous_id)) = previous_slot_and_id {
+        if block.previous_blockhash_id != previous_id {
+            return Err(ArchiveIntegrityError::Invalid(format!(
+                "block {sequence} slot {} has previous_blockhash_id {}, previous block id is {previous_id}",
+                block.row.slot, block.previous_blockhash_id
+            )));
+        }
+        if block.parent_slot != previous_slot {
+            return Err(ArchiveIntegrityError::Invalid(format!(
+                "block {sequence} slot {} has parent_slot {}, previous block slot is {previous_slot}",
+                block.row.slot, block.parent_slot
+            )));
+        }
+    } else if let Some(expected_parent_slot) = predecessor_parent_slot
+        && block.parent_slot != expected_parent_slot
+    {
+        return Err(ArchiveIntegrityError::Invalid(format!(
+            "first block slot {} has parent_slot {}, predecessor tail ends at slot {expected_parent_slot}",
+            block.row.slot, block.parent_slot
+        )));
+    } else if registry_offset == 1 && block.parent_slot != 0 {
+        return Err(ArchiveIntegrityError::Invalid(format!(
+            "epoch-0 first block slot {} has parent_slot {}, expected genesis slot 0",
+            block.row.slot, block.parent_slot
+        )));
+    }
+    if sequence == 0 && block.previous_blockhash_id != 0 {
+        return Err(ArchiveIntegrityError::Invalid(format!(
+            "first block slot {} has previous_blockhash_id {}, expected boundary id 0",
+            block.row.slot, block.previous_blockhash_id
+        )));
+    }
     Ok(())
 }
 
@@ -956,8 +2184,8 @@ fn validate_genesis_poh_bounds(
     Ok(())
 }
 
-fn read_blockhash_registry(
-    reader: &ArchiveReader<PinnedLocalRangeSource>,
+fn read_blockhash_registry<S: RangeSource>(
+    reader: &ArchiveReader<S>,
     epoch: u64,
 ) -> IntegrityResult<(Vec<u8>, u64, u64)> {
     let size = reader
@@ -993,9 +2221,9 @@ fn read_blockhash_registry(
     Ok((bytes, records, offset))
 }
 
-fn validate_predecessor_boundary(
-    reader: &ArchiveReader<PinnedLocalRangeSource>,
-    predecessor: Option<&ArchiveReader<PinnedLocalRangeSource>>,
+fn validate_predecessor_boundary<S: RangeSource>(
+    reader: &ArchiveReader<S>,
+    predecessor: Option<&ArchiveReader<S>>,
     epoch: u64,
     slots_per_epoch: u64,
     current_registry: &[u8],
@@ -1818,6 +3046,381 @@ mod tests {
         }
     }
 
+    fn preflight_test_config() -> ArchiveV2PohPreflightConfig {
+        ArchiveV2PohPreflightConfig {
+            epoch: 2,
+            slots_per_epoch: 1_000,
+            workers: 2,
+        }
+    }
+
+    fn write_test_poh_frames(root: &Path, payloads: &[Vec<u8>], hashes: &[[u8; 32]]) {
+        let mut framed = Vec::new();
+        for payload in payloads {
+            write_u32_varint(&mut framed, payload.len() as u32).unwrap();
+            framed.extend_from_slice(payload);
+        }
+        fs::write(root.join(ARCHIVE_V2_POH_FILE), framed).unwrap();
+        fs::write(
+            root.join(ARCHIVE_V2_BLOCKHASH_REGISTRY_FILE),
+            hashes.iter().flatten().copied().collect::<Vec<_>>(),
+        )
+        .unwrap();
+    }
+
+    #[derive(Default)]
+    struct CountingStructuralObserver {
+        blocks: u64,
+        entries: u64,
+        finish_calls: u64,
+    }
+
+    impl ArchiveV2PohStructuralObserver for CountingStructuralObserver {
+        fn observe(
+            &mut self,
+            block: StructurallyAttestedArchiveV2PohBlock<'_>,
+        ) -> IntegrityResult<()> {
+            self.blocks = checked_increment(self.blocks, "test structural block count")?;
+            self.entries = checked_add_preflight_u64(
+                self.entries,
+                block.record.entries.len() as u64,
+                "test structural entry count",
+            )?;
+            assert_eq!(block.row.block_id, block.record.block_id);
+            assert_eq!(block.row.slot, block.record.slot);
+            assert_eq!(
+                block.record.entries.last().unwrap().hash,
+                block.expected_final_hash
+            );
+            Ok(())
+        }
+
+        fn finish(&mut self) -> IntegrityResult<()> {
+            self.finish_calls = checked_increment(self.finish_calls, "test finish call count")?;
+            Ok(())
+        }
+    }
+
+    #[test]
+    fn poh_preflight_attests_current_all_zero_derived_and_legacy() {
+        for expected_schema in [
+            PohSidecarSchema::Current,
+            PohSidecarSchema::CurrentAllZeroDerived,
+            PohSidecarSchema::LegacyNoSignatureCount,
+        ] {
+            let source = TempDir::new().unwrap();
+            write_test_blocks(source.path(), &[2_000], 1_999, true);
+            let final_hash = write_current_poh(source.path(), expected_schema, [9; 32], 2_000);
+            fs::write(
+                source.path().join(ARCHIVE_V2_BLOCKHASH_REGISTRY_FILE),
+                final_hash,
+            )
+            .unwrap();
+            let reader = open_test_archive(source.path(), 2, 1_000);
+            let report = preflight_archive_v2_poh(&reader, preflight_test_config()).unwrap();
+            assert!(report.complete_source);
+            assert_eq!(report.poh_schema, expected_schema);
+            assert_eq!(report.frames_bound, 1);
+            assert_eq!(report.entries_bound, 1);
+            assert_eq!(report.transactions_bound, 1);
+            assert_eq!(report.signatures_derived, 1);
+            assert_eq!(report.total_effective_hash_rounds, 1);
+            assert_eq!(report.hash_recomputation, "not-run");
+            let repeated = preflight_archive_v2_poh(&reader, preflight_test_config()).unwrap();
+            assert_eq!(repeated.poh_schema, expected_schema);
+            assert_eq!(repeated.poh_sha256, report.poh_sha256);
+            let mut observer = CountingStructuralObserver::default();
+            let streamed = stream_preflighted_archive_v2_poh(
+                &reader,
+                &report,
+                preflight_test_config().workers,
+                &mut observer,
+            )
+            .unwrap();
+            assert_eq!(streamed.poh_schema, expected_schema);
+            assert_eq!(streamed.poh_sha256, report.poh_sha256);
+            assert_eq!(streamed.cryptographic_entry_recompute, "not-run");
+            assert_eq!(observer.blocks, 1);
+            assert_eq!(observer.entries, 1);
+            assert_eq!(observer.finish_calls, 1);
+        }
+    }
+
+    #[test]
+    fn structural_stream_rejects_mutated_preflight_before_observer_finish() {
+        let source = TempDir::new().unwrap();
+        write_test_blocks(source.path(), &[2_000], 1_999, true);
+        let final_hash =
+            write_current_poh(source.path(), PohSidecarSchema::Current, [9; 32], 2_000);
+        fs::write(
+            source.path().join(ARCHIVE_V2_BLOCKHASH_REGISTRY_FILE),
+            final_hash,
+        )
+        .unwrap();
+        let reader = open_test_archive(source.path(), 2, 1_000);
+        let valid_report = preflight_archive_v2_poh(&reader, preflight_test_config()).unwrap();
+        let mut report = valid_report.clone();
+        report.entries_bound += 1;
+        let mut observer = CountingStructuralObserver::default();
+        let error = stream_preflighted_archive_v2_poh(
+            &reader,
+            &report,
+            preflight_test_config().workers,
+            &mut observer,
+        )
+        .unwrap_err();
+        assert!(error.to_string().contains("private SDK seal"));
+        assert_eq!(observer.blocks, 0);
+        assert_eq!(observer.finish_calls, 0);
+
+        let poh_path = source.path().join(ARCHIVE_V2_POH_FILE);
+        let mut changed = fs::read(&poh_path).unwrap();
+        changed.push(0);
+        fs::write(poh_path, changed).unwrap();
+        let mut observer = CountingStructuralObserver::default();
+        assert!(
+            stream_preflighted_archive_v2_poh(
+                &reader,
+                &valid_report,
+                preflight_test_config().workers,
+                &mut observer,
+            )
+            .is_err()
+        );
+        assert_eq!(observer.finish_calls, 0);
+    }
+
+    #[test]
+    fn poh_preflight_rejects_mixed_wire_and_current_signature_modes() {
+        let mixed_wire = TempDir::new().unwrap();
+        write_test_blocks(mixed_wire.path(), &[2_000, 2_001], 1_999, true);
+        let hashes = [[31; 32], [32; 32]];
+        let current = archive_wire::encode(&CurrentPohRecord {
+            block_id: 0,
+            slot: 2_000,
+            entries: vec![CurrentPohEntry {
+                num_hashes: 1,
+                hash: hashes[0],
+                transaction_count: 1,
+                signature_count: 1,
+            }],
+        })
+        .unwrap();
+        let legacy = archive_wire::encode(&LegacyPohRecord {
+            block_id: 1,
+            slot: 2_001,
+            entries: vec![LegacyPohEntry {
+                num_hashes: 1,
+                hash: hashes[1],
+                transaction_count: 1,
+            }],
+        })
+        .unwrap();
+        write_test_poh_frames(mixed_wire.path(), &[current, legacy], &hashes);
+        let reader = open_test_archive(mixed_wire.path(), 2, 1_000);
+        let error = preflight_archive_v2_poh(&reader, preflight_test_config()).unwrap_err();
+        assert!(error.to_string().contains("mixed"));
+
+        let mixed_signatures = TempDir::new().unwrap();
+        write_test_blocks(mixed_signatures.path(), &[2_000, 2_001], 1_999, true);
+        let payloads = [
+            archive_wire::encode(&CurrentPohRecord {
+                block_id: 0,
+                slot: 2_000,
+                entries: vec![CurrentPohEntry {
+                    num_hashes: 1,
+                    hash: hashes[0],
+                    transaction_count: 1,
+                    signature_count: 1,
+                }],
+            })
+            .unwrap(),
+            archive_wire::encode(&CurrentPohRecord {
+                block_id: 1,
+                slot: 2_001,
+                entries: vec![CurrentPohEntry {
+                    num_hashes: 1,
+                    hash: hashes[1],
+                    transaction_count: 1,
+                    signature_count: 0,
+                }],
+            })
+            .unwrap(),
+        ];
+        write_test_poh_frames(mixed_signatures.path(), &payloads, &hashes);
+        let reader = open_test_archive(mixed_signatures.path(), 2, 1_000);
+        assert!(preflight_archive_v2_poh(&reader, preflight_test_config()).is_err());
+    }
+
+    #[test]
+    fn poh_preflight_rejects_no_evidence_and_ambiguous_classification() {
+        let no_evidence = TempDir::new().unwrap();
+        write_test_blocks(no_evidence.path(), &[2_000], 1_999, false);
+        let final_hash = [44; 32];
+        let payload = archive_wire::encode(&CurrentPohRecord {
+            block_id: 0,
+            slot: 2_000,
+            entries: vec![CurrentPohEntry {
+                num_hashes: 1,
+                hash: final_hash,
+                transaction_count: 0,
+                signature_count: 0,
+            }],
+        })
+        .unwrap();
+        write_test_poh_frames(no_evidence.path(), &[payload], &[final_hash]);
+        let reader = open_test_archive(no_evidence.path(), 2, 1_000);
+        let error = preflight_archive_v2_poh(&reader, preflight_test_config()).unwrap_err();
+        assert!(error.to_string().contains("no signature-count evidence"));
+
+        let zero_legacy = TempDir::new().unwrap();
+        write_test_blocks(zero_legacy.path(), &[2_000], 1_999, false);
+        let payload = archive_wire::encode(&LegacyPohRecord {
+            block_id: 0,
+            slot: 2_000,
+            entries: vec![LegacyPohEntry {
+                num_hashes: 0,
+                hash: final_hash,
+                transaction_count: 0,
+            }],
+        })
+        .unwrap();
+        write_test_poh_frames(zero_legacy.path(), &[payload], &[final_hash]);
+        let reader = open_test_archive(zero_legacy.path(), 2, 1_000);
+        let error = preflight_archive_v2_poh(&reader, preflight_test_config()).unwrap_err();
+        assert!(
+            error
+                .to_string()
+                .contains("no effective hash-round evidence")
+        );
+
+        let mut ambiguous = OrderedPohPreflightState::default();
+        ambiguous.current.current_all_zero_possible = false;
+        let error = select_poh_preflight_candidate(&ambiguous).unwrap_err();
+        assert!(error.to_string().contains("ambiguous"));
+
+        let mut ambiguous_with_invalid_current_semantics = OrderedPohPreflightState::default();
+        ambiguous_with_invalid_current_semantics
+            .current
+            .current_exact_possible = false;
+        ambiguous_with_invalid_current_semantics
+            .current
+            .current_all_zero_possible = false;
+        let error =
+            select_poh_preflight_candidate(&ambiguous_with_invalid_current_semantics).unwrap_err();
+        assert!(error.to_string().contains("ambiguous"));
+    }
+
+    #[test]
+    fn poh_preflight_reports_exact_maximum_and_total_rounds() {
+        let source = TempDir::new().unwrap();
+        write_test_blocks(source.path(), &[2_000, 2_001], 1_999, true);
+        let hashes = [[51; 32], [52; 32]];
+        let payloads = [
+            archive_wire::encode(&CurrentPohRecord {
+                block_id: 0,
+                slot: 2_000,
+                entries: vec![
+                    CurrentPohEntry {
+                        num_hashes: 10,
+                        hash: [50; 32],
+                        transaction_count: 0,
+                        signature_count: 0,
+                    },
+                    CurrentPohEntry {
+                        num_hashes: 2,
+                        hash: hashes[0],
+                        transaction_count: 1,
+                        signature_count: 1,
+                    },
+                ],
+            })
+            .unwrap(),
+            archive_wire::encode(&CurrentPohRecord {
+                block_id: 1,
+                slot: 2_001,
+                entries: vec![CurrentPohEntry {
+                    num_hashes: 0,
+                    hash: hashes[1],
+                    transaction_count: 1,
+                    signature_count: 1,
+                }],
+            })
+            .unwrap(),
+        ];
+        write_test_poh_frames(source.path(), &payloads, &hashes);
+        let reader = open_test_archive(source.path(), 2, 1_000);
+        let report = preflight_archive_v2_poh(&reader, preflight_test_config()).unwrap();
+        assert_eq!(report.max_num_hashes_per_entry, 10);
+        assert_eq!(report.max_entries_per_block, 2);
+        assert_eq!(report.max_effective_hash_rounds_per_block, 12);
+        assert_eq!(report.max_effective_hash_rounds_block_id, 0);
+        assert_eq!(report.max_effective_hash_rounds_slot, 2_000);
+        assert_eq!(report.total_effective_hash_rounds, 13);
+        assert_eq!(report.entries_bound, 3);
+        assert_eq!(report.current_exact_signature_evidence_entries, 2);
+    }
+
+    #[test]
+    fn poh_preflight_rejects_absolute_guard_truncation_and_trailing_bytes() {
+        let make_payload = |num_hashes, final_hash| {
+            archive_wire::encode(&CurrentPohRecord {
+                block_id: 0,
+                slot: 2_000,
+                entries: vec![CurrentPohEntry {
+                    num_hashes,
+                    hash: final_hash,
+                    transaction_count: 1,
+                    signature_count: 1,
+                }],
+            })
+            .unwrap()
+        };
+
+        let over_guard = TempDir::new().unwrap();
+        write_test_blocks(over_guard.path(), &[2_000], 1_999, true);
+        let final_hash = [61; 32];
+        write_test_poh_frames(
+            over_guard.path(),
+            &[make_payload(
+                MAX_REPLAY_NUM_HASHES_PER_ENTRY + 1,
+                final_hash,
+            )],
+            &[final_hash],
+        );
+        let reader = open_test_archive(over_guard.path(), 2, 1_000);
+        let error = preflight_archive_v2_poh(&reader, preflight_test_config()).unwrap_err();
+        assert!(error.to_string().contains("absolute guard"));
+
+        let final_mismatch = TempDir::new().unwrap();
+        write_test_blocks(final_mismatch.path(), &[2_000], 1_999, true);
+        write_test_poh_frames(
+            final_mismatch.path(),
+            &[make_payload(1, [60; 32])],
+            &[final_hash],
+        );
+        let reader = open_test_archive(final_mismatch.path(), 2, 1_000);
+        let error = preflight_archive_v2_poh(&reader, preflight_test_config()).unwrap_err();
+        assert!(error.to_string().contains("final hash"));
+
+        for corruption in ["truncated", "trailing"] {
+            let source = TempDir::new().unwrap();
+            write_test_blocks(source.path(), &[2_000], 1_999, true);
+            let payload = make_payload(1, final_hash);
+            write_test_poh_frames(source.path(), &[payload], &[final_hash]);
+            let path = source.path().join(ARCHIVE_V2_POH_FILE);
+            let mut bytes = fs::read(&path).unwrap();
+            if corruption == "truncated" {
+                bytes.pop();
+            } else {
+                bytes.push(0);
+            }
+            fs::write(path, bytes).unwrap();
+            let reader = open_test_archive(source.path(), 2, 1_000);
+            assert!(preflight_archive_v2_poh(&reader, preflight_test_config()).is_err());
+        }
+    }
+
     #[test]
     fn full_integrity_fixture_accepts_all_explicit_poh_profiles() {
         const SLOTS_PER_EPOCH: u64 = 1_000;
@@ -1854,6 +3457,9 @@ mod tests {
             .unwrap();
             write_predecessor_tail(current.path(), &predecessor_hashes, &predecessor_slots);
             let current_reader = open_test_archive(current.path(), 2, SLOTS_PER_EPOCH);
+            let preflight =
+                preflight_archive_v2_poh(&current_reader, preflight_test_config()).unwrap();
+            assert_eq!(preflight.poh_schema, profile);
             let report = verify_archive_v2_integrity(
                 &current_reader,
                 Some(&predecessor_reader),
@@ -1865,6 +3471,82 @@ mod tests {
             assert_eq!(report.poh_transactions_partitioned, 1);
             assert_eq!(report.signature_bytes_hashed_for_poh, 64);
         }
+    }
+
+    #[test]
+    fn continuity_only_checks_the_complete_predecessor_boundary_without_poh() {
+        const SLOTS_PER_EPOCH: u64 = 1_000;
+        let predecessor = TempDir::new().unwrap();
+        let predecessor_slots: Vec<u64> = (1_000..1_300).collect();
+        write_test_blocks(predecessor.path(), &predecessor_slots, 999, false);
+        let predecessor_hashes: Vec<[u8; 32]> = (0..TAIL_RECORDS)
+            .map(|index| Sha256::digest((index as u64).to_le_bytes()).into())
+            .collect();
+        fs::write(
+            predecessor.path().join(ARCHIVE_V2_BLOCKHASH_REGISTRY_FILE),
+            predecessor_hashes
+                .iter()
+                .flatten()
+                .copied()
+                .collect::<Vec<_>>(),
+        )
+        .unwrap();
+        let predecessor_reader = open_test_archive(predecessor.path(), 1, SLOTS_PER_EPOCH);
+
+        let current = TempDir::new().unwrap();
+        write_test_blocks(current.path(), &[2_000, 2_001], 1_299, false);
+        fs::write(
+            current.path().join(ARCHIVE_V2_BLOCKHASH_REGISTRY_FILE),
+            [[41u8; HASH_BYTES], [42u8; HASH_BYTES]]
+                .into_iter()
+                .flatten()
+                .collect::<Vec<_>>(),
+        )
+        .unwrap();
+        write_predecessor_tail(current.path(), &predecessor_hashes, &predecessor_slots);
+        let current_reader = open_test_archive(current.path(), 2, SLOTS_PER_EPOCH);
+        let report = verify_archive_v2_blockhash_continuity(
+            &current_reader,
+            Some(&predecessor_reader),
+            ArchiveContinuityConfig {
+                epoch: 2,
+                slots_per_epoch: SLOTS_PER_EPOCH,
+                selected_blocks: 2,
+                workers: 2,
+            },
+        )
+        .unwrap();
+        assert!(report.complete_source);
+        assert!(report.predecessor_boundary_checked);
+        assert_eq!(
+            report.predecessor_tail_records_verified,
+            TAIL_RECORDS as u64
+        );
+        assert_eq!(report.chain_blocks_verified, 2);
+    }
+
+    #[test]
+    fn continuity_only_requires_the_immediate_predecessor() {
+        const SLOTS_PER_EPOCH: u64 = 1_000;
+        let source = TempDir::new().unwrap();
+        write_test_blocks(source.path(), &[2_000], 1_999, false);
+        fs::write(
+            source.path().join(ARCHIVE_V2_BLOCKHASH_REGISTRY_FILE),
+            [11u8; HASH_BYTES],
+        )
+        .unwrap();
+        let reader = open_test_archive(source.path(), 2, SLOTS_PER_EPOCH);
+        let report = verify_archive_v2_blockhash_continuity(
+            &reader,
+            None,
+            ArchiveContinuityConfig {
+                epoch: 2,
+                slots_per_epoch: SLOTS_PER_EPOCH,
+                selected_blocks: 1,
+                workers: 1,
+            },
+        );
+        assert!(report.is_err());
     }
 
     #[test]

@@ -19,11 +19,16 @@ members = [
     "crates/blockzilla-index-archive-measure",
     "crates/blockzilla-format",
     "crates/blockzilla-log-parser",
+    "crates/blockzilla-query-sdk",
+    "crates/blockzilla-archive-sdk",
     "crates/blockzilla-read-sdk",
+    "crates/blockzilla-user-program-index",
+    "crates/blockzilla-dump",
     "crates/blockzilla-firebase-indexer",
     "crates/old-faithful/car-reader",
     "crates/old-faithful/slot-ranges",
     "examples/token-api",
+    "examples/archive-token-events",
 ]
 
 [workspace.package]

@@ -1,15 +1,28 @@
 # Blockzilla documentation
 
-Start with the repository [fixture quick start](../README.md#quick-start-build-and-read-the-fixture).
-It is the shortest working path through the project.
+Start with [Archive formats and the read SDK](reference/archive-formats-and-read-sdk.md).
+It is the main product guide for format choice, the common ordered scan API,
+network setup, cache behavior, trust levels, and reader file layouts.
+
+The repository [fixture quick start](../README.md#quick-start-build-and-read-the-fixture)
+is the shortest working path through the project.
 
 Current guides: [Blockzilla CLI](../blockzilla/README.md),
-[supporting services](../services/README.md), the
-[token API example](../examples/token-api/README.md), and
+[supporting services](../services/README.md), and
 [developer scripts](../scripts/README.md).
+
+The [token API example](../examples/token-api/README.md) is an older,
+format-specific example. It reads Compact V2 wire files directly and is not the
+recommended read-SDK starting point.
 
 ## Implemented reference
 
+- [Archive formats and the read SDK](reference/archive-formats-and-read-sdk.md)
+  is the common entry point for CAR, Compact V2, Indexer V3, and the
+  `NetworkEpoch` facade.
+- [Blockzilla query SDK guide](guides/blockzilla-query-sdk.md) documents the
+  implemented source-neutral models, request policy, adapters, sinks, and
+  receipts.
 - [Archive V2 hot-block format](reference/archive-v2-hot-block-format.md)
   documents the files and records implemented by `blockzilla-format` and the
   Blockzilla builders.

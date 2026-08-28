@@ -1,0 +1,29 @@
+[package]
+name = "blockzilla-user-program-index"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+description = "Per-epoch index from Solana signer users to reached programs"
+readme = "README.md"
+include = ["Cargo.toml", "README.md", "src/**", "examples/**"]
+keywords = ["solana", "archive", "index"]
+categories = ["database", "data-structures"]
+
+[dependencies]
+anyhow = "1.0.102"
+blockzilla-format = { version = "0.2.0", path = "../blockzilla-format" }
+blockzilla-read-sdk = { version = "0.2.0", path = "../blockzilla-read-sdk" }
+bs58 = "0.5.1"
+rustix = { version = "1.1.4", features = ["fs"] }
+serde = { version = "1.0.228", features = ["derive"] }
+serde_json = "1.0.149"
+sha2 = "0.11.0"
+smallvec = "1.15.2"
+thiserror = "2.0.18"
+tracing = "0.1.44"
+wincode = { version = "=0.6.1", features = ["derive"] }
+
+[dev-dependencies]
+tempfile = "3.24.0"

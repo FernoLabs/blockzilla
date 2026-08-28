@@ -1,5 +1,5 @@
 use std::{
-    collections::HashSet,
+    collections::{HashMap, HashSet},
     io::Read,
     ops::Range,
     sync::{
@@ -11,19 +11,22 @@ use std::{
 };
 
 use blockzilla_format::{
-    ARCHIVE_V2_HOT_INDEX_FLAG_DICTIONARY, ARCHIVE_V2_HOT_INDEX_FLAG_RAW_BLOCKS,
-    ARCHIVE_V2_HOT_INDEX_HEADER_LEN, ARCHIVE_V2_HOT_INDEX_MAGIC, ARCHIVE_V2_HOT_INDEX_ROW_LEN,
-    ARCHIVE_V2_HOT_INDEX_VERSION, ARCHIVE_V2_TX_FLAG_HAS_LOADED_ADDRESSES,
-    ARCHIVE_V2_TX_FLAG_HAS_METADATA, ARCHIVE_V2_TX_FLAG_MESSAGE_V0,
+    ARCHIVE_V2_BLOCKHASH_REGISTRY_FILE, ARCHIVE_V2_HOT_INDEX_FLAG_DICTIONARY,
+    ARCHIVE_V2_HOT_INDEX_FLAG_RAW_BLOCKS, ARCHIVE_V2_HOT_INDEX_HEADER_LEN,
+    ARCHIVE_V2_HOT_INDEX_MAGIC, ARCHIVE_V2_HOT_INDEX_ROW_LEN, ARCHIVE_V2_HOT_INDEX_VERSION,
+    ARCHIVE_V2_PREV_BLOCKHASH_TAIL_FILE, ARCHIVE_V2_TX_FLAG_HAS_INNER_IX,
+    ARCHIVE_V2_TX_FLAG_HAS_LOADED_ADDRESSES, ARCHIVE_V2_TX_FLAG_HAS_METADATA,
+    ARCHIVE_V2_TX_FLAG_HAS_TOKEN_BALANCES, ARCHIVE_V2_TX_FLAG_MESSAGE_V0,
     ARCHIVE_V2_TX_FLAG_METADATA_RAW_FALLBACK, ARCHIVE_V2_TX_FLAG_TX_RAW_FALLBACK,
-    ArchiveV2HotBlockBlob, ArchiveV2HotBlockHeader, ArchiveV2HotBlockIndex,
-    ArchiveV2HotBlockIndexRow, ArchiveV2HotMessagePayload, ArchiveV2HotMetaRecord,
-    ArchiveV2HotTxRow, ArchiveV2HotTxRowIter, BorrowedArchiveV2HotBlockBlob,
-    BorrowedArchiveV2HotBlockBlobWithoutRewards, CompactMetaV1, CompactPubkey,
-    WINCODE_ARCHIVE_V2_FLAG_ALL_PUBKEY_REF_COUNTS, WINCODE_ARCHIVE_V2_FLAG_FIRST_SEEN_REGISTRY,
-    WINCODE_ARCHIVE_V2_FLAG_LEB128, WINCODE_ARCHIVE_V2_FLAG_NO_REGISTRY,
-    WINCODE_ARCHIVE_V2_HOT_BLOCK_VERSION, WincodeArchiveV2Footer, WincodeArchiveV2Genesis,
-    deserialize_archive_v2_hot_block_blob, deserialize_archive_v2_hot_block_blob_borrowed_current,
+    ARCHIVE_V2_VOTE_HASH_REGISTRY_FILE, ArchiveV2HotBlockBlob, ArchiveV2HotBlockHeader,
+    ArchiveV2HotBlockIndex, ArchiveV2HotBlockIndexRow, ArchiveV2HotMessagePayload,
+    ArchiveV2HotMetaRecord, ArchiveV2HotTxRow, ArchiveV2HotTxRowIter,
+    BorrowedArchiveV2HotBlockBlob, BorrowedArchiveV2HotBlockBlobWithoutRewards, CompactMetaV1,
+    CompactPubkey, WINCODE_ARCHIVE_V2_FLAG_ALL_PUBKEY_REF_COUNTS,
+    WINCODE_ARCHIVE_V2_FLAG_FIRST_SEEN_REGISTRY, WINCODE_ARCHIVE_V2_FLAG_LEB128,
+    WINCODE_ARCHIVE_V2_FLAG_NO_REGISTRY, WINCODE_ARCHIVE_V2_HOT_BLOCK_VERSION,
+    WincodeArchiveV2Footer, WincodeArchiveV2Genesis, deserialize_archive_v2_hot_block_blob,
+    deserialize_archive_v2_hot_block_blob_borrowed_current,
     deserialize_archive_v2_hot_block_blob_borrowed_current_without_rewards, wincode_leb128_config,
 };
 use rayon::prelude::*;
@@ -35,6 +38,14 @@ use crate::{
         BLOCK_INDEX_FILE, BLOCKS_FILE, GENERATION_MANIFEST_FILE, GENESIS_BIN_FILE,
         GenerationManifest, META_FILE, REGISTRY_FILE, REQUIRED_GENERATION_FILES, SIGNATURES_FILE,
         decode_sha256, hex_lower,
+    },
+    message_schema::{
+        CompactV2MessageSchema, CompactV2MessageSchemaError, decode_compact_v2_message,
+        select_compact_v2_message_schema,
+    },
+    metadata_schema::{
+        CompactV2MetadataSchema, CompactV2MetadataSchemaError, decode_compact_v2_metadata,
+        select_compact_v2_metadata_schema,
     },
     source::{RangeSource, RangeSourceReader},
 };
@@ -191,9 +202,23 @@ pub enum HashVerification {
     SizesOnly,
 }
 
+/// How an [`ArchiveReader`] obtained its generation identity.
+///
+/// A published reader parsed a generation manifest. An operator-trusted
+/// reader used caller-supplied identity and structural checks only.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ArchiveReaderSourceKind {
+    PublishedManifest,
+    OperatorTrusted,
+}
+
 #[derive(Debug, Clone)]
 pub struct OpenOptions {
     pub hash_verification: HashVerification,
+    /// Exact first slot for the epoch when the caller has an authoritative
+    /// warm-up-aware schedule. When absent, the schema-v1 manifest's legacy
+    /// fixed-width epoch window is used for compatibility.
+    pub epoch_first_slot: Option<u64>,
     pub io_chunk_size: usize,
     pub max_block_bytes: usize,
     pub max_compressed_frame_bytes: usize,
@@ -207,6 +232,7 @@ impl Default for OpenOptions {
     fn default() -> Self {
         Self {
             hash_verification: HashVerification::AllFiles,
+            epoch_first_slot: None,
             io_chunk_size: DEFAULT_IO_CHUNK_SIZE,
             max_block_bytes: DEFAULT_MAX_BLOCK_BYTES,
             max_compressed_frame_bytes: DEFAULT_MAX_COMPRESSED_FRAME_BYTES,
@@ -227,6 +253,7 @@ pub struct CompiledPubkeyFilter {
     binding: GenerationBinding,
     registry_ids: HashSet<u32>,
     raw_pubkeys: HashSet<[u8; 32]>,
+    resolved_ids: HashMap<[u8; 32], u32>,
 }
 
 impl CompiledPubkeyFilter {
@@ -241,6 +268,76 @@ impl CompiledPubkeyFilter {
     pub fn registry_id_count(&self) -> usize {
         self.registry_ids.len()
     }
+
+    /// Return the generation-local registry ID for one requested pubkey.
+    pub fn registry_id_for(&self, pubkey: &[u8; 32]) -> Option<u32> {
+        self.resolved_ids.get(pubkey).copied()
+    }
+
+    /// Match one compact reference against one exact requested pubkey.
+    ///
+    /// The reference is valid only for the generation bound to this filter.
+    pub fn matches_reference(&self, reference: &CompactPubkey, pubkey: &[u8; 32]) -> bool {
+        match reference {
+            CompactPubkey::Id(id) => self.registry_id_for(pubkey) == Some(*id),
+            CompactPubkey::Raw(raw) => raw == pubkey && self.raw_pubkeys.contains(pubkey),
+        }
+    }
+
+    /// Classify one reference against all pubkeys compiled into this filter.
+    pub fn classify_reference(
+        &self,
+        reference: &CompactPubkey,
+        registry_entries: u32,
+    ) -> PubkeyReferenceMatch {
+        match reference {
+            CompactPubkey::Id(id) if *id == 0 || *id > registry_entries => {
+                PubkeyReferenceMatch::InvalidRegistryReference
+            }
+            CompactPubkey::Id(id) if self.registry_ids.contains(id) => PubkeyReferenceMatch::Match,
+            CompactPubkey::Raw(pubkey) if self.raw_pubkeys.contains(pubkey) => {
+                PubkeyReferenceMatch::Match
+            }
+            CompactPubkey::Id(_) | CompactPubkey::Raw(_) => PubkeyReferenceMatch::NoMatch,
+        }
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum PubkeyReferenceMatch {
+    Match,
+    NoMatch,
+    InvalidRegistryReference,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum SelectorIndeterminateReason {
+    RawTransactionFallback,
+    RawMetadataFallback,
+    MessageUnavailable,
+    MetadataUnavailable,
+    InvalidRegistryReference,
+    InvalidAccountReference,
+    TokenMintUnavailable,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum SelectorOutcome<T> {
+    Match(T),
+    NoMatch,
+    Indeterminate(SelectorIndeterminateReason),
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct ProgramInvocationMatch {
+    pub direct_count: u32,
+    pub cpi_count: u32,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct TokenBalanceMatch {
+    pub pre_count: u32,
+    pub post_count: u32,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -509,6 +606,12 @@ pub struct ValidatedGeneration {
     pub signatures_available: bool,
 }
 
+#[derive(Debug, Clone, Copy)]
+struct SelectedCompactV2Schemas {
+    message: CompactV2MessageSchema,
+    metadata: CompactV2MetadataSchema,
+}
+
 #[derive(Debug)]
 pub struct ArchiveReader<S> {
     source: S,
@@ -521,6 +624,9 @@ pub struct ArchiveReader<S> {
     registry_entries: u32,
     total_signatures: u64,
     signatures_available: bool,
+    message_schema: CompactV2MessageSchema,
+    metadata_schema: CompactV2MetadataSchema,
+    source_kind: ArchiveReaderSourceKind,
     options: OpenOptions,
 }
 
@@ -533,6 +639,8 @@ impl<S: RangeSource> ArchiveReader<S> {
         let manifest_bytes =
             source.read_all_bounded(GENERATION_MANIFEST_FILE, MAX_MANIFEST_BYTES)?;
         let manifest = GenerationManifest::parse(&manifest_bytes)?;
+        let message_schema = select_compact_v2_message_schema(&source, &manifest)?;
+        let metadata_schema = select_compact_v2_metadata_schema(&source, &manifest)?;
         let validated = validate_generation_structure(&source, &manifest, &options)?;
 
         Ok(Self {
@@ -546,6 +654,9 @@ impl<S: RangeSource> ArchiveReader<S> {
             registry_entries: validated.registry_entries,
             total_signatures: validated.total_signatures,
             signatures_available: validated.signatures_available,
+            message_schema,
+            metadata_schema,
+            source_kind: ArchiveReaderSourceKind::PublishedManifest,
             options,
         })
     }
@@ -567,21 +678,52 @@ impl<S: RangeSource> ArchiveReader<S> {
         identity: crate::manifest::TrustedGenerationIdentity,
         options: OpenOptions,
     ) -> Result<Self> {
+        Self::open_trusted_with_schemas(
+            source,
+            identity,
+            options,
+            CompactV2MessageSchema::Current,
+            CompactV2MetadataSchema::CurrentTypedError,
+        )
+    }
+
+    /// Open a trusted unpublished generation with explicit wire grammars.
+    ///
+    /// Use this method for historical local generations. The caller selects
+    /// one message grammar and one metadata grammar for the full generation;
+    /// the reader never infers a grammar from individual records.
+    pub fn open_trusted_with_schemas(
+        source: S,
+        identity: crate::manifest::TrustedGenerationIdentity,
+        options: OpenOptions,
+        message_schema: CompactV2MessageSchema,
+        metadata_schema: CompactV2MetadataSchema,
+    ) -> Result<Self> {
         if options.hash_verification != HashVerification::SizesOnly {
             return Err(Error::InvalidManifest(
                 "open_trusted requires HashVerification::SizesOnly".into(),
             ));
         }
 
-        let mut files = Vec::with_capacity(REQUIRED_GENERATION_FILES.len() + 2);
+        let mut files = Vec::with_capacity(REQUIRED_GENERATION_FILES.len() + 5);
         for name in REQUIRED_GENERATION_FILES {
             let size = source
                 .size(name)?
                 .ok_or_else(|| Error::MissingFile(name.to_owned()))?;
             files.push((name.to_owned(), size));
         }
-        if let Some(size) = source.size(SIGNATURES_FILE)? {
-            files.push((SIGNATURES_FILE.to_owned(), size));
+        for name in [
+            SIGNATURES_FILE,
+            ARCHIVE_V2_BLOCKHASH_REGISTRY_FILE,
+            ARCHIVE_V2_PREV_BLOCKHASH_TAIL_FILE,
+            ARCHIVE_V2_VOTE_HASH_REGISTRY_FILE,
+        ] {
+            if files.iter().any(|(present, _)| present == name) {
+                continue;
+            }
+            if let Some(size) = source.size(name)? {
+                files.push((name.to_owned(), size));
+            }
         }
         if identity.epoch == 0
             && let Some(size) = source.size(GENESIS_BIN_FILE)?
@@ -603,6 +745,9 @@ impl<S: RangeSource> ArchiveReader<S> {
             registry_entries: validated.registry_entries,
             total_signatures: validated.total_signatures,
             signatures_available: validated.signatures_available,
+            message_schema,
+            metadata_schema,
+            source_kind: ArchiveReaderSourceKind::OperatorTrusted,
             options,
         })
     }
@@ -652,6 +797,34 @@ impl<S: RangeSource> ArchiveReader<S> {
         self.signatures_available
     }
 
+    pub fn message_schema(&self) -> CompactV2MessageSchema {
+        self.message_schema
+    }
+
+    pub fn metadata_schema(&self) -> CompactV2MetadataSchema {
+        self.metadata_schema
+    }
+
+    pub const fn source_kind(&self) -> ArchiveReaderSourceKind {
+        self.source_kind
+    }
+
+    /// Decode one complete transaction message with this generation's grammar.
+    pub fn decode_message(
+        &self,
+        bytes: &[u8],
+    ) -> std::result::Result<ArchiveV2HotMessagePayload, CompactV2MessageSchemaError> {
+        decode_compact_v2_message(self.message_schema, bytes)
+    }
+
+    /// Decode one complete transaction metadata record with this generation's grammar.
+    pub fn decode_metadata(
+        &self,
+        bytes: &[u8],
+    ) -> std::result::Result<CompactMetaV1, CompactV2MetadataSchemaError> {
+        decode_compact_v2_metadata(self.metadata_schema, bytes)
+    }
+
     /// Compile an include-any pubkey filter by scanning `registry.bin` once.
     /// Memory is O(number of requested pubkeys), not O(registry size). Queried
     /// bytes are retained as well as resolved IDs so inline raw pubkeys match.
@@ -661,7 +834,7 @@ impl<S: RangeSource> ArchiveReader<S> {
     ) -> Result<CompiledPubkeyFilter> {
         let raw_pubkeys: HashSet<[u8; 32]> = pubkeys.into_iter().collect();
         let mut registry_ids = HashSet::with_capacity(raw_pubkeys.len());
-        let mut resolved_pubkeys = HashSet::with_capacity(raw_pubkeys.len());
+        let mut resolved_ids = HashMap::with_capacity(raw_pubkeys.len());
         if !raw_pubkeys.is_empty() && self.registry_entries != 0 {
             let mut offset = 0u64;
             let registry_size = self.manifest.required_file(REGISTRY_FILE)?.size;
@@ -679,14 +852,14 @@ impl<S: RangeSource> ArchiveReader<S> {
                     let mut key = [0u8; 32];
                     key.copy_from_slice(key_bytes);
                     if raw_pubkeys.contains(&key) {
-                        if !resolved_pubkeys.insert(key) {
+                        let zero_based = offset / 32 + position as u64;
+                        let id = u32::try_from(zero_based + 1)
+                            .map_err(|_| Error::InvalidRegistry("registry id overflow".into()))?;
+                        if resolved_ids.insert(key, id).is_some() {
                             return Err(Error::InvalidRegistry(
                                 "a requested pubkey occurs more than once in registry.bin".into(),
                             ));
                         }
-                        let zero_based = offset / 32 + position as u64;
-                        let id = u32::try_from(zero_based + 1)
-                            .map_err(|_| Error::InvalidRegistry("registry id overflow".into()))?;
                         registry_ids.insert(id);
                     }
                 }
@@ -697,7 +870,70 @@ impl<S: RangeSource> ArchiveReader<S> {
             binding: self.binding,
             registry_ids,
             raw_pubkeys,
+            resolved_ids,
         })
+    }
+
+    /// Resolve one compact pubkey with one exact bounded registry read.
+    pub fn resolve_pubkey(&self, reference: &CompactPubkey) -> Result<[u8; 32]> {
+        match reference {
+            CompactPubkey::Raw(pubkey) => Ok(*pubkey),
+            CompactPubkey::Id(id) => {
+                if *id == 0 || *id > self.registry_entries {
+                    return Err(Error::InvalidRegistry(format!(
+                        "registry id {id} is outside 1..={}",
+                        self.registry_entries
+                    )));
+                }
+                let offset = u64::from(*id - 1)
+                    .checked_mul(32)
+                    .ok_or(Error::Overflow("registry pubkey offset"))?;
+                let bytes = self.source.read_range(REGISTRY_FILE, offset, 32)?;
+                let mut pubkey = [0u8; 32];
+                pubkey.copy_from_slice(&bytes);
+                Ok(pubkey)
+            }
+        }
+    }
+
+    /// Select transactions that invoke a requested program directly or by CPI.
+    ///
+    /// A required raw or missing component returns `Indeterminate`; it never
+    /// becomes a silent non-match.
+    pub fn select_program_invocations(
+        &self,
+        filter: &CompiledPubkeyFilter,
+        row: &ArchiveV2HotTxRow,
+        message: Option<&ArchiveV2HotMessagePayload>,
+        metadata: Option<&CompactMetaV1>,
+    ) -> Result<SelectorOutcome<ProgramInvocationMatch>> {
+        self.ensure_filter_binding(filter)?;
+        Ok(select_program_invocations(
+            filter,
+            self.registry_entries,
+            row,
+            message,
+            metadata,
+        ))
+    }
+
+    /// Select transactions with pre- or post-token balances for a mint.
+    ///
+    /// This selector uses recorded token-balance mints. It does not infer a
+    /// mint from instruction bytes or token account addresses.
+    pub fn select_token_balances(
+        &self,
+        filter: &CompiledPubkeyFilter,
+        row: &ArchiveV2HotTxRow,
+        metadata: Option<&CompactMetaV1>,
+    ) -> Result<SelectorOutcome<TokenBalanceMatch>> {
+        self.ensure_filter_binding(filter)?;
+        Ok(select_token_balances(
+            filter,
+            self.registry_entries,
+            row,
+            metadata,
+        ))
     }
 
     pub fn blocks(&self) -> BlockIterator<'_, S> {
@@ -757,6 +993,7 @@ impl<S: RangeSource> ArchiveReader<S> {
             batch: Vec::new(),
             decompressor: None,
             decompressed: Vec::new(),
+            io_stats: BorrowedBlockStreamIoStats::default(),
         }
     }
 
@@ -780,6 +1017,7 @@ impl<S: RangeSource> ArchiveReader<S> {
             batch: Vec::new(),
             decompressor: None,
             decompressed: Vec::new(),
+            io_stats: BorrowedBlockStreamIoStats::default(),
         })
     }
 
@@ -811,6 +1049,7 @@ impl<S: RangeSource> ArchiveReader<S> {
             batch: Vec::new(),
             decompressor: None,
             decompressed: Vec::new(),
+            io_stats: BorrowedBlockStreamIoStats::default(),
         })
     }
 
@@ -1405,6 +1644,10 @@ impl<S: RangeSource> ArchiveReader<S> {
                 &block,
                 filter,
                 self.registry_entries,
+                SelectedCompactV2Schemas {
+                    message: self.message_schema,
+                    metadata: self.metadata_schema,
+                },
                 signatures,
             )?);
         }
@@ -1915,6 +2158,16 @@ impl<S: RangeSource> BlockIterator<'_, S> {
 ///
 /// This type intentionally does not implement [`Iterator`], because each returned block borrows
 /// the decompressed bytes held by the stream.
+#[derive(Debug, Default, Clone, Copy, PartialEq, Eq)]
+pub struct BorrowedBlockStreamIoStats {
+    /// Exact coalesced reads made against `blocks.wincode.zst`.
+    pub source_read_calls: u64,
+    /// Exact compressed bytes returned by those reads.
+    pub source_read_bytes: u64,
+    /// Exact bytes produced by successful block decompressions.
+    pub decoded_bytes: u64,
+}
+
 pub struct BorrowedBlockStream<'a, S> {
     archive: &'a ArchiveReader<S>,
     discard_rewards: bool,
@@ -1926,9 +2179,15 @@ pub struct BorrowedBlockStream<'a, S> {
     batch: Vec<u8>,
     decompressor: Option<zstd::bulk::Decompressor<'static>>,
     decompressed: Vec<u8>,
+    io_stats: BorrowedBlockStreamIoStats,
 }
 
 impl<S: RangeSource> BorrowedBlockStream<'_, S> {
+    /// Return exact I/O totals accumulated by this stream.
+    pub const fn io_stats(&self) -> BorrowedBlockStreamIoStats {
+        self.io_stats
+    }
+
     /// Decode and lend the next block. The returned value must be dropped before this method can
     /// be called again, which makes reuse of the decompression buffer safe without self-references.
     pub fn next_block(&mut self) -> Option<Result<BorrowedDecodedBlock<'_>>> {
@@ -1976,17 +2235,29 @@ impl<S: RangeSource> BorrowedBlockStream<'_, S> {
                 }
             }
         }
-        Some(
-            self.archive.decode_compressed_block_borrowed_reusing(
-                row,
-                compressed,
-                self.decompressor
-                    .as_mut()
-                    .expect("decompressor was initialized above"),
-                &mut self.decompressed,
-                self.discard_rewards,
-            ),
-        )
+        let decoded = self.archive.decode_compressed_block_borrowed_reusing(
+            row,
+            compressed,
+            self.decompressor
+                .as_mut()
+                .expect("decompressor was initialized above"),
+            &mut self.decompressed,
+            self.discard_rewards,
+        );
+        if decoded.is_ok() {
+            self.io_stats.decoded_bytes = match self
+                .io_stats
+                .decoded_bytes
+                .checked_add(u64::from(row.uncompressed_len))
+            {
+                Some(total) => total,
+                None => {
+                    self.next = self.end;
+                    return Some(Err(Error::Overflow("borrowed block decoded-byte count")));
+                }
+            };
+        }
+        Some(decoded)
     }
 
     /// Number of blocks not yet requested from the stream.
@@ -2027,6 +2298,19 @@ impl<S: RangeSource> BorrowedBlockStream<'_, S> {
                 self.batch.len()
             )));
         }
+        self.io_stats.source_read_calls = self
+            .io_stats
+            .source_read_calls
+            .checked_add(1)
+            .ok_or(Error::Overflow("borrowed block source-read count"))?;
+        self.io_stats.source_read_bytes = self
+            .io_stats
+            .source_read_bytes
+            .checked_add(
+                u64::try_from(length)
+                    .map_err(|_| Error::Overflow("borrowed block source-read bytes"))?,
+            )
+            .ok_or(Error::Overflow("borrowed block source-read bytes"))?;
         self.batch_end = end;
         Ok(())
     }
@@ -2322,6 +2606,12 @@ fn parse_and_validate_index(
         )));
     }
 
+    let epoch_first_slot = options
+        .epoch_first_slot
+        .unwrap_or_else(|| manifest.epoch_start_slot());
+    let epoch_last_slot = epoch_first_slot
+        .checked_add(manifest.slots_per_epoch - 1)
+        .ok_or(Error::Overflow("explicit epoch slot range"))?;
     let mut rows = Vec::with_capacity(row_count as usize);
     let mut expected_offset = 0u64;
     let mut expected_tx_ordinal = 0u64;
@@ -2350,13 +2640,10 @@ fn parse_and_validate_index(
                 row.block_id
             )));
         }
-        if row.slot < manifest.epoch_start_slot() || row.slot > manifest.epoch_end_slot() {
+        if row.slot < epoch_first_slot || row.slot > epoch_last_slot {
             return Err(Error::InvalidIndex(format!(
                 "slot {} is outside epoch {} range {}..={}",
-                row.slot,
-                manifest.epoch,
-                manifest.epoch_start_slot(),
-                manifest.epoch_end_slot()
+                row.slot, manifest.epoch, epoch_first_slot, epoch_last_slot
             )));
         }
         if previous_slot.is_some_and(|slot| row.slot <= slot) {
@@ -2748,6 +3035,7 @@ fn scan_transaction(
     block: &ArchiveV2HotBlockBlob,
     filter: &CompiledPubkeyFilter,
     registry_entries: u32,
+    schemas: SelectedCompactV2Schemas,
     signatures: SignatureReference,
 ) -> Result<ScannedTransaction> {
     if row.flags & ARCHIVE_V2_TX_FLAG_TX_RAW_FALLBACK != 0 {
@@ -2757,7 +3045,7 @@ fn scan_transaction(
             row,
             outcome: TransactionMatch::Indeterminate(IndeterminateReason::RawTransactionFallback),
             message: None,
-            metadata: metadata_state(block, &row, slot, false)?,
+            metadata: metadata_state(block, &row, slot, false, schemas.metadata)?,
             signatures,
         });
     }
@@ -2770,7 +3058,7 @@ fn scan_transaction(
         slot,
     )?;
     let message: ArchiveV2HotMessagePayload =
-        wincode::config::deserialize(message_bytes, wincode_leb128_config()).map_err(|error| {
+        decode_compact_v2_message(schemas.message, message_bytes).map_err(|error| {
             Error::InvalidBlock {
                 slot,
                 message: format!("decode message for tx {}: {error}", row.tx_index),
@@ -2794,7 +3082,7 @@ fn scan_transaction(
     let static_result = evaluate_keys(static_keys, filter, registry_entries);
     let needs_loaded = is_v0 && row.flags & ARCHIVE_V2_TX_FLAG_HAS_LOADED_ADDRESSES != 0;
     let read_metadata = static_result.matched || needs_loaded;
-    let metadata = metadata_state(block, &row, slot, read_metadata)?;
+    let metadata = metadata_state(block, &row, slot, read_metadata, schemas.metadata)?;
 
     let mut loaded_result = KeyEvaluation::default();
     let loaded_unavailable = if needs_loaded {
@@ -2840,11 +3128,242 @@ fn scan_transaction(
     })
 }
 
+fn select_program_invocations(
+    filter: &CompiledPubkeyFilter,
+    registry_entries: u32,
+    row: &ArchiveV2HotTxRow,
+    message: Option<&ArchiveV2HotMessagePayload>,
+    metadata: Option<&CompactMetaV1>,
+) -> SelectorOutcome<ProgramInvocationMatch> {
+    if row.flags & ARCHIVE_V2_TX_FLAG_TX_RAW_FALLBACK != 0 {
+        return SelectorOutcome::Indeterminate(SelectorIndeterminateReason::RawTransactionFallback);
+    }
+    if row.flags & ARCHIVE_V2_TX_FLAG_METADATA_RAW_FALLBACK != 0 {
+        return SelectorOutcome::Indeterminate(SelectorIndeterminateReason::RawMetadataFallback);
+    }
+    let Some(message) = message else {
+        return SelectorOutcome::Indeterminate(SelectorIndeterminateReason::MessageUnavailable);
+    };
+    let (static_keys, instructions, is_v0) = match message {
+        ArchiveV2HotMessagePayload::Legacy(message) => (
+            message.account_keys.as_slice(),
+            message.instructions.as_slice(),
+            false,
+        ),
+        ArchiveV2HotMessagePayload::V0(message) => (
+            message.account_keys.as_slice(),
+            message.instructions.as_slice(),
+            true,
+        ),
+        ArchiveV2HotMessagePayload::V1(message) => (
+            message.account_keys.as_slice(),
+            message.instructions.as_slice(),
+            false,
+        ),
+    };
+
+    let mut direct_count = 0u32;
+    for instruction in instructions {
+        let reference = match message_account_reference(
+            static_keys,
+            is_v0,
+            usize::from(instruction.program_id_index),
+            row,
+            metadata,
+        ) {
+            Ok(reference) => reference,
+            Err(reason) => return SelectorOutcome::Indeterminate(reason),
+        };
+        match filter.classify_reference(reference, registry_entries) {
+            PubkeyReferenceMatch::Match => {
+                let Some(next) = direct_count.checked_add(1) else {
+                    return SelectorOutcome::Indeterminate(
+                        SelectorIndeterminateReason::InvalidAccountReference,
+                    );
+                };
+                direct_count = next;
+            }
+            PubkeyReferenceMatch::NoMatch => {}
+            PubkeyReferenceMatch::InvalidRegistryReference => {
+                return SelectorOutcome::Indeterminate(
+                    SelectorIndeterminateReason::InvalidRegistryReference,
+                );
+            }
+        }
+    }
+
+    // A decoded metadata record is required even when the semantic inner-IX
+    // flag is clear. Without it, this selector cannot prove CPI coverage and
+    // cannot report complete direct/CPI counts.
+    let Some(metadata) = metadata else {
+        return SelectorOutcome::Indeterminate(SelectorIndeterminateReason::MetadataUnavailable);
+    };
+
+    let mut cpi_count = 0u32;
+    if row.flags & ARCHIVE_V2_TX_FLAG_HAS_INNER_IX != 0 {
+        let Some(groups) = metadata.inner_instructions.as_deref() else {
+            return SelectorOutcome::Indeterminate(
+                SelectorIndeterminateReason::MetadataUnavailable,
+            );
+        };
+        for group in groups {
+            let Ok(outer_index) = usize::try_from(group.index) else {
+                return SelectorOutcome::Indeterminate(
+                    SelectorIndeterminateReason::InvalidAccountReference,
+                );
+            };
+            if outer_index >= instructions.len() {
+                return SelectorOutcome::Indeterminate(
+                    SelectorIndeterminateReason::InvalidAccountReference,
+                );
+            }
+            for instruction in &group.instructions {
+                let Ok(program_index) = usize::try_from(instruction.program_id_index) else {
+                    return SelectorOutcome::Indeterminate(
+                        SelectorIndeterminateReason::InvalidAccountReference,
+                    );
+                };
+                let reference = match message_account_reference(
+                    static_keys,
+                    is_v0,
+                    program_index,
+                    row,
+                    Some(metadata),
+                ) {
+                    Ok(reference) => reference,
+                    Err(reason) => return SelectorOutcome::Indeterminate(reason),
+                };
+                match filter.classify_reference(reference, registry_entries) {
+                    PubkeyReferenceMatch::Match => {
+                        let Some(next) = cpi_count.checked_add(1) else {
+                            return SelectorOutcome::Indeterminate(
+                                SelectorIndeterminateReason::InvalidAccountReference,
+                            );
+                        };
+                        cpi_count = next;
+                    }
+                    PubkeyReferenceMatch::NoMatch => {}
+                    PubkeyReferenceMatch::InvalidRegistryReference => {
+                        return SelectorOutcome::Indeterminate(
+                            SelectorIndeterminateReason::InvalidRegistryReference,
+                        );
+                    }
+                }
+            }
+        }
+    }
+
+    if direct_count != 0 || cpi_count != 0 {
+        SelectorOutcome::Match(ProgramInvocationMatch {
+            direct_count,
+            cpi_count,
+        })
+    } else {
+        SelectorOutcome::NoMatch
+    }
+}
+
+fn message_account_reference<'a>(
+    static_keys: &'a [CompactPubkey],
+    is_v0: bool,
+    index: usize,
+    row: &ArchiveV2HotTxRow,
+    metadata: Option<&'a CompactMetaV1>,
+) -> std::result::Result<&'a CompactPubkey, SelectorIndeterminateReason> {
+    if let Some(reference) = static_keys.get(index) {
+        return Ok(reference);
+    }
+    if !is_v0 {
+        return Err(SelectorIndeterminateReason::InvalidAccountReference);
+    }
+    let metadata = required_metadata(row, metadata)?;
+    let loaded_index = index - static_keys.len();
+    metadata
+        .loaded_writable_addresses
+        .get(loaded_index)
+        .or_else(|| {
+            loaded_index
+                .checked_sub(metadata.loaded_writable_addresses.len())
+                .and_then(|index| metadata.loaded_readonly_addresses.get(index))
+        })
+        .ok_or(SelectorIndeterminateReason::InvalidAccountReference)
+}
+
+fn required_metadata<'a>(
+    row: &ArchiveV2HotTxRow,
+    metadata: Option<&'a CompactMetaV1>,
+) -> std::result::Result<&'a CompactMetaV1, SelectorIndeterminateReason> {
+    if row.flags & ARCHIVE_V2_TX_FLAG_METADATA_RAW_FALLBACK != 0 {
+        return Err(SelectorIndeterminateReason::RawMetadataFallback);
+    }
+    metadata.ok_or(SelectorIndeterminateReason::MetadataUnavailable)
+}
+
+fn select_token_balances(
+    filter: &CompiledPubkeyFilter,
+    registry_entries: u32,
+    row: &ArchiveV2HotTxRow,
+    metadata: Option<&CompactMetaV1>,
+) -> SelectorOutcome<TokenBalanceMatch> {
+    if row.flags & ARCHIVE_V2_TX_FLAG_TX_RAW_FALLBACK != 0 {
+        return SelectorOutcome::Indeterminate(SelectorIndeterminateReason::RawTransactionFallback);
+    }
+    if row.flags & ARCHIVE_V2_TX_FLAG_METADATA_RAW_FALLBACK != 0 {
+        return SelectorOutcome::Indeterminate(SelectorIndeterminateReason::RawMetadataFallback);
+    }
+    if row.flags & ARCHIVE_V2_TX_FLAG_HAS_TOKEN_BALANCES == 0 {
+        return SelectorOutcome::NoMatch;
+    }
+    let metadata = match required_metadata(row, metadata) {
+        Ok(metadata) => metadata,
+        Err(reason) => return SelectorOutcome::Indeterminate(reason),
+    };
+    let mut pre_count = 0u32;
+    let mut post_count = 0u32;
+    for (balances, count) in [
+        (metadata.pre_token_balances.as_slice(), &mut pre_count),
+        (metadata.post_token_balances.as_slice(), &mut post_count),
+    ] {
+        for balance in balances {
+            let Some(mint) = balance.mint.as_ref() else {
+                return SelectorOutcome::Indeterminate(
+                    SelectorIndeterminateReason::TokenMintUnavailable,
+                );
+            };
+            match filter.classify_reference(mint, registry_entries) {
+                PubkeyReferenceMatch::Match => {
+                    let Some(next) = count.checked_add(1) else {
+                        return SelectorOutcome::Indeterminate(
+                            SelectorIndeterminateReason::InvalidAccountReference,
+                        );
+                    };
+                    *count = next;
+                }
+                PubkeyReferenceMatch::NoMatch => {}
+                PubkeyReferenceMatch::InvalidRegistryReference => {
+                    return SelectorOutcome::Indeterminate(
+                        SelectorIndeterminateReason::InvalidRegistryReference,
+                    );
+                }
+            }
+        }
+    }
+    if pre_count != 0 || post_count != 0 {
+        SelectorOutcome::Match(TokenBalanceMatch {
+            pre_count,
+            post_count,
+        })
+    } else {
+        SelectorOutcome::NoMatch
+    }
+}
+
 fn metadata_state(
     block: &ArchiveV2HotBlockBlob,
     row: &ArchiveV2HotTxRow,
     slot: u64,
     read: bool,
+    metadata_schema: CompactV2MetadataSchema,
 ) -> Result<MetadataState> {
     if row.flags & ARCHIVE_V2_TX_FLAG_HAS_METADATA == 0 || row.metadata_len == 0 {
         return Ok(MetadataState::Absent);
@@ -2863,13 +3382,12 @@ fn metadata_state(
         row.tx_index,
         slot,
     )?;
-    let metadata =
-        wincode::config::deserialize(bytes, wincode_leb128_config()).map_err(|error| {
-            Error::InvalidBlock {
-                slot,
-                message: format!("decode metadata for tx {}: {error}", row.tx_index),
-            }
-        })?;
+    let metadata = decode_compact_v2_metadata(metadata_schema, bytes).map_err(|error| {
+        Error::InvalidBlock {
+            slot,
+            message: format!("decode metadata for tx {}: {error}", row.tx_index),
+        }
+    })?;
     Ok(MetadataState::Decoded(Box::new(metadata)))
 }
 
@@ -2938,10 +3456,11 @@ mod tests {
 
     use blockzilla_format::{
         ARCHIVE_V2_TX_FLAG_HAS_LOADED_ADDRESSES, ARCHIVE_V2_TX_FLAG_HAS_METADATA,
-        ARCHIVE_V2_TX_FLAG_MESSAGE_V0, ArchiveV2HotBlockHeader, ArchiveV2HotLegacyMessage,
-        ArchiveV2HotRewards, ArchiveV2HotV0Message, CompactMessageHeader, CompactReward,
-        CompactShredding, OwnedCompactRecentBlockhash, WincodeArchiveV2Header,
-        write_archive_v2_hot_block_index,
+        ARCHIVE_V2_TX_FLAG_MESSAGE_V0, ArchiveV2HotBlockHeader, ArchiveV2HotInstruction,
+        ArchiveV2HotInstructionData, ArchiveV2HotLegacyMessage, ArchiveV2HotRewards,
+        ArchiveV2HotV0Message, CompactInnerInstruction, CompactInnerInstructions,
+        CompactMessageHeader, CompactReward, CompactShredding, CompactTokenBalance,
+        OwnedCompactRecentBlockhash, WincodeArchiveV2Header, write_archive_v2_hot_block_index,
     };
     use tempfile::TempDir;
 
@@ -3161,6 +3680,314 @@ mod tests {
         }
     }
 
+    fn selector_row(flags: u32) -> ArchiveV2HotTxRow {
+        ArchiveV2HotTxRow {
+            tx_index: 0,
+            flags,
+            message_offset: 0,
+            message_len: 0,
+            metadata_offset: 0,
+            metadata_len: 0,
+            signature_count: 1,
+            reserved: [0; 3],
+        }
+    }
+
+    fn selector_instruction(program_id_index: u8) -> ArchiveV2HotInstruction {
+        ArchiveV2HotInstruction {
+            program_id_index,
+            accounts: Vec::new(),
+            data: ArchiveV2HotInstructionData::Raw(Vec::new()),
+        }
+    }
+
+    fn selector_message(
+        account_keys: Vec<CompactPubkey>,
+        instructions: Vec<ArchiveV2HotInstruction>,
+    ) -> ArchiveV2HotMessagePayload {
+        ArchiveV2HotMessagePayload::Legacy(ArchiveV2HotLegacyMessage {
+            header: message_header(),
+            account_keys,
+            recent_blockhash: OwnedCompactRecentBlockhash::Id(0),
+            instructions,
+        })
+    }
+
+    fn selector_metadata() -> CompactMetaV1 {
+        CompactMetaV1 {
+            err: None,
+            fee: 5_000,
+            pre_balances: Vec::new(),
+            post_balances: Vec::new(),
+            inner_instructions: None,
+            logs: None,
+            pre_token_balances: Vec::new(),
+            post_token_balances: Vec::new(),
+            rewards: Vec::new(),
+            loaded_writable_addresses: Vec::new(),
+            loaded_readonly_addresses: Vec::new(),
+            return_data: None,
+            compute_units_consumed: None,
+            cost_units: None,
+        }
+    }
+
+    fn decoded_single_transaction(
+        message_bytes: Vec<u8>,
+        metadata_bytes: Vec<u8>,
+        flags: u32,
+    ) -> DecodedBlock {
+        DecodedBlock {
+            index_row: ArchiveV2HotBlockIndexRow {
+                block_id: 0,
+                slot: 101,
+                compressed_offset: 0,
+                compressed_len: 0,
+                uncompressed_len: 0,
+                tx_count: 1,
+                first_tx_ordinal: 0,
+                first_signature_ordinal: 0,
+                signature_count: 1,
+            },
+            block: ArchiveV2HotBlockBlob {
+                header: ArchiveV2HotBlockHeader {
+                    slot: 101,
+                    parent_slot: 100,
+                    blockhash_id: 1,
+                    previous_blockhash_id: 0,
+                    block_time: None,
+                    block_height: None,
+                    rewards: None,
+                },
+                tx_count: 1,
+                tx_rows: vec![ArchiveV2HotTxRow {
+                    tx_index: 0,
+                    flags,
+                    message_offset: 0,
+                    message_len: message_bytes.len() as u32,
+                    metadata_offset: 0,
+                    metadata_len: metadata_bytes.len() as u32,
+                    signature_count: 1,
+                    reserved: [0; 3],
+                }],
+                message_bytes,
+                metadata_bytes,
+            },
+        }
+    }
+
+    fn decode_hex(value: &str) -> Vec<u8> {
+        value
+            .as_bytes()
+            .chunks_exact(2)
+            .map(|pair| {
+                let digit = |byte: u8| match byte {
+                    b'0'..=b'9' => byte - b'0',
+                    b'a'..=b'f' => byte - b'a' + 10,
+                    _ => panic!("invalid lowercase hex fixture"),
+                };
+                (digit(pair[0]) << 4) | digit(pair[1])
+            })
+            .collect()
+    }
+
+    #[test]
+    fn strict_program_selector_matches_direct_and_cpi_invocations() {
+        let fixture = Fixture::build();
+        let archive = ArchiveReader::open(fixture.source()).unwrap();
+        let filter = archive.compile_pubkey_filter([REGISTRY_KEY_TWO]).unwrap();
+
+        let direct = selector_message(vec![CompactPubkey::Id(2)], vec![selector_instruction(0)]);
+        assert_eq!(
+            archive
+                .select_program_invocations(
+                    &filter,
+                    &selector_row(ARCHIVE_V2_TX_FLAG_HAS_METADATA),
+                    Some(&direct),
+                    Some(&selector_metadata()),
+                )
+                .unwrap(),
+            SelectorOutcome::Match(ProgramInvocationMatch {
+                direct_count: 1,
+                cpi_count: 0,
+            })
+        );
+
+        let cpi = selector_message(
+            vec![CompactPubkey::Id(1), CompactPubkey::Id(2)],
+            vec![selector_instruction(0)],
+        );
+        let mut metadata = selector_metadata();
+        metadata.inner_instructions = Some(vec![CompactInnerInstructions {
+            index: 0,
+            instructions: vec![CompactInnerInstruction {
+                program_id_index: 1,
+                accounts: Vec::new(),
+                data: Vec::new(),
+                stack_height: Some(2),
+            }],
+        }]);
+        assert_eq!(
+            archive
+                .select_program_invocations(
+                    &filter,
+                    &selector_row(
+                        ARCHIVE_V2_TX_FLAG_HAS_METADATA | ARCHIVE_V2_TX_FLAG_HAS_INNER_IX,
+                    ),
+                    Some(&cpi),
+                    Some(&metadata),
+                )
+                .unwrap(),
+            SelectorOutcome::Match(ProgramInvocationMatch {
+                direct_count: 0,
+                cpi_count: 1,
+            })
+        );
+    }
+
+    #[test]
+    fn explicit_epoch_first_slot_controls_index_bounds() {
+        let fixture = Fixture::build();
+        let accepted = OpenOptions {
+            hash_verification: HashVerification::SizesOnly,
+            epoch_first_slot: Some(100),
+            ..OpenOptions::default()
+        };
+        ArchiveReader::open_with_options(fixture.source(), accepted).unwrap();
+
+        let rejected = OpenOptions {
+            hash_verification: HashVerification::SizesOnly,
+            epoch_first_slot: Some(0),
+            ..OpenOptions::default()
+        };
+        let error = ArchiveReader::open_with_options(fixture.source(), rejected).unwrap_err();
+        assert!(error.to_string().contains("outside epoch 1 range 0..=99"));
+    }
+
+    #[test]
+    fn strict_token_selector_matches_pre_post_and_raw_mint_references() {
+        let fixture = Fixture::build();
+        let archive = ArchiveReader::open(fixture.source()).unwrap();
+        let filter = archive.compile_pubkey_filter([REGISTRY_KEY_TWO]).unwrap();
+        assert_eq!(filter.registry_id_for(&REGISTRY_KEY_TWO), Some(2));
+        assert!(
+            filter.matches_reference(&CompactPubkey::Raw(REGISTRY_KEY_TWO), &REGISTRY_KEY_TWO,)
+        );
+
+        let balance = |mint| CompactTokenBalance {
+            account_index: 0,
+            mint: Some(mint),
+            owner: None,
+            program_id: None,
+            amount: 1,
+            decimals: 6,
+        };
+        let mut metadata = selector_metadata();
+        metadata.pre_token_balances = vec![balance(CompactPubkey::Id(2))];
+        metadata.post_token_balances = vec![balance(CompactPubkey::Raw(REGISTRY_KEY_TWO))];
+        assert_eq!(
+            archive
+                .select_token_balances(
+                    &filter,
+                    &selector_row(
+                        ARCHIVE_V2_TX_FLAG_HAS_METADATA | ARCHIVE_V2_TX_FLAG_HAS_TOKEN_BALANCES,
+                    ),
+                    Some(&metadata),
+                )
+                .unwrap(),
+            SelectorOutcome::Match(TokenBalanceMatch {
+                pre_count: 1,
+                post_count: 1,
+            })
+        );
+    }
+
+    #[test]
+    fn strict_selectors_report_raw_invalid_and_missing_coverage() {
+        let fixture = Fixture::build();
+        let archive = ArchiveReader::open(fixture.source()).unwrap();
+        let filter = archive.compile_pubkey_filter([REGISTRY_KEY_TWO]).unwrap();
+        let message = selector_message(vec![CompactPubkey::Id(2)], vec![selector_instruction(0)]);
+
+        for flags in [
+            ARCHIVE_V2_TX_FLAG_METADATA_RAW_FALLBACK,
+            ARCHIVE_V2_TX_FLAG_METADATA_RAW_FALLBACK | ARCHIVE_V2_TX_FLAG_HAS_INNER_IX,
+        ] {
+            assert_eq!(
+                archive
+                    .select_program_invocations(
+                        &filter,
+                        &selector_row(flags),
+                        Some(&message),
+                        None,
+                    )
+                    .unwrap(),
+                SelectorOutcome::Indeterminate(
+                    SelectorIndeterminateReason::RawMetadataFallback,
+                )
+            );
+            assert_eq!(
+                archive
+                    .select_token_balances(&filter, &selector_row(flags), None)
+                    .unwrap(),
+                SelectorOutcome::Indeterminate(SelectorIndeterminateReason::RawMetadataFallback,)
+            );
+        }
+
+        assert_eq!(
+            archive
+                .select_program_invocations(&filter, &selector_row(0), Some(&message), None,)
+                .unwrap(),
+            SelectorOutcome::Indeterminate(SelectorIndeterminateReason::MetadataUnavailable)
+        );
+        assert_eq!(
+            archive
+                .select_program_invocations(
+                    &filter,
+                    &selector_row(ARCHIVE_V2_TX_FLAG_TX_RAW_FALLBACK),
+                    None,
+                    None,
+                )
+                .unwrap(),
+            SelectorOutcome::Indeterminate(SelectorIndeterminateReason::RawTransactionFallback,)
+        );
+
+        let invalid = selector_message(vec![CompactPubkey::Id(99)], vec![selector_instruction(0)]);
+        assert_eq!(
+            archive
+                .select_program_invocations(
+                    &filter,
+                    &selector_row(ARCHIVE_V2_TX_FLAG_HAS_METADATA),
+                    Some(&invalid),
+                    Some(&selector_metadata()),
+                )
+                .unwrap(),
+            SelectorOutcome::Indeterminate(SelectorIndeterminateReason::InvalidRegistryReference,)
+        );
+
+        let mut invalid_token = selector_metadata();
+        invalid_token.pre_token_balances = vec![CompactTokenBalance {
+            account_index: 0,
+            mint: Some(CompactPubkey::Id(99)),
+            owner: None,
+            program_id: None,
+            amount: 1,
+            decimals: 6,
+        }];
+        assert_eq!(
+            archive
+                .select_token_balances(
+                    &filter,
+                    &selector_row(
+                        ARCHIVE_V2_TX_FLAG_HAS_METADATA | ARCHIVE_V2_TX_FLAG_HAS_TOKEN_BALANCES,
+                    ),
+                    Some(&invalid_token),
+                )
+                .unwrap(),
+            SelectorOutcome::Indeterminate(SelectorIndeterminateReason::InvalidRegistryReference,)
+        );
+    }
+
     #[derive(Clone)]
     struct CountingSource {
         inner: LocalRangeSource,
@@ -3202,6 +4029,124 @@ mod tests {
                 .push((object.to_owned(), offset, length));
             self.inner.read_range(object, offset, length)
         }
+    }
+
+    #[test]
+    fn compact_pubkey_resolution_uses_one_exact_bounded_registry_read() {
+        let fixture = Fixture::build();
+        let source = CountingSource::new(fixture.source());
+        let observed = source.clone();
+        let archive = ArchiveReader::open(source).unwrap();
+        observed.clear();
+
+        assert_eq!(
+            archive
+                .resolve_pubkey(&CompactPubkey::Raw(RAW_KEY))
+                .unwrap(),
+            RAW_KEY
+        );
+        assert!(observed.reads_for(REGISTRY_FILE).is_empty());
+
+        assert_eq!(
+            archive.resolve_pubkey(&CompactPubkey::Id(2)).unwrap(),
+            REGISTRY_KEY_TWO
+        );
+        assert_eq!(observed.reads_for(REGISTRY_FILE), [(32, 32)]);
+
+        observed.clear();
+        assert!(matches!(
+            archive.resolve_pubkey(&CompactPubkey::Id(0)).unwrap_err(),
+            Error::InvalidRegistry(_)
+        ));
+        assert!(observed.reads_for(REGISTRY_FILE).is_empty());
+    }
+
+    #[test]
+    fn published_reader_binds_message_schema_and_uses_it_in_transaction_scan() {
+        let fixture = Fixture::build();
+        bind_schema_marker(
+            fixture.directory.path(),
+            crate::COMPACT_V2_MAY24_MESSAGE_SCHEMA_MARKER_FILE,
+            crate::COMPACT_V2_MAY24_MESSAGE_SCHEMA_MARKER_BYTES,
+        );
+        let archive = ArchiveReader::open(fixture.source()).unwrap();
+        assert_eq!(
+            archive.message_schema(),
+            CompactV2MessageSchema::May24PreUnknownFallbacks
+        );
+        assert_eq!(
+            archive.metadata_schema(),
+            CompactV2MetadataSchema::CurrentTypedError
+        );
+
+        let historical_message = decode_hex(
+            "0002010206121813150e0d00c0e60c02040202000209ccf1736d29ad6e301871d2d5a34e01709272ebdc60b9b855a31b7c3036fae9360131c80106a1d8179137542a983437bdfe2a7ab2557f535c8a78722b68a49dc0000000000503030201000c030000000080c6a47e8d0300",
+        );
+        let filter = archive
+            .compile_pubkey_filter(std::iter::empty::<[u8; 32]>())
+            .unwrap();
+        let scanned = archive
+            .scan_decoded_block(
+                &filter,
+                decoded_single_transaction(historical_message, Vec::new(), 0),
+            )
+            .unwrap();
+        assert!(matches!(
+            scanned.transactions[0].message,
+            Some(ArchiveV2HotMessagePayload::Legacy(_))
+        ));
+    }
+
+    #[test]
+    fn published_reader_accepts_explicit_current_message_schema_marker() {
+        let fixture = Fixture::build();
+        bind_schema_marker(
+            fixture.directory.path(),
+            crate::COMPACT_V2_CURRENT_MESSAGE_SCHEMA_MARKER_FILE,
+            crate::COMPACT_V2_CURRENT_MESSAGE_SCHEMA_MARKER_BYTES,
+        );
+        let archive = ArchiveReader::open(fixture.source()).unwrap();
+        assert_eq!(archive.message_schema(), CompactV2MessageSchema::Current);
+    }
+
+    #[test]
+    fn published_reader_binds_legacy_metadata_schema_and_uses_it_in_scan() {
+        let fixture = Fixture::build();
+        bind_schema_marker(
+            fixture.directory.path(),
+            crate::COMPACT_V2_LEGACY_METADATA_SCHEMA_MARKER_FILE,
+            crate::COMPACT_V2_LEGACY_METADATA_SCHEMA_MARKER_BYTES,
+        );
+        let archive = ArchiveReader::open(fixture.source()).unwrap();
+        assert_eq!(
+            archive.metadata_schema(),
+            CompactV2MetadataSchema::LegacyRawError
+        );
+
+        let message = selector_message(vec![CompactPubkey::Raw(RAW_KEY)], Vec::new());
+        let message = wincode::config::serialize(&message, wincode_leb128_config()).unwrap();
+        let epoch_900_metadata = vec![
+            0x01, 0x0d, 0x08, 0x00, 0x00, 0x00, 0x00, 0x19, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
+            0x00, 0x90, 0x4e, 0x03, 0xcc, 0xef, 0xf0, 0xf2, 0x32, 0x80, 0xf6, 0xed, 0xdf, 0x09,
+            0x01, 0x03, 0xbc, 0xa1, 0xf0, 0xf2, 0x32, 0x80, 0xf6, 0xed, 0xdf, 0x09, 0x01, 0x01,
+            0x00, 0x01, 0x02, 0x0e, 0x03, 0x01, 0x16, 0x03, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
+            0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x01, 0xb4, 0x10, 0x01, 0xe4, 0x1a,
+        ];
+        let filter = archive.compile_pubkey_filter([RAW_KEY]).unwrap();
+        let scanned = archive
+            .scan_decoded_block(
+                &filter,
+                decoded_single_transaction(
+                    message,
+                    epoch_900_metadata,
+                    ARCHIVE_V2_TX_FLAG_HAS_METADATA,
+                ),
+            )
+            .unwrap();
+        assert!(matches!(
+            scanned.transactions[0].metadata,
+            MetadataState::Decoded(ref metadata) if metadata.fee == 10_000
+        ));
     }
 
     #[derive(Clone)]
@@ -4571,6 +5516,23 @@ mod tests {
             complete,
             files,
         };
+        manifest.generation_digest = compute_generation_digest(&manifest).unwrap();
+        fs::write(
+            root.join(GENERATION_MANIFEST_FILE),
+            serde_json::to_vec_pretty(&manifest).unwrap(),
+        )
+        .unwrap();
+    }
+
+    fn bind_schema_marker(root: &Path, name: &str, bytes: &[u8]) {
+        fs::write(root.join(name), bytes).unwrap();
+        let manifest_bytes = fs::read(root.join(GENERATION_MANIFEST_FILE)).unwrap();
+        let mut manifest = GenerationManifest::parse(&manifest_bytes).unwrap();
+        manifest.files.push(GenerationFile {
+            name: name.to_owned(),
+            size: bytes.len() as u64,
+            sha256: hex_lower(&Sha256::digest(bytes)),
+        });
         manifest.generation_digest = compute_generation_digest(&manifest).unwrap();
         fs::write(
             root.join(GENERATION_MANIFEST_FILE),

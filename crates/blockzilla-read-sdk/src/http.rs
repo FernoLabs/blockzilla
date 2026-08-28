@@ -1,9 +1,21 @@
-use std::{fmt, io::Read, time::Duration};
+use std::{
+    collections::HashMap,
+    fmt,
+    io::Read,
+    sync::{
+        Arc, Mutex,
+        atomic::{AtomicU64, Ordering},
+    },
+    time::Duration,
+};
 
 use reqwest::{
     StatusCode,
     blocking::{Client, RequestBuilder, Response},
-    header::{ACCEPT_ENCODING, AUTHORIZATION, CONTENT_LENGTH, CONTENT_RANGE, HeaderValue, RANGE},
+    header::{
+        ACCEPT_ENCODING, AUTHORIZATION, CONTENT_LENGTH, CONTENT_RANGE, ETAG, HeaderMap,
+        HeaderValue, RANGE,
+    },
     redirect,
 };
 use url::Url;
@@ -15,6 +27,56 @@ use crate::{
 };
 
 const DEFAULT_MAX_MANIFEST_BYTES: usize = 4 * 1024 * 1024;
+
+/// Exact HTTP work completed by one source and all its clones.
+///
+/// `returned_body_bytes` counts only response-body bytes that passed the
+/// source's exact-length and range validation. HEAD responses have no body.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct HttpRangeSourceStats {
+    pub head_requests: u64,
+    pub get_requests: u64,
+    pub returned_body_bytes: u64,
+}
+
+impl HttpRangeSourceStats {
+    pub fn requests(self) -> u64 {
+        self.head_requests.saturating_add(self.get_requests)
+    }
+
+    pub fn saturating_sub(self, earlier: Self) -> Self {
+        Self {
+            head_requests: self.head_requests.saturating_sub(earlier.head_requests),
+            get_requests: self.get_requests.saturating_sub(earlier.get_requests),
+            returned_body_bytes: self
+                .returned_body_bytes
+                .saturating_sub(earlier.returned_body_bytes),
+        }
+    }
+}
+
+#[derive(Debug, Default)]
+struct HttpRangeSourceCounters {
+    head_requests: AtomicU64,
+    get_requests: AtomicU64,
+    returned_body_bytes: AtomicU64,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+enum ObservedObjectIdentity {
+    Absent,
+    Present {
+        length: u64,
+        strong_etag: Option<String>,
+    },
+}
+
+/// Immutable HTTP object identity required by the persistent range cache.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct HttpObjectIdentity {
+    pub length: u64,
+    pub strong_etag: String,
+}
 
 #[derive(Debug, Clone)]
 pub struct HttpRangeSourceOptions {
@@ -49,6 +111,8 @@ pub struct HttpRangeSource {
     epoch: u64,
     authorization: Option<HeaderValue>,
     max_manifest_bytes: usize,
+    counters: Arc<HttpRangeSourceCounters>,
+    observed_objects: Arc<Mutex<HashMap<String, ObservedObjectIdentity>>>,
 }
 
 impl fmt::Debug for HttpRangeSource {
@@ -62,6 +126,15 @@ impl fmt::Debug for HttpRangeSource {
                 &self.authorization.as_ref().map(|_| "<redacted>"),
             )
             .field("max_manifest_bytes", &self.max_manifest_bytes)
+            .field("stats", &self.stats())
+            .field(
+                "observed_object_count",
+                &self
+                    .observed_objects
+                    .lock()
+                    .map(|objects| objects.len())
+                    .ok(),
+            )
             .finish()
     }
 }
@@ -151,6 +224,8 @@ impl HttpRangeSource {
             epoch,
             authorization,
             max_manifest_bytes: options.max_manifest_bytes,
+            counters: Arc::new(HttpRangeSourceCounters::default()),
+            observed_objects: Arc::new(Mutex::new(HashMap::new())),
         })
     }
 
@@ -160,6 +235,153 @@ impl HttpRangeSource {
 
     pub fn epoch(&self) -> u64 {
         self.epoch
+    }
+
+    /// Return a shared-source snapshot. Clones contribute to the same totals.
+    pub fn stats(&self) -> HttpRangeSourceStats {
+        HttpRangeSourceStats {
+            head_requests: self.counters.head_requests.load(Ordering::Relaxed),
+            get_requests: self.counters.get_requests.load(Ordering::Relaxed),
+            returned_body_bytes: self.counters.returned_body_bytes.load(Ordering::Relaxed),
+        }
+    }
+
+    /// Perform a fresh HEAD and require an exact strong ETag and length.
+    pub fn strong_identity(&self, object: &str) -> SourceResult<HttpObjectIdentity> {
+        self.head_identity(object, true)?
+            .ok_or_else(|| SourceError::NotFound(object.to_owned()))
+    }
+
+    fn record_head_request(&self) {
+        self.counters.head_requests.fetch_add(1, Ordering::Relaxed);
+    }
+
+    fn record_get_request(&self) {
+        self.counters.get_requests.fetch_add(1, Ordering::Relaxed);
+    }
+
+    fn record_returned_body(&self, length: usize) {
+        self.counters
+            .returned_body_bytes
+            .fetch_add(length as u64, Ordering::Relaxed);
+    }
+
+    fn bind_object_identity(
+        &self,
+        object: &str,
+        length: u64,
+        strong_etag: Option<&str>,
+    ) -> SourceResult<()> {
+        let mut objects = self.observed_objects.lock().map_err(|_| {
+            SourceError::Protocol("HTTP object-identity binding cache is poisoned".into())
+        })?;
+        if let Some(observed) = objects.get_mut(object) {
+            match observed {
+                ObservedObjectIdentity::Absent => {
+                    return Err(SourceError::Protocol(format!(
+                        "object {object} became present after its absence was pinned"
+                    )));
+                }
+                ObservedObjectIdentity::Present {
+                    length: observed_length,
+                    strong_etag: observed_etag,
+                } => {
+                    if *observed_length != length {
+                        return Err(SourceError::Protocol(format!(
+                            "object {object} changed size from {observed_length} to {length}"
+                        )));
+                    }
+                    match (&*observed_etag, strong_etag) {
+                        (Some(expected), Some(actual)) if expected == actual => {}
+                        (Some(expected), Some(actual)) => {
+                            return Err(SourceError::Protocol(format!(
+                                "object {object} changed strong ETag from {expected} to {actual}"
+                            )));
+                        }
+                        (Some(_), None) => {
+                            return Err(SourceError::Protocol(format!(
+                                "object {object} omitted the pinned strong ETag"
+                            )));
+                        }
+                        (None, Some(actual)) => *observed_etag = Some(actual.to_owned()),
+                        (None, None) => {}
+                    }
+                }
+            }
+        } else {
+            objects.insert(
+                object.to_owned(),
+                ObservedObjectIdentity::Present {
+                    length,
+                    strong_etag: strong_etag.map(str::to_owned),
+                },
+            );
+        }
+        Ok(())
+    }
+
+    fn bind_object_absence(&self, object: &str) -> SourceResult<()> {
+        let mut objects = self.observed_objects.lock().map_err(|_| {
+            SourceError::Protocol("HTTP object-identity binding cache is poisoned".into())
+        })?;
+        match objects.get(object) {
+            Some(ObservedObjectIdentity::Absent) => Ok(()),
+            Some(ObservedObjectIdentity::Present { .. }) => Err(SourceError::Protocol(format!(
+                "object {object} became absent after its presence was pinned"
+            ))),
+            None => {
+                objects.insert(object.to_owned(), ObservedObjectIdentity::Absent);
+                Ok(())
+            }
+        }
+    }
+
+    fn head_identity(
+        &self,
+        object: &str,
+        require_strong_etag: bool,
+    ) -> SourceResult<Option<HttpObjectIdentity>> {
+        let url = self.object_url(object)?;
+        self.record_head_request();
+        let response = self
+            .authorize(
+                self.client
+                    .head(url)
+                    .header(ACCEPT_ENCODING, HeaderValue::from_static("identity")),
+            )
+            .send()
+            .map_err(sanitize_http_error)?;
+        self.check_origin(&response)?;
+        if response.status() == StatusCode::NOT_FOUND {
+            self.bind_object_absence(object)?;
+            return Ok(None);
+        }
+        if response.status() != StatusCode::OK {
+            return Err(SourceError::Protocol(format!(
+                "HEAD for {object} returned HTTP {}",
+                response.status()
+            )));
+        }
+        let value = response.headers().get(CONTENT_LENGTH).ok_or_else(|| {
+            SourceError::Protocol(format!("HEAD for {object} omitted Content-Length"))
+        })?;
+        let value = value.to_str().map_err(|_| {
+            SourceError::Protocol(format!("HEAD for {object} has invalid Content-Length"))
+        })?;
+        let length = value.parse::<u64>().map_err(|_| {
+            SourceError::Protocol(format!("HEAD for {object} has invalid Content-Length"))
+        })?;
+        let strong_etag = strong_etag(response.headers(), object)?;
+        if require_strong_etag && strong_etag.is_none() {
+            return Err(SourceError::Protocol(format!(
+                "HEAD for {object} requires one exact strong ETag"
+            )));
+        }
+        self.bind_object_identity(object, length, strong_etag.as_deref())?;
+        Ok(Some(HttpObjectIdentity {
+            length,
+            strong_etag: strong_etag.unwrap_or_default(),
+        }))
     }
 
     fn object_url(&self, object: &str) -> SourceResult<Url> {
@@ -207,6 +429,7 @@ impl HttpRangeSource {
             )));
         }
         let url = self.object_url(GENERATION_MANIFEST_FILE)?;
+        self.record_get_request();
         let mut response = self
             .authorize(
                 self.client
@@ -216,48 +439,34 @@ impl HttpRangeSource {
             .send()
             .map_err(sanitize_http_error)?;
         self.check_origin(&response)?;
+        if response.status() == StatusCode::NOT_FOUND {
+            self.bind_object_absence(GENERATION_MANIFEST_FILE)?;
+            return Err(SourceError::NotFound(GENERATION_MANIFEST_FILE.to_owned()));
+        }
         if response.status() != StatusCode::OK {
             return Err(SourceError::Protocol(format!(
                 "manifest GET returned HTTP {}",
                 response.status()
             )));
         }
+        let response_etag = strong_etag(response.headers(), GENERATION_MANIFEST_FILE)?;
+        self.bind_object_identity(
+            GENERATION_MANIFEST_FILE,
+            expected_length as u64,
+            response_etag.as_deref(),
+        )?;
         enforce_content_length(&response, expected_length)?;
-        read_bounded(&mut response, expected_length, GENERATION_MANIFEST_FILE)
+        let bytes = read_bounded(&mut response, expected_length, GENERATION_MANIFEST_FILE)?;
+        self.record_returned_body(bytes.len());
+        Ok(bytes)
     }
 }
 
 impl RangeSource for HttpRangeSource {
     fn size(&self, object: &str) -> SourceResult<Option<u64>> {
-        let url = self.object_url(object)?;
-        let response = self
-            .authorize(
-                self.client
-                    .head(url)
-                    .header(ACCEPT_ENCODING, HeaderValue::from_static("identity")),
-            )
-            .send()
-            .map_err(sanitize_http_error)?;
-        self.check_origin(&response)?;
-        if response.status() == StatusCode::NOT_FOUND {
-            return Ok(None);
-        }
-        if response.status() != StatusCode::OK {
-            return Err(SourceError::Protocol(format!(
-                "HEAD for {object} returned HTTP {}",
-                response.status()
-            )));
-        }
-        let value = response.headers().get(CONTENT_LENGTH).ok_or_else(|| {
-            SourceError::Protocol(format!("HEAD for {object} omitted Content-Length"))
-        })?;
-        let value = value.to_str().map_err(|_| {
-            SourceError::Protocol(format!("HEAD for {object} has invalid Content-Length"))
-        })?;
-        let size = value.parse::<u64>().map_err(|_| {
-            SourceError::Protocol(format!("HEAD for {object} has invalid Content-Length"))
-        })?;
-        Ok(Some(size))
+        Ok(self
+            .head_identity(object, false)?
+            .map(|identity| identity.length))
     }
 
     fn read_range(&self, object: &str, offset: u64, length: usize) -> SourceResult<Vec<u8>> {
@@ -292,6 +501,7 @@ impl RangeSource for HttpRangeSource {
             .ok_or_else(|| SourceError::Protocol(format!("range overflow for {object}")))?;
         let end_inclusive = end_exclusive - 1;
         let url = self.object_url(object)?;
+        self.record_get_request();
         let mut response = self
             .authorize(
                 self.client
@@ -302,6 +512,10 @@ impl RangeSource for HttpRangeSource {
             .send()
             .map_err(sanitize_http_error)?;
         self.check_origin(&response)?;
+        if response.status() == StatusCode::NOT_FOUND {
+            self.bind_object_absence(object)?;
+            return Err(SourceError::NotFound(object.to_owned()));
+        }
         if response.status() != StatusCode::PARTIAL_CONTENT {
             return Err(SourceError::Protocol(format!(
                 "range GET for {object} returned HTTP {}, expected 206",
@@ -321,13 +535,49 @@ impl RangeSource for HttpRangeSource {
                     "range GET for {object} has malformed Content-Range"
                 ))
             })?;
+        let response_etag = strong_etag(response.headers(), object)?;
+        self.bind_object_identity(object, total, response_etag.as_deref())?;
         if actual_start != offset || actual_end != end_inclusive || end_exclusive > total {
             return Err(SourceError::Protocol(format!(
                 "range GET for {object} returned an unexpected Content-Range"
             )));
         }
-        read_bounded(&mut response, length, object)
+        let bytes = read_bounded(&mut response, length, object)?;
+        self.record_returned_body(bytes.len());
+        Ok(bytes)
     }
+}
+
+fn strong_etag(headers: &HeaderMap, object: &str) -> SourceResult<Option<String>> {
+    let mut values = headers.get_all(ETAG).iter();
+    let Some(value) = values.next() else {
+        return Ok(None);
+    };
+    if values.next().is_some() {
+        return Err(SourceError::Protocol(format!(
+            "response for {object} has multiple ETag fields"
+        )));
+    }
+    let value = value.to_str().map_err(|_| {
+        SourceError::Protocol(format!("response for {object} has a non-ASCII ETag"))
+    })?;
+    let (weak, opaque) = match value.strip_prefix("W/") {
+        Some(opaque) => (true, opaque),
+        None => (false, value),
+    };
+    let bytes = opaque.as_bytes();
+    if bytes.len() < 2
+        || bytes.first() != Some(&b'"')
+        || bytes.last() != Some(&b'"')
+        || bytes[1..bytes.len() - 1]
+            .iter()
+            .any(|byte| !matches!(*byte, 0x21 | 0x23..=0x7e))
+    {
+        return Err(SourceError::Protocol(format!(
+            "response for {object} has a malformed ETag"
+        )));
+    }
+    Ok((!weak).then(|| value.to_owned()))
 }
 
 fn enforce_content_length(response: &Response, expected: usize) -> SourceResult<()> {
@@ -350,7 +600,15 @@ fn read_bounded(response: &mut Response, expected: usize, object: &str) -> Sourc
     let bound = u64::try_from(expected)
         .unwrap_or(u64::MAX)
         .saturating_add(1);
-    let mut bytes = Vec::with_capacity(expected.min(8 * 1024 * 1024));
+    let allocation = expected.checked_add(1).ok_or_else(|| {
+        SourceError::Protocol(format!("response allocation bound overflows for {object}"))
+    })?;
+    let mut bytes = Vec::new();
+    bytes.try_reserve_exact(allocation).map_err(|error| {
+        SourceError::Protocol(format!(
+            "cannot reserve {allocation} bounded response bytes for {object}: {error}"
+        ))
+    })?;
     response
         .take(bound)
         .read_to_end(&mut bytes)
@@ -386,7 +644,42 @@ fn sanitize_http_error(error: reqwest::Error) -> SourceError {
 
 #[cfg(test)]
 mod tests {
+    use std::{
+        io::{Read as _, Write as _},
+        net::TcpListener,
+        thread,
+    };
+
     use super::*;
+
+    fn serve_once(
+        expected_request_lines: Vec<&'static str>,
+        responses: Vec<&'static [u8]>,
+    ) -> (String, thread::JoinHandle<()>) {
+        assert_eq!(expected_request_lines.len(), responses.len());
+        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        let address = listener.local_addr().unwrap();
+        let task = thread::spawn(move || {
+            for (expected, response) in expected_request_lines.into_iter().zip(responses) {
+                let (mut stream, _) = listener.accept().unwrap();
+                let mut request = Vec::new();
+                let mut buffer = [0_u8; 1024];
+                while !request.windows(4).any(|window| window == b"\r\n\r\n") {
+                    let read = stream.read(&mut buffer).unwrap();
+                    assert_ne!(read, 0, "client closed before its request headers ended");
+                    request.extend_from_slice(&buffer[..read]);
+                    assert!(
+                        request.len() <= 16 * 1024,
+                        "request headers exceed test cap"
+                    );
+                }
+                let request = String::from_utf8(request).unwrap();
+                assert_eq!(request.lines().next(), Some(expected));
+                stream.write_all(response).unwrap();
+            }
+        });
+        (format!("http://{address}/gateway"), task)
+    }
 
     #[test]
     fn parses_strict_content_range() {
@@ -412,5 +705,310 @@ mod tests {
         let rendered = format!("{source:?}");
         assert!(!rendered.contains("highly-secret-token"));
         assert!(rendered.contains("<redacted>"));
+    }
+
+    #[test]
+    fn shared_stats_count_exact_head_get_and_validated_body_bytes() {
+        let (base_url, server) = serve_once(
+            vec![
+                "HEAD /gateway/v1/epochs/7/files/thing.bin HTTP/1.1",
+                "GET /gateway/v1/epochs/7/files/thing.bin HTTP/1.1",
+            ],
+            vec![
+                b"HTTP/1.1 200 OK\r\nContent-Length: 4\r\nConnection: close\r\n\r\n",
+                b"HTTP/1.1 206 Partial Content\r\nContent-Length: 2\r\nContent-Range: bytes 1-2/4\r\nConnection: close\r\n\r\nbc",
+            ],
+        );
+        let source = HttpRangeSource::with_options(
+            base_url,
+            7,
+            None,
+            HttpRangeSourceOptions {
+                allow_insecure_http: true,
+                ..HttpRangeSourceOptions::default()
+            },
+        )
+        .unwrap();
+        let clone = source.clone();
+        assert_eq!(source.size("thing.bin").unwrap(), Some(4));
+        assert_eq!(clone.read_range("thing.bin", 1, 2).unwrap(), b"bc");
+        assert_eq!(
+            source.stats(),
+            HttpRangeSourceStats {
+                head_requests: 1,
+                get_requests: 1,
+                returned_body_bytes: 2,
+            }
+        );
+        assert_eq!(clone.stats(), source.stats());
+        server.join().unwrap();
+    }
+
+    #[test]
+    fn invalid_content_range_is_not_counted_as_validated_body_bytes() {
+        let (base_url, server) = serve_once(
+            vec!["GET /gateway/v1/epochs/7/files/thing.bin HTTP/1.1"],
+            vec![
+                b"HTTP/1.1 206 Partial Content\r\nContent-Length: 2\r\nContent-Range: bytes 0-1/4\r\nConnection: close\r\n\r\nab",
+            ],
+        );
+        let source = HttpRangeSource::with_options(
+            base_url,
+            7,
+            None,
+            HttpRangeSourceOptions {
+                allow_insecure_http: true,
+                ..HttpRangeSourceOptions::default()
+            },
+        )
+        .unwrap();
+        assert!(source.read_range("thing.bin", 1, 2).is_err());
+        assert_eq!(
+            source.stats(),
+            HttpRangeSourceStats {
+                head_requests: 0,
+                get_requests: 1,
+                returned_body_bytes: 0,
+            }
+        );
+        server.join().unwrap();
+    }
+
+    #[test]
+    fn head_size_is_pinned_against_later_range_totals() {
+        let (base_url, server) = serve_once(
+            vec![
+                "HEAD /gateway/v1/epochs/7/files/thing.bin HTTP/1.1",
+                "GET /gateway/v1/epochs/7/files/thing.bin HTTP/1.1",
+            ],
+            vec![
+                b"HTTP/1.1 200 OK\r\nContent-Length: 4\r\nConnection: close\r\n\r\n",
+                b"HTTP/1.1 206 Partial Content\r\nContent-Length: 2\r\nContent-Range: bytes 1-2/5\r\nConnection: close\r\n\r\nbc",
+            ],
+        );
+        let source = HttpRangeSource::with_options(
+            base_url,
+            7,
+            None,
+            HttpRangeSourceOptions {
+                allow_insecure_http: true,
+                ..HttpRangeSourceOptions::default()
+            },
+        )
+        .unwrap();
+        assert_eq!(source.size("thing.bin").unwrap(), Some(4));
+        let error = source.read_range("thing.bin", 1, 2).unwrap_err();
+        assert!(error.to_string().contains("changed size from 4 to 5"));
+        assert_eq!(source.stats().returned_body_bytes, 0);
+        server.join().unwrap();
+    }
+
+    #[test]
+    fn head_absence_is_pinned_against_later_head_and_range_presence() {
+        let (base_url, server) = serve_once(
+            vec![
+                "HEAD /gateway/v1/epochs/7/files/thing.bin HTTP/1.1",
+                "HEAD /gateway/v1/epochs/7/files/thing.bin HTTP/1.1",
+                "GET /gateway/v1/epochs/7/files/thing.bin HTTP/1.1",
+            ],
+            vec![
+                b"HTTP/1.1 404 Not Found\r\nContent-Length: 0\r\nConnection: close\r\n\r\n",
+                b"HTTP/1.1 200 OK\r\nContent-Length: 4\r\nETag: \"v1\"\r\nConnection: close\r\n\r\n",
+                b"HTTP/1.1 206 Partial Content\r\nContent-Length: 1\r\nContent-Range: bytes 0-0/4\r\nETag: \"v1\"\r\nConnection: close\r\n\r\na",
+            ],
+        );
+        let source = HttpRangeSource::with_options(
+            base_url,
+            7,
+            None,
+            HttpRangeSourceOptions {
+                allow_insecure_http: true,
+                ..HttpRangeSourceOptions::default()
+            },
+        )
+        .unwrap();
+
+        assert_eq!(source.size("thing.bin").unwrap(), None);
+        let head_error = source.strong_identity("thing.bin").unwrap_err();
+        assert!(
+            head_error
+                .to_string()
+                .contains("became present after its absence was pinned")
+        );
+        let read_error = source.read_range("thing.bin", 0, 1).unwrap_err();
+        assert!(
+            read_error
+                .to_string()
+                .contains("became present after its absence was pinned")
+        );
+        assert_eq!(source.stats().returned_body_bytes, 0);
+        server.join().unwrap();
+    }
+
+    #[test]
+    fn head_presence_is_pinned_against_later_head_and_range_absence() {
+        let (base_url, server) = serve_once(
+            vec![
+                "HEAD /gateway/v1/epochs/7/files/thing.bin HTTP/1.1",
+                "HEAD /gateway/v1/epochs/7/files/thing.bin HTTP/1.1",
+                "GET /gateway/v1/epochs/7/files/thing.bin HTTP/1.1",
+            ],
+            vec![
+                b"HTTP/1.1 200 OK\r\nContent-Length: 4\r\nETag: \"v1\"\r\nConnection: close\r\n\r\n",
+                b"HTTP/1.1 404 Not Found\r\nContent-Length: 0\r\nConnection: close\r\n\r\n",
+                b"HTTP/1.1 404 Not Found\r\nContent-Length: 0\r\nConnection: close\r\n\r\n",
+            ],
+        );
+        let source = HttpRangeSource::with_options(
+            base_url,
+            7,
+            None,
+            HttpRangeSourceOptions {
+                allow_insecure_http: true,
+                ..HttpRangeSourceOptions::default()
+            },
+        )
+        .unwrap();
+
+        assert_eq!(source.strong_identity("thing.bin").unwrap().length, 4);
+        let head_error = source.size("thing.bin").unwrap_err();
+        assert!(
+            head_error
+                .to_string()
+                .contains("became absent after its presence was pinned")
+        );
+        let read_error = source.read_range("thing.bin", 0, 1).unwrap_err();
+        assert!(
+            read_error
+                .to_string()
+                .contains("became absent after its presence was pinned")
+        );
+        assert_eq!(source.stats().returned_body_bytes, 0);
+        server.join().unwrap();
+    }
+
+    #[test]
+    fn cache_identity_rejects_missing_and_weak_etags() {
+        for response in [
+            b"HTTP/1.1 200 OK\r\nContent-Length: 4\r\nConnection: close\r\n\r\n".as_slice(),
+            b"HTTP/1.1 200 OK\r\nContent-Length: 4\r\nETag: W/\"v1\"\r\nConnection: close\r\n\r\n"
+                .as_slice(),
+        ] {
+            let (base_url, server) = serve_once(
+                vec!["HEAD /gateway/v1/epochs/7/files/thing.bin HTTP/1.1"],
+                vec![response],
+            );
+            let source = HttpRangeSource::with_options(
+                base_url,
+                7,
+                None,
+                HttpRangeSourceOptions {
+                    allow_insecure_http: true,
+                    ..HttpRangeSourceOptions::default()
+                },
+            )
+            .unwrap();
+            let error = source.strong_identity("thing.bin").unwrap_err();
+            assert!(error.to_string().contains("exact strong ETag"));
+            server.join().unwrap();
+        }
+    }
+
+    #[test]
+    fn range_get_must_keep_the_pinned_strong_etag() {
+        let (base_url, server) = serve_once(
+            vec![
+                "HEAD /gateway/v1/epochs/7/files/thing.bin HTTP/1.1",
+                "GET /gateway/v1/epochs/7/files/thing.bin HTTP/1.1",
+            ],
+            vec![
+                b"HTTP/1.1 200 OK\r\nContent-Length: 4\r\nETag: \"v1\"\r\nConnection: close\r\n\r\n",
+                b"HTTP/1.1 206 Partial Content\r\nContent-Length: 2\r\nContent-Range: bytes 1-2/4\r\nETag: \"v2\"\r\nConnection: close\r\n\r\nbc",
+            ],
+        );
+        let source = HttpRangeSource::with_options(
+            base_url,
+            7,
+            None,
+            HttpRangeSourceOptions {
+                allow_insecure_http: true,
+                ..HttpRangeSourceOptions::default()
+            },
+        )
+        .unwrap();
+        assert_eq!(source.strong_identity("thing.bin").unwrap().length, 4);
+        let error = source.read_range("thing.bin", 1, 2).unwrap_err();
+        assert!(error.to_string().contains("changed strong ETag"));
+        assert_eq!(source.stats().returned_body_bytes, 0);
+        server.join().unwrap();
+    }
+
+    #[test]
+    fn manifest_get_keeps_the_head_pinned_strong_etag() {
+        let (base_url, server) = serve_once(
+            vec![
+                "HEAD /gateway/v1/epochs/7/manifest HTTP/1.1",
+                "GET /gateway/v1/epochs/7/manifest HTTP/1.1",
+            ],
+            vec![
+                b"HTTP/1.1 200 OK\r\nContent-Length: 4\r\nETag: \"v1\"\r\nConnection: close\r\n\r\n",
+                b"HTTP/1.1 200 OK\r\nContent-Length: 4\r\nETag: \"v1\"\r\nConnection: close\r\n\r\ntest",
+            ],
+        );
+        let source = HttpRangeSource::with_options(
+            base_url,
+            7,
+            None,
+            HttpRangeSourceOptions {
+                allow_insecure_http: true,
+                ..HttpRangeSourceOptions::default()
+            },
+        )
+        .unwrap();
+        assert_eq!(source.size(GENERATION_MANIFEST_FILE).unwrap(), Some(4));
+        assert_eq!(
+            source.read_range(GENERATION_MANIFEST_FILE, 0, 4).unwrap(),
+            b"test"
+        );
+        assert_eq!(
+            source.stats(),
+            HttpRangeSourceStats {
+                head_requests: 1,
+                get_requests: 1,
+                returned_body_bytes: 4,
+            }
+        );
+        server.join().unwrap();
+    }
+
+    #[test]
+    fn manifest_get_rejects_a_changed_head_pinned_strong_etag() {
+        let (base_url, server) = serve_once(
+            vec![
+                "HEAD /gateway/v1/epochs/7/manifest HTTP/1.1",
+                "GET /gateway/v1/epochs/7/manifest HTTP/1.1",
+            ],
+            vec![
+                b"HTTP/1.1 200 OK\r\nContent-Length: 4\r\nETag: \"v1\"\r\nConnection: close\r\n\r\n",
+                b"HTTP/1.1 200 OK\r\nContent-Length: 4\r\nETag: \"v2\"\r\nConnection: close\r\n\r\ntest",
+            ],
+        );
+        let source = HttpRangeSource::with_options(
+            base_url,
+            7,
+            None,
+            HttpRangeSourceOptions {
+                allow_insecure_http: true,
+                ..HttpRangeSourceOptions::default()
+            },
+        )
+        .unwrap();
+        assert_eq!(source.size(GENERATION_MANIFEST_FILE).unwrap(), Some(4));
+        let error = source
+            .read_range(GENERATION_MANIFEST_FILE, 0, 4)
+            .unwrap_err();
+        assert!(error.to_string().contains("changed strong ETag"));
+        assert_eq!(source.stats().returned_body_bytes, 0);
+        server.join().unwrap();
     }
 }

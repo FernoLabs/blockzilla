@@ -1,10 +1,14 @@
 # blockzilla-read-sdk
 
+For format choice and the common all-format API, start with
+[`Archive formats and the read SDK`](../../docs/reference/archive-formats-and-read-sdk.md).
+This README gives the Compact V2 reader details.
+
 Read-only Rust SDK for an immutable Blockzilla Archive V2 generation. It is
-designed for the Mac/FireWatch flow: cache the small control files locally,
-stream compressed block frames from Blockzilla, filter compact transactions by
-epoch registry IDs, read only matching signatures, and build the application
-database on the client.
+designed for local indexers and client applications: cache the small control
+files locally, stream compressed block frames from Blockzilla, filter compact
+transactions by epoch registry IDs, read only matching signatures, and build
+an application database on the client.
 
 The SDK never asks Blockzilla to reconstruct a Solana block. It returns the
 compact Archive V2 message and metadata values that the application parser can
@@ -31,12 +35,33 @@ right choice for a completed local download, but it intentionally reads and
 hashes the entire blocks and signatures files before opening. Do **not** use the
 default for lazy HTTP streaming.
 
-## Mac cache plus HTTP streaming
+The manifest can bind exactly one message-schema marker. The explicit Current
+marker is `archive-v2-message-schema-current-v1.marker`. The historical marker
+is `archive-v2-message-schema-may24-pre-unknown-fallbacks-v1.marker`. Both
+markers in one generation are invalid. Mainnet epochs 0, 1, and 2 must bind one
+of them. Later unmarked generations keep the Current compatibility default.
+
+## Source modes
+
+The `blockzilla-dump` CLI exposes the same source choices as `--archive PATH`
+for a complete local generation and `--gateway URL` for a Cloudflare gateway.
+For direct SDK use, open a local generation with `LocalRangeSource`:
+
+```rust,no_run
+use blockzilla_read_sdk::{ArchiveReader, LocalRangeSource};
+
+let source = LocalRangeSource::new("archive/epoch-900");
+let archive = ArchiveReader::open(source)?;
+println!("{} blocks", archive.index().rows.len());
+# Ok::<(), blockzilla_read_sdk::Error>(())
+```
+
+## Local cache plus HTTP streaming
 
 Enable the HTTP source:
 
 ```toml
-blockzilla-read-sdk = { path = "../blockzilla-read-sdk", features = ["http"] }
+blockzilla-read-sdk = { version = "0.2", features = ["http"] }
 ```
 
 The gateway routes are:
@@ -50,14 +75,15 @@ GET/HEAD /v1/epochs/{epoch}/files/{name}
 proxies, redacts its bearer token from `Debug`, and requires exact `206` plus
 `Content-Range` responses for file ranges.
 
-For the intended hybrid flow, place the verified manifest, registry, index and
-metadata in `cache/epoch-999/`. Leave blocks and signatures absent so the
-overlay routes those objects to the gateway:
+For the intended hybrid flow, first cache the verified manifest, block index,
+metadata, and `registry.bin`. A user-program index build also caches the bound
+`registry.mphf` in the same directory. Then leave blocks and signatures absent
+so the overlay streams their bounded ranges from the gateway:
 
 ```rust,no_run
 use blockzilla_read_sdk::{
     ArchiveReader, HashVerification, HttpRangeSource, LocalRangeSource,
-    MetadataState, OpenOptions, OverlayRangeSource, TransactionMatch,
+    OpenOptions, OverlayRangeSource, SelectorOutcome, TransactionMatch,
 };
 
 let epoch = 999;
@@ -75,18 +101,48 @@ let options = OpenOptions {
 };
 let archive = ArchiveReader::open_with_options(source, options)?;
 
-let watched = [[7u8; 32], [8u8; 32]];
-let filter = archive.compile_pubkey_filter(watched)?;
+// The manifest selects one message schema and one metadata schema for the
+// complete generation. The reader never guesses a schema per transaction.
+let _message_schema = archive.message_schema();
+let _metadata_schema = archive.metadata_schema();
+
+let program_id = [7u8; 32];
+let filter = archive.compile_pubkey_filter([program_id])?;
 for block in archive.scan(&filter)? {
     let block = block?;
     for transaction in block.transactions {
-        if matches!(transaction.outcome, TransactionMatch::Match { .. })
-            && matches!(&transaction.metadata, MetadataState::Decoded(_))
-        {
-            let signatures =
-                archive.read_transaction_signatures(transaction.signatures)?;
-            // Pass transaction.message, transaction.metadata and signatures to
-            // the FireWatch parser, then commit slot progress transactionally.
+        // The account scan is a safe prefilter for program invocations because
+        // each invoked program must be one of the message accounts.
+        match transaction.outcome {
+            TransactionMatch::NoMatch => continue,
+            TransactionMatch::Indeterminate(reason) => {
+                eprintln!("account coverage is indeterminate: {reason:?}");
+                continue;
+            }
+            TransactionMatch::Match { .. } => {}
+        }
+
+        match archive.select_program_invocations(
+            &filter,
+            &transaction.row,
+            transaction.message.as_ref(),
+            transaction.metadata.decoded(),
+        )? {
+            SelectorOutcome::Match(invocation) => {
+                let signatures =
+                    archive.read_transaction_signatures(transaction.signatures)?;
+                println!(
+                    "slot={} direct={} cpi={} signatures={}",
+                    transaction.slot,
+                    invocation.direct_count,
+                    invocation.cpi_count,
+                    signatures.len(),
+                );
+            }
+            SelectorOutcome::NoMatch => {}
+            SelectorOutcome::Indeterminate(reason) => {
+                eprintln!("program coverage is indeterminate: {reason:?}");
+            }
         }
     }
 }
@@ -103,6 +159,11 @@ end-to-end file hashing is required.
 Sequential `blocks()` and `scan()` calls coalesce adjacent compressed frames
 into bounded contiguous reads (64 MiB by default, matching the gateway cap).
 Random `read_block(row)` remains a single-frame range request.
+
+`select_token_balances` matches recorded pre- and post-token-balance mints.
+Do not use the account scan as its prefilter: a recorded mint is not required
+to be a transaction account. Decode metadata for every row in scope, and keep
+each `Indeterminate` result in the coverage report.
 
 ## Filtering semantics
 
@@ -123,9 +184,9 @@ Each transaction produces one of:
 Never silently treat `Indeterminate` as `NoMatch` for an indexer.
 
 `TransactionMatch` answers only the account-filter question. It does not mean a
-transaction is parser-ready. FireWatch must additionally require decoded
-metadata (and any other parser-required fields); `Absent` or `RawFallback`
-metadata must stop the lossless path or be handled by an explicit fallback.
+transaction is parser-ready. A downstream parser must additionally require
+decoded metadata and its other required fields. `Absent` or `RawFallback`
+metadata must stop the lossless path or use an explicit fallback.
 
 `signatures.bin` is optional. The SDK computes each transaction's flat
 signature ordinal from the hot index and row counts. It performs one selective
