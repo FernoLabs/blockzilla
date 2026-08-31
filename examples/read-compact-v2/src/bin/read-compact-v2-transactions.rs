@@ -5,11 +5,11 @@ use std::{error::Error, io::Write, time::Instant};
 use blockzilla_compact_v2_read_sdk::{ArchiveInstructionSource, CompactV2ParallelScanConfig};
 use blockzilla_example_workloads::TransactionIdentityDumpSink;
 use blockzilla_read_compact_v2::{
-    finish_archive, legacy_arguments, open_archive, output_file, scan_request,
+    finish_archive, open_archive, output_file, positional_arguments, scan_request,
 };
 
 fn main() -> Result<(), Box<dyn Error>> {
-    let arguments = legacy_arguments("read-compact-v2-transactions")?;
+    let arguments = positional_arguments("read-compact-v2-transactions")?;
     let total_started = Instant::now();
     let mut archive = open_archive(&arguments)?;
     let identity = archive.identity().clone();
@@ -144,7 +144,7 @@ mod tests {
 
     #[test]
     fn parses_a_local_parallel_transaction_dump() {
-        let arguments = blockzilla_read_compact_v2::legacy_arguments_from(
+        let arguments = blockzilla_read_compact_v2::positional_arguments_from(
             "read-compact-v2-transactions",
             None,
             [

@@ -4,7 +4,7 @@ use sha2::{Digest, Sha256};
 
 use crate::{Error, Result};
 
-/// Deterministic output facts used for cross-format parity checks.
+/// Deterministic output counts used for cross-format parity checks.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct OutputReport {
     /// Stable schema name for the fixed-record stream.
@@ -13,15 +13,6 @@ pub struct OutputReport {
     pub row_count: u64,
     /// Header and record bytes written to the output.
     pub output_bytes: u64,
-    /// SHA-256 of all output bytes, including the workload and target header.
-    pub sha256: [u8; 32],
-}
-
-impl OutputReport {
-    /// Lower-case hexadecimal SHA-256 for logs and reports.
-    pub fn sha256_hex(&self) -> String {
-        hex_lower(self.sha256)
-    }
 }
 
 /// Deterministic identity of transactions whose application result is partial.
@@ -67,7 +58,6 @@ impl<W, R> FinishedOutput<W, R> {
 
 pub(crate) struct CanonicalOutput<W> {
     writer: W,
-    hasher: Sha256,
     output_bytes: u64,
     row_count: u64,
 }
@@ -75,11 +65,8 @@ pub(crate) struct CanonicalOutput<W> {
 impl<W: Write> CanonicalOutput<W> {
     pub(crate) fn new(mut writer: W, header: &[u8]) -> Result<Self> {
         writer.write_all(header)?;
-        let mut hasher = Sha256::new();
-        hasher.update(header);
         Ok(Self {
             writer,
-            hasher,
             output_bytes: u64::try_from(header.len())
                 .map_err(|_| Error::CounterOverflow("output byte"))?,
             row_count: 0,
@@ -88,7 +75,6 @@ impl<W: Write> CanonicalOutput<W> {
 
     pub(crate) fn write_row(&mut self, row: &[u8]) -> Result<()> {
         self.writer.write_all(row)?;
-        self.hasher.update(row);
         self.output_bytes = self
             .output_bytes
             .checked_add(
@@ -113,7 +99,6 @@ impl<W: Write> CanonicalOutput<W> {
                 schema,
                 row_count: self.row_count,
                 output_bytes: self.output_bytes,
-                sha256: self.hasher.finalize().into(),
             },
         })
     }

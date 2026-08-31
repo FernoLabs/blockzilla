@@ -20,8 +20,9 @@ examples on the landing page.
 
 The workload programs print setup, scan, and total time. They also print
 transaction rate, logical source bytes, network bytes, cache bytes, local read
-bytes, output size, output SHA-256, and coverage SHA-256. Use these values only
-after the output and coverage values match between formats.
+bytes, output size, and coverage SHA-256. Use these values only after the output
+and coverage values match between formats. Compare output files byte-for-byte
+outside the timed run.
 
 Compact V2 uses one ordered source reader and parallel decode and projection.
 The default worker count is the number of logical CPUs available to the

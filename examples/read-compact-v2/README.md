@@ -87,7 +87,9 @@ private `.blockzilla-cache` folder in the current directory. Use
 The clean bucket is planned to contain 11 normalized Compact V2 samples that
 use the same current message grammar and the same typed transaction-error
 metadata grammar. The example has no old/new metadata table and no
-epoch-specific schema switch.
+epoch-specific schema switch. A sample that does not pass the current SDK
+reader is repaired or rebuilt before publication; the reader does not select a
+compatibility profile for that sample.
 
 ## Use the same layout on disk
 

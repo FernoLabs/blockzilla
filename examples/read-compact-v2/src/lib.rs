@@ -22,6 +22,7 @@ use blockzilla_example_workloads::{
 pub const DEFAULT_ORIGIN: &str =
     "https://blockzilla-archive-samples-v1.cheron-augustin.workers.dev";
 pub const DEFAULT_EPOCH: u64 = 900;
+pub const DEFAULT_FIREWATCH_WALLET: &str = "5LikTUsx695BHRipWoRrn6YmTQEcPrvbR8YaHxdSRQo8";
 pub const SAMPLE_EPOCHS: [u64; 11] = [0, 100, 200, 300, 400, 500, 600, 700, 800, 900, 1_000];
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -85,17 +86,17 @@ pub fn count_arguments_from(
     })
 }
 
-/// Old positional form retained only for the transaction exporter and matrix tools.
-pub fn legacy_arguments(binary: &str) -> Result<Arguments, Box<dyn Error>> {
-    legacy_arguments_from(binary, None, std::env::args_os().skip(1))
+/// Positional form retained only for the transaction exporter and matrix tools.
+pub fn positional_arguments(binary: &str) -> Result<Arguments, Box<dyn Error>> {
+    positional_arguments_from(binary, None, std::env::args_os().skip(1))
 }
 
-pub fn legacy_arguments_from(
+pub fn positional_arguments_from(
     binary: &str,
     target_name: Option<&str>,
     values: impl IntoIterator<Item = OsString>,
 ) -> Result<Arguments, Box<dyn Error>> {
-    parse_legacy_arguments(binary, target_name, values.into_iter().collect())
+    parse_positional_arguments(binary, target_name, values.into_iter().collect())
 }
 
 fn flag_arguments(
@@ -112,7 +113,7 @@ fn flag_arguments(
     let mut cache_root = None;
     let mut output = None;
     let mut threads = CompactV2ParallelScanConfig::default().workers;
-    let mut target = None;
+    let mut target = target_name.map(|_| DEFAULT_FIREWATCH_WALLET.to_owned());
     let mut values = values.into_iter();
 
     while let Some(flag) = values.next() {
@@ -163,9 +164,6 @@ fn flag_arguments(
     if archive_root.is_some() && cache_root.is_some() {
         return Err("--cache-root is only used with a network source".into());
     }
-    if target_name.is_some() && target.is_none() {
-        return Err(format!("--wallet is required\n{usage}").into());
-    }
     let output = output.unwrap_or_else(|| default_output(binary, epoch));
     let source = if let Some(root) = archive_root {
         let epoch_root = absolute_path(root)?
@@ -193,14 +191,14 @@ fn flag_arguments(
     })
 }
 
-fn parse_legacy_arguments(
+fn parse_positional_arguments(
     binary: &str,
     target_name: Option<&str>,
     mut values: Vec<OsString>,
 ) -> Result<Arguments, Box<dyn Error>> {
     let target_usage = target_name.map_or(String::new(), |name| format!(" <{name}>"));
     let usage = format!(
-        "legacy usage:\n  {binary} <origin> <epoch> <cache-root>{target_usage} <output> [max-blocks] [--threads N]\n  {binary} local <files-root> <epoch> <candidate-id>{target_usage} <output> [max-blocks] [--threads N]"
+        "usage:\n  {binary} <origin> <epoch> <cache-root>{target_usage} <output> [max-blocks] [--threads N]\n  {binary} local <files-root> <epoch> <candidate-id>{target_usage} <output> [max-blocks] [--threads N]"
     );
     let mut threads = CompactV2ParallelScanConfig::default().workers;
     if values.len() >= 2 && values[values.len() - 2] == "--threads" {
@@ -314,8 +312,7 @@ pub fn open_archive(
             epoch_root,
             candidate_id,
         } => {
-            let descriptor =
-                CompactV2LocalDescriptor::mainnet_current(arguments.epoch, candidate_id)?;
+            let descriptor = CompactV2LocalDescriptor::mainnet(arguments.epoch, candidate_id)?;
             CompactV2Archive::open_local(epoch_root, descriptor)
         }
     }
@@ -348,6 +345,70 @@ impl RunTiming {
             setup_io: archive.transport_snapshot(),
         }
     }
+}
+
+/// Finish a full-epoch count and print the same timing and I/O units as the
+/// workload examples.
+pub fn finish_count(
+    arguments: &CountArguments,
+    archive: CompactV2Archive,
+    timing: RunTiming,
+    parallel: CompactV2ParallelScanReceipt,
+    scan_seconds: f64,
+    recorded_inner_instructions: u64,
+) -> Result<(), Box<dyn Error>> {
+    let receipt = parallel.scan;
+    let total_io = finish_archive(archive)?;
+    let total_seconds = timing.total_started.elapsed().as_secs_f64();
+    let scan_seconds_nonzero = scan_seconds.max(f64::MIN_POSITIVE);
+    let total_seconds_nonzero = total_seconds.max(f64::MIN_POSITIVE);
+    let scan_io = total_io.saturating_sub(timing.setup_io);
+    let setup_http = timing.setup_io.http_and_cache;
+    let scan_http = scan_io.http_and_cache;
+    let total_http = total_io.http_and_cache;
+    let logical_bytes = receipt.io.source_read_bytes.unwrap_or(0);
+
+    println!(
+        "format=compact-v2 workload=slot-hours epoch={} source={} threads={} requested_workers={} effective_workers={} max_active_workers={} blocks={} transactions={} instructions={} recorded_inner_instructions={} transactions_with_incomplete_instructions={} transactions_with_incomplete_cpi={} setup_s={:.6} scan_s={:.6} total_s={:.6} scan_tps={:.3} total_tps={:.3} bound_source_size_bytes={} scan_logical_read_calls={} scan_logical_read_bytes={} scan_logical_read_mb_s={:.6} setup_network_bytes={} scan_network_bytes={} total_network_bytes={} scan_network_mb_s={:.6} total_network_mb_s={:.6} setup_cache_read_bytes={} scan_cache_read_bytes={} total_cache_read_bytes={} setup_local_read_calls={} scan_local_read_calls={} total_local_read_calls={} setup_local_read_bytes={} scan_local_read_bytes={} total_local_read_bytes={} scan_local_read_mb_s={:.6} total_local_read_mb_s={:.6}",
+        arguments.epoch,
+        source_name(&arguments.source),
+        arguments.threads,
+        parallel.requested_workers,
+        parallel.effective_workers,
+        parallel.max_active_workers,
+        receipt.blocks,
+        receipt.transactions,
+        receipt.instructions,
+        recorded_inner_instructions,
+        receipt.transactions_with_incomplete_instructions,
+        receipt.transactions_with_incomplete_cpi,
+        timing.setup_seconds,
+        scan_seconds,
+        total_seconds,
+        receipt.transactions as f64 / scan_seconds_nonzero,
+        receipt.transactions as f64 / total_seconds_nonzero,
+        timing.bound_source_size_bytes,
+        receipt.io.source_read_calls.unwrap_or(0),
+        logical_bytes,
+        decimal_mb_s(logical_bytes, scan_seconds_nonzero),
+        setup_http.network_body_bytes,
+        scan_http.network_body_bytes,
+        total_http.network_body_bytes,
+        decimal_mb_s(scan_http.network_body_bytes, scan_seconds_nonzero),
+        decimal_mb_s(total_http.network_body_bytes, total_seconds_nonzero),
+        setup_http.cache_read_bytes,
+        scan_http.cache_read_bytes,
+        total_http.cache_read_bytes,
+        timing.setup_io.local_read_calls,
+        scan_io.local_read_calls,
+        total_io.local_read_calls,
+        timing.setup_io.local_read_bytes,
+        scan_io.local_read_bytes,
+        total_io.local_read_bytes,
+        decimal_mb_s(scan_io.local_read_bytes, scan_seconds_nonzero),
+        decimal_mb_s(total_io.local_read_bytes, total_seconds_nonzero),
+    );
+    Ok(())
 }
 
 /// Print the detailed counters outside the small format-specific examples.
@@ -506,7 +567,7 @@ pub fn print_run(report: RunReport<'_>) {
     let total_http = report.total_io.http_and_cache;
     let logical_bytes = report.receipt.io.source_read_bytes.unwrap_or(0);
     println!(
-        "format=compact-v2 workload={} epoch={} source={} threads={} requested_workers={} effective_workers={} max_active_workers={} max_batch_blocks={} max_batch_transactions={} max_projected_block_bytes={} max_projected_batch_bytes={} registry_mode={} registry_prefetch_read_calls={} registry_prefetch_read_bytes={} registry_resident_bound_bytes={} blocks={} transactions={} setup_s={:.6} scan_s={:.6} total_s={:.6} scan_tps={:.3} total_tps={:.3} bound_source_size_bytes={} scan_logical_read_calls={} scan_logical_read_bytes={} scan_logical_read_mb_s={:.6} setup_network_bytes={} scan_network_bytes={} total_network_bytes={} scan_network_mb_s={:.6} total_network_mb_s={:.6} setup_cache_read_bytes={} scan_cache_read_bytes={} total_cache_read_bytes={} setup_local_read_calls={} scan_local_read_calls={} total_local_read_calls={} setup_local_read_bytes={} scan_local_read_bytes={} total_local_read_bytes={} scan_local_read_mb_s={:.6} total_local_read_mb_s={:.6} output_path={} output_schema={} output_rows={} output_bytes={} output_sha256={} output_complete={} indeterminate_transactions={} coverage_sha256={}",
+        "format=compact-v2 workload={} epoch={} source={} threads={} requested_workers={} effective_workers={} max_active_workers={} max_batch_blocks={} max_batch_transactions={} max_projected_block_bytes={} max_projected_batch_bytes={} registry_mode={} registry_prefetch_read_calls={} registry_prefetch_read_bytes={} registry_resident_bound_bytes={} blocks={} transactions={} setup_s={:.6} scan_s={:.6} total_s={:.6} scan_tps={:.3} total_tps={:.3} bound_source_size_bytes={} scan_logical_read_calls={} scan_logical_read_bytes={} scan_logical_read_mb_s={:.6} setup_network_bytes={} scan_network_bytes={} total_network_bytes={} scan_network_mb_s={:.6} total_network_mb_s={:.6} setup_cache_read_bytes={} scan_cache_read_bytes={} total_cache_read_bytes={} setup_local_read_calls={} scan_local_read_calls={} total_local_read_calls={} setup_local_read_bytes={} scan_local_read_bytes={} total_local_read_bytes={} scan_local_read_mb_s={:.6} total_local_read_mb_s={:.6} output_path={} output_schema={} output_rows={} output_bytes={} output_complete={} indeterminate_transactions={} coverage_sha256={}",
         report.workload,
         report.arguments.epoch,
         source_name(&report.arguments.source),
@@ -553,7 +614,6 @@ pub fn print_run(report: RunReport<'_>) {
         report.output.schema,
         report.output.row_count,
         report.output.output_bytes,
-        report.output.sha256_hex(),
         report.output_complete,
         report.coverage.indeterminate_transactions,
         report.coverage.sha256_hex(),
@@ -645,6 +705,14 @@ mod tests {
             panic!("expected network source");
         };
         assert_eq!(origin, DEFAULT_ORIGIN);
+
+        let firewatch = arguments_from(
+            "read-compact-v2-firewatch",
+            Some("wallet"),
+            std::iter::empty(),
+        )
+        .unwrap();
+        assert_eq!(firewatch.target.as_deref(), Some(DEFAULT_FIREWATCH_WALLET));
     }
 
     #[test]
@@ -777,8 +845,8 @@ mod tests {
     }
 
     #[test]
-    fn old_transaction_exporter_form_remains_separate() {
-        let parsed = legacy_arguments_from(
+    fn transaction_exporter_positional_form_remains_separate() {
+        let parsed = positional_arguments_from(
             "read-compact-v2-transactions",
             None,
             [

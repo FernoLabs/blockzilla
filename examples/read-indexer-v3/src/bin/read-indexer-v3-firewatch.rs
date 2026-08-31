@@ -1,10 +1,10 @@
-use std::error::Error;
+use std::{error::Error, time::Instant};
 
 use blockzilla_example_workloads::{FirewatchSink, firewatch_scan_request};
 use blockzilla_indexer_v3_read_sdk::{IndexerV3Archive, QueryError, ScanRequest};
 use blockzilla_read_indexer_v3::{
-    DEFAULT_FIREWATCH_WALLET, WorkloadSource, finish_archive, output_file, parse_pubkey,
-    workload_target_arguments,
+    DEFAULT_FIREWATCH_WALLET, RunTiming, WorkloadSource, finish_targeted_workload, output_file,
+    parse_pubkey, workload_target_arguments,
 };
 
 fn main() -> Result<(), Box<dyn Error>> {
@@ -19,6 +19,7 @@ fn main() -> Result<(), Box<dyn Error>> {
         .as_deref()
         .ok_or("the FireWatch wallet is missing")?;
     let wallet = parse_pubkey("wallet", wallet_text)?;
+    let started = Instant::now();
     let mut archive = match &arguments.source {
         WorkloadSource::Network { origin, cache_root } => {
             IndexerV3Archive::open_selective(origin, arguments.epoch, cache_root)?
@@ -27,25 +28,27 @@ fn main() -> Result<(), Box<dyn Error>> {
             IndexerV3Archive::open_local(archive_root, arguments.epoch)?
         }
     };
+    let timing = RunTiming::after_open(started, &archive);
     let request = firewatch_scan_request(ScanRequest::all());
     let mut sink = FirewatchSink::new(output_file(&arguments.output)?, wallet)?;
 
     // Reverse lookup returns sound candidates. The sink confirms exact matches.
-    let receipt = archive.for_each_signer_wallet_candidate_block_parallel(
+    let scan = Instant::now();
+    let targeted = archive.for_each_signer_wallet_candidate_block_parallel(
         &wallet,
         &request,
         arguments.threads,
         |block| sink.process_block(block).map_err(QueryError::sink),
     )?;
-    let (writer, report) = sink.finish()?.into_parts();
-    writer.into_inner()?;
-    finish_archive(archive)?;
+    let scan_seconds = scan.elapsed().as_secs_f64();
+    let finished = sink.finish()?;
 
-    println!(
-        "decoded {} candidate blocks; wrote {} wallet-program rows to {}",
-        receipt.scan.candidate_blocks,
-        report.output.row_count,
-        arguments.output.display()
-    );
-    Ok(())
+    finish_targeted_workload(
+        &arguments,
+        archive,
+        timing,
+        targeted,
+        scan_seconds,
+        finished,
+    )
 }

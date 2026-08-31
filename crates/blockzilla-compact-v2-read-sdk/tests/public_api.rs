@@ -1,9 +1,9 @@
 use blockzilla_compact_v2_read_sdk::{
     ArchiveInstructionSource, ArchiveIoSnapshot, CompactV2Archive, CompactV2LocalDescriptor,
-    CompactV2MessageSchema, CompactV2MetadataSchema, CompactV2OpenOptions,
-    CompactV2ParallelScanConfig, CompactV2ParallelScanReceipt, CompactV2RegistryReadPolicy,
-    CompactV2TransportKind, CompactV2TransportReceipt, DEFAULT_COMPACT_V2_FULL_REGISTRY_BYTES,
-    MAX_COMPACT_V2_PARALLEL_WORKERS, ScanRange, ScanRequest,
+    CompactV2OpenOptions, CompactV2ParallelScanConfig, CompactV2ParallelScanReceipt,
+    CompactV2RegistryReadPolicy, CompactV2TransportKind, CompactV2TransportReceipt,
+    DEFAULT_COMPACT_V2_FULL_REGISTRY_BYTES, MAX_COMPACT_V2_PARALLEL_WORKERS, ScanRange,
+    ScanRequest,
 };
 
 #[test]
@@ -24,8 +24,7 @@ fn common_example_types_are_reexported() {
 
 #[test]
 fn local_descriptor_and_transport_receipt_are_public() {
-    let descriptor =
-        CompactV2LocalDescriptor::mainnet_current(900, "epoch-900-corrected-v2").unwrap();
+    let descriptor = CompactV2LocalDescriptor::mainnet(900, "epoch-900-corrected-v2").unwrap();
     assert_eq!(descriptor.epoch, 900);
     let receipt = CompactV2TransportReceipt {
         kind: CompactV2TransportKind::LocalDirectory,
@@ -37,20 +36,11 @@ fn local_descriptor_and_transport_receipt_are_public() {
 }
 
 #[test]
-fn network_wire_grammar_options_are_public() {
+fn network_transport_options_are_public() {
     let options = CompactV2OpenOptions {
-        message_schema: CompactV2MessageSchema::May24PreUnknownFallbacks,
-        metadata_schema: CompactV2MetadataSchema::LegacyRawError,
-        ..CompactV2OpenOptions::default()
+        allow_insecure_http: true,
     };
-    assert_eq!(
-        options.message_schema,
-        CompactV2MessageSchema::May24PreUnknownFallbacks
-    );
-    assert_eq!(
-        options.metadata_schema,
-        CompactV2MetadataSchema::LegacyRawError
-    );
+    assert!(options.allow_insecure_http);
 }
 
 #[test]

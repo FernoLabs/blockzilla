@@ -197,8 +197,8 @@ responses. For a local source, the SDK opens only fixed object names and pins
 the opened files for the scan.
 
 The readers still validate internal headers, indexes, offsets, counts, and
-epoch geometry. Output SHA-256 values in workload tools check application
-result parity. They are not archive publication hashes.
+epoch geometry. Workload parity uses row counts, byte counts, coverage
+evidence, and direct output comparison outside the timed read.
 
 The public source is a small read-only
 [`blockzilla-archive-samples-v1` Worker](../../workers/blockzilla-archive-samples-v1/README.md).

@@ -128,8 +128,11 @@ Local readers pin the opened files and check that they did not change before
 the result is accepted. Structural checks validate headers, lengths, offsets,
 counts, codecs, and cross-file relations.
 
-An output SHA-256 is an application parity check. It does not change the
-source binding and it is not an archive publication hash.
+For the beginner workloads, compare output row and byte counts, then compare
+the output files byte-for-byte outside the timed reader run. The coverage
+count and digest remain the explicit check for incomplete source data. These
+application checks do not change the source binding and are not archive
+publication hashes.
 
 ## Measure speed correctly
 

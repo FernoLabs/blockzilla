@@ -148,7 +148,7 @@ pub struct ScanRequest {
     /// Resolve and include each instruction's account list.
     ///
     /// Program identities and instruction coordinates remain available when
-    /// this projection is disabled. Compact V2 and Indexer V3 leave
+    /// this projection is disabled. Compact V2, Indexer V3, and CAR leave
     /// `ResolvedInstruction::accounts` empty in that case. The default is
     /// `true` for compatibility.
     #[serde(default = "default_true")]
@@ -284,10 +284,10 @@ impl ScanRequest {
     /// Keep instruction program identities and coordinates, but omit their
     /// resolved account lists.
     ///
-    /// Compact V2 and Indexer V3 then avoid instruction-account-list public-key
-    /// resolution and heap allocation. Other adapters can still publish full
-    /// account lists. Applications such as Pump.fun and FireWatch do not use
-    /// those lists.
+    /// Compact V2, Indexer V3, and CAR then avoid instruction-account-list
+    /// public-key resolution and heap allocation. Other adapters can still
+    /// publish full account lists. Applications such as Pump.fun and FireWatch
+    /// do not use those lists.
     pub const fn without_instruction_accounts(mut self) -> Self {
         self.include_instruction_accounts = false;
         self

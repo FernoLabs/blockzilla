@@ -18,9 +18,10 @@ use std::{
 
 pub use blockzilla_query_sdk::{
     ArchiveFormat, ArchiveInstructionSource, ArchiveInstructionSourceExt, ArchiveIoSnapshot,
-    BlockSink, BlockView, RecordedTokenBalance, ScanIoReceipt, ScanRange, ScanReceipt, ScanRequest,
-    SourceIdentity, SourceVerification, TokenBalanceCoverage, TokenBalanceRequirement,
-    TokenBalanceSide, TransactionView,
+    BlockSink, BlockView, Error as QueryError, FnBlockSink, RecordedTokenBalance,
+    Result as QueryResult, ScanIoReceipt, ScanRange, ScanReceipt, ScanRequest, SourceIdentity,
+    SourceVerification, TokenBalanceCoverage, TokenBalanceRequirement, TokenBalanceSide,
+    TransactionView,
 };
 use of_car_reader::{
     query_sdk::{CanonicalBlockPlan, CarInstructionSource, CarQueryError, CarQueryLimits},
@@ -554,8 +555,7 @@ impl CarArchive {
     /// Open one Worker CAR epoch with an exact trusted canonical slot plan.
     ///
     /// This is the correct constructor when one or more canonical blocks have
-    /// an empty raw range. The effective source binding includes a digest of
-    /// the exact supplied plan.
+    /// an empty raw range. The caller supplies the exact trusted plan.
     pub fn open_with_canonical_slots(
         origin: &str,
         epoch: u64,

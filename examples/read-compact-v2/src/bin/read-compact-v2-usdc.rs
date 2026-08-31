@@ -18,7 +18,7 @@ fn main() -> Result<(), Box<dyn Error>> {
             candidate_id,
         } => CompactV2Archive::open_local(
             epoch_root,
-            CompactV2LocalDescriptor::mainnet_current(args.epoch, candidate_id.clone())?,
+            CompactV2LocalDescriptor::mainnet(args.epoch, candidate_id.clone())?,
         )?,
     };
     let timing = RunTiming::after_open(started, &archive);

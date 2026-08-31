@@ -78,8 +78,9 @@ network request. TLS, HTTP, channel, caller, and decoder buffers are outside
 this body-window value.
 
 `OperatorTrusted` is the source verification level because the canonical block
-plan comes from the operator. On the strict Worker path, the binding covers the
-strong-ETag CAR object, raw slot index, and accepted canonical plan.
+count comes from the operator. On the strict Worker path, the binding covers
+the strong-ETag CAR object and raw slot-index object. It does not hash a slot
+plan or archive payload.
 
 The raw index is a byte-range index. A zero-length row does not prove that the
 ledger has no canonical block at that slot. Thus, the SDK does not silently use
@@ -147,10 +148,10 @@ match the admitted HEAD length exactly. The strong-ETag routes do not use this
 exception.
 
 The resulting HTTP verification is `operator-trusted`. The effective source
-binding covers only the accepted URLs, observed lengths, epoch, and canonical
-slot plan. It is not an ETag, archive content hash, manifest, seal, or proof of
-stable remote object identity. `bound_source_size_bytes` is the sum of the two
-observed object lengths.
+binding covers only the accepted URLs, observed lengths, and epoch. It does not
+hash the canonical slot plan or archive payload. It is not an ETag, seal, or
+proof of stable remote object identity. `bound_source_size_bytes` is the sum of
+the two observed object lengths.
 
 The older `open_old_faithful` constructor stays strict and still requires
 strong ETags. Use

@@ -14,14 +14,13 @@
 //!
 //! # Construction and scan
 //!
-//! Obtain the dense slot plan from the trusted manifest or Compact/V3 block
-//! index that defines the comparison. Pass a local file, a caller-owned remote
+//! Obtain the dense slot plan from the trusted block inventory or index that
+//! defines the comparison. Pass a local file, a caller-owned remote
 //! stream, or a decompressor as the sequential [`Read`] input. This module does
 //! not include a network client.
-//! `SourceIdentity::binding` must contain a nonblank CAR object binding. After
-//! construction, [`ArchiveInstructionSource::identity`] returns an effective
-//! binding that contains both that object binding and a domain-separated
-//! SHA-256 digest of the exact canonical slot plan.
+//! `SourceIdentity::binding` must contain a nonblank CAR object binding. The
+//! source keeps that input binding and marks whether it is a strong object
+//! binding or an operator-trusted descriptor.
 //!
 //! ```no_run
 //! use std::{fs::File, io::BufReader};
@@ -46,7 +45,7 @@
 //!     slots_per_epoch: 432_000,
 //!     block_count,
 //!     verification: SourceVerification::OperatorTrusted,
-//!     binding: Some("trusted-root-cid-or-manifest-binding".into()),
+//!     binding: Some("trusted-car-object-binding".into()),
 //! };
 //! let car = BufReader::new(File::open("epoch-185.car")?);
 //! let mut source = CarInstructionSource::new(
@@ -70,17 +69,6 @@ use std::{
     io::{self, Read},
 };
 
-use blockzilla_query_sdk::{
-    ArchiveFormat, ArchiveInstructionSource, BlockHeader, BlockSink, CanonicalBlock,
-    CanonicalTransaction, CoverageReason, CpiCoverage, Error as QueryError, ExecutionStatus,
-    InstructionCoordinate, InstructionCoverage, InstructionDataCoverage,
-    InstructionDataRequirement, MAX_CANONICAL_SHORT_VEC_ITEMS, OrderedBlockPublisher,
-    RecordedTokenBalance, ResolvedInstruction, ScanIoReceipt, ScanReceipt, ScanRequest,
-    SourceIdentity, SourceVerification, TokenBalanceCoverage, TokenBalanceRequirement,
-    TokenBalanceSide, TransactionHeader,
-};
-use sha2::{Digest, Sha256};
-
 use crate::{
     CarBlockReader, LosslessBlockReadLimits,
     confirmed_block::TransactionStatusMeta,
@@ -94,6 +82,15 @@ use crate::{
         CompiledInstruction, MessageHeader, VersionedMessage, VersionedTransaction,
     },
 };
+use blockzilla_query_sdk::{
+    ArchiveFormat, ArchiveInstructionSource, BlockHeader, BlockSink, CanonicalBlock,
+    CanonicalTransaction, CoverageReason, CpiCoverage, Error as QueryError, ExecutionStatus,
+    InstructionCoordinate, InstructionCoverage, InstructionDataCoverage,
+    InstructionDataRequirement, MAX_CANONICAL_SHORT_VEC_ITEMS, OrderedBlockPublisher,
+    RecordedTokenBalance, ResolvedInstruction, ScanIoReceipt, ScanReceipt, ScanRequest,
+    SourceIdentity, SourceVerification, TokenBalanceCoverage, TokenBalanceRequirement,
+    TokenBalanceSide, TransactionHeader,
+};
 
 const HARD_MAX_HEADER_BYTES: usize = 16 << 20;
 const HARD_MAX_IO_BUFFER_BYTES: usize = 64 << 20;
@@ -105,7 +102,6 @@ const HARD_MAX_METADATA_BYTES: usize = 512 << 20;
 const HARD_MAX_RESOLVED_ACCOUNTS: usize = 256;
 const HARD_MAX_TRANSACTIONS_PER_BLOCK: usize = u16::MAX as usize;
 const HARD_MAX_INSTRUCTIONS_PER_TRANSACTION: usize = u16::MAX as usize;
-const CANONICAL_PLAN_DIGEST_DOMAIN: &[u8] = b"blockzilla.car-query.canonical-block-plan.v1\0";
 
 /// Explicit memory and geometry limits for an operator-trusted CAR source.
 ///
@@ -265,7 +261,7 @@ pub enum CarQueryError {
 
 type CarQueryResult<T> = Result<T, CarQueryError>;
 
-/// Exact dense block-row slot sequence from a trusted index or manifest.
+/// Exact dense block-row slot sequence from a trusted block inventory or index.
 ///
 /// A planned slot that is absent from the CAR stream becomes an empty block
 /// row. A skipped slot that is absent from this plan never becomes a row.
@@ -357,8 +353,7 @@ impl<R: Read> CarInstructionSource<R> {
     /// Bind one sequential decoded-CAR stream to a trusted source identity and
     /// canonical dense block plan.
     ///
-    /// The input identity binding is the CAR object binding. The stored source
-    /// identity adds the canonical-plan digest to that binding.
+    /// The input identity binding is the CAR object binding.
     pub fn new(
         reader: R,
         identity: SourceIdentity,
@@ -372,7 +367,7 @@ impl<R: Read> CarInstructionSource<R> {
     ///
     /// The input binding must identify only the accepted descriptor. It must
     /// not claim a strong object validator, content hash, or object identity.
-    /// The stored binding keeps that label and adds the canonical-plan digest.
+    /// The stored binding keeps that label without hashing the slot plan.
     pub fn new_operator_trusted_descriptor(
         reader: R,
         identity: SourceIdentity,
@@ -400,7 +395,7 @@ impl<R: Read> CarInstructionSource<R> {
             .binding
             .take()
             .expect("identity validation required a CAR input binding");
-        identity.binding = Some(effective_binding(input_binding, &plan, binding_kind));
+        identity.binding = Some(effective_binding(input_binding, binding_kind));
         let limits = limits.validate()?;
         let mut reader =
             CarBlockReader::with_capacity(CountingRead::new(reader), limits.io_buffer_bytes);
@@ -612,40 +607,12 @@ fn validate_identity(identity: &SourceIdentity, plan: &CanonicalBlockPlan) -> Ca
     Ok(())
 }
 
-fn effective_binding(
-    input_binding: String,
-    plan: &CanonicalBlockPlan,
-    binding_kind: CarBindingKind,
-) -> String {
+fn effective_binding(input_binding: String, binding_kind: CarBindingKind) -> String {
     let label = match binding_kind {
         CarBindingKind::StrongObject => "car-object-binding",
         CarBindingKind::OperatorTrustedDescriptor => "operator-trusted-input-descriptor",
     };
-    format!(
-        "{label}={input_binding};canonical-slot-plan-sha256={}",
-        canonical_plan_digest_hex(plan)
-    )
-}
-
-fn canonical_plan_digest_hex(plan: &CanonicalBlockPlan) -> String {
-    let mut hasher = Sha256::new();
-    hasher.update(CANONICAL_PLAN_DIGEST_DOMAIN);
-    hasher.update(
-        u64::try_from(plan.slots.len())
-            .expect("validated canonical plan length fits u32")
-            .to_le_bytes(),
-    );
-    for slot in &plan.slots {
-        hasher.update(slot.to_le_bytes());
-    }
-    let digest = hasher.finalize();
-    const HEX: &[u8; 16] = b"0123456789abcdef";
-    let mut output = String::with_capacity(digest.len() * 2);
-    for byte in digest {
-        output.push(char::from(HEX[usize::from(byte >> 4)]));
-        output.push(char::from(HEX[usize::from(byte & 0x0f)]));
-    }
-    output
+    format!("{label}={input_binding}")
 }
 
 fn publish_empty_row(
@@ -878,6 +845,7 @@ fn project_transaction(
                     metadata,
                     &account_keys,
                     &request.instruction_data,
+                    request.include_instruction_accounts,
                     limits,
                 )?;
                 (InstructionCoverage::Complete, instructions)
@@ -1207,6 +1175,7 @@ fn project_instructions(
     metadata: Option<&TransactionStatusMeta>,
     account_keys: &[[u8; 32]],
     requirement: &InstructionDataRequirement,
+    include_accounts: bool,
     limits: CarQueryLimits,
 ) -> CarQueryResult<Vec<ResolvedInstruction>> {
     let groups = metadata
@@ -1242,6 +1211,7 @@ fn project_instructions(
             &instruction.data,
             account_keys,
             requirement,
+            include_accounts,
         )?;
         if next_group
             .peek()
@@ -1259,6 +1229,7 @@ fn project_instructions(
                     &instruction.data,
                     account_keys,
                     requirement,
+                    include_accounts,
                 )?;
             }
         }
@@ -1282,6 +1253,7 @@ fn push_instruction(
     data: &[u8],
     account_keys: &[[u8; 32]],
     requirement: &InstructionDataRequirement,
+    include_accounts: bool,
 ) -> CarQueryResult<()> {
     let program_index = usize::try_from(program_id_index)
         .map_err(|_| CarQueryError::InvalidArchive("program index exceeds usize".into()))?;
@@ -1291,15 +1263,28 @@ fn push_instruction(
             account_keys.len()
         ))
     })?;
-    let mut accounts = reserved_vec(account_indexes.len(), "instruction account keys")?;
-    for index in account_indexes {
-        accounts.push(*account_keys.get(usize::from(*index)).ok_or_else(|| {
-            CarQueryError::InvalidArchive(format!(
-                "instruction account index {index} is outside {} resolved accounts",
-                account_keys.len()
-            ))
-        })?);
-    }
+    let accounts = if include_accounts {
+        let mut accounts = reserved_vec(account_indexes.len(), "instruction account keys")?;
+        for index in account_indexes {
+            accounts.push(*account_keys.get(usize::from(*index)).ok_or_else(|| {
+                CarQueryError::InvalidArchive(format!(
+                    "instruction account index {index} is outside {} resolved accounts",
+                    account_keys.len()
+                ))
+            })?);
+        }
+        accounts
+    } else {
+        for index in account_indexes {
+            if usize::from(*index) >= account_keys.len() {
+                return Err(CarQueryError::InvalidArchive(format!(
+                    "instruction account index {index} is outside {} resolved accounts",
+                    account_keys.len()
+                )));
+            }
+        }
+        Vec::new()
+    };
     if data.len() > MAX_CANONICAL_SHORT_VEC_ITEMS {
         return Err(CarQueryError::InvalidArchive(format!(
             "instruction data length {} exceeds canonical short-vector limit",
@@ -1744,9 +1729,7 @@ mod tests {
         );
         assert_eq!(
             valid.identity().binding.as_deref(),
-            Some(
-                "car-object-binding=fixture-root-cid;canonical-slot-plan-sha256=1d1fddb024f89915be1a602e7dee07d0d81fd1f8c5f4276e0e5bf6622a8db32c"
-            )
+            Some("car-object-binding=fixture-root-cid")
         );
 
         let mut descriptor_identity = identity(&plan);
@@ -1759,9 +1742,10 @@ mod tests {
         )
         .unwrap();
         let descriptor_binding = descriptor.identity().binding.as_deref().unwrap();
-        assert!(descriptor_binding.starts_with(
-            "operator-trusted-input-descriptor=url-length-descriptor-v1;canonical-slot-plan-sha256="
-        ));
+        assert_eq!(
+            descriptor_binding,
+            "operator-trusted-input-descriptor=url-length-descriptor-v1"
+        );
         assert!(!descriptor_binding.contains("car-object-binding"));
 
         let mut no_binding = identity(&plan);
@@ -1795,7 +1779,7 @@ mod tests {
             CarQueryLimits::default(),
         )
         .unwrap();
-        assert_ne!(valid.identity().binding, other.identity().binding);
+        assert_eq!(valid.identity().binding, other.identity().binding);
 
         let mut wrong_count = identity(&plan);
         wrong_count.block_count = 1;
@@ -2107,6 +2091,66 @@ mod tests {
         assert_eq!(transaction.instructions[4].program_id, loaded_program);
         assert_eq!(transaction.instructions[4].accounts, vec![readonly_program]);
         assert_eq!(transaction.instructions[4].data, vec![35]);
+    }
+
+    #[test]
+    fn v0_without_instruction_accounts_keeps_loaded_programs_and_cpi() {
+        let signer = [1; 32];
+        let static_program = [2; 32];
+        let loaded_program = [9; 32];
+        let readonly_program = [8; 32];
+        let transaction = v0_transaction(
+            [7; 64],
+            &[signer, static_program],
+            &[(2, &[0, 3], &[11])],
+            &[3],
+            &[4],
+        );
+        let metadata = metadata(TransactionStatusMeta {
+            inner_instructions: vec![InnerInstructions {
+                index: 0,
+                instructions: vec![InnerInstruction {
+                    program_id_index: 3,
+                    accounts: vec![2],
+                    data: vec![33],
+                    stack_height: Some(2),
+                }],
+            }],
+            inner_instructions_none: false,
+            loaded_writable_addresses: vec![loaded_program.to_vec()],
+            loaded_readonly_addresses: vec![readonly_program.to_vec()],
+            ..TransactionStatusMeta::default()
+        });
+        let fixture = FixtureTransaction {
+            cid: cid(0x55),
+            transaction,
+            metadata,
+            index: Some(0),
+        };
+        let mut car = car_header();
+        append_block(&mut car, FIRST_SLOT, &[fixture], &[0], &[0], 0x56);
+        let request = ScanRequest::all()
+            .without_instruction_accounts()
+            .without_instruction_data();
+        let (receipt, blocks) = collect(&mut source(car, vec![FIRST_SLOT]), &request).unwrap();
+        let transaction = &blocks[0].transactions[0];
+
+        assert_eq!(receipt.instructions, 2);
+        assert_eq!(receipt.transactions_with_incomplete_instructions, 0);
+        assert_eq!(receipt.transactions_with_incomplete_cpi, 0);
+        assert_eq!(transaction.header.cpi_coverage, CpiCoverage::Complete);
+        assert_eq!(transaction.instructions.len(), 2);
+        assert_eq!(transaction.instructions[0].program_id, loaded_program);
+        assert!(transaction.instructions[0].accounts.is_empty());
+        assert_eq!(transaction.instructions[0].coordinate.order, 0);
+        assert_eq!(transaction.instructions[0].coordinate.outer_index, 0);
+        assert_eq!(transaction.instructions[0].coordinate.inner_index, None);
+        assert_eq!(transaction.instructions[1].program_id, readonly_program);
+        assert!(transaction.instructions[1].accounts.is_empty());
+        assert_eq!(transaction.instructions[1].coordinate.order, 1);
+        assert_eq!(transaction.instructions[1].coordinate.outer_index, 0);
+        assert_eq!(transaction.instructions[1].coordinate.inner_index, Some(0));
+        assert_eq!(transaction.instructions[1].coordinate.stack_height, Some(2));
     }
 
     #[test]

@@ -32,7 +32,7 @@ pub use blockzilla_read_sdk::{
     CompactV2RegistryReadPolicy, DEFAULT_COMPACT_V2_FULL_REGISTRY_BYTES,
     MAX_ORDERED_PARALLEL_DECODE_WORKERS as MAX_COMPACT_V2_PARALLEL_WORKERS,
 };
-pub use blockzilla_read_sdk::{CompactV2MessageSchema, CompactV2MetadataSchema};
+use blockzilla_read_sdk::{CompactV2MessageSchema, CompactV2MetadataSchema};
 use sha2::{Digest, Sha256};
 use thiserror::Error;
 use url::Url;
@@ -89,27 +89,13 @@ const LOCAL_COMPACT_V2_OBJECTS: &[&str] = &[
 ];
 
 /// Network options for [`CompactV2Archive::open_with_options`].
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
 pub struct CompactV2OpenOptions {
     /// Permit cleartext HTTP for a controlled local fixture.
     pub allow_insecure_http: bool,
-    /// Exact message grammar used by the complete remote object set.
-    pub message_schema: CompactV2MessageSchema,
-    /// Exact transaction-metadata grammar used by the remote object set.
-    pub metadata_schema: CompactV2MetadataSchema,
 }
 
-impl Default for CompactV2OpenOptions {
-    fn default() -> Self {
-        Self {
-            allow_insecure_http: false,
-            message_schema: CompactV2MessageSchema::Current,
-            metadata_schema: CompactV2MetadataSchema::CurrentTypedError,
-        }
-    }
-}
-
-/// Explicit identity and wire grammar for one local reader set.
+/// Explicit identity for one local reader set.
 ///
 /// This is an operator input, not a content-derived identity.
 /// `candidate_id` must change when the operator replaces the reader set.
@@ -120,14 +106,12 @@ pub struct CompactV2LocalDescriptor {
     pub candidate_id: String,
     pub first_slot: u64,
     pub slots_per_epoch: u64,
-    pub message_schema: CompactV2MessageSchema,
-    pub metadata_schema: CompactV2MetadataSchema,
 }
 
 impl CompactV2LocalDescriptor {
-    /// Describe a current-schema mainnet reader set in the fixed-width epoch
-    /// range used by the retained Compact V2 archives.
-    pub fn mainnet_current(epoch: u64, candidate_id: impl Into<String>) -> Result<Self> {
+    /// Describe a mainnet reader set in the fixed-width epoch range used by
+    /// the retained Compact V2 archives.
+    pub fn mainnet(epoch: u64, candidate_id: impl Into<String>) -> Result<Self> {
         let first_slot = epoch
             .checked_mul(MAINNET_ARCHIVE_SLOTS_PER_EPOCH)
             .ok_or_else(|| Error::Geometry("mainnet epoch first slot overflows u64".into()))?;
@@ -137,8 +121,6 @@ impl CompactV2LocalDescriptor {
             candidate_id: candidate_id.into(),
             first_slot,
             slots_per_epoch: MAINNET_ARCHIVE_SLOTS_PER_EPOCH,
-            message_schema: CompactV2MessageSchema::Current,
-            metadata_schema: CompactV2MetadataSchema::CurrentTypedError,
         };
         descriptor.validate()?;
         Ok(descriptor)
@@ -443,8 +425,8 @@ impl CompactV2Archive {
                 epoch_first_slot: Some(first_slot),
                 ..OpenOptions::default()
             },
-            options.message_schema,
-            options.metadata_schema,
+            CompactV2MessageSchema::Current,
+            CompactV2MetadataSchema::CurrentTypedError,
         )
         .map_err(Error::Reader)?;
         let source = CompactV2InstructionSource::new(reader, first_slot).map_err(Error::Query)?;
@@ -465,7 +447,7 @@ impl CompactV2Archive {
 
     /// Open one Compact V2 reader set from a pinned local root.
     ///
-    /// The explicit descriptor supplies operator-trusted identity and grammar.
+    /// The explicit descriptor supplies operator-trusted identity and geometry.
     /// Admission retains all structural index, registry, metadata,
     /// signature-length, and epoch-geometry checks.
     pub fn open_local(
@@ -494,8 +476,8 @@ impl CompactV2Archive {
                 epoch_first_slot: Some(descriptor.first_slot),
                 ..OpenOptions::default()
             },
-            descriptor.message_schema,
-            descriptor.metadata_schema,
+            CompactV2MessageSchema::Current,
+            CompactV2MetadataSchema::CurrentTypedError,
         )
         .map_err(Error::Reader)?;
         let bound_source_size_bytes = reader
@@ -876,26 +858,9 @@ mod tests {
     }
 
     #[test]
-    fn network_options_require_an_explicit_historical_grammar() {
+    fn network_options_do_not_select_a_wire_grammar() {
         let current = CompactV2OpenOptions::default();
-        assert_eq!(current.message_schema, CompactV2MessageSchema::Current);
-        assert_eq!(
-            current.metadata_schema,
-            CompactV2MetadataSchema::CurrentTypedError
-        );
-        let historical = CompactV2OpenOptions {
-            message_schema: CompactV2MessageSchema::May24PreUnknownFallbacks,
-            metadata_schema: CompactV2MetadataSchema::LegacyRawError,
-            ..current
-        };
-        assert_eq!(
-            historical.message_schema,
-            CompactV2MessageSchema::May24PreUnknownFallbacks
-        );
-        assert_eq!(
-            historical.metadata_schema,
-            CompactV2MetadataSchema::LegacyRawError
-        );
+        assert!(!current.allow_insecure_http);
     }
 
     #[test]
@@ -984,23 +949,16 @@ mod tests {
 
     #[test]
     fn local_descriptor_is_explicit_and_current_schema() {
-        let descriptor =
-            CompactV2LocalDescriptor::mainnet_current(900, "epoch-900-corrected-v2").unwrap();
+        let descriptor = CompactV2LocalDescriptor::mainnet(900, "epoch-900-corrected-v2").unwrap();
         assert_eq!(descriptor.first_slot, 388_800_000);
         assert_eq!(descriptor.slots_per_epoch, 432_000);
-        assert_eq!(descriptor.message_schema, CompactV2MessageSchema::Current);
-        assert_eq!(
-            descriptor.metadata_schema,
-            CompactV2MetadataSchema::CurrentTypedError
-        );
-        assert!(CompactV2LocalDescriptor::mainnet_current(900, "bad candidate").is_err());
+        assert!(CompactV2LocalDescriptor::mainnet(900, "bad candidate").is_err());
     }
 
     #[test]
     fn local_open_uses_the_format_defined_object_set() {
         let temporary = tempfile::tempdir().unwrap();
-        let descriptor =
-            CompactV2LocalDescriptor::mainnet_current(900, "epoch-900-corrected-v2").unwrap();
+        let descriptor = CompactV2LocalDescriptor::mainnet(900, "epoch-900-corrected-v2").unwrap();
         let error = match CompactV2Archive::open_local(temporary.path(), descriptor) {
             Ok(_) => panic!("empty local root was admitted"),
             Err(error) => error,

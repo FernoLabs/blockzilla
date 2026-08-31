@@ -14,9 +14,7 @@ use std::{
     str::FromStr,
 };
 
-use blockzilla_car_read_sdk::{
-    ArchiveIoSnapshot, CarArchiveHttpProfile, ScanIoReceipt, ScanReceipt, SourceVerification,
-};
+use blockzilla_car_read_sdk::{ArchiveIoSnapshot, ScanIoReceipt, ScanReceipt, SourceVerification};
 use blockzilla_example_workloads::{CoverageReport, OutputReport};
 
 pub const DEFAULT_PUBLIC_ORIGIN: &str =
@@ -45,24 +43,8 @@ pub enum Route {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub struct TaskArguments {
-    pub route: Route,
-    pub origin: String,
-    pub epoch: u64,
-    pub expected_blocks: NonZeroU32,
-    pub output: PathBuf,
-    pub max_blocks: Option<NonZeroU32>,
-}
-
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct TargetTaskArguments {
-    pub source: TaskArguments,
-    pub target: String,
-}
-
-#[derive(Debug, Clone, PartialEq, Eq)]
 pub enum WorkloadSource {
-    Network { route: Route, origin: String },
+    Network { origin: String },
     LocalArchive { archive_root: PathBuf },
 }
 
@@ -73,9 +55,19 @@ pub struct WorkloadArguments {
     pub expected_blocks: NonZeroU32,
     pub target: Option<String>,
     pub output: PathBuf,
-    /// Present only when the hidden legacy positional form requests a smoke
-    /// prefix. The normal flag interface always scans the complete epoch.
-    pub max_blocks: Option<NonZeroU32>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct CountArguments {
+    pub source: CountSource,
+    pub epoch: u64,
+    pub expected_blocks: NonZeroU32,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum CountSource {
+    Network { origin: String },
+    Local { archive_root: PathBuf },
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -98,8 +90,7 @@ impl Error for CliError {}
 /// Parse the simple full-epoch workload flags.
 ///
 /// With no arguments, this selects the clean public Worker layout, epoch 900,
-/// and `default_output`. The old positional form remains accepted for existing
-/// benchmark runners, but it is not part of the beginner interface.
+/// and `default_output`.
 pub fn workload_arguments(
     binary: &str,
     default_output: &str,
@@ -128,6 +119,86 @@ pub fn workload_target_arguments(
     )
 }
 
+/// Parse the small full-epoch count example flags.
+///
+/// With no arguments, this selects public epoch 900. A local archive uses the
+/// same `car/<epoch>/` directory layout as the public source.
+pub fn count_arguments(binary: &str) -> Result<CountArguments, CliError> {
+    count_arguments_from(binary, std::env::args_os().skip(1))
+}
+
+pub fn count_arguments_from(
+    binary: &str,
+    values: impl IntoIterator<Item = OsString>,
+) -> Result<CountArguments, CliError> {
+    let usage = format!(
+        "usage: {binary} [--epoch N] [--origin URL | --archive-root DIR]\n\nSample epochs: 0, 100, 200, ..., 1000. The complete epoch is always scanned."
+    );
+    let mut epoch = DEFAULT_SAMPLE_EPOCH;
+    let mut epoch_was_set = false;
+    let mut origin = DEFAULT_PUBLIC_ORIGIN.to_owned();
+    let mut origin_was_set = false;
+    let mut archive_root = None;
+    let mut values = values.into_iter();
+
+    while let Some(value) = values.next() {
+        let flag = os_text(value, &usage)?;
+        match flag.as_str() {
+            "--epoch" => {
+                if epoch_was_set {
+                    return Err(CliError::new("--epoch was provided more than once"));
+                }
+                epoch_was_set = true;
+                epoch = parse_number(
+                    "epoch",
+                    &os_text(
+                        values.next().ok_or_else(|| CliError::new(usage.clone()))?,
+                        &usage,
+                    )?,
+                )?;
+            }
+            "--origin" => {
+                if origin_was_set {
+                    return Err(CliError::new("--origin was provided more than once"));
+                }
+                origin_was_set = true;
+                origin = os_text(
+                    values.next().ok_or_else(|| CliError::new(usage.clone()))?,
+                    &usage,
+                )?;
+            }
+            "--archive-root" => {
+                if archive_root.is_some() {
+                    return Err(CliError::new("--archive-root was provided more than once"));
+                }
+                archive_root = Some(PathBuf::from(
+                    values.next().ok_or_else(|| CliError::new(usage.clone()))?,
+                ));
+            }
+            "--help" | "-h" => return Err(CliError::new(usage)),
+            _ => {
+                return Err(CliError::new(format!("unknown option {flag:?}\n\n{usage}")));
+            }
+        }
+    }
+
+    if archive_root.is_some() && origin_was_set {
+        return Err(CliError::new(
+            "use either --origin or --archive-root, not both",
+        ));
+    }
+    let expected_blocks = sample_block_count(epoch)?;
+    let source = archive_root.map_or_else(
+        || CountSource::Network { origin },
+        |archive_root| CountSource::Local { archive_root },
+    );
+    Ok(CountArguments {
+        source,
+        epoch,
+        expected_blocks,
+    })
+}
+
 pub fn workload_arguments_from(
     binary: &str,
     target_name: Option<&str>,
@@ -135,20 +206,13 @@ pub fn workload_arguments_from(
     default_output: &str,
     values: impl IntoIterator<Item = OsString>,
 ) -> Result<WorkloadArguments, CliError> {
-    let values = values.into_iter().collect::<Vec<_>>();
-    if values
-        .first()
-        .and_then(|value| value.to_str())
-        .is_some_and(|value| {
-            matches!(
-                value,
-                "worker" | "old-faithful" | "old-faithful-operator-trusted"
-            )
-        })
-    {
-        return legacy_workload_arguments(target_name, values);
-    }
-    flag_workload_arguments(binary, target_name, default_target, default_output, values)
+    flag_workload_arguments(
+        binary,
+        target_name,
+        default_target,
+        default_output,
+        values.into_iter().collect(),
+    )
 }
 
 fn flag_workload_arguments(
@@ -236,10 +300,7 @@ fn flag_workload_arguments(
     }
     let expected_blocks = sample_block_count(epoch)?;
     let source = archive_root.map_or_else(
-        || WorkloadSource::Network {
-            route: Route::Worker,
-            origin,
-        },
+        || WorkloadSource::Network { origin },
         |archive_root| WorkloadSource::LocalArchive { archive_root },
     );
     Ok(WorkloadArguments {
@@ -248,50 +309,7 @@ fn flag_workload_arguments(
         expected_blocks,
         target,
         output,
-        max_blocks: None,
     })
-}
-
-fn legacy_workload_arguments(
-    target_name: Option<&str>,
-    values: Vec<OsString>,
-) -> Result<WorkloadArguments, CliError> {
-    let values = values
-        .into_iter()
-        .map(|value| {
-            value
-                .into_string()
-                .map_err(|_| CliError::new("legacy positional arguments must be UTF-8"))
-        })
-        .collect::<Result<Vec<_>, _>>()?;
-    let usage = "legacy CAR workload arguments are invalid";
-    if target_name.is_some() {
-        let parsed = target_task_arguments(values, usage)?;
-        Ok(WorkloadArguments {
-            source: WorkloadSource::Network {
-                route: parsed.source.route,
-                origin: parsed.source.origin,
-            },
-            epoch: parsed.source.epoch,
-            expected_blocks: parsed.source.expected_blocks,
-            target: Some(parsed.target),
-            output: parsed.source.output,
-            max_blocks: parsed.source.max_blocks,
-        })
-    } else {
-        let parsed = task_arguments(values, usage)?;
-        Ok(WorkloadArguments {
-            source: WorkloadSource::Network {
-                route: parsed.route,
-                origin: parsed.origin,
-            },
-            epoch: parsed.epoch,
-            expected_blocks: parsed.expected_blocks,
-            target: None,
-            output: parsed.output,
-            max_blocks: parsed.max_blocks,
-        })
-    }
 }
 
 fn sample_block_count(epoch: u64) -> Result<NonZeroU32, CliError> {
@@ -312,77 +330,6 @@ fn os_text(value: OsString, usage: &str) -> Result<String, CliError> {
         .map_err(|_| CliError::new(format!("an option must be UTF-8\n\n{usage}")))
 }
 
-pub fn task_arguments(
-    values: impl IntoIterator<Item = String>,
-    usage: &'static str,
-) -> Result<TaskArguments, CliError> {
-    let mut values = values.into_iter();
-    let route = parse_route(values.next(), usage)?;
-    let origin = required(values.next(), usage)?;
-    let epoch = parse_number("epoch", &required(values.next(), usage)?)?;
-    let expected_blocks = parse_nonzero("canonical-block-count", &required(values.next(), usage)?)?;
-    let output = PathBuf::from(required(values.next(), usage)?);
-    let max_blocks = values
-        .next()
-        .map(|value| parse_nonzero("max-blocks", &value))
-        .transpose()?;
-    if values.next().is_some() {
-        return Err(CliError::new(usage));
-    }
-    Ok(TaskArguments {
-        route,
-        origin,
-        epoch,
-        expected_blocks,
-        output,
-        max_blocks,
-    })
-}
-
-pub fn target_task_arguments(
-    values: impl IntoIterator<Item = String>,
-    usage: &'static str,
-) -> Result<TargetTaskArguments, CliError> {
-    let mut values = values.into_iter();
-    let route = parse_route(values.next(), usage)?;
-    let origin = required(values.next(), usage)?;
-    let epoch = parse_number("epoch", &required(values.next(), usage)?)?;
-    let expected_blocks = parse_nonzero("canonical-block-count", &required(values.next(), usage)?)?;
-    let target = required(values.next(), usage)?;
-    let output = PathBuf::from(required(values.next(), usage)?);
-    let max_blocks = values
-        .next()
-        .map(|value| parse_nonzero("max-blocks", &value))
-        .transpose()?;
-    if values.next().is_some() {
-        return Err(CliError::new(usage));
-    }
-    Ok(TargetTaskArguments {
-        source: TaskArguments {
-            route,
-            origin,
-            epoch,
-            expected_blocks,
-            output,
-            max_blocks,
-        },
-        target,
-    })
-}
-
-fn parse_route(value: Option<String>, usage: &'static str) -> Result<Route, CliError> {
-    match value.as_deref() {
-        Some("worker") => Ok(Route::Worker),
-        Some("old-faithful") => Ok(Route::OldFaithful),
-        Some("old-faithful-operator-trusted") => Ok(Route::OldFaithfulOperatorTrusted),
-        _ => Err(CliError::new(usage)),
-    }
-}
-
-fn required(value: Option<String>, usage: &'static str) -> Result<String, CliError> {
-    value.ok_or_else(|| CliError::new(usage))
-}
-
 fn parse_number<T>(name: &str, value: &str) -> Result<T, CliError>
 where
     T: FromStr,
@@ -391,11 +338,6 @@ where
     value
         .parse()
         .map_err(|error| CliError::new(format!("invalid {name}: {error}")))
-}
-
-fn parse_nonzero(name: &str, value: &str) -> Result<NonZeroU32, CliError> {
-    NonZeroU32::new(parse_number(name, value)?)
-        .ok_or_else(|| CliError::new(format!("{name} must be greater than zero")))
 }
 
 pub fn parse_pubkey(value: &str) -> Result<[u8; 32], CliError> {
@@ -435,7 +377,6 @@ pub struct RunFacts {
     pub verification: SourceVerification,
     pub requested_blocks: u32,
     pub bound_source_size_bytes: u64,
-    pub http_profile: Option<CarArchiveHttpProfile>,
     pub receipt: ScanReceipt,
     pub setup_seconds: f64,
     pub scan_seconds: f64,
@@ -449,46 +390,13 @@ impl Display for RunFacts {
     fn fmt(&self, formatter: &mut Formatter<'_>) -> fmt::Result {
         let scan_seconds = self.scan_seconds.max(f64::MIN_POSITIVE);
         let total_seconds = self.total_seconds.max(f64::MIN_POSITIVE);
-        let (
-            http_verification,
-            http_object_binding,
-            http_workers,
-            http_window_chunks,
-            http_chunk_bytes,
-            http_body_window_bytes,
-        ) = self.http_profile.map_or(
-            ("not-applicable", "not-applicable", 0, 0, 0, 0),
-            |profile| {
-                (
-                    match profile.verification {
-                        blockzilla_car_read_sdk::CarArchiveHttpVerification::StrongEtag => {
-                            "strong-etag"
-                        }
-                        blockzilla_car_read_sdk::CarArchiveHttpVerification::OperatorTrusted => {
-                            "operator-trusted"
-                        }
-                    },
-                    profile.verification.object_binding_kind(),
-                    profile.workers,
-                    profile.window_chunks,
-                    profile.chunk_bytes,
-                    profile.body_window_bytes,
-                )
-            },
-        );
         write!(
             formatter,
-            "format=car epoch={} verification={} requested_blocks={} bound_source_size_bytes={} http_verification={} http_object_binding={} http_content_hash=none http_workers={} http_window_chunks={} http_chunk_bytes={} http_body_window_bytes={} blocks={} transactions={} instructions={} setup_s={:.6} scan_s={:.6} total_s={:.6} scan_tps={:.3} total_tps={:.3}",
+            "format=car epoch={} verification={} requested_blocks={} bound_source_size_bytes={} blocks={} transactions={} instructions={} setup_s={:.6} scan_s={:.6} total_s={:.6} scan_tps={:.3} total_tps={:.3}",
             self.epoch,
             self.verification,
             self.requested_blocks,
             self.bound_source_size_bytes,
-            http_verification,
-            http_object_binding,
-            http_workers,
-            http_window_chunks,
-            http_chunk_bytes,
-            http_body_window_bytes,
             self.receipt.blocks,
             self.receipt.transactions,
             self.receipt.instructions,
@@ -561,12 +469,11 @@ impl Display for OutputFacts<'_> {
     fn fmt(&self, formatter: &mut Formatter<'_>) -> fmt::Result {
         write!(
             formatter,
-            "workload={} output_schema={} output_rows={} output_bytes={} output_sha256={} output_complete={} coverage_indeterminate_transactions={} coverage_sha256={}",
+            "workload={} output_schema={} output_rows={} output_bytes={} output_complete={} coverage_indeterminate_transactions={} coverage_sha256={}",
             self.workload,
             self.output.schema,
             self.output.row_count,
             self.output.output_bytes,
-            self.output.sha256_hex(),
             self.output_complete,
             self.coverage.indeterminate_transactions,
             self.coverage.sha256_hex(),
@@ -578,7 +485,78 @@ impl Display for OutputFacts<'_> {
 mod tests {
     use super::*;
 
-    const USAGE: &str = "usage: example ...";
+    #[test]
+    fn count_defaults_to_public_epoch_900() {
+        let arguments = count_arguments_from("read-car", std::iter::empty::<OsString>()).unwrap();
+        assert_eq!(arguments.epoch, 900);
+        assert_eq!(arguments.expected_blocks.get(), 431_858);
+        assert_eq!(
+            arguments.source,
+            CountSource::Network {
+                origin: DEFAULT_PUBLIC_ORIGIN.to_owned(),
+            }
+        );
+    }
+
+    #[test]
+    fn count_resolves_a_local_sample_epoch() {
+        let arguments = count_arguments_from(
+            "read-car",
+            ["--archive-root", "archive", "--epoch", "100"]
+                .into_iter()
+                .map(OsString::from),
+        )
+        .unwrap();
+        assert_eq!(arguments.epoch, 100);
+        assert_eq!(arguments.expected_blocks.get(), 402_076);
+        assert_eq!(
+            arguments.source,
+            CountSource::Local {
+                archive_root: PathBuf::from("archive"),
+            }
+        );
+    }
+
+    #[test]
+    fn count_rejects_a_block_limit() {
+        let error = count_arguments_from(
+            "read-car",
+            ["--blocks", "1024"].into_iter().map(OsString::from),
+        )
+        .unwrap_err();
+        assert!(error.to_string().contains("unknown option"));
+    }
+
+    #[test]
+    fn count_rejects_mixed_local_and_network_sources() {
+        let error = count_arguments_from(
+            "read-car",
+            [
+                "--archive-root",
+                "archive",
+                "--origin",
+                "https://archive.example",
+            ]
+            .into_iter()
+            .map(OsString::from),
+        )
+        .unwrap_err();
+        assert!(
+            error
+                .to_string()
+                .contains("either --origin or --archive-root")
+        );
+    }
+
+    #[test]
+    fn count_rejects_an_epoch_outside_the_public_sample_set() {
+        let error = count_arguments_from(
+            "read-car",
+            ["--epoch", "901"].into_iter().map(OsString::from),
+        )
+        .unwrap_err();
+        assert!(error.to_string().contains("not in the public sample set"));
+    }
 
     #[test]
     fn workload_defaults_to_public_epoch_900() {
@@ -593,11 +571,9 @@ mod tests {
         assert_eq!(arguments.epoch, 900);
         assert_eq!(arguments.expected_blocks.get(), 431_858);
         assert_eq!(arguments.output, PathBuf::from("car-usdc.bin"));
-        assert_eq!(arguments.max_blocks, None);
         assert_eq!(
             arguments.source,
             WorkloadSource::Network {
-                route: Route::Worker,
                 origin: DEFAULT_PUBLIC_ORIGIN.to_owned(),
             }
         );
@@ -668,97 +644,6 @@ mod tests {
                 .to_string()
                 .contains("either --origin or --archive-root")
         );
-    }
-
-    #[test]
-    fn workload_keeps_the_legacy_smoke_prefix() {
-        let arguments = workload_arguments_from(
-            "read-car-usdc",
-            None,
-            None,
-            "car-usdc.bin",
-            [
-                "old-faithful-operator-trusted",
-                "https://files.old-faithful.net",
-                "900",
-                "431858",
-                "legacy.bin",
-                "1024",
-            ]
-            .into_iter()
-            .map(OsString::from),
-        )
-        .unwrap();
-        assert_eq!(arguments.max_blocks.unwrap().get(), 1_024);
-        assert_eq!(arguments.output, PathBuf::from("legacy.bin"));
-        assert!(matches!(
-            arguments.source,
-            WorkloadSource::Network {
-                route: Route::OldFaithfulOperatorTrusted,
-                ..
-            }
-        ));
-    }
-
-    #[test]
-    fn parses_a_full_epoch_task() {
-        let arguments = task_arguments(
-            [
-                "old-faithful",
-                "https://files.old-faithful.net",
-                "900",
-                "431858",
-                "usdc.bin",
-            ]
-            .into_iter()
-            .map(str::to_owned),
-            USAGE,
-        )
-        .unwrap();
-        assert_eq!(arguments.route, Route::OldFaithful);
-        assert_eq!(arguments.epoch, 900);
-        assert_eq!(arguments.expected_blocks.get(), 431_858);
-        assert_eq!(arguments.output, PathBuf::from("usdc.bin"));
-        assert_eq!(arguments.max_blocks, None);
-    }
-
-    #[test]
-    fn parses_the_explicit_operator_trusted_route() {
-        let arguments = task_arguments(
-            [
-                "old-faithful-operator-trusted",
-                "https://files.old-faithful.net",
-                "100",
-                "430000",
-                "usdc.bin",
-            ]
-            .into_iter()
-            .map(str::to_owned),
-            USAGE,
-        )
-        .unwrap();
-        assert_eq!(arguments.route, Route::OldFaithfulOperatorTrusted);
-    }
-
-    #[test]
-    fn parses_a_target_and_smoke_limit() {
-        let arguments = target_task_arguments(
-            [
-                "worker",
-                "https://archive.example",
-                "0",
-                "431548",
-                "11111111111111111111111111111111",
-                "firewatch.bin",
-                "1024",
-            ]
-            .into_iter()
-            .map(str::to_owned),
-            USAGE,
-        )
-        .unwrap();
-        assert_eq!(arguments.target, "11111111111111111111111111111111");
-        assert_eq!(arguments.source.max_blocks.unwrap().get(), 1_024);
     }
 
     #[test]

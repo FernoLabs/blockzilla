@@ -1,7 +1,9 @@
 # Read CAR
 
-The three primary programs are small CAR examples:
+The primary programs are small CAR examples:
 
+- [`read-car`](src/main.rs) counts blocks, transactions, and recorded inner
+  instructions in fixed 9,000-slot windows.
 - [`read-car-usdc`](src/bin/read-car-usdc.rs) writes recorded USDC pre- and
   post-token balances.
 - [`read-car-pumpfun`](src/bin/read-car-pumpfun.rs) writes transactions with a
@@ -9,9 +11,10 @@ The three primary programs are small CAR examples:
 - [`read-car-firewatch`](src/bin/read-car-firewatch.rs) writes the distinct
   programs reached by successful transactions from one signer wallet.
 
-Each program opens one CAR archive through `blockzilla-car-read-sdk`, builds
-one query, and streams the result to one shared workload sink. It does not
-select an archive format at run time.
+Each program opens one CAR archive through `blockzilla-car-read-sdk` and builds
+one query. The three application jobs stream to shared workload sinks. The
+ordered reader keeps about 48 slot-window counters in memory. No program
+selects an archive format at run time.
 
 ## Start with a local archive
 
@@ -75,16 +78,15 @@ cargo run --release --locked -p blockzilla-read-car --bin read-car-usdc
 The Worker route requires exact lengths and strong ETags. Use `--origin URL`
 for another Worker with the same `/car/<epoch>/...` object layout.
 
-Each program reports setup, scan, and total time. It also reports transaction
-rate, source bytes delivered to the decoder, HTTP body bytes, MB/s, output
-rows, output bytes, output SHA-256, coverage status, and the coverage SHA-256.
-For a network source, it also reports the HTTP admission and the worker,
-window, chunk, and body-window values. These programs use the SDK defaults:
-four workers, eight chunks, and 32 MiB chunks, for a 256 MiB body window. The
-HTTP fields are `not-applicable` or zero for a local source.
+The three application programs report setup, scan, and total time. They also
+report transaction rate, source bytes delivered to the decoder, HTTP body
+bytes, MB/s, output rows, output bytes, coverage status, and the coverage
+SHA-256. The ordered count program reports the same time and read-rate units,
+plus its block, transaction, and recorded inner-instruction totals.
 Before a speed comparison, require the output row count, output byte count,
-output SHA-256, complete or incomplete state, indeterminate transaction count,
-and coverage SHA-256 to match. Use the same epoch, block universe, and target.
+complete or incomplete state, indeterminate transaction count, and coverage
+SHA-256 to match. Compare the output files byte-for-byte outside the timed run.
+Use the same epoch, block universe, and target.
 The
 [`blockzilla-example-workloads` guide](../../crates/blockzilla-example-workloads/README.md)
 defines this gate and the canonical records.
@@ -114,90 +116,50 @@ defines its common record and acceptance gate.
 
 ## Ordered read baseline
 
-This binary is the smallest public CAR example. It uses only
-`blockzilla-car-read-sdk`. The SDK owns the URLs, the complete raw slot-index
-check, HTTP admission, ranges, CAR decoding, and canonical block order.
-The caller gives a trusted canonical block count. The SDK stops if it differs
-from the nonempty range count.
+`read-car` is the smallest public CAR example. The SDK owns the URLs, complete
+raw slot-index check, HTTP admission, range reads, CAR decoding, and canonical
+block order. The example contains the trusted block counts for the 11 public
+sample epochs.
+
+With no arguments, it scans all of public epoch 900:
 
 ```console
-cargo run --release --locked -p blockzilla-read-car -- \
-  worker \
-  https://blockzilla-network-format-benchmark-v1.cheron-augustin.workers.dev \
-  0 \
-  431548 \
-  1024
+cargo run --release --locked -p blockzilla-read-car --bin read-car
 ```
 
-The first argument selects the explicit URL layout and HTTP admission. For the
-public Old Faithful service, use:
+Use the same simple archive tree for a local scan:
 
 ```console
-cargo run --release --locked -p blockzilla-read-car -- \
-  old-faithful-operator-trusted \
-  https://files.old-faithful.net \
-  800 \
-  430282 \
-  1024
+cargo run --release --locked -p blockzilla-read-car --bin read-car -- \
+  --archive-root archive \
+  --epoch 900
 ```
 
-The plain `old-faithful` route stays strict and requires strong ETags. The
-public service does not send them. The explicit operator-trusted route requires
-HTTPS and reports `http_verification=operator-trusted`. Its source descriptor
-digest covers only the accepted URLs, observed lengths, epoch, and canonical
-slot plan. It is not an ETag, archive content hash, manifest, seal, or proof of
-stable remote object identity. The result makes this limit explicit with
-`http_object_binding=none` and `http_content_hash=none`.
+The complete interface is:
 
-The block count is not a speed-test tuning value. It must come from a trusted
-canonical inventory. The last argument is optional. It is the maximum number
-of canonical block rows, and its default is 1,024.
-
-The normal command uses the SDK defaults: four HTTP workers, an eight-chunk
-window, and 32 MiB chunks. This gives a 256 MiB maximum range-body window. A
-benchmark can set all three controls after `max-blocks`:
-
-```console
-cargo run --release --locked -p blockzilla-read-car -- \
-  worker \
-  https://blockzilla-network-format-benchmark-v1.cheron-augustin.workers.dev \
-  0 \
-  431548 \
-  1024 \
-  8 \
-  8 \
-  33554432
+```text
+--epoch N          0, 100, 200, ..., or 1000; default 900
+--origin URL       another compatible clean Worker origin
+--archive-root DIR local root that contains car/<epoch>/
 ```
 
-The order is `http-workers http-window-chunks http-chunk-bytes`. The command
-rejects a partial profile. The SDK also rejects zero values, more than 16
-workers or window chunks, more than 33,554,432 chunk bytes, and a worker count
-that is larger than the window-chunk count.
+There is no block-limit option. The program always scans the complete selected
+epoch. It stops if the SDK does not deliver the trusted number of blocks or if
+slots are not in strict increasing order.
 
-Some CAR epochs contain canonical blocks with no reconstructed CAR byte range.
-For these epochs, the raw index has fewer nonempty rows than the canonical
-inventory. This binary stops on that mismatch. Applications must then use the
-SDK's exact-plan constructor. This rule prevents a quiet block-ordinal shift in
-cross-format comparisons.
+The publication gate rejects a CAR when its slot index does not cover the
+expected block count. Repair the index before publication. This rule prevents
+a quiet block-ordinal shift in cross-format comparisons.
 
-The callback fingerprints the ordered block universe and counts transactions.
-It does not request instruction bytes. It accepts explicit historical
-instruction, CPI, and execution coverage gaps.
-This rule is the same in the Compact V2 and Indexer V3 examples.
+The program requests instruction coordinates but not instruction payloads,
+account lists, signatures, signer keys, or execution status. It counts recorded
+inner instructions from those coordinates. It also aggregates block,
+transaction, and inner-instruction counts into 9,000-slot windows. At an
+assumed 400 ms per slot, each window is approximately one hour. These are slot
+windows, not UTC clock hours.
 
-The output separates setup, scan, and total time. `block_universe_sha256` hashes
-one 16-byte `(block_ordinal, slot, transaction_count)` record for each callback.
-`block_universe_records` gives the number of records. Matching values prove
-that format comparisons used the same ordered ordinal, slot, and transaction-
-count rows. They do not prove equal block content or equal application output.
-
-`bound_source_size_bytes` includes the CAR object and its 5,184,000-byte raw
-slot index. Network and cache bytes are also separate.
-`http_verification`, `http_object_binding`, `http_content_hash`, `http_workers`,
-`http_window_chunks`, `http_chunk_bytes`, and `http_body_window_bytes` record
-the effective transport profile and its identity limits.
-`scan_aggregate_io_mb_s` and `total_aggregate_io_mb_s` add network and cache
-bytes and use decimal MB. The sum can count a downloaded cache object twice:
-once as network input and once as a cache read. CAR does not use the persistent
-cache, so its cache values are zero. The report matrix uses the end-to-end total
-values because CAR can start prefetch work during setup.
+The first output line reports setup, scan, and total time, transaction rate,
+source bytes, network MB/s, and incomplete instruction or CPI coverage. If
+instruction coverage is incomplete, the recorded inner-instruction count is a
+lower bound. One bucket-basis line follows it. About 48 bucket lines contain
+the approximate-hour counts. The final line contains the full-epoch totals.

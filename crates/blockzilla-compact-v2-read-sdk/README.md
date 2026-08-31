@@ -126,8 +126,9 @@ policy.
 
 Use `CompactV2Archive::open_local` for a reader set in one local or NAS
 directory. Supply a `CompactV2LocalDescriptor`. This descriptor has the
-cluster, epoch, slot range, candidate ID, and exact wire schemas. It is an
-operator input. Its identity is not derived from file content.
+cluster, epoch, slot range, and candidate ID. It is an operator input. Its
+identity is not derived from file content. The SDK always uses the current
+message and metadata schemas.
 
 ```rust,no_run
 use std::num::NonZeroU32;
@@ -136,7 +137,7 @@ use blockzilla_compact_v2_read_sdk::{
     ScanRequest,
 };
 
-let descriptor = CompactV2LocalDescriptor::mainnet_current(
+let descriptor = CompactV2LocalDescriptor::mainnet(
     900,
     "epoch-900-corrected-v2",
 )?;
@@ -165,9 +166,9 @@ ranges, registry shape, metadata totals, optional signature length, and epoch
 geometry. It does not hash file content. The operator must change
 `candidate_id` when the files are replaced, even if their sizes do not change.
 
-`CompactV2LocalDescriptor::mainnet_current` selects the Current message schema
-and Current Typed Error metadata schema. Do not use it for a historical schema.
-For such a source, construct `CompactV2LocalDescriptor` with the exact schemas.
+`CompactV2LocalDescriptor::mainnet` selects the one supported current message
+and metadata schema. If the current reader rejects a sample, repair or rebuild
+the sample before publication. Do not change the reader for that epoch.
 
 The two snippets count rows and do not use instruction payload bytes. They
 therefore accept named historical instruction, CPI, and execution coverage
@@ -182,9 +183,7 @@ The facade uses a bounded HTTP object-set policy:
 - HTTPS is required. Redirects and ambient HTTP proxies are disabled.
 - The SDK probes only the fixed Compact V2 object names.
 - Every present object must provide an exact length and a strong ETag.
-- `CompactV2OpenOptions` gives the exact message and metadata grammars. The
-  default is the current grammar. Historical sources must select their known
-  grammars explicitly.
+- `CompactV2Archive::open` selects the current message and metadata grammars.
 - Payload responses must keep the pinned length and strong ETag.
 - The reader performs structural index, offset, footer, registry, and
   signature-length checks.
@@ -200,15 +199,13 @@ not read file payloads to make it.
 
 ```text
 cargo run -p blockzilla-read-compact-v2 -- \
-  https://blockzilla-network-format-benchmark-v1.cheron-augustin.workers.dev \
-  0 \
+  https://blockzilla-archive-samples-v1.cheron-augustin.workers.dev \
+  900 \
   /private/tmp/blockzilla-compact-v2-cache \
-  1024 \
-  --message-schema current \
-  --metadata-schema legacy
+  1024
 ```
 
-Read a current-schema local candidate:
+Read a local candidate:
 
 ```text
 cargo run --release --locked -p blockzilla-read-compact-v2 -- \

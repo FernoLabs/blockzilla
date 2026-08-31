@@ -3,8 +3,9 @@
 This crate contains three small application rules and one transaction identity
 dump sink. It does not open an archive.
 A CAR, Compact V2, Indexer V3, or Jetstreamer example supplies records to one
-sink. Equal workload output and coverage digests prove application parity
-before a speed comparison.
+sink. Equal output files, output counts, and coverage digests prove application
+parity before a speed comparison. Compare the output files outside the timed
+reader run.
 
 The full comparison target has 12 distinct workload binaries: USDC, Pump.fun,
 and FireWatch for each of the four readers. The Jetstreamer workload binaries
@@ -33,14 +34,15 @@ bit. A count alone cannot hide gaps at different positions.
 Each `*_scan_request` helper removes data planes that the workload does not
 use. The format reader can then avoid unnecessary decoding and allocation.
 Full instruction account projection is the default. Pump.fun and FireWatch
-permit readers to omit unused instruction account lists. Compact V2 and
-Indexer V3 avoid their resolution and allocation. The current CAR and
-Jetstreamer paths can still materialize the lists.
+permit readers to omit unused instruction account lists. CAR, Compact V2, and
+Indexer V3 avoid their resolution and allocation. The current Jetstreamer path
+can still materialize the lists.
 
 A speed result compares the complete application jobs. It includes source
 access, decoding, projection, and sink work. It does not require equal internal
-decoder work. A report must state each request projection and must compare
-equal workload output and coverage digests.
+decoder work. A report must state each request projection. Require equal output
+row and byte counts, byte-for-byte equal output files, and equal coverage counts
+and digests.
 
 ## Canonical binary records
 

@@ -1,8 +1,9 @@
 use std::io::Write;
 
 use blockzilla_query_sdk::{BlockSink, BlockView, TransactionView};
+use sha2::{Digest, Sha256};
 
-use crate::{FinishedOutput, Result, output::CanonicalOutput};
+use crate::{FinishedOutput, OutputReport, Result, output::CanonicalOutput};
 
 /// Header bytes before the fixed transaction identity records.
 pub const HEADER_BYTES: usize = 48;
@@ -49,7 +50,7 @@ pub struct TransactionIdentityDumpSink<W> {
     epoch: u64,
     start_slot: u64,
     end_slot_exclusive: u64,
-    output: CanonicalOutput<W>,
+    output: HashedOutput<W>,
     record_buffer: [u8; RECORD_BYTES],
     last_slot: Option<u64>,
     last_tx_index: u32,
@@ -74,7 +75,7 @@ impl<W: Write> TransactionIdentityDumpSink<W> {
             epoch,
             start_slot,
             end_slot_exclusive,
-            output: CanonicalOutput::new(writer, &header)?,
+            output: HashedOutput::new(writer, &header)?,
             record_buffer: [0; RECORD_BYTES],
             last_slot: None,
             last_tx_index: 0,
@@ -119,13 +120,13 @@ impl<W: Write> TransactionIdentityDumpSink<W> {
 
     /// Flush output and return the writer with the final deterministic report.
     pub fn finish(self) -> Result<FinishedOutput<W, TransactionIdentityDumpReport>> {
-        let finished = self.output.finish("blockzilla-transaction-identity/v1")?;
+        let (finished, output_sha256) = self.output.finish("blockzilla-transaction-identity/v1")?;
         Ok(FinishedOutput {
             writer: finished.writer,
             report: TransactionIdentityDumpReport {
                 records: finished.report.row_count,
                 output_bytes: finished.report.output_bytes,
-                output_sha256: finished.report.sha256,
+                output_sha256,
                 first_slot: self.first_written_slot,
                 last_slot: self.last_written_slot,
             },
@@ -174,6 +175,35 @@ impl<W: Write> TransactionIdentityDumpSink<W> {
     }
 }
 
+/// The transaction identity export keeps its strict output digest separate
+/// from the small beginner workload writers.
+struct HashedOutput<W> {
+    output: CanonicalOutput<W>,
+    hasher: Sha256,
+}
+
+impl<W: Write> HashedOutput<W> {
+    fn new(writer: W, header: &[u8]) -> Result<Self> {
+        let mut hasher = Sha256::new();
+        hasher.update(header);
+        Ok(Self {
+            output: CanonicalOutput::new(writer, header)?,
+            hasher,
+        })
+    }
+
+    fn write_row(&mut self, row: &[u8]) -> Result<()> {
+        self.output.write_row(row)?;
+        self.hasher.update(row);
+        Ok(())
+    }
+
+    fn finish(self, schema: &'static str) -> Result<(FinishedOutput<W, OutputReport>, [u8; 32])> {
+        let finished = self.output.finish(schema)?;
+        Ok((finished, self.hasher.finalize().into()))
+    }
+}
+
 impl<W: Write> BlockSink for TransactionIdentityDumpSink<W> {
     fn visit_block(&mut self, block: BlockView<'_>) -> blockzilla_query_sdk::Result<()> {
         self.process_block(block)
@@ -195,13 +225,11 @@ fn header(epoch: u64, start_slot: u64, end_slot_exclusive: u64) -> [u8; HEADER_B
 
 #[cfg(test)]
 mod tests {
+    use super::*;
     use blockzilla_query_sdk::{
         BlockHeader, CanonicalBlock, CanonicalTransaction, CpiCoverage, ExecutionStatus,
         InstructionCoverage, TokenBalanceCoverage, TransactionHeader,
     };
-    use sha2::{Digest, Sha256};
-
-    use super::*;
 
     fn transaction(tx_index: u32, signature: Option<[u8; 64]>) -> CanonicalTransaction {
         CanonicalTransaction {

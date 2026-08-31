@@ -1,336 +1,277 @@
-use std::{env, error::Error, num::NonZeroU32, time::Instant};
+use std::{error::Error, io, time::Instant};
 
 use blockzilla_car_read_sdk::{
-    ArchiveInstructionSource, ArchiveInstructionSourceExt, CarArchive, CarArchiveHttpProfile,
-    CarArchiveOptions, ScanRequest,
+    ArchiveInstructionSource, BlockSink, BlockView, CarArchive, QueryError, QueryResult,
+    ScanRequest,
 };
+use blockzilla_read_car::{CountSource, RunFacts, count_arguments};
 
-const DEFAULT_MAX_BLOCKS: u32 = 1_024;
+const SLOTS_PER_APPROXIMATE_HOUR: u64 = 9_000;
 
 fn main() -> Result<(), Box<dyn Error>> {
-    let arguments = arguments()?;
+    let arguments = count_arguments("read-car")?;
     let total_started = Instant::now();
-
-    let mut archive = match (arguments.route, arguments.http_options) {
-        (Route::Worker, None) => CarArchive::open(
-            &arguments.origin,
-            arguments.epoch,
-            arguments.expected_blocks,
-        )?,
-        (Route::Worker, Some(options)) => CarArchive::open_with_options(
-            &arguments.origin,
-            arguments.epoch,
-            arguments.expected_blocks,
-            options,
-        )?,
-        (Route::OldFaithful, None) => CarArchive::open_old_faithful(
-            &arguments.origin,
-            arguments.epoch,
-            arguments.expected_blocks,
-        )?,
-        (Route::OldFaithful, Some(options)) => CarArchive::open_old_faithful_with_options(
-            &arguments.origin,
-            arguments.epoch,
-            arguments.expected_blocks,
-            options,
-        )?,
-        (Route::OldFaithfulOperatorTrusted, None) => {
-            CarArchive::open_old_faithful_operator_trusted(
-                &arguments.origin,
-                arguments.epoch,
-                arguments.expected_blocks,
-            )?
-        }
-        (Route::OldFaithfulOperatorTrusted, Some(options)) => {
-            CarArchive::open_old_faithful_operator_trusted_with_options(
-                &arguments.origin,
-                arguments.epoch,
-                arguments.expected_blocks,
-                options,
-            )?
-        }
-    };
+    let mut archive = open_archive(&arguments)?;
     let setup_seconds = total_started.elapsed().as_secs_f64();
-    let bound_source_size_bytes = archive.bound_source_size_bytes();
-    let http_profile = archive
-        .http_profile()
-        .ok_or("the network CAR reader has no HTTP profile")?;
+
+    let identity = archive.identity();
+    let expected_blocks = u64::from(identity.block_count);
+    let requested_blocks = identity.block_count;
+    let mut counts = ApproximateHourCounts::new(identity.first_slot, identity.slots_per_epoch)?;
+
+    // Keep instruction coordinates, but skip payloads and unused projections.
+    let request = ScanRequest::all()
+        .allow_incomplete_instructions()
+        .allow_incomplete_cpi()
+        .without_primary_signatures()
+        .without_instruction_data()
+        .without_instruction_accounts()
+        .without_required_signers()
+        .without_execution_status();
+
     let verification = archive.identity().verification;
-    let range = archive.bounded_range(0, arguments.max_blocks)?;
-    let request = benchmark_request(range);
-
+    let bound_source_size_bytes = archive.bound_source_size_bytes();
     let setup_io = archive.io_snapshot();
-    let mut first_slot = None;
-    let mut last_slot = None;
     let scan_started = Instant::now();
-    let (receipt, block_universe) = archive.for_each_block_fingerprinted(&request, |block| {
-        first_slot.get_or_insert(block.header.slot);
-        last_slot = Some(block.header.slot);
-        Ok(())
-    })?;
+    let receipt = archive.scan_ordered(&request, &mut counts)?;
+    let scan_seconds = scan_started.elapsed().as_secs_f64();
     let total_io = archive.finish_io();
-    let scan_seconds = scan_started.elapsed().as_secs_f64().max(f64::MIN_POSITIVE);
+    let total_seconds = total_started.elapsed().as_secs_f64();
     let scan_io = total_io.saturating_sub(setup_io);
-    let total_seconds = total_started.elapsed().as_secs_f64().max(f64::MIN_POSITIVE);
-    let first_slot = first_slot.ok_or("scan returned no blocks")?;
-    let last_slot = last_slot.ok_or("scan returned no blocks")?;
-    let block_universe_sha256 = block_universe.sha256_hex();
 
-    print_result(
-        "car",
-        arguments.epoch,
+    if receipt.blocks != expected_blocks || receipt.blocks != counts.total_blocks() {
+        return Err("the scan did not visit every block in the epoch".into());
+    }
+    if receipt.transactions != counts.total_transactions() {
+        return Err("the transaction count does not match the SDK receipt".into());
+    }
+    if counts.total_recorded_inner_instructions() > receipt.instructions {
+        return Err("the inner-instruction count exceeds the SDK instruction count".into());
+    }
+
+    let run = RunFacts {
+        epoch: arguments.epoch,
         verification,
-        range.block_count.get(),
+        requested_blocks,
         bound_source_size_bytes,
-        receipt.blocks,
-        receipt.transactions,
-        block_universe.records(),
-        &block_universe_sha256,
-        first_slot,
-        last_slot,
-        http_profile,
+        receipt,
         setup_seconds,
         scan_seconds,
         total_seconds,
         setup_io,
         scan_io,
         total_io,
+    };
+    println!(
+        "{run} recorded_inner_instructions={} transactions_with_incomplete_instructions={} transactions_with_incomplete_cpi={}",
+        counts.total_recorded_inner_instructions(),
+        receipt.transactions_with_incomplete_instructions,
+        receipt.transactions_with_incomplete_cpi,
     );
+    counts.print();
     Ok(())
 }
 
-fn benchmark_request(range: blockzilla_car_read_sdk::ScanRange) -> ScanRequest {
-    ScanRequest::bounded(range)
-        .allow_incomplete_instructions()
-        .allow_incomplete_cpi()
-        .allow_unknown_execution()
-        .without_instruction_data()
+fn open_archive(
+    arguments: &blockzilla_read_car::CountArguments,
+) -> blockzilla_car_read_sdk::Result<CarArchive> {
+    match &arguments.source {
+        CountSource::Network { origin } => {
+            CarArchive::open(origin, arguments.epoch, arguments.expected_blocks)
+        }
+        CountSource::Local { archive_root } => {
+            CarArchive::open_local(archive_root, arguments.epoch, arguments.expected_blocks)
+        }
+    }
 }
 
-#[allow(clippy::too_many_arguments)]
-fn print_result(
-    format: &str,
-    epoch: u64,
-    verification: blockzilla_car_read_sdk::SourceVerification,
-    requested_blocks: u32,
-    bound_source_size_bytes: u64,
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+struct Bucket {
     blocks: u64,
     transactions: u64,
-    block_universe_records: u64,
-    block_universe_sha256: &str,
+    recorded_inner_instructions: u64,
+}
+
+struct ApproximateHourCounts {
     first_slot: u64,
-    last_slot: u64,
-    http_profile: CarArchiveHttpProfile,
-    setup_seconds: f64,
-    scan_seconds: f64,
-    total_seconds: f64,
-    setup_io: blockzilla_car_read_sdk::ArchiveIoSnapshot,
-    scan_io: blockzilla_car_read_sdk::ArchiveIoSnapshot,
-    total_io: blockzilla_car_read_sdk::ArchiveIoSnapshot,
-) {
-    let scan_tps = transactions as f64 / scan_seconds;
-    let total_tps = transactions as f64 / total_seconds;
-    let scan_aggregate_io_bytes = scan_io
-        .network_body_bytes
-        .saturating_add(scan_io.cache_read_bytes);
-    let total_aggregate_io_bytes = total_io
-        .network_body_bytes
-        .saturating_add(total_io.cache_read_bytes);
-    println!(
-        "format={format} epoch={epoch} verification={verification} selected_blocks={requested_blocks} bound_source_size_bytes={bound_source_size_bytes} blocks={blocks} transactions={transactions} block_universe_records={block_universe_records} block_universe_sha256={block_universe_sha256} first_slot={first_slot} last_slot={last_slot} http_verification={} http_object_binding={} http_content_hash=none http_workers={} http_window_chunks={} http_chunk_bytes={} http_body_window_bytes={} setup_s={setup_seconds:.6} scan_s={scan_seconds:.6} total_s={total_seconds:.6} scan_tps={scan_tps:.3} total_tps={total_tps:.3} setup_head_requests={} scan_head_requests={} total_head_requests={} setup_get_requests={} scan_get_requests={} total_get_requests={} setup_network_bytes={} scan_network_bytes={} total_network_bytes={} setup_cache_hits={} scan_cache_hits={} total_cache_hits={} setup_cache_downloads={} scan_cache_downloads={} total_cache_downloads={} setup_cache_read_calls={} scan_cache_read_calls={} total_cache_read_calls={} setup_cache_bytes={} scan_cache_bytes={} total_cache_bytes={} scan_network_mb_s={:.6} scan_aggregate_io_mb_s={:.6} total_network_mb_s={:.6} total_aggregate_io_mb_s={:.6}",
-        http_profile.verification,
-        http_profile.verification.object_binding_kind(),
-        http_profile.workers,
-        http_profile.window_chunks,
-        http_profile.chunk_bytes,
-        http_profile.body_window_bytes,
-        setup_io.head_requests,
-        scan_io.head_requests,
-        total_io.head_requests,
-        setup_io.get_requests,
-        scan_io.get_requests,
-        total_io.get_requests,
-        setup_io.network_body_bytes,
-        scan_io.network_body_bytes,
-        total_io.network_body_bytes,
-        setup_io.cache_hits,
-        scan_io.cache_hits,
-        total_io.cache_hits,
-        setup_io.cache_downloads,
-        scan_io.cache_downloads,
-        total_io.cache_downloads,
-        setup_io.cache_read_calls,
-        scan_io.cache_read_calls,
-        total_io.cache_read_calls,
-        setup_io.cache_read_bytes,
-        scan_io.cache_read_bytes,
-        total_io.cache_read_bytes,
-        decimal_mb_s(scan_io.network_body_bytes, scan_seconds),
-        decimal_mb_s(scan_aggregate_io_bytes, scan_seconds),
-        decimal_mb_s(total_io.network_body_bytes, total_seconds),
-        decimal_mb_s(total_aggregate_io_bytes, total_seconds),
-    );
+    end_slot: u64,
+    last_slot: Option<u64>,
+    buckets: Vec<Bucket>,
 }
 
-fn decimal_mb_s(bytes: u64, seconds: f64) -> f64 {
-    bytes as f64 / 1_000_000.0 / seconds
-}
+impl ApproximateHourCounts {
+    fn new(first_slot: u64, slots_per_epoch: u64) -> Result<Self, Box<dyn Error>> {
+        let end_slot = first_slot
+            .checked_add(slots_per_epoch)
+            .ok_or("epoch slot range overflows u64")?;
+        let bucket_count = slots_per_epoch.div_ceil(SLOTS_PER_APPROXIMATE_HOUR);
+        Ok(Self {
+            first_slot,
+            end_slot,
+            last_slot: None,
+            buckets: vec![Bucket::default(); usize::try_from(bucket_count)?],
+        })
+    }
 
-#[derive(Debug, Clone, Copy)]
-enum Route {
-    Worker,
-    OldFaithful,
-    OldFaithfulOperatorTrusted,
-}
+    fn total_blocks(&self) -> u64 {
+        self.buckets.iter().map(|bucket| bucket.blocks).sum()
+    }
 
-#[derive(Debug)]
-struct Arguments {
-    route: Route,
-    origin: String,
-    epoch: u64,
-    expected_blocks: NonZeroU32,
-    max_blocks: NonZeroU32,
-    http_options: Option<CarArchiveOptions>,
-}
+    fn total_transactions(&self) -> u64 {
+        self.buckets.iter().map(|bucket| bucket.transactions).sum()
+    }
 
-fn arguments() -> Result<Arguments, Box<dyn Error>> {
-    arguments_from(env::args().skip(1))
-}
+    fn total_recorded_inner_instructions(&self) -> u64 {
+        self.buckets
+            .iter()
+            .map(|bucket| bucket.recorded_inner_instructions)
+            .sum()
+    }
 
-fn arguments_from(args: impl IntoIterator<Item = String>) -> Result<Arguments, Box<dyn Error>> {
-    let mut args = args.into_iter();
-    let usage = "usage: read-car <worker|old-faithful|old-faithful-operator-trusted> <origin> <epoch> <canonical-block-count> [max-blocks [http-workers http-window-chunks http-chunk-bytes]]";
-    let route = match args.next().as_deref() {
-        Some("worker") => Route::Worker,
-        Some("old-faithful") => Route::OldFaithful,
-        Some("old-faithful-operator-trusted") => Route::OldFaithfulOperatorTrusted,
-        _ => return Err(usage.into()),
-    };
-    let origin = args.next().ok_or(usage)?;
-    let epoch = args.next().ok_or(usage)?.parse()?;
-    let expected_blocks = args.next().ok_or(usage)?.parse()?;
-    let expected_blocks = NonZeroU32::new(expected_blocks)
-        .ok_or("canonical-block-count must be greater than zero")?;
-    let remaining = args.collect::<Vec<_>>();
-    let (max_blocks, http_options) = match remaining.as_slice() {
-        [] => (DEFAULT_MAX_BLOCKS, None),
-        [max_blocks] => (max_blocks.parse()?, None),
-        [
-            max_blocks,
-            http_workers,
-            http_window_chunks,
-            http_chunk_bytes,
-        ] => {
-            let options = CarArchiveOptions {
-                http_workers: http_workers.parse()?,
-                http_window_chunks: http_window_chunks.parse()?,
-                http_chunk_bytes: http_chunk_bytes.parse()?,
-                ..CarArchiveOptions::default()
-            };
-            let _ = options.http_body_window_bytes()?;
-            (max_blocks.parse()?, Some(options))
+    fn add(
+        &mut self,
+        slot: u64,
+        transactions: u64,
+        recorded_inner_instructions: u64,
+    ) -> QueryResult<()> {
+        if self.last_slot.is_some_and(|last_slot| slot <= last_slot) {
+            return Err(sink_error(format!(
+                "block slot {slot} is not after the prior slot"
+            )));
         }
-        _ => {
-            return Err(
-                format!("{usage}; HTTP tuning requires all three values after max-blocks").into(),
+        let offset = slot
+            .checked_sub(self.first_slot)
+            .ok_or_else(|| sink_error("block is before the epoch slot range"))?;
+        if slot >= self.end_slot {
+            return Err(sink_error("block is after the epoch slot range"));
+        }
+        let index = usize::try_from(offset / SLOTS_PER_APPROXIMATE_HOUR)
+            .map_err(|error| sink_error(error.to_string()))?;
+        let bucket = self
+            .buckets
+            .get_mut(index)
+            .ok_or_else(|| sink_error("block is after the epoch slot range"))?;
+
+        increment(&mut bucket.blocks, 1)?;
+        increment(&mut bucket.transactions, transactions)?;
+        increment(
+            &mut bucket.recorded_inner_instructions,
+            recorded_inner_instructions,
+        )?;
+        self.last_slot = Some(slot);
+        Ok(())
+    }
+
+    fn print(&self) {
+        println!(
+            "bucket_basis=slot slots_per_approximate_hour=9000 assumed_slot_time_ms=400 utc_clock_hours=false"
+        );
+        for (index, bucket) in self.buckets.iter().enumerate() {
+            let index = u64::try_from(index).expect("bucket index fits in u64");
+            let start_slot = self.first_slot + index * SLOTS_PER_APPROXIMATE_HOUR;
+            let end_slot = (start_slot + SLOTS_PER_APPROXIMATE_HOUR).min(self.end_slot);
+            println!(
+                "approximate_hour={index} start_slot={start_slot} end_slot_exclusive={end_slot} blocks={} transactions={} recorded_inner_instructions={}",
+                bucket.blocks, bucket.transactions, bucket.recorded_inner_instructions,
             );
         }
-    };
-    let max_blocks = NonZeroU32::new(max_blocks).ok_or("max-blocks must be greater than zero")?;
-    Ok(Arguments {
-        route,
-        origin,
-        epoch,
-        expected_blocks,
-        max_blocks,
-        http_options,
-    })
+        println!(
+            "total blocks={} transactions={} recorded_inner_instructions={}",
+            self.total_blocks(),
+            self.total_transactions(),
+            self.total_recorded_inner_instructions(),
+        );
+    }
+}
+
+impl BlockSink for ApproximateHourCounts {
+    fn visit_block(&mut self, block: BlockView<'_>) -> QueryResult<()> {
+        let transactions = u64::try_from(block.transactions.len())
+            .map_err(|error| sink_error(error.to_string()))?;
+        let recorded_inner_instructions =
+            block
+                .transaction_views()
+                .try_fold(0u64, |total, transaction| {
+                    let inner = transaction
+                        .instructions
+                        .iter()
+                        .filter(|instruction| instruction.coordinate.inner_index.is_some())
+                        .count();
+                    let inner =
+                        u64::try_from(inner).map_err(|error| sink_error(error.to_string()))?;
+                    total
+                        .checked_add(inner)
+                        .ok_or_else(|| sink_error("inner-instruction count overflow"))
+                })?;
+        self.add(block.header.slot, transactions, recorded_inner_instructions)
+    }
+}
+
+fn increment(count: &mut u64, amount: u64) -> QueryResult<()> {
+    *count = count
+        .checked_add(amount)
+        .ok_or_else(|| sink_error("count overflow"))?;
+    Ok(())
+}
+
+fn sink_error(message: impl Into<String>) -> QueryError {
+    QueryError::sink(io::Error::other(message.into()))
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
 
-    fn parse(values: &[&str]) -> Result<Arguments, Box<dyn Error>> {
-        arguments_from(values.iter().map(|value| (*value).to_owned()))
-    }
-
     #[test]
-    fn accepts_the_simple_default_form() {
-        let arguments = parse(&["worker", "https://archive.example", "0", "431548"]).unwrap();
-        assert_eq!(arguments.max_blocks.get(), DEFAULT_MAX_BLOCKS);
-        assert!(arguments.http_options.is_none());
-    }
+    fn aggregates_fixed_slot_windows() {
+        let mut counts = ApproximateHourCounts::new(1_000, 18_001).unwrap();
+        counts.add(1_000, 2, 3).unwrap();
+        counts.add(9_999, 5, 7).unwrap();
+        counts.add(10_000, 11, 13).unwrap();
+        counts.add(19_000, 17, 19).unwrap();
 
-    #[test]
-    fn accepts_the_explicit_operator_trusted_route() {
-        let arguments = parse(&[
-            "old-faithful-operator-trusted",
-            "https://files.old-faithful.net",
-            "100",
-            "430000",
-        ])
-        .unwrap();
-        assert!(matches!(arguments.route, Route::OldFaithfulOperatorTrusted));
-    }
-
-    #[test]
-    fn accepts_one_complete_http_profile() {
-        let arguments = parse(&[
-            "worker",
-            "https://archive.example",
-            "0",
-            "431548",
-            "1024",
-            "2",
-            "4",
-            "1048576",
-        ])
-        .unwrap();
-        let options = arguments.http_options.unwrap();
-        assert_eq!(arguments.max_blocks.get(), 1024);
-        assert_eq!(options.http_workers, 2);
-        assert_eq!(options.http_window_chunks, 4);
-        assert_eq!(options.http_chunk_bytes, 1_048_576);
-        assert_eq!(options.http_body_window_bytes().unwrap(), 4_194_304);
-    }
-
-    #[test]
-    fn rejects_partial_http_profiles() {
-        for values in [
+        assert_eq!(
+            counts.buckets,
             vec![
-                "worker",
-                "https://archive.example",
-                "0",
-                "431548",
-                "1024",
-                "2",
-            ],
-            vec![
-                "worker",
-                "https://archive.example",
-                "0",
-                "431548",
-                "1024",
-                "2",
-                "4",
-            ],
-        ] {
-            let error = parse(&values).unwrap_err();
-            assert!(error.to_string().contains("requires all three values"));
-        }
+                Bucket {
+                    blocks: 2,
+                    transactions: 7,
+                    recorded_inner_instructions: 10,
+                },
+                Bucket {
+                    blocks: 1,
+                    transactions: 11,
+                    recorded_inner_instructions: 13,
+                },
+                Bucket {
+                    blocks: 1,
+                    transactions: 17,
+                    recorded_inner_instructions: 19,
+                },
+            ]
+        );
+        assert_eq!(counts.total_blocks(), 4);
+        assert_eq!(counts.total_transactions(), 35);
+        assert_eq!(counts.total_recorded_inner_instructions(), 42);
     }
 
     #[test]
-    fn rejects_invalid_http_profiles_before_network_access() {
-        for tuning in [
-            ["0", "4", "1048576"],
-            ["5", "4", "1048576"],
-            ["2", "4", "0"],
-        ] {
-            let mut values = vec!["worker", "https://archive.example", "0", "431548", "1024"];
-            values.extend(tuning);
-            assert!(parse(&values).is_err(), "accepted {tuning:?}");
-        }
+    fn rejects_duplicate_or_decreasing_slots() {
+        let mut duplicate = ApproximateHourCounts::new(1_000, 9_000).unwrap();
+        duplicate.add(1_100, 1, 0).unwrap();
+        assert!(duplicate.add(1_100, 1, 0).is_err());
+
+        let mut decreasing = ApproximateHourCounts::new(1_000, 9_000).unwrap();
+        decreasing.add(1_100, 1, 0).unwrap();
+        assert!(decreasing.add(1_099, 1, 0).is_err());
+    }
+
+    #[test]
+    fn rejects_slots_outside_the_epoch() {
+        let mut before = ApproximateHourCounts::new(1_000, 9_000).unwrap();
+        assert!(before.add(999, 1, 0).is_err());
+
+        let mut after = ApproximateHourCounts::new(1_000, 9_000).unwrap();
+        assert!(after.add(10_000, 1, 0).is_err());
     }
 }

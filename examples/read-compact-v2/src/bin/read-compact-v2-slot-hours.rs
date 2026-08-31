@@ -1,15 +1,16 @@
-use std::{error::Error, io};
+use std::{error::Error, io, time::Instant};
 
 use blockzilla_compact_v2_read_sdk::{
     ArchiveInstructionSource, BlockSink, BlockView, CompactV2Archive, CompactV2LocalDescriptor,
     CompactV2ParallelScanConfig, QueryError, QueryResult, ScanRequest,
 };
-use blockzilla_read_compact_v2::{Source, count_arguments, finish_archive};
+use blockzilla_read_compact_v2::{RunTiming, Source, count_arguments, finish_count};
 
 const SLOTS_PER_APPROXIMATE_HOUR: u64 = 9_000;
 
 fn main() -> Result<(), Box<dyn Error>> {
     let args = count_arguments("read-compact-v2-slot-hours")?;
+    let started = Instant::now();
     let mut archive = match &args.source {
         Source::Network { origin, cache_root } => {
             CompactV2Archive::open(origin, args.epoch, cache_root)?
@@ -19,9 +20,10 @@ fn main() -> Result<(), Box<dyn Error>> {
             candidate_id,
         } => CompactV2Archive::open_local(
             epoch_root,
-            CompactV2LocalDescriptor::mainnet_current(args.epoch, candidate_id.clone())?,
+            CompactV2LocalDescriptor::mainnet(args.epoch, candidate_id.clone())?,
         )?,
     };
+    let timing = RunTiming::after_open(started, &archive);
 
     let identity = archive.identity();
     let first_slot = identity.first_slot;
@@ -39,9 +41,10 @@ fn main() -> Result<(), Box<dyn Error>> {
         .without_required_signers()
         .without_execution_status();
     let config = CompactV2ParallelScanConfig::new(args.threads);
-    let receipt = archive
-        .scan_ordered_parallel(&request, &mut counts, config)?
-        .scan;
+    let scan = Instant::now();
+    let parallel = archive.scan_ordered_parallel(&request, &mut counts, config)?;
+    let scan_seconds = scan.elapsed().as_secs_f64();
+    let receipt = parallel.scan;
 
     if receipt.blocks != expected_blocks || receipt.blocks != counts.total_blocks() {
         return Err("the scan did not visit every block in the epoch".into());
@@ -52,7 +55,14 @@ fn main() -> Result<(), Box<dyn Error>> {
     if counts.total_recorded_inner_instructions() > receipt.instructions {
         return Err("the inner-instruction count exceeds the SDK instruction count".into());
     }
-    finish_archive(archive)?;
+    finish_count(
+        &args,
+        archive,
+        timing,
+        parallel,
+        scan_seconds,
+        counts.total_recorded_inner_instructions(),
+    )?;
     counts.print();
     Ok(())
 }

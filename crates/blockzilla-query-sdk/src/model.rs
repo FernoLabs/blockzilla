@@ -116,7 +116,7 @@ pub struct ResolvedInstruction {
     pub program_id: [u8; 32],
     /// Account public keys in the instruction account-index order.
     ///
-    /// Compact V2 and Indexer V3 leave this empty when
+    /// Compact V2, Indexer V3, and CAR leave this empty when
     /// `ScanRequest::include_instruction_accounts` is false. Program identity
     /// and coordinates remain exact in that mode.
     pub accounts: Vec<[u8; 32]>,

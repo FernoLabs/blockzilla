@@ -42,8 +42,7 @@ fn main() -> Result<(), Box<dyn Error>> {
     validate_new_output(&arguments.output)?;
 
     let total_started = Instant::now();
-    let descriptor =
-        CompactV2LocalDescriptor::mainnet_current(arguments.epoch, &arguments.candidate_id)?;
+    let descriptor = CompactV2LocalDescriptor::mainnet(arguments.epoch, &arguments.candidate_id)?;
     let mut archive = CompactV2Archive::open_local(&arguments.root, descriptor)?;
     let range = archive.bounded_range(0, arguments.max_blocks)?;
     let bound_source_size_bytes = archive.bound_source_size_bytes();

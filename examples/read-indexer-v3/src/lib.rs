@@ -4,15 +4,20 @@ use std::{
     error::Error,
     ffi::OsString,
     fmt::Display,
+    io::Write,
     num::{NonZeroU32, NonZeroUsize},
     path::{Path, PathBuf},
+    time::Instant,
 };
 
-use blockzilla_example_workloads::{CoverageReport, OutputReport};
+use blockzilla_example_workloads::{
+    CoverageReport, FinishedOutput, FirewatchReport, OutputReport, PumpReport, UsdcReport,
+};
 use blockzilla_indexer_v3_read_sdk::{
-    IndexerV3Archive, IndexerV3ParallelScanStats, IndexerV3RegistryReadMode,
-    IndexerV3RegistryReadReceipt, IndexerV3TransportReceipt, MAX_INDEXER_V3_PARALLEL_WORKERS,
-    ScanIoReceipt, ScanRequest, default_worker_count,
+    IndexerV3Archive, IndexerV3ParallelScanReceipt, IndexerV3ParallelScanStats,
+    IndexerV3RegistryReadMode, IndexerV3RegistryReadReceipt, IndexerV3TargetedScanReceipt,
+    IndexerV3TransportReceipt, MAX_INDEXER_V3_PARALLEL_WORKERS, ScanIoReceipt, ScanRequest,
+    default_worker_count,
 };
 
 pub const DEFAULT_PUBLIC_ORIGIN: &str =
@@ -358,6 +363,305 @@ pub fn scan_request(
     )
 }
 
+/// Timing and I/O state that is not part of the tutorial scan flow.
+pub struct RunTiming {
+    total_started: Instant,
+    setup_seconds: f64,
+    bound_source_size_bytes: u64,
+    setup_io: IndexerV3TransportReceipt,
+}
+
+impl RunTiming {
+    pub fn after_open(total_started: Instant, archive: &IndexerV3Archive) -> Self {
+        Self {
+            total_started,
+            setup_seconds: total_started.elapsed().as_secs_f64(),
+            bound_source_size_bytes: archive.bound_source_size_bytes(),
+            setup_io: archive.transport_snapshot(),
+        }
+    }
+}
+
+/// Finish a full-epoch count and print the same timing and I/O units as the
+/// workload examples.
+pub fn finish_count(
+    arguments: &CountArguments,
+    archive: IndexerV3Archive,
+    timing: RunTiming,
+    parallel: IndexerV3ParallelScanReceipt,
+    scan_seconds: f64,
+    recorded_inner_instructions: u64,
+) -> Result<(), Box<dyn Error>> {
+    let receipt = parallel.scan;
+    let total_io = finish_archive(archive)?;
+    let total_seconds = timing.total_started.elapsed().as_secs_f64();
+    let scan_seconds_nonzero = scan_seconds.max(f64::MIN_POSITIVE);
+    let total_seconds_nonzero = total_seconds.max(f64::MIN_POSITIVE);
+    let scan_io = subtract_transport(total_io, timing.setup_io);
+    let setup_http = timing.setup_io.http_and_cache;
+    let scan_http = scan_io.http_and_cache;
+    let total_http = total_io.http_and_cache;
+    let logical_bytes = receipt.io.source_read_bytes.unwrap_or(0);
+
+    println!(
+        "format=indexer-v3 workload=slot-hours scan_kind=ordered-full-scan epoch={} source={} threads={} requested_workers={} effective_workers={} max_active_workers={} parallel_jobs={} projected_blocks={} registry_mode={} registry_prefetch_read_calls={} registry_prefetch_read_bytes={} blocks={} transactions={} instructions={} recorded_inner_instructions={} transactions_with_incomplete_instructions={} transactions_with_incomplete_cpi={} setup_s={:.6} scan_s={:.6} total_s={:.6} scan_tps={:.3} total_tps={:.3} bound_source_size_bytes={} scan_logical_read_calls={} scan_logical_read_bytes={} scan_logical_read_mb_s={:.6} setup_network_bytes={} scan_network_bytes={} total_network_bytes={} scan_network_mb_s={:.6} total_network_mb_s={:.6} setup_cache_read_bytes={} scan_cache_read_bytes={} total_cache_read_bytes={} setup_local_read_calls={} scan_local_read_calls={} total_local_read_calls={} setup_local_read_bytes={} scan_local_read_bytes={} total_local_read_bytes={} scan_local_read_mb_s={:.6} total_local_read_mb_s={:.6}",
+        arguments.epoch,
+        workload_source_name(&arguments.source),
+        arguments.threads,
+        parallel.parallel.requested_workers,
+        parallel.parallel.effective_workers,
+        parallel.parallel.max_active_workers,
+        parallel.parallel.jobs,
+        parallel.parallel.projected_blocks,
+        registry_mode_name(parallel.registry.mode),
+        parallel.registry.prefetch_read_calls,
+        parallel.registry.prefetch_read_bytes,
+        receipt.blocks,
+        receipt.transactions,
+        receipt.instructions,
+        recorded_inner_instructions,
+        receipt.transactions_with_incomplete_instructions,
+        receipt.transactions_with_incomplete_cpi,
+        timing.setup_seconds,
+        scan_seconds,
+        total_seconds,
+        receipt.transactions as f64 / scan_seconds_nonzero,
+        receipt.transactions as f64 / total_seconds_nonzero,
+        timing.bound_source_size_bytes,
+        receipt.io.source_read_calls.unwrap_or(0),
+        logical_bytes,
+        decimal_mb_s(logical_bytes, scan_seconds_nonzero),
+        setup_http.network_body_bytes,
+        scan_http.network_body_bytes,
+        total_http.network_body_bytes,
+        decimal_mb_s(scan_http.network_body_bytes, scan_seconds_nonzero),
+        decimal_mb_s(total_http.network_body_bytes, total_seconds_nonzero),
+        setup_http.cache_read_bytes,
+        scan_http.cache_read_bytes,
+        total_http.cache_read_bytes,
+        timing.setup_io.local_read_calls,
+        scan_io.local_read_calls,
+        total_io.local_read_calls,
+        timing.setup_io.local_read_bytes,
+        scan_io.local_read_bytes,
+        total_io.local_read_bytes,
+        decimal_mb_s(scan_io.local_read_bytes, scan_seconds_nonzero),
+        decimal_mb_s(total_io.local_read_bytes, total_seconds_nonzero),
+    );
+    Ok(())
+}
+
+/// Counters common to the three small real-world workload reports.
+pub trait ExampleReport {
+    fn workload(&self) -> &'static str;
+    fn common(&self) -> (u64, u64, OutputReport, CoverageReport, bool);
+    fn print_details(&self);
+}
+
+impl ExampleReport for UsdcReport {
+    fn workload(&self) -> &'static str {
+        "usdc-recorded-balances"
+    }
+
+    fn common(&self) -> (u64, u64, OutputReport, CoverageReport, bool) {
+        (
+            self.blocks_seen,
+            self.transactions_seen,
+            self.output,
+            self.coverage,
+            self.output_complete,
+        )
+    }
+
+    fn print_details(&self) {
+        println!(
+            "workload={} matching_transactions={} pre_rows={} post_rows={} token_balances_unavailable_transactions={} token_mint_unavailable_transactions={}",
+            self.workload(),
+            self.matching_transactions,
+            self.pre_rows,
+            self.post_rows,
+            self.token_balances_unavailable_transactions,
+            self.token_mint_unavailable_transactions,
+        );
+    }
+}
+
+impl ExampleReport for PumpReport {
+    fn workload(&self) -> &'static str {
+        "pumpfun-transactions"
+    }
+
+    fn common(&self) -> (u64, u64, OutputReport, CoverageReport, bool) {
+        (
+            self.blocks_seen,
+            self.transactions_seen,
+            self.output,
+            self.coverage,
+            self.output_complete,
+        )
+    }
+
+    fn print_details(&self) {
+        println!(
+            "workload={} matching_transactions={} written_transactions={} direct_invocations={} cpi_invocations={} incomplete_instruction_transactions={} incomplete_cpi_transactions={} matches_without_primary_signature={}",
+            self.workload(),
+            self.matching_transactions,
+            self.written_transactions,
+            self.direct_invocations,
+            self.cpi_invocations,
+            self.incomplete_instruction_transactions,
+            self.incomplete_cpi_transactions,
+            self.matches_without_primary_signature,
+        );
+    }
+}
+
+impl ExampleReport for FirewatchReport {
+    fn workload(&self) -> &'static str {
+        "firewatch-wallet-programs"
+    }
+
+    fn common(&self) -> (u64, u64, OutputReport, CoverageReport, bool) {
+        (
+            self.blocks_seen,
+            self.transactions_seen,
+            self.output,
+            self.coverage,
+            self.output_complete,
+        )
+    }
+
+    fn print_details(&self) {
+        println!(
+            "workload={} signer_transactions={} successful_signer_transactions={} failed_signer_transactions={} unknown_execution_signer_transactions={} reached_instructions={} distinct_programs={} incomplete_instruction_transactions={} incomplete_cpi_transactions={}",
+            self.workload(),
+            self.signer_transactions,
+            self.successful_signer_transactions,
+            self.failed_signer_transactions,
+            self.unknown_execution_signer_transactions,
+            self.reached_instructions,
+            self.distinct_programs,
+            self.incomplete_instruction_transactions,
+            self.incomplete_cpi_transactions,
+        );
+    }
+}
+
+pub fn finish_ordered_workload<W: Write, R: ExampleReport>(
+    arguments: &WorkloadArguments,
+    archive: IndexerV3Archive,
+    timing: RunTiming,
+    parallel: IndexerV3ParallelScanReceipt,
+    scan_seconds: f64,
+    finished: FinishedOutput<W, R>,
+) -> Result<(), Box<dyn Error>> {
+    let receipt = parallel.scan;
+    finish_workload(
+        arguments,
+        archive,
+        timing,
+        WorkloadScan {
+            counts: WorkCounts {
+                requested_blocks: receipt.blocks,
+                requested_transactions: receipt.transactions,
+                candidate_blocks: receipt.blocks,
+                candidate_transactions: receipt.transactions,
+                skipped_blocks: 0,
+                skipped_transactions: 0,
+                decoded_blocks: receipt.blocks,
+                decoded_transactions: receipt.transactions,
+            },
+            source_io: receipt.io,
+            parallel: parallel.parallel,
+            registry: parallel.registry,
+        },
+        "ordered-full-scan",
+        scan_seconds,
+        finished,
+    )
+}
+
+pub fn finish_targeted_workload<W: Write, R: ExampleReport>(
+    arguments: &WorkloadArguments,
+    archive: IndexerV3Archive,
+    timing: RunTiming,
+    targeted: IndexerV3TargetedScanReceipt,
+    scan_seconds: f64,
+    finished: FinishedOutput<W, R>,
+) -> Result<(), Box<dyn Error>> {
+    let scan = targeted.scan;
+    let parallel = scan
+        .parallel
+        .ok_or("the targeted parallel scan did not return parallel statistics")?;
+    finish_workload(
+        arguments,
+        archive,
+        timing,
+        WorkloadScan {
+            counts: WorkCounts {
+                requested_blocks: scan.requested_blocks,
+                requested_transactions: scan.requested_transactions,
+                candidate_blocks: scan.candidate_blocks,
+                candidate_transactions: scan.candidate_transactions,
+                skipped_blocks: scan.skipped_blocks,
+                skipped_transactions: scan.skipped_transactions,
+                decoded_blocks: scan.scan_receipt.blocks,
+                decoded_transactions: scan.scan_receipt.transactions,
+            },
+            source_io: scan.source_io,
+            parallel,
+            registry: scan.registry,
+        },
+        "reverse-index-candidates",
+        scan_seconds,
+        finished,
+    )
+}
+
+struct WorkloadScan {
+    counts: WorkCounts,
+    source_io: ScanIoReceipt,
+    parallel: IndexerV3ParallelScanStats,
+    registry: IndexerV3RegistryReadReceipt,
+}
+
+fn finish_workload<W: Write, R: ExampleReport>(
+    arguments: &WorkloadArguments,
+    archive: IndexerV3Archive,
+    timing: RunTiming,
+    scan: WorkloadScan,
+    scan_kind: &'static str,
+    scan_seconds: f64,
+    finished: FinishedOutput<W, R>,
+) -> Result<(), Box<dyn Error>> {
+    let (mut writer, report) = finished.into_parts();
+    writer.flush()?;
+    let (blocks_seen, transactions_seen, output, coverage, output_complete) = report.common();
+    validate_workload_counts(scan.counts, blocks_seen, transactions_seen)?;
+    let total_io = finish_archive(archive)?;
+    let total_seconds = timing.total_started.elapsed().as_secs_f64();
+    print_run(RunReport {
+        workload: report.workload(),
+        scan_kind,
+        arguments,
+        counts: scan.counts,
+        source_io: scan.source_io,
+        setup_seconds: timing.setup_seconds,
+        scan_seconds,
+        total_seconds,
+        bound_source_size_bytes: timing.bound_source_size_bytes,
+        setup_io: timing.setup_io,
+        total_io,
+        output,
+        coverage,
+        output_complete,
+        parallel: scan.parallel,
+        registry: scan.registry,
+    });
+    report.print_details();
+    Ok(())
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct WorkCounts {
     pub requested_blocks: u64,
@@ -373,7 +677,7 @@ pub struct WorkCounts {
 pub struct RunReport<'a> {
     pub workload: &'static str,
     pub scan_kind: &'static str,
-    pub arguments: &'a Arguments,
+    pub arguments: &'a WorkloadArguments,
     pub counts: WorkCounts,
     pub source_io: ScanIoReceipt,
     pub setup_seconds: f64,
@@ -398,11 +702,11 @@ pub fn print_run(report: RunReport<'_>) {
     let total_http = report.total_io.http_and_cache;
     let logical_bytes = report.source_io.source_read_bytes.unwrap_or(0);
     println!(
-        "format=indexer-v3 workload={} scan_kind={} epoch={} source={} threads={} requested_workers={} effective_workers={} max_active_workers={} parallel_jobs={} projected_blocks={} blocks_per_job_limit={} job_window_limit={} max_in_flight_jobs={} max_coordinator_pending_results={} max_result_channel_backlog={} max_coordinator_pending_projected_blocks={} declared_decoded_byte_limit={} transaction_limit={} max_in_flight_declared_decoded_bytes={} max_in_flight_transactions={} max_owned_payload_block_bytes={} max_in_flight_owned_payload_bytes={} global_projected_block_bound={} registry_mode={} registry_prefetch_read_calls={} registry_prefetch_read_bytes={} registry_resolutions={} registry_resident_payload_bytes={} requested_blocks={} requested_transactions={} candidate_blocks={} candidate_transactions={} skipped_blocks={} skipped_transactions={} decoded_blocks={} decoded_transactions={} setup_s={:.6} scan_s={:.6} total_s={:.6} decoded_scan_tps={:.3} decoded_total_tps={:.3} requested_universe_work_equivalent_tps={:.3} bound_source_size_bytes={} scan_logical_read_calls={} scan_logical_read_bytes={} scan_logical_read_mb_s={:.6} setup_network_bytes={} scan_network_bytes={} total_network_bytes={} scan_network_mb_s={:.6} total_network_mb_s={:.6} setup_cache_read_bytes={} scan_cache_read_bytes={} total_cache_read_bytes={} setup_local_read_calls={} scan_local_read_calls={} total_local_read_calls={} setup_local_read_bytes={} scan_local_read_bytes={} total_local_read_bytes={} scan_local_read_mb_s={:.6} total_local_read_mb_s={:.6} output_path={} output_schema={} output_rows={} output_bytes={} output_sha256={} output_complete={} indeterminate_transactions={} coverage_sha256={}",
+        "format=indexer-v3 workload={} scan_kind={} epoch={} source={} threads={} requested_workers={} effective_workers={} max_active_workers={} parallel_jobs={} projected_blocks={} blocks_per_job_limit={} job_window_limit={} max_in_flight_jobs={} max_coordinator_pending_results={} max_result_channel_backlog={} max_coordinator_pending_projected_blocks={} declared_decoded_byte_limit={} transaction_limit={} max_in_flight_declared_decoded_bytes={} max_in_flight_transactions={} max_owned_payload_block_bytes={} max_in_flight_owned_payload_bytes={} global_projected_block_bound={} registry_mode={} registry_prefetch_read_calls={} registry_prefetch_read_bytes={} registry_resolutions={} registry_resident_payload_bytes={} requested_blocks={} requested_transactions={} candidate_blocks={} candidate_transactions={} skipped_blocks={} skipped_transactions={} decoded_blocks={} decoded_transactions={} setup_s={:.6} scan_s={:.6} total_s={:.6} scan_tps={:.3} total_tps={:.3} decoded_scan_tps={:.3} decoded_total_tps={:.3} bound_source_size_bytes={} scan_logical_read_calls={} scan_logical_read_bytes={} scan_logical_read_mb_s={:.6} setup_network_bytes={} scan_network_bytes={} total_network_bytes={} scan_network_mb_s={:.6} total_network_mb_s={:.6} setup_cache_read_bytes={} scan_cache_read_bytes={} total_cache_read_bytes={} setup_local_read_calls={} scan_local_read_calls={} total_local_read_calls={} setup_local_read_bytes={} scan_local_read_bytes={} total_local_read_bytes={} scan_local_read_mb_s={:.6} total_local_read_mb_s={:.6} output_path={} output_schema={} output_rows={} output_bytes={} output_complete={} indeterminate_transactions={} coverage_sha256={}",
         report.workload,
         report.scan_kind,
         report.arguments.epoch,
-        source_name(&report.arguments.source),
+        workload_source_name(&report.arguments.source),
         report.arguments.threads,
         report.parallel.requested_workers,
         report.parallel.effective_workers,
@@ -438,9 +742,10 @@ pub fn print_run(report: RunReport<'_>) {
         report.setup_seconds,
         report.scan_seconds,
         report.total_seconds,
+        report.counts.requested_transactions as f64 / scan_seconds,
+        report.counts.requested_transactions as f64 / total_seconds,
         report.counts.decoded_transactions as f64 / scan_seconds,
         report.counts.decoded_transactions as f64 / total_seconds,
-        report.counts.requested_transactions as f64 / scan_seconds,
         report.bound_source_size_bytes,
         report.source_io.source_read_calls.unwrap_or(0),
         logical_bytes,
@@ -465,7 +770,6 @@ pub fn print_run(report: RunReport<'_>) {
         report.output.schema,
         report.output.row_count,
         report.output.output_bytes,
-        report.output.sha256_hex(),
         report.output_complete,
         report.coverage.indeterminate_transactions,
         report.coverage.sha256_hex(),
@@ -526,10 +830,10 @@ fn subtract_transport(
     }
 }
 
-fn source_name(source: &Source) -> &'static str {
+fn workload_source_name(source: &WorkloadSource) -> &'static str {
     match source {
-        Source::Network { .. } => "network",
-        Source::LocalSplit { .. } => "local-split",
+        WorkloadSource::Network { .. } => "network",
+        WorkloadSource::LocalArchive { .. } => "local",
     }
 }
 

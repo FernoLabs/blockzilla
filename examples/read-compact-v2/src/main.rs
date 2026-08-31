@@ -2,8 +2,7 @@ use std::{env, error::Error, num::NonZeroU32, path::PathBuf, time::Instant};
 
 use blockzilla_compact_v2_read_sdk::{
     ArchiveInstructionSource, ArchiveInstructionSourceExt, CompactV2Archive,
-    CompactV2LocalDescriptor, CompactV2MessageSchema, CompactV2MetadataSchema,
-    CompactV2OpenOptions, CompactV2TransportReceipt, ScanRequest,
+    CompactV2LocalDescriptor, CompactV2TransportReceipt, ScanRequest,
 };
 
 const DEFAULT_MAX_BLOCKS: u32 = 1_024;
@@ -17,17 +16,13 @@ fn main() -> Result<(), Box<dyn Error>> {
             origin,
             epoch,
             cache_root,
-            options,
-        } => (
-            CompactV2Archive::open_with_options(&origin, epoch, cache_root, options)?,
-            epoch,
-        ),
+        } => (CompactV2Archive::open(&origin, epoch, cache_root)?, epoch),
         Input::Local {
             root,
             epoch,
             candidate_id,
         } => {
-            let descriptor = CompactV2LocalDescriptor::mainnet_current(epoch, candidate_id)?;
+            let descriptor = CompactV2LocalDescriptor::mainnet(epoch, candidate_id)?;
             (CompactV2Archive::open_local(root, descriptor)?, epoch)
         }
     };
@@ -43,7 +38,7 @@ fn main() -> Result<(), Box<dyn Error>> {
     let mut first_slot = None;
     let mut last_slot = None;
     let scan_started = Instant::now();
-    let (receipt, block_universe) = archive.for_each_block_fingerprinted(&request, |block| {
+    let receipt = archive.for_each_block(&request, |block| {
         first_slot.get_or_insert(block.header.slot);
         last_slot = Some(block.header.slot);
         Ok(())
@@ -55,8 +50,6 @@ fn main() -> Result<(), Box<dyn Error>> {
     let total_seconds = total_started.elapsed().as_secs_f64().max(f64::MIN_POSITIVE);
     let first_slot = first_slot.ok_or("scan returned no blocks")?;
     let last_slot = last_slot.ok_or("scan returned no blocks")?;
-    let block_universe_sha256 = block_universe.sha256_hex();
-
     print_result(
         "compact-v2",
         epoch,
@@ -67,8 +60,6 @@ fn main() -> Result<(), Box<dyn Error>> {
         bound_source_size_bytes,
         receipt.blocks,
         receipt.transactions,
-        block_universe.records(),
-        &block_universe_sha256,
         first_slot,
         last_slot,
         setup_seconds,
@@ -100,8 +91,6 @@ fn print_result(
     bound_source_size_bytes: u64,
     blocks: u64,
     transactions: u64,
-    block_universe_records: u64,
-    block_universe_sha256: &str,
     first_slot: u64,
     last_slot: u64,
     setup_seconds: f64,
@@ -125,7 +114,7 @@ fn print_result(
         .saturating_add(total_http.cache_read_bytes)
         .saturating_add(total_io.local_read_bytes);
     println!(
-        "format={format} epoch={epoch} verification={verification} transport_kind={transport_kind} candidate_id={candidate_id} selected_blocks={requested_blocks} bound_source_size_bytes={bound_source_size_bytes} blocks={blocks} transactions={transactions} block_universe_records={block_universe_records} block_universe_sha256={block_universe_sha256} first_slot={first_slot} last_slot={last_slot} setup_s={setup_seconds:.6} scan_s={scan_seconds:.6} total_s={total_seconds:.6} scan_tps={scan_tps:.3} total_tps={total_tps:.3} setup_head_requests={} scan_head_requests={} total_head_requests={} setup_get_requests={} scan_get_requests={} total_get_requests={} setup_network_bytes={} scan_network_bytes={} total_network_bytes={} setup_cache_hits={} scan_cache_hits={} total_cache_hits={} setup_cache_downloads={} scan_cache_downloads={} total_cache_downloads={} setup_cache_read_calls={} scan_cache_read_calls={} total_cache_read_calls={} setup_cache_bytes={} scan_cache_bytes={} total_cache_bytes={} setup_local_read_calls={} scan_local_read_calls={} total_local_read_calls={} setup_local_read_bytes={} scan_local_read_bytes={} total_local_read_bytes={} setup_local_mb_s={:.6} scan_local_mb_s={:.6} total_local_mb_s={:.6} scan_network_mb_s={:.6} scan_aggregate_io_mb_s={:.6} total_network_mb_s={:.6} total_aggregate_io_mb_s={:.6}",
+        "format={format} epoch={epoch} verification={verification} transport_kind={transport_kind} candidate_id={candidate_id} selected_blocks={requested_blocks} bound_source_size_bytes={bound_source_size_bytes} blocks={blocks} transactions={transactions} first_slot={first_slot} last_slot={last_slot} setup_s={setup_seconds:.6} scan_s={scan_seconds:.6} total_s={total_seconds:.6} scan_tps={scan_tps:.3} total_tps={total_tps:.3} setup_head_requests={} scan_head_requests={} total_head_requests={} setup_get_requests={} scan_get_requests={} total_get_requests={} setup_network_bytes={} scan_network_bytes={} total_network_bytes={} setup_cache_hits={} scan_cache_hits={} total_cache_hits={} setup_cache_downloads={} scan_cache_downloads={} total_cache_downloads={} setup_cache_read_calls={} scan_cache_read_calls={} total_cache_read_calls={} setup_cache_bytes={} scan_cache_bytes={} total_cache_bytes={} setup_local_read_calls={} scan_local_read_calls={} total_local_read_calls={} setup_local_read_bytes={} scan_local_read_bytes={} total_local_read_bytes={} setup_local_mb_s={:.6} scan_local_mb_s={:.6} total_local_mb_s={:.6} scan_network_mb_s={:.6} scan_aggregate_io_mb_s={:.6} total_network_mb_s={:.6} total_aggregate_io_mb_s={:.6}",
         setup_http.head_requests,
         scan_http.head_requests,
         total_http.head_requests,
@@ -173,7 +162,6 @@ enum Input {
         origin: String,
         epoch: u64,
         cache_root: PathBuf,
-        options: CompactV2OpenOptions,
     },
     Local {
         root: PathBuf,
@@ -187,43 +175,11 @@ fn arguments() -> Result<(Input, NonZeroU32), Box<dyn Error>> {
 }
 
 fn arguments_from(
-    args: impl Iterator<Item = String>,
+    mut args: impl Iterator<Item = String>,
 ) -> Result<(Input, NonZeroU32), Box<dyn Error>> {
-    let usage = "usage:\n  read-compact-v2 <worker-origin> <epoch> <absolute-cache-root> [max-blocks] [--message-schema current|may24] [--metadata-schema current|legacy]\n  read-compact-v2 local <absolute-compact-root> <epoch> <candidate-id> [max-blocks]";
-    let mut values = args.collect::<Vec<_>>();
-    let mut options = CompactV2OpenOptions::default();
-    let mut message_schema_seen = false;
-    let mut metadata_schema_seen = false;
-    while values.len() >= 2 {
-        let flag = values[values.len() - 2].as_str();
-        match flag {
-            "--message-schema" => {
-                if message_schema_seen {
-                    return Err("--message-schema was provided more than once".into());
-                }
-                message_schema_seen = true;
-                let value = values.pop().expect("length was checked");
-                values.pop();
-                options.message_schema = parse_message_schema(&value)?;
-            }
-            "--metadata-schema" => {
-                if metadata_schema_seen {
-                    return Err("--metadata-schema was provided more than once".into());
-                }
-                metadata_schema_seen = true;
-                let value = values.pop().expect("length was checked");
-                values.pop();
-                options.metadata_schema = parse_metadata_schema(&value)?;
-            }
-            _ => break,
-        }
-    }
-    let mut args = values.into_iter();
+    let usage = "usage:\n  read-compact-v2 <worker-origin> <epoch> <absolute-cache-root> [max-blocks]\n  read-compact-v2 local <absolute-compact-root> <epoch> <candidate-id> [max-blocks]";
     let first = args.next().ok_or(usage)?;
     let input = if first == "local" {
-        if message_schema_seen || metadata_schema_seen {
-            return Err("network schema options cannot be used with local mode".into());
-        }
         let root = PathBuf::from(args.next().ok_or(usage)?);
         let epoch = args.next().ok_or(usage)?.parse()?;
         let candidate_id = args.next().ok_or(usage)?;
@@ -240,7 +196,6 @@ fn arguments_from(
             origin,
             epoch,
             cache_root,
-            options,
         }
     };
     let max_blocks = args
@@ -251,22 +206,6 @@ fn arguments_from(
         return Err(usage.into());
     }
     Ok((input, max_blocks))
-}
-
-fn parse_message_schema(value: &str) -> Result<CompactV2MessageSchema, Box<dyn Error>> {
-    match value {
-        "current" => Ok(CompactV2MessageSchema::Current),
-        "may24" => Ok(CompactV2MessageSchema::May24PreUnknownFallbacks),
-        _ => Err("message schema must be current or may24".into()),
-    }
-}
-
-fn parse_metadata_schema(value: &str) -> Result<CompactV2MetadataSchema, Box<dyn Error>> {
-    match value {
-        "current" => Ok(CompactV2MetadataSchema::CurrentTypedError),
-        "legacy" => Ok(CompactV2MetadataSchema::LegacyRawError),
-        _ => Err("metadata schema must be current or legacy".into()),
-    }
 }
 
 #[cfg(test)]
@@ -307,38 +246,25 @@ mod tests {
         )
         .unwrap();
         assert_eq!(blocks.get(), DEFAULT_MAX_BLOCKS);
-        let Input::Network { epoch, options, .. } = input else {
+        let Input::Network { epoch, .. } = input else {
             panic!("expected network input");
         };
         assert_eq!(epoch, 0);
-        assert_eq!(options, CompactV2OpenOptions::default());
     }
 
     #[test]
-    fn parses_explicit_network_wire_grammars() {
-        let (input, blocks) = arguments_from(
+    fn rejects_extra_arguments() {
+        let result = arguments_from(
             [
                 "https://example.test",
                 "0",
                 "/tmp/cache",
                 "1024",
-                "--message-schema",
-                "current",
-                "--metadata-schema",
-                "legacy",
+                "unexpected",
             ]
             .into_iter()
             .map(str::to_owned),
-        )
-        .unwrap();
-        assert_eq!(blocks.get(), 1024);
-        let Input::Network { options, .. } = input else {
-            panic!("expected network input");
-        };
-        assert_eq!(options.message_schema, CompactV2MessageSchema::Current);
-        assert_eq!(
-            options.metadata_schema,
-            CompactV2MetadataSchema::LegacyRawError
         );
+        assert!(result.is_err());
     }
 }

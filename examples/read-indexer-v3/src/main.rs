@@ -33,7 +33,7 @@ fn main() -> Result<(), Box<dyn Error>> {
     let mut first_slot = None;
     let mut last_slot = None;
     let scan_started = Instant::now();
-    let (receipt, block_universe) = archive.for_each_block_fingerprinted(&request, |block| {
+    let receipt = archive.for_each_block(&request, |block| {
         first_slot.get_or_insert(block.header.slot);
         last_slot = Some(block.header.slot);
         Ok(())
@@ -58,8 +58,6 @@ fn main() -> Result<(), Box<dyn Error>> {
     let total_seconds = elapsed_seconds(total_started);
     let first_slot = first_slot.ok_or("scan returned no blocks")?;
     let last_slot = last_slot.ok_or("scan returned no blocks")?;
-    let block_universe_sha256 = block_universe.sha256_hex();
-
     print_result(ResultView {
         arguments: &arguments,
         transport_kind: total_transport.kind,
@@ -70,8 +68,6 @@ fn main() -> Result<(), Box<dyn Error>> {
         cached_source_size_bytes,
         blocks: receipt.blocks,
         transactions: receipt.transactions,
-        block_universe_records: block_universe.records(),
-        block_universe_sha256: &block_universe_sha256,
         first_slot,
         last_slot,
         setup_seconds,
@@ -236,8 +232,6 @@ struct ResultView<'a> {
     cached_source_size_bytes: u64,
     blocks: u64,
     transactions: u64,
-    block_universe_records: u64,
-    block_universe_sha256: &'a str,
     first_slot: u64,
     last_slot: u64,
     setup_seconds: f64,
@@ -266,7 +260,7 @@ fn print_result(result: ResultView<'_>) {
         .network_body_bytes
         .saturating_add(result.total_io.cache_read_bytes);
     println!(
-        "format=indexer-v3 transport_kind={} candidate_id={} epoch={} verification={} source_scope={} requested_max_blocks={} selected_blocks={} bound_source_size_bytes={} cached_source_size_bytes={} blocks={} transactions={} block_universe_records={} block_universe_sha256={} first_slot={} last_slot={} setup_s={:.6} scan_s={:.6} total_s={:.6} scan_tps={:.3} total_tps={:.3} setup_head_requests={} scan_head_requests={} total_head_requests={} setup_get_requests={} scan_get_requests={} total_get_requests={} setup_network_bytes={} scan_network_bytes={} total_network_bytes={} setup_cache_hits={} scan_cache_hits={} total_cache_hits={} setup_cache_downloads={} scan_cache_downloads={} total_cache_downloads={} setup_cache_read_calls={} scan_cache_read_calls={} total_cache_read_calls={} setup_cache_bytes={} scan_cache_bytes={} total_cache_bytes={} scan_network_mb_s={:.6} scan_aggregate_io_mb_s={:.6} total_network_mb_s={:.6} total_aggregate_io_mb_s={:.6} setup_local_read_calls={} scan_local_read_calls={} total_local_read_calls={} setup_local_read_bytes={} scan_local_read_bytes={} total_local_read_bytes={} scan_local_mb_s={:.6} total_local_mb_s={:.6}",
+        "format=indexer-v3 transport_kind={} candidate_id={} epoch={} verification={} source_scope={} requested_max_blocks={} selected_blocks={} bound_source_size_bytes={} cached_source_size_bytes={} blocks={} transactions={} first_slot={} last_slot={} setup_s={:.6} scan_s={:.6} total_s={:.6} scan_tps={:.3} total_tps={:.3} setup_head_requests={} scan_head_requests={} total_head_requests={} setup_get_requests={} scan_get_requests={} total_get_requests={} setup_network_bytes={} scan_network_bytes={} total_network_bytes={} setup_cache_hits={} scan_cache_hits={} total_cache_hits={} setup_cache_downloads={} scan_cache_downloads={} total_cache_downloads={} setup_cache_read_calls={} scan_cache_read_calls={} total_cache_read_calls={} setup_cache_bytes={} scan_cache_bytes={} total_cache_bytes={} scan_network_mb_s={:.6} scan_aggregate_io_mb_s={:.6} total_network_mb_s={:.6} total_aggregate_io_mb_s={:.6} setup_local_read_calls={} scan_local_read_calls={} total_local_read_calls={} setup_local_read_bytes={} scan_local_read_bytes={} total_local_read_bytes={} scan_local_mb_s={:.6} total_local_mb_s={:.6}",
         transport_kind_name(result.transport_kind),
         result.arguments.source.candidate_id(),
         result.arguments.epoch,
@@ -278,8 +272,6 @@ fn print_result(result: ResultView<'_>) {
         result.cached_source_size_bytes,
         result.blocks,
         result.transactions,
-        result.block_universe_records,
-        result.block_universe_sha256,
         result.first_slot,
         result.last_slot,
         result.setup_seconds,
@@ -365,7 +357,7 @@ mod tests {
     use super::*;
 
     #[test]
-    fn parses_legacy_network_arguments_with_default_limit() {
+    fn parses_positional_network_arguments_with_default_limit() {
         let arguments =
             arguments_from(["https://example.test", "900", "/absolute/cache/directory"]).unwrap();
         assert_eq!(arguments.epoch, 900);
@@ -380,7 +372,7 @@ mod tests {
     }
 
     #[test]
-    fn parses_legacy_network_arguments_with_explicit_limit() {
+    fn parses_positional_network_arguments_with_explicit_limit() {
         let arguments = arguments_from([
             "https://example.test",
             "800",
