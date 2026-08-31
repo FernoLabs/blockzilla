@@ -4,6 +4,7 @@ use std::{
     ops::Range,
     sync::{
         Mutex,
+        atomic::{AtomicU64, AtomicUsize, Ordering},
         mpsc::{Receiver, SyncSender, sync_channel},
     },
     thread,
@@ -11,16 +12,20 @@ use std::{
 };
 
 use blockzilla_format::{
-    ARCHIVE_V2_BLOCKHASH_REGISTRY_FILE, ARCHIVE_V2_HOT_INDEX_FLAG_DICTIONARY,
-    ARCHIVE_V2_HOT_INDEX_FLAG_RAW_BLOCKS, ARCHIVE_V2_HOT_INDEX_HEADER_LEN,
-    ARCHIVE_V2_HOT_INDEX_MAGIC, ARCHIVE_V2_HOT_INDEX_ROW_LEN, ARCHIVE_V2_HOT_INDEX_VERSION,
-    ARCHIVE_V2_PREV_BLOCKHASH_TAIL_FILE, ARCHIVE_V2_TX_FLAG_HAS_INNER_IX,
-    ARCHIVE_V2_TX_FLAG_HAS_LOADED_ADDRESSES, ARCHIVE_V2_TX_FLAG_HAS_METADATA,
-    ARCHIVE_V2_TX_FLAG_HAS_TOKEN_BALANCES, ARCHIVE_V2_TX_FLAG_MESSAGE_V0,
-    ARCHIVE_V2_TX_FLAG_METADATA_RAW_FALLBACK, ARCHIVE_V2_TX_FLAG_TX_RAW_FALLBACK,
-    ARCHIVE_V2_VOTE_HASH_REGISTRY_FILE, ArchiveV2HotBlockBlob, ArchiveV2HotBlockHeader,
-    ArchiveV2HotBlockIndex, ArchiveV2HotBlockIndexRow, ArchiveV2HotMessagePayload,
-    ArchiveV2HotMetaRecord, ArchiveV2HotTxRow, ArchiveV2HotTxRowIter,
+    ARCHIVE_V2_BLOCK_ACCESS_FILE, ARCHIVE_V2_BLOCK_ACCESS_INDEX_FILE,
+    ARCHIVE_V2_BLOCKHASH_INDEX_V3_FILE, ARCHIVE_V2_BLOCKHASH_REGISTRY_FILE,
+    ARCHIVE_V2_FIRST_SEEN_REGISTRY_MANIFEST_FILE, ARCHIVE_V2_GET_BLOCK_INDEX_FILE,
+    ARCHIVE_V2_HOT_INDEX_FLAG_DICTIONARY, ARCHIVE_V2_HOT_INDEX_FLAG_RAW_BLOCKS,
+    ARCHIVE_V2_HOT_INDEX_HEADER_LEN, ARCHIVE_V2_HOT_INDEX_MAGIC, ARCHIVE_V2_HOT_INDEX_ROW_LEN,
+    ARCHIVE_V2_HOT_INDEX_VERSION, ARCHIVE_V2_POH_FILE, ARCHIVE_V2_PREV_BLOCKHASH_TAIL_FILE,
+    ARCHIVE_V2_PUBKEY_HOT_SEED_FILE, ARCHIVE_V2_PUBKEY_REGISTRY_COUNTS_FILE,
+    ARCHIVE_V2_PUBKEY_REGISTRY_INDEX_FILE, ARCHIVE_V2_SHREDDING_FILE,
+    ARCHIVE_V2_TX_FLAG_HAS_INNER_IX, ARCHIVE_V2_TX_FLAG_HAS_LOADED_ADDRESSES,
+    ARCHIVE_V2_TX_FLAG_HAS_METADATA, ARCHIVE_V2_TX_FLAG_HAS_TOKEN_BALANCES,
+    ARCHIVE_V2_TX_FLAG_MESSAGE_V0, ARCHIVE_V2_TX_FLAG_METADATA_RAW_FALLBACK,
+    ARCHIVE_V2_TX_FLAG_TX_RAW_FALLBACK, ARCHIVE_V2_VOTE_HASH_REGISTRY_FILE, ArchiveV2HotBlockBlob,
+    ArchiveV2HotBlockHeader, ArchiveV2HotBlockIndex, ArchiveV2HotBlockIndexRow,
+    ArchiveV2HotMessagePayload, ArchiveV2HotMetaRecord, ArchiveV2HotTxRow, ArchiveV2HotTxRowIter,
     BorrowedArchiveV2HotBlockBlob, BorrowedArchiveV2HotBlockBlobWithoutRewards, CompactMetaV1,
     CompactPubkey, WINCODE_ARCHIVE_V2_FLAG_ALL_PUBKEY_REF_COUNTS,
     WINCODE_ARCHIVE_V2_FLAG_FIRST_SEEN_REGISTRY, WINCODE_ARCHIVE_V2_FLAG_LEB128,
@@ -34,10 +39,14 @@ use sha2::{Digest, Sha256};
 
 use crate::{
     Error, Result,
+    descriptor::{
+        ArchiveDescriptor, ArchiveIdentity, ArchiveSourceBinding, COMPACT_V2_OPTIONAL_OBJECTS,
+        COMPACT_V2_REQUIRED_OBJECTS,
+    },
     manifest::{
         BLOCK_INDEX_FILE, BLOCKS_FILE, GENERATION_MANIFEST_FILE, GENESIS_BIN_FILE,
-        GenerationManifest, META_FILE, REGISTRY_FILE, REQUIRED_GENERATION_FILES, SIGNATURES_FILE,
-        decode_sha256, hex_lower,
+        GenerationManifest, META_FILE, OperatorTrustedLocalDescriptor, REGISTRY_FILE,
+        REQUIRED_GENERATION_FILES, SIGNATURES_FILE, decode_sha256, hex_lower,
     },
     message_schema::{
         CompactV2MessageSchema, CompactV2MessageSchemaError, decode_compact_v2_message,
@@ -112,8 +121,12 @@ pub struct RecycledBlockStats {
 pub const MAX_ORDERED_PARALLEL_DECODE_WORKERS: usize = 64;
 pub const MAX_ORDERED_PARALLEL_COMPRESSED_BUFFERS: usize = 16;
 pub const MAX_ORDERED_PARALLEL_BLOCKS_PER_BATCH: usize = 65_536;
+/// Hard bound for caller-owned transaction projections retained in one batch.
+pub const MAX_ORDERED_PARALLEL_TRANSACTIONS_PER_BATCH: u64 = 65_536;
 pub const MAX_ORDERED_PARALLEL_UNCOMPRESSED_BATCH_BYTES: usize = 1024 * 1024 * 1024;
 pub const MAX_ORDERED_PARALLEL_RETAINED_DECOMPRESSED_BYTES: usize = 1024 * 1024 * 1024;
+
+static NEXT_READER_ID: AtomicU64 = AtomicU64::new(1);
 
 /// Bounded resources for monotonic block I/O with parallel borrowed decoding.
 ///
@@ -166,8 +179,14 @@ impl Default for OrderedParallelBlockConfig {
 pub struct OrderedParallelBlockStats {
     pub block_count: u64,
     pub batch_count: u64,
+    /// Distinct private-pool workers that decoded at least one block.
+    pub effective_workers: usize,
+    /// Peak simultaneous decode-and-project callbacks.
+    pub max_active_workers: usize,
     /// Largest number of blocks projected before one ordered delivery pass.
     pub max_blocks_per_batch: usize,
+    /// Largest transaction count projected before one ordered delivery pass.
+    pub max_transactions_per_batch: u64,
     pub read_call_count: u64,
     pub compressed_bytes: u64,
     pub producer_read_wall_time: Duration,
@@ -210,6 +229,18 @@ pub enum HashVerification {
 pub enum ArchiveReaderSourceKind {
     PublishedManifest,
     OperatorTrusted,
+    ObjectSetBound,
+}
+
+/// Identity and inventory used by one open Compact V2 reader.
+///
+/// The local variant is intentionally not a publication manifest. It contains
+/// operator-supplied identity and sizes observed through a pinned local source.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum ArchiveGenerationDescriptor {
+    PublishedManifest(GenerationManifest),
+    OperatorTrustedLocal(OperatorTrustedLocalDescriptor),
+    ObjectSet(ArchiveDescriptor),
 }
 
 #[derive(Debug, Clone)]
@@ -250,6 +281,7 @@ pub struct GenerationBinding {
 
 #[derive(Debug, Clone)]
 pub struct CompiledPubkeyFilter {
+    reader_id: u64,
     binding: GenerationBinding,
     registry_ids: HashSet<u32>,
     raw_pubkeys: HashSet<[u8; 32]>,
@@ -257,6 +289,10 @@ pub struct CompiledPubkeyFilter {
 }
 
 impl CompiledPubkeyFilter {
+    pub fn reader_id(&self) -> u64 {
+        self.reader_id
+    }
+
     pub fn binding(&self) -> GenerationBinding {
         self.binding
     }
@@ -376,7 +412,7 @@ impl MetadataState {
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct SignatureReference {
-    pub generation_digest: [u8; 32],
+    pub reader_id: u64,
     pub first_ordinal: u64,
     pub count: u8,
 }
@@ -606,6 +642,41 @@ pub struct ValidatedGeneration {
     pub signatures_available: bool,
 }
 
+/// Read the first Compact V2 block slot without opening the full archive.
+///
+/// This small structural probe is useful when an application selects a known
+/// epoch schedule from the first indexed slot. The full reader still validates
+/// the complete index before it exposes blocks.
+pub fn compact_v2_first_slot<S: RangeSource>(source: &S) -> Result<Option<u64>> {
+    let index_size = source
+        .size(BLOCK_INDEX_FILE)?
+        .ok_or_else(|| Error::MissingLocalFile(BLOCK_INDEX_FILE.to_owned()))?;
+    if index_size < ARCHIVE_V2_HOT_INDEX_HEADER_LEN as u64 {
+        return Err(Error::InvalidIndex("index header is truncated".into()));
+    }
+    let header = source.read_range(BLOCK_INDEX_FILE, 0, ARCHIVE_V2_HOT_INDEX_HEADER_LEN)?;
+    if &header[..8] != ARCHIVE_V2_HOT_INDEX_MAGIC {
+        return Err(Error::InvalidIndex("bad index magic".into()));
+    }
+    if u16::from_le_bytes(header[8..10].try_into().expect("two bytes"))
+        != ARCHIVE_V2_HOT_INDEX_VERSION
+    {
+        return Err(Error::InvalidIndex("unsupported index version".into()));
+    }
+    let row_count = u64::from_le_bytes(header[12..20].try_into().expect("eight bytes"));
+    if row_count == 0 {
+        return Ok(None);
+    }
+    let minimum = (ARCHIVE_V2_HOT_INDEX_HEADER_LEN + 12) as u64;
+    if index_size < minimum {
+        return Err(Error::InvalidIndex("first index row is truncated".into()));
+    }
+    let prefix = source.read_range(BLOCK_INDEX_FILE, ARCHIVE_V2_HOT_INDEX_HEADER_LEN as u64, 12)?;
+    Ok(Some(u64::from_le_bytes(
+        prefix[4..12].try_into().expect("eight bytes"),
+    )))
+}
+
 #[derive(Debug, Clone, Copy)]
 struct SelectedCompactV2Schemas {
     message: CompactV2MessageSchema,
@@ -615,7 +686,8 @@ struct SelectedCompactV2Schemas {
 #[derive(Debug)]
 pub struct ArchiveReader<S> {
     source: S,
-    manifest: GenerationManifest,
+    generation: ArchiveGenerationDescriptor,
+    reader_id: u64,
     index: ArchiveV2HotBlockIndex,
     genesis: Option<WincodeArchiveV2Genesis>,
     genesis_bin: Option<Vec<u8>>,
@@ -631,6 +703,58 @@ pub struct ArchiveReader<S> {
 }
 
 impl<S: RangeSource> ArchiveReader<S> {
+    /// Open a pinned local Compact V2 object set with the current grammars.
+    ///
+    /// Admission uses the fixed format object list, exact sizes, structural
+    /// validation, and the source's pinned regular-file identity. It does not
+    /// read a publication file or hash archive payloads.
+    pub fn open_pinned(
+        source: S,
+        identity: ArchiveIdentity,
+        mut options: OpenOptions,
+    ) -> Result<Self> {
+        options.hash_verification = HashVerification::SizesOnly;
+        Self::open_pinned_with_schemas(
+            source,
+            identity,
+            options,
+            CompactV2MessageSchema::Current,
+            CompactV2MetadataSchema::CurrentTypedError,
+        )
+    }
+
+    /// Open a pinned local object set with explicit Compact V2 grammars.
+    pub fn open_pinned_with_schemas(
+        source: S,
+        identity: ArchiveIdentity,
+        mut options: OpenOptions,
+        message_schema: CompactV2MessageSchema,
+        metadata_schema: CompactV2MetadataSchema,
+    ) -> Result<Self> {
+        options.hash_verification = HashVerification::SizesOnly;
+        let descriptor =
+            discover_archive_descriptor(&source, identity, ArchiveSourceBinding::PinnedLocal)?;
+        let validated = validate_archive_descriptor_structure(&source, &descriptor, &options)?;
+        let reader_id = NEXT_READER_ID.fetch_add(1, Ordering::SeqCst);
+        Ok(Self {
+            source,
+            reader_id,
+            generation: ArchiveGenerationDescriptor::ObjectSet(descriptor),
+            index: validated.index,
+            genesis: validated.genesis,
+            genesis_bin: validated.genesis_bin,
+            metadata_footer: validated.metadata_footer,
+            binding: validated.binding,
+            registry_entries: validated.registry_entries,
+            total_signatures: validated.total_signatures,
+            signatures_available: validated.signatures_available,
+            message_schema,
+            metadata_schema,
+            source_kind: ArchiveReaderSourceKind::OperatorTrusted,
+            options,
+        })
+    }
+
     pub fn open(source: S) -> Result<Self> {
         Self::open_with_options(source, OpenOptions::default())
     }
@@ -643,9 +767,11 @@ impl<S: RangeSource> ArchiveReader<S> {
         let metadata_schema = select_compact_v2_metadata_schema(&source, &manifest)?;
         let validated = validate_generation_structure(&source, &manifest, &options)?;
 
+        let reader_id = NEXT_READER_ID.fetch_add(1, Ordering::SeqCst);
         Ok(Self {
             source,
-            manifest,
+            reader_id,
+            generation: ArchiveGenerationDescriptor::PublishedManifest(manifest),
             index: validated.index,
             genesis: validated.genesis,
             genesis_bin: validated.genesis_bin,
@@ -665,14 +791,13 @@ impl<S: RangeSource> ArchiveReader<S> {
     /// without hashing any file content, for a source the caller already
     /// trusts (e.g. a local NAS directory).
     ///
-    /// This skips the manifest's cross-service integrity contract entirely:
-    /// `identity` is taken as given, not verified against the archive's own
-    /// content, and every declared file gets a placeholder hash. Structural
-    /// validation (index/metadata bounds, registry shape, footer totals) still
-    /// runs in full via [`validate_generation_structure`] — only the
-    /// published-manifest and content-hash steps are skipped. Requires
-    /// `options.hash_verification == HashVerification::SizesOnly`, since a
-    /// placeholder hash would otherwise fail any real comparison.
+    /// This does not load or synthesize a generation manifest. `identity` is
+    /// taken as given and is not verified against file content. The reader
+    /// builds a separate in-memory local descriptor from exact file sizes.
+    /// Structural validation (index/metadata bounds, registry shape, footer
+    /// totals, signature length, and epoch geometry) still runs. Requires
+    /// `options.hash_verification == HashVerification::SizesOnly` because the
+    /// local descriptor has no content-digest fields.
     pub fn open_trusted(
         source: S,
         identity: crate::manifest::TrustedGenerationIdentity,
@@ -700,7 +825,7 @@ impl<S: RangeSource> ArchiveReader<S> {
         metadata_schema: CompactV2MetadataSchema,
     ) -> Result<Self> {
         if options.hash_verification != HashVerification::SizesOnly {
-            return Err(Error::InvalidManifest(
+            return Err(Error::InvalidLocalDescriptor(
                 "open_trusted requires HashVerification::SizesOnly".into(),
             ));
         }
@@ -709,14 +834,24 @@ impl<S: RangeSource> ArchiveReader<S> {
         for name in REQUIRED_GENERATION_FILES {
             let size = source
                 .size(name)?
-                .ok_or_else(|| Error::MissingFile(name.to_owned()))?;
+                .ok_or_else(|| Error::MissingLocalFile(name.to_owned()))?;
             files.push((name.to_owned(), size));
         }
         for name in [
             SIGNATURES_FILE,
             ARCHIVE_V2_BLOCKHASH_REGISTRY_FILE,
+            ARCHIVE_V2_BLOCKHASH_INDEX_V3_FILE,
             ARCHIVE_V2_PREV_BLOCKHASH_TAIL_FILE,
             ARCHIVE_V2_VOTE_HASH_REGISTRY_FILE,
+            ARCHIVE_V2_POH_FILE,
+            ARCHIVE_V2_SHREDDING_FILE,
+            ARCHIVE_V2_PUBKEY_REGISTRY_COUNTS_FILE,
+            ARCHIVE_V2_PUBKEY_REGISTRY_INDEX_FILE,
+            ARCHIVE_V2_FIRST_SEEN_REGISTRY_MANIFEST_FILE,
+            ARCHIVE_V2_PUBKEY_HOT_SEED_FILE,
+            ARCHIVE_V2_BLOCK_ACCESS_FILE,
+            ARCHIVE_V2_BLOCK_ACCESS_INDEX_FILE,
+            ARCHIVE_V2_GET_BLOCK_INDEX_FILE,
         ] {
             if files.iter().any(|(present, _)| present == name) {
                 continue;
@@ -731,12 +866,14 @@ impl<S: RangeSource> ArchiveReader<S> {
             files.push((GENESIS_BIN_FILE.to_owned(), size));
         }
 
-        let manifest = crate::manifest::synthesize_trusted_manifest(identity, files)?;
-        let validated = validate_generation_structure(&source, &manifest, &options)?;
+        let descriptor = OperatorTrustedLocalDescriptor::new(identity, files)?;
+        let validated = validate_operator_trusted_local_structure(&source, &descriptor, &options)?;
 
+        let reader_id = NEXT_READER_ID.fetch_add(1, Ordering::SeqCst);
         Ok(Self {
             source,
-            manifest,
+            reader_id,
+            generation: ArchiveGenerationDescriptor::OperatorTrustedLocal(descriptor),
             index: validated.index,
             genesis: validated.genesis,
             genesis_bin: validated.genesis_bin,
@@ -752,12 +889,187 @@ impl<S: RangeSource> ArchiveReader<S> {
         })
     }
 
+    /// Open a format-defined object set whose HTTP lengths and strong ETags
+    /// were pinned by the caller.
+    ///
+    /// `object_set_id` is an opaque label for those validators. No object is
+    /// read only to compute a content hash.
+    pub fn open_object_set(
+        source: S,
+        identity: ArchiveIdentity,
+        object_set_id: impl Into<String>,
+        options: OpenOptions,
+    ) -> Result<Self> {
+        Self::open_object_set_with_schemas(
+            source,
+            identity,
+            object_set_id,
+            options,
+            CompactV2MessageSchema::Current,
+            CompactV2MetadataSchema::CurrentTypedError,
+        )
+    }
+
+    /// Open a strongly bound object set with explicit Compact V2 grammars.
+    pub fn open_object_set_with_schemas(
+        source: S,
+        identity: ArchiveIdentity,
+        object_set_id: impl Into<String>,
+        options: OpenOptions,
+        message_schema: CompactV2MessageSchema,
+        metadata_schema: CompactV2MetadataSchema,
+    ) -> Result<Self> {
+        if options.hash_verification != HashVerification::SizesOnly {
+            return Err(Error::InvalidLocalDescriptor(
+                "object-set readers require size-only structural admission".into(),
+            ));
+        }
+        let descriptor = discover_archive_descriptor(
+            &source,
+            identity,
+            ArchiveSourceBinding::StrongEtags {
+                object_set_id: object_set_id.into(),
+            },
+        )?;
+        let validated = validate_archive_descriptor_structure(&source, &descriptor, &options)?;
+
+        let reader_id = NEXT_READER_ID.fetch_add(1, Ordering::SeqCst);
+        Ok(Self {
+            source,
+            reader_id,
+            generation: ArchiveGenerationDescriptor::ObjectSet(descriptor),
+            index: validated.index,
+            genesis: validated.genesis,
+            genesis_bin: validated.genesis_bin,
+            metadata_footer: validated.metadata_footer,
+            binding: validated.binding,
+            registry_entries: validated.registry_entries,
+            total_signatures: validated.total_signatures,
+            signatures_available: validated.signatures_available,
+            message_schema,
+            metadata_schema,
+            source_kind: ArchiveReaderSourceKind::ObjectSetBound,
+            options,
+        })
+    }
+
     pub fn source(&self) -> &S {
         &self.source
     }
 
+    /// Return the opaque runtime identifier for this reader instance.
+    pub const fn reader_id(&self) -> u64 {
+        self.reader_id
+    }
+
+    /// Return the published manifest.
+    ///
+    /// This legacy accessor is only valid for a published reader. New code
+    /// that can receive a local reader must use [`Self::published_manifest`]
+    /// or the common descriptor accessors.
     pub fn manifest(&self) -> &GenerationManifest {
-        &self.manifest
+        self.published_manifest()
+            .expect("operator-trusted local readers have no published manifest")
+    }
+
+    pub fn published_manifest(&self) -> Option<&GenerationManifest> {
+        match &self.generation {
+            ArchiveGenerationDescriptor::PublishedManifest(manifest) => Some(manifest),
+            ArchiveGenerationDescriptor::OperatorTrustedLocal(_)
+            | ArchiveGenerationDescriptor::ObjectSet(_) => None,
+        }
+    }
+
+    pub fn local_descriptor(&self) -> Option<&OperatorTrustedLocalDescriptor> {
+        match &self.generation {
+            ArchiveGenerationDescriptor::PublishedManifest(_) => None,
+            ArchiveGenerationDescriptor::OperatorTrustedLocal(descriptor) => Some(descriptor),
+            ArchiveGenerationDescriptor::ObjectSet(_) => None,
+        }
+    }
+
+    pub fn archive_descriptor(&self) -> Option<&ArchiveDescriptor> {
+        match &self.generation {
+            ArchiveGenerationDescriptor::ObjectSet(descriptor) => Some(descriptor),
+            ArchiveGenerationDescriptor::PublishedManifest(_)
+            | ArchiveGenerationDescriptor::OperatorTrustedLocal(_) => None,
+        }
+    }
+
+    pub const fn generation_descriptor(&self) -> &ArchiveGenerationDescriptor {
+        &self.generation
+    }
+
+    pub fn cluster_id(&self) -> &str {
+        match &self.generation {
+            ArchiveGenerationDescriptor::PublishedManifest(manifest) => &manifest.cluster_id,
+            ArchiveGenerationDescriptor::OperatorTrustedLocal(descriptor) => {
+                &descriptor.identity.cluster_id
+            }
+            ArchiveGenerationDescriptor::ObjectSet(descriptor) => &descriptor.identity.cluster_id,
+        }
+    }
+
+    pub fn epoch(&self) -> u64 {
+        match &self.generation {
+            ArchiveGenerationDescriptor::PublishedManifest(manifest) => manifest.epoch,
+            ArchiveGenerationDescriptor::OperatorTrustedLocal(descriptor) => {
+                descriptor.identity.epoch
+            }
+            ArchiveGenerationDescriptor::ObjectSet(descriptor) => descriptor.identity.epoch,
+        }
+    }
+
+    pub fn generation_label(&self) -> &str {
+        match &self.generation {
+            ArchiveGenerationDescriptor::PublishedManifest(manifest) => &manifest.generation_id,
+            ArchiveGenerationDescriptor::OperatorTrustedLocal(descriptor) => {
+                &descriptor.identity.generation_id
+            }
+            ArchiveGenerationDescriptor::ObjectSet(descriptor) => {
+                &descriptor.identity.generation_id
+            }
+        }
+    }
+
+    pub fn slots_per_epoch(&self) -> u64 {
+        match &self.generation {
+            ArchiveGenerationDescriptor::PublishedManifest(manifest) => manifest.slots_per_epoch,
+            ArchiveGenerationDescriptor::OperatorTrustedLocal(descriptor) => {
+                descriptor.identity.slots_per_epoch
+            }
+            ArchiveGenerationDescriptor::ObjectSet(descriptor) => {
+                descriptor.identity.slots_per_epoch
+            }
+        }
+    }
+
+    pub fn file_size(&self, name: &str) -> Option<u64> {
+        match &self.generation {
+            ArchiveGenerationDescriptor::PublishedManifest(manifest) => {
+                manifest.file(name).map(|file| file.size)
+            }
+            ArchiveGenerationDescriptor::OperatorTrustedLocal(descriptor) => {
+                descriptor.file(name).map(|file| file.size)
+            }
+            ArchiveGenerationDescriptor::ObjectSet(descriptor) => {
+                descriptor.object(name).map(|object| object.size)
+            }
+        }
+    }
+
+    pub fn required_file_size(&self, name: &str) -> Result<u64> {
+        match &self.generation {
+            ArchiveGenerationDescriptor::PublishedManifest(manifest) => {
+                Ok(manifest.required_file(name)?.size)
+            }
+            ArchiveGenerationDescriptor::OperatorTrustedLocal(descriptor) => {
+                Ok(descriptor.required_file(name)?.size)
+            }
+            ArchiveGenerationDescriptor::ObjectSet(descriptor) => {
+                Ok(descriptor.required_object(name)?.size)
+            }
+        }
     }
 
     pub fn index(&self) -> &ArchiveV2HotBlockIndex {
@@ -837,7 +1149,7 @@ impl<S: RangeSource> ArchiveReader<S> {
         let mut resolved_ids = HashMap::with_capacity(raw_pubkeys.len());
         if !raw_pubkeys.is_empty() && self.registry_entries != 0 {
             let mut offset = 0u64;
-            let registry_size = self.manifest.required_file(REGISTRY_FILE)?.size;
+            let registry_size = self.required_file_size(REGISTRY_FILE)?;
             let chunk_size = (self.options.io_chunk_size / 32).max(1) * 32;
             while offset < registry_size {
                 let length = usize::try_from((registry_size - offset).min(chunk_size as u64))
@@ -867,6 +1179,7 @@ impl<S: RangeSource> ArchiveReader<S> {
             }
         }
         Ok(CompiledPubkeyFilter {
+            reader_id: self.reader_id,
             binding: self.binding,
             registry_ids,
             raw_pubkeys,
@@ -1229,6 +1542,7 @@ impl<S: RangeSource> ArchiveReader<S> {
                         decompressor: None,
                         decompressed: Vec::new(),
                         caller,
+                        used: false,
                         max_retained_decompressed_buffer_bytes: 0,
                         decompress_decode_sum_time: Duration::ZERO,
                         projection_sum_time: Duration::ZERO,
@@ -1244,6 +1558,8 @@ impl<S: RangeSource> ArchiveReader<S> {
                 .expect("the new recycled-buffer channel has a receiver");
         }
         let (ready_sender, ready_receiver) = sync_channel(config.compressed_buffer_count);
+        let active_workers = AtomicUsize::new(0);
+        let max_active_workers = AtomicUsize::new(0);
 
         thread::scope(|scope| {
             let producer = scope.spawn(|| {
@@ -1277,76 +1593,6 @@ impl<S: RangeSource> ArchiveReader<S> {
                     break;
                 }
 
-                let decode_started = Instant::now();
-                decode_pool.install(|| {
-                    self.index.rows[ready.plan.row_start..ready.plan.row_end]
-                        .par_iter()
-                        .enumerate()
-                        .map(|(batch_row, row)| {
-                            let row_number = ready.plan.row_start + batch_row;
-                            let relative_offset = row
-                                .compressed_offset
-                                .checked_sub(ready.plan.compressed_offset)
-                                .ok_or_else(|| {
-                                    Error::InvalidIndex(
-                                        "parallel block frame offset underflow".into(),
-                                    )
-                                })?;
-                            let relative_offset = usize::try_from(relative_offset)
-                                .map_err(|_| Error::Overflow("parallel block frame offset"))?;
-                            let frame_end = relative_offset
-                                .checked_add(row.compressed_len as usize)
-                                .ok_or(Error::Overflow("parallel block frame range"))?;
-                            let compressed =
-                                ready.bytes.get(relative_offset..frame_end).ok_or_else(|| {
-                                    Error::InvalidIndex(
-                                        "parallel block frame is outside its read batch".into(),
-                                    )
-                                })?;
-                            let worker_number = rayon::current_thread_index().ok_or_else(|| {
-                                Error::InvalidIndex(
-                                    "parallel block task ran outside its decode pool".into(),
-                                )
-                            })?;
-                            let mut worker_guard = workers[worker_number].lock().map_err(|_| {
-                                Error::InvalidIndex(
-                                    "parallel block worker state is poisoned".into(),
-                                )
-                            })?;
-                            let mut worker = worker_guard.take().ok_or_else(|| {
-                                Error::InvalidIndex(
-                                    "parallel block worker was re-entered by nested work".into(),
-                                )
-                            })?;
-                            drop(worker_guard);
-                            let result = worker.decode_and_project(
-                                self,
-                                *row,
-                                compressed,
-                                row_number,
-                                config.discard_rewards,
-                                config.retained_decompressed_bytes_per_worker,
-                                &project,
-                            );
-                            let mut worker_guard = workers[worker_number].lock().map_err(|_| {
-                                Error::InvalidIndex(
-                                    "parallel block worker state is poisoned".into(),
-                                )
-                            })?;
-                            *worker_guard = Some(worker);
-                            result
-                        })
-                        .collect_into_vec(&mut projected)
-                });
-                coordinator.stats.coordinator_decode_project_wall_time = coordinator
-                    .stats
-                    .coordinator_decode_project_wall_time
-                    .saturating_add(decode_started.elapsed());
-
-                // Projection results cannot borrow this compressed batch.
-                // Return its allocation token before ordered result handling.
-                let _ = free_sender.send(ready.bytes);
-
                 coordinator.stats.batch_count = match coordinator.stats.batch_count.checked_add(1) {
                     Some(value) => value,
                     None => {
@@ -1370,25 +1616,126 @@ impl<S: RangeSource> ArchiveReader<S> {
                             break;
                         }
                     };
-                coordinator.stats.max_blocks_per_batch = coordinator
-                    .stats
-                    .max_blocks_per_batch
-                    .max(expected.row_end - expected.row_start);
 
-                for (batch_row, result) in projected.drain(..).enumerate() {
-                    let row_number = expected.row_start + batch_row;
-                    let output = match result {
-                        Ok(output) => output,
-                        Err(error) => {
+                for wave_start in
+                    (ready.plan.row_start..ready.plan.row_end).step_by(config.decode_workers)
+                {
+                    let wave_end = wave_start
+                        .saturating_add(config.decode_workers)
+                        .min(ready.plan.row_end);
+                    let decode_started = Instant::now();
+                    decode_pool.install(|| {
+                        self.index.rows[wave_start..wave_end]
+                            .par_iter()
+                            .enumerate()
+                            .map(|(wave_row, row)| {
+                                let row_number = wave_start + wave_row;
+                                let relative_offset = row
+                                    .compressed_offset
+                                    .checked_sub(ready.plan.compressed_offset)
+                                    .ok_or_else(|| {
+                                        Error::InvalidIndex(
+                                            "parallel block frame offset underflow".into(),
+                                        )
+                                    })?;
+                                let relative_offset = usize::try_from(relative_offset)
+                                    .map_err(|_| Error::Overflow("parallel block frame offset"))?;
+                                let frame_end = relative_offset
+                                    .checked_add(row.compressed_len as usize)
+                                    .ok_or(Error::Overflow("parallel block frame range"))?;
+                                let compressed = ready
+                                    .bytes
+                                    .get(relative_offset..frame_end)
+                                    .ok_or_else(|| {
+                                        Error::InvalidIndex(
+                                            "parallel block frame is outside its read batch".into(),
+                                        )
+                                    })?;
+                                let worker_number =
+                                    rayon::current_thread_index().ok_or_else(|| {
+                                        Error::InvalidIndex(
+                                            "parallel block task ran outside its decode pool"
+                                                .into(),
+                                        )
+                                    })?;
+                                let mut worker_guard =
+                                    workers[worker_number].lock().map_err(|_| {
+                                        Error::InvalidIndex(
+                                            "parallel block worker state is poisoned".into(),
+                                        )
+                                    })?;
+                                let mut worker = worker_guard.take().ok_or_else(|| {
+                                    Error::InvalidIndex(
+                                        "parallel block worker was re-entered by nested work"
+                                            .into(),
+                                    )
+                                })?;
+                                drop(worker_guard);
+                                worker.used = true;
+                                let active = active_workers.fetch_add(1, Ordering::AcqRel) + 1;
+                                max_active_workers.fetch_max(active, Ordering::Relaxed);
+                                let result = worker.decode_and_project(
+                                    self,
+                                    *row,
+                                    compressed,
+                                    row_number,
+                                    config.discard_rewards,
+                                    config.retained_decompressed_bytes_per_worker,
+                                    &project,
+                                );
+                                let previous = active_workers.fetch_sub(1, Ordering::AcqRel);
+                                debug_assert!(previous > 0);
+                                let mut worker_guard =
+                                    workers[worker_number].lock().map_err(|_| {
+                                        Error::InvalidIndex(
+                                            "parallel block worker state is poisoned".into(),
+                                        )
+                                    })?;
+                                *worker_guard = Some(worker);
+                                result
+                            })
+                            .collect_into_vec(&mut projected)
+                    });
+                    coordinator.stats.coordinator_decode_project_wall_time = coordinator
+                        .stats
+                        .coordinator_decode_project_wall_time
+                        .saturating_add(decode_started.elapsed());
+                    coordinator.stats.max_blocks_per_batch = coordinator
+                        .stats
+                        .max_blocks_per_batch
+                        .max(wave_end - wave_start);
+                    let wave_transactions = self.index.rows[wave_start..wave_end]
+                        .iter()
+                        .try_fold(0_u64, |total, row| {
+                            total
+                                .checked_add(u64::from(row.tx_count))
+                                .ok_or(Error::Overflow("parallel transaction wave count"))
+                        })
+                        .map_err(E::from)?;
+                    coordinator.stats.max_transactions_per_batch = coordinator
+                        .stats
+                        .max_transactions_per_batch
+                        .max(wave_transactions);
+
+                    for (wave_row, result) in projected.drain(..).enumerate() {
+                        let row_number = wave_start + wave_row;
+                        let output = match result {
+                            Ok(output) => output,
+                            Err(error) => {
+                                coordinator.error = Some(error);
+                                break 'batches;
+                            }
+                        };
+                        if let Err(error) = consume_ordered(row_number, output) {
                             coordinator.error = Some(error);
                             break 'batches;
                         }
-                    };
-                    if let Err(error) = consume_ordered(row_number, output) {
-                        coordinator.error = Some(error);
-                        break 'batches;
                     }
                 }
+
+                // Projection outputs are consumed wave by wave and cannot
+                // borrow this compressed source batch. Recycle it now.
+                let _ = free_sender.send(ready.bytes);
             }
 
             // Closing both directions wakes a producer blocked on either a
@@ -1420,6 +1767,7 @@ impl<S: RangeSource> ArchiveReader<S> {
                 producer_stats.max_compressed_batch_bytes;
             coordinator.stats.max_declared_uncompressed_batch_bytes =
                 producer_stats.max_declared_uncompressed_batch_bytes;
+            coordinator.stats.max_active_workers = max_active_workers.load(Ordering::Relaxed);
             for worker in &workers {
                 let worker = worker.lock().map_err(|_| {
                     E::from(Error::InvalidIndex(
@@ -1431,6 +1779,13 @@ impl<S: RangeSource> ArchiveReader<S> {
                         "parallel block worker state was not restored".into(),
                     ))
                 })?;
+                if worker.used {
+                    coordinator.stats.effective_workers = coordinator
+                        .stats
+                        .effective_workers
+                        .checked_add(1)
+                        .ok_or_else(|| E::from(Error::Overflow("effective worker count")))?;
+                }
                 coordinator.stats.max_retained_decompressed_buffer_bytes = coordinator
                     .stats
                     .max_retained_decompressed_buffer_bytes
@@ -1631,7 +1986,7 @@ impl<S: RangeSource> ArchiveReader<S> {
         let mut transactions = Vec::with_capacity(block.tx_rows.len());
         for row in block.tx_rows.iter().copied() {
             let signatures = SignatureReference {
-                generation_digest: self.binding.generation_digest,
+                reader_id: self.reader_id,
                 first_ordinal: first_signature_ordinal,
                 count: row.signature_count,
             };
@@ -1684,7 +2039,7 @@ impl<S: RangeSource> ArchiveReader<S> {
         &self,
         reference: SignatureReference,
     ) -> Result<Vec<[u8; 64]>> {
-        if reference.generation_digest != self.binding.generation_digest {
+        if reference.reader_id != self.reader_id {
             return Err(Error::FilterBindingMismatch);
         }
         if !self.signatures_available {
@@ -1717,7 +2072,7 @@ impl<S: RangeSource> ArchiveReader<S> {
     }
 
     fn ensure_filter_binding(&self, filter: &CompiledPubkeyFilter) -> Result<()> {
-        if filter.binding != self.binding {
+        if filter.reader_id != self.reader_id || filter.binding != self.binding {
             return Err(Error::FilterBindingMismatch);
         }
         Ok(())
@@ -1813,6 +2168,7 @@ struct OrderedParallelBatchPlan {
     compressed_offset: u64,
     compressed_len: usize,
     declared_uncompressed_bytes: u64,
+    transaction_count: u64,
 }
 
 fn ordered_parallel_batch_plans(
@@ -1831,8 +2187,15 @@ fn ordered_parallel_batch_plans(
         let mut end = start;
         let mut compressed_len = 0usize;
         let mut declared_uncompressed_bytes = 0u64;
+        let mut transaction_count = 0u64;
         while end < range.end {
             let row = rows[end];
+            if u64::from(row.tx_count) > MAX_ORDERED_PARALLEL_TRANSACTIONS_PER_BATCH {
+                return Err(Error::InvalidIndex(format!(
+                    "slot {} has {} transactions, above the ordered parallel per-batch limit {}",
+                    row.slot, row.tx_count, MAX_ORDERED_PARALLEL_TRANSACTIONS_PER_BATCH,
+                )));
+            }
             let expected_offset = first
                 .compressed_offset
                 .checked_add(
@@ -1852,15 +2215,20 @@ fn ordered_parallel_batch_plans(
             let next_uncompressed = declared_uncompressed_bytes
                 .checked_add(u64::from(row.uncompressed_len))
                 .ok_or(Error::Overflow("parallel uncompressed batch length"))?;
+            let next_transactions = transaction_count
+                .checked_add(u64::from(row.tx_count))
+                .ok_or(Error::Overflow("parallel transaction batch count"))?;
             if end > start
                 && (end - start >= max_blocks_per_batch
                     || next_compressed > compressed_target
-                    || next_uncompressed > uncompressed_budget)
+                    || next_uncompressed > uncompressed_budget
+                    || next_transactions > MAX_ORDERED_PARALLEL_TRANSACTIONS_PER_BATCH)
             {
                 break;
             }
             compressed_len = next_compressed;
             declared_uncompressed_bytes = next_uncompressed;
+            transaction_count = next_transactions;
             end += 1;
         }
         plans.push(OrderedParallelBatchPlan {
@@ -1869,6 +2237,7 @@ fn ordered_parallel_batch_plans(
             compressed_offset: first.compressed_offset,
             compressed_len,
             declared_uncompressed_bytes,
+            transaction_count,
         });
         start = end;
     }
@@ -1954,6 +2323,7 @@ struct OrderedParallelWorker<T> {
     decompressor: Option<zstd::bulk::Decompressor<'static>>,
     decompressed: Vec<u8>,
     caller: T,
+    used: bool,
     max_retained_decompressed_buffer_bytes: usize,
     decompress_decode_sum_time: Duration,
     projection_sum_time: Duration,
@@ -2353,50 +2723,196 @@ pub fn validate_generation_structure<S: RangeSource>(
     }
     validate_manifest_files(source, manifest, options)?;
 
-    let registry_file = manifest.required_file(REGISTRY_FILE)?;
-    if registry_file.size % 32 != 0 {
+    validate_generation_layout(source, GenerationLayout::Published(manifest), options)
+}
+
+fn validate_operator_trusted_local_structure<S: RangeSource>(
+    source: &S,
+    descriptor: &OperatorTrustedLocalDescriptor,
+    options: &OpenOptions,
+) -> Result<ValidatedGeneration> {
+    validate_options(options)?;
+    if options.hash_verification != HashVerification::SizesOnly {
+        return Err(Error::InvalidLocalDescriptor(
+            "operator-trusted local readers require HashVerification::SizesOnly".into(),
+        ));
+    }
+    descriptor.validate()?;
+    validate_local_descriptor_files(source, descriptor)?;
+    validate_generation_layout(source, GenerationLayout::Local(descriptor), options)
+}
+
+fn discover_archive_descriptor<S: RangeSource>(
+    source: &S,
+    identity: ArchiveIdentity,
+    source_binding: ArchiveSourceBinding,
+) -> Result<ArchiveDescriptor> {
+    let mut objects = Vec::with_capacity(
+        COMPACT_V2_REQUIRED_OBJECTS.len() + COMPACT_V2_OPTIONAL_OBJECTS.len() + 1,
+    );
+    for name in COMPACT_V2_REQUIRED_OBJECTS {
+        let size = source
+            .size(name)?
+            .ok_or_else(|| Error::MissingLocalFile(name.to_owned()))?;
+        objects.push((name.to_owned(), size));
+    }
+    for name in COMPACT_V2_OPTIONAL_OBJECTS {
+        if let Some(size) = source.size(name)? {
+            objects.push((name.to_owned(), size));
+        }
+    }
+    if identity.epoch == 0
+        && let Some(size) = source.size(GENESIS_BIN_FILE)?
+    {
+        objects.push((GENESIS_BIN_FILE.to_owned(), size));
+    }
+    ArchiveDescriptor::new(identity, objects, source_binding)
+}
+
+fn validate_archive_descriptor_structure<S: RangeSource>(
+    source: &S,
+    descriptor: &ArchiveDescriptor,
+    options: &OpenOptions,
+) -> Result<ValidatedGeneration> {
+    validate_options(options)?;
+    descriptor.validate()?;
+    for object in &descriptor.objects {
+        let actual = source
+            .size(&object.name)?
+            .ok_or_else(|| Error::MissingLocalFile(object.name.clone()))?;
+        if actual != object.size {
+            return Err(Error::FileSize {
+                name: object.name.clone(),
+                expected: object.size,
+                actual,
+            });
+        }
+    }
+    validate_generation_layout(source, GenerationLayout::ObjectSet(descriptor), options)
+}
+
+#[derive(Clone, Copy)]
+enum GenerationLayout<'a> {
+    Published(&'a GenerationManifest),
+    Local(&'a OperatorTrustedLocalDescriptor),
+    ObjectSet(&'a ArchiveDescriptor),
+}
+
+impl GenerationLayout<'_> {
+    fn epoch(self) -> u64 {
+        match self {
+            Self::Published(manifest) => manifest.epoch,
+            Self::Local(descriptor) => descriptor.identity.epoch,
+            Self::ObjectSet(descriptor) => descriptor.identity.epoch,
+        }
+    }
+
+    fn slots_per_epoch(self) -> u64 {
+        match self {
+            Self::Published(manifest) => manifest.slots_per_epoch,
+            Self::Local(descriptor) => descriptor.identity.slots_per_epoch,
+            Self::ObjectSet(descriptor) => descriptor.identity.slots_per_epoch,
+        }
+    }
+
+    fn epoch_start_slot(self) -> u64 {
+        match self {
+            Self::Published(manifest) => manifest.epoch_start_slot(),
+            Self::Local(descriptor) => descriptor.epoch_start_slot(),
+            Self::ObjectSet(descriptor) => descriptor.epoch_start_slot(),
+        }
+    }
+
+    fn file_size(self, name: &str) -> Option<u64> {
+        match self {
+            Self::Published(manifest) => manifest.file(name).map(|file| file.size),
+            Self::Local(descriptor) => descriptor.file(name).map(|file| file.size),
+            Self::ObjectSet(descriptor) => descriptor.object(name).map(|object| object.size),
+        }
+    }
+
+    fn required_file_size(self, name: &str) -> Result<u64> {
+        match self {
+            Self::Published(manifest) => Ok(manifest.required_file(name)?.size),
+            Self::Local(descriptor) => Ok(descriptor.required_file(name)?.size),
+            Self::ObjectSet(descriptor) => Ok(descriptor.required_object(name)?.size),
+        }
+    }
+
+    fn binding(self) -> Result<GenerationBinding> {
+        match self {
+            Self::Published(manifest) => {
+                let registry = manifest.required_file(REGISTRY_FILE)?;
+                Ok(GenerationBinding {
+                    generation_digest: decode_sha256(&manifest.generation_digest)
+                        .map_err(Error::InvalidManifest)?,
+                    registry_sha256: decode_sha256(&registry.sha256)
+                        .map_err(Error::InvalidManifest)?,
+                })
+            }
+            Self::Local(descriptor) => Ok(operator_trusted_runtime_binding(descriptor)),
+            Self::ObjectSet(descriptor) => Ok(object_set_runtime_binding(descriptor)),
+        }
+    }
+}
+
+fn validate_generation_layout<S: RangeSource>(
+    source: &S,
+    generation: GenerationLayout<'_>,
+    options: &OpenOptions,
+) -> Result<ValidatedGeneration> {
+    let registry_size = generation.required_file_size(REGISTRY_FILE)?;
+
+    if registry_size % 32 != 0 {
         return Err(Error::InvalidRegistry(format!(
             "registry.bin is {} bytes, not a multiple of 32",
-            registry_file.size
+            registry_size
         )));
     }
-    let registry_entries_u64 = registry_file.size / 32;
+    let registry_entries_u64 = registry_size / 32;
     let registry_entries = u32::try_from(registry_entries_u64).map_err(|_| {
         Error::InvalidRegistry(format!(
             "registry has {registry_entries_u64} entries, exceeding the u32 id space"
         ))
     })?;
 
-    let index_file = manifest.required_file(BLOCK_INDEX_FILE)?;
+    let index_size = generation.required_file_size(BLOCK_INDEX_FILE)?;
     let max_index_size = (ARCHIVE_V2_HOT_INDEX_HEADER_LEN as u64)
         .checked_add(
-            manifest
-                .slots_per_epoch
+            generation
+                .slots_per_epoch()
                 .checked_mul(ARCHIVE_V2_HOT_INDEX_ROW_LEN as u64)
                 .ok_or(Error::Overflow("maximum block index size"))?,
         )
         .ok_or(Error::Overflow("maximum block index size"))?;
-    if index_file.size > max_index_size {
+    if index_size > max_index_size {
         return Err(Error::InvalidIndex(format!(
             "index is {} bytes, above the epoch maximum {}",
-            index_file.size, max_index_size
+            index_size, max_index_size
         )));
     }
-    let index_length = usize::try_from(index_file.size)
+    let index_length = usize::try_from(index_size)
         .map_err(|_| Error::InvalidIndex("index size exceeds usize".into()))?;
     let index_bytes = source.read_range(BLOCK_INDEX_FILE, 0, index_length)?;
-    let blocks_size = manifest.required_file(BLOCKS_FILE)?.size;
-    let (index, total_signatures) =
-        parse_and_validate_index(&index_bytes, blocks_size, manifest, options)?;
+    let blocks_size = generation.required_file_size(BLOCKS_FILE)?;
+    let (index, total_signatures) = parse_and_validate_index(
+        &index_bytes,
+        blocks_size,
+        generation.epoch(),
+        generation.slots_per_epoch(),
+        generation.epoch_start_slot(),
+        options,
+    )?;
 
-    let signatures_available = if let Some(signatures) = manifest.file(SIGNATURES_FILE) {
+    let signatures_available = if let Some(signatures_size) = generation.file_size(SIGNATURES_FILE)
+    {
         let expected = total_signatures
             .checked_mul(64)
             .ok_or(Error::Overflow("signature sidecar size"))?;
-        if signatures.size != expected {
+        if signatures_size != expected {
             return Err(Error::InvalidIndex(format!(
                 "signatures.bin is {} bytes, expected {} for {} signatures",
-                signatures.size, expected, total_signatures
+                signatures_size, expected, total_signatures
             )));
         }
         true
@@ -2404,13 +2920,16 @@ pub fn validate_generation_structure<S: RangeSource>(
         false
     };
 
-    let (metadata_footer, genesis) = validate_metadata(source, manifest, &index, options)?;
-    let genesis_bin = validate_genesis_bin(source, manifest, genesis.as_ref())?;
-    let binding = GenerationBinding {
-        generation_digest: decode_sha256(&manifest.generation_digest)
-            .map_err(Error::InvalidManifest)?,
-        registry_sha256: decode_sha256(&registry_file.sha256).map_err(Error::InvalidManifest)?,
-    };
+    let metadata_footer = generation.required_file_size(META_FILE)?;
+    let (metadata_footer, genesis) =
+        validate_metadata(source, metadata_footer, generation.epoch(), &index, options)?;
+    let genesis_bin = validate_genesis_bin(
+        source,
+        generation.file_size(GENESIS_BIN_FILE),
+        generation.epoch(),
+        genesis.as_ref(),
+    )?;
+    let binding = generation.binding()?;
     Ok(ValidatedGeneration {
         index,
         genesis,
@@ -2421,6 +2940,122 @@ pub fn validate_generation_structure<S: RangeSource>(
         total_signatures,
         signatures_available,
     })
+}
+
+fn validate_local_descriptor_files<S: RangeSource>(
+    source: &S,
+    descriptor: &OperatorTrustedLocalDescriptor,
+) -> Result<()> {
+    for file in &descriptor.files {
+        let actual = source
+            .size(&file.name)?
+            .ok_or_else(|| Error::MissingLocalFile(file.name.clone()))?;
+        if actual != file.size {
+            return Err(Error::FileSize {
+                name: file.name.clone(),
+                expected: file.size,
+                actual,
+            });
+        }
+    }
+    Ok(())
+}
+
+fn operator_trusted_runtime_binding(
+    descriptor: &OperatorTrustedLocalDescriptor,
+) -> GenerationBinding {
+    const DOMAIN: &[u8] = b"blockzilla/operator-trusted-local-runtime-binding/v1\0";
+    let mut files: Vec<_> = descriptor.files.iter().collect();
+    files.sort_unstable_by(|left, right| left.name.as_bytes().cmp(right.name.as_bytes()));
+    let mut hasher = Sha256::new();
+    hasher.update(DOMAIN);
+    for value in [
+        descriptor.identity.cluster_id.as_bytes(),
+        descriptor.identity.generation_id.as_bytes(),
+    ] {
+        hasher.update((value.len() as u64).to_le_bytes());
+        hasher.update(value);
+    }
+    hasher.update(descriptor.identity.epoch.to_le_bytes());
+    hasher.update(descriptor.identity.slots_per_epoch.to_le_bytes());
+    for file in files {
+        hasher.update((file.name.len() as u64).to_le_bytes());
+        hasher.update(file.name.as_bytes());
+        hasher.update(file.size.to_le_bytes());
+    }
+    let generation_digest: [u8; 32] = hasher.finalize().into();
+
+    let mut registry_hasher = Sha256::new();
+    registry_hasher.update(DOMAIN);
+    registry_hasher.update(b"registry-size\0");
+    registry_hasher.update(generation_digest);
+    registry_hasher.update(
+        descriptor
+            .required_file(REGISTRY_FILE)
+            .expect("validated local descriptor has registry.bin")
+            .size
+            .to_le_bytes(),
+    );
+    GenerationBinding {
+        generation_digest,
+        registry_sha256: registry_hasher.finalize().into(),
+    }
+}
+
+fn object_set_runtime_binding(descriptor: &ArchiveDescriptor) -> GenerationBinding {
+    const OBJECT_SET_DOMAIN: &[u8] = b"blockzilla/compact-v2/object-set-runtime-binding/v1\0";
+    const PINNED_LOCAL_DOMAIN: &[u8] = b"blockzilla/compact-v2/pinned-local-runtime-binding/v1\0";
+    let mut objects: Vec<_> = descriptor.objects.iter().collect();
+    objects.sort_unstable_by(|left, right| left.name.as_bytes().cmp(right.name.as_bytes()));
+    let mut hasher = Sha256::new();
+    let source_id = match &descriptor.source_binding {
+        ArchiveSourceBinding::PinnedLocal => {
+            hasher.update(PINNED_LOCAL_DOMAIN);
+            None
+        }
+        ArchiveSourceBinding::StrongEtags { object_set_id } => {
+            hasher.update(OBJECT_SET_DOMAIN);
+            Some(object_set_id.as_bytes())
+        }
+    };
+    for value in [
+        descriptor.identity.cluster_id.as_bytes(),
+        descriptor.identity.generation_id.as_bytes(),
+    ] {
+        hasher.update((value.len() as u64).to_le_bytes());
+        hasher.update(value);
+    }
+    if let Some(source_id) = source_id {
+        hasher.update((source_id.len() as u64).to_le_bytes());
+        hasher.update(source_id);
+    }
+    hasher.update(descriptor.identity.epoch.to_le_bytes());
+    hasher.update(descriptor.identity.slots_per_epoch.to_le_bytes());
+    for object in objects {
+        hasher.update((object.name.len() as u64).to_le_bytes());
+        hasher.update(object.name.as_bytes());
+        hasher.update(object.size.to_le_bytes());
+    }
+    let generation_digest: [u8; 32] = hasher.finalize().into();
+
+    let mut registry_binding = Sha256::new();
+    registry_binding.update(match &descriptor.source_binding {
+        ArchiveSourceBinding::PinnedLocal => PINNED_LOCAL_DOMAIN,
+        ArchiveSourceBinding::StrongEtags { .. } => OBJECT_SET_DOMAIN,
+    });
+    registry_binding.update(b"registry-object\0");
+    registry_binding.update(generation_digest);
+    registry_binding.update(
+        descriptor
+            .required_object(REGISTRY_FILE)
+            .expect("validated descriptor has registry.bin")
+            .size
+            .to_le_bytes(),
+    );
+    GenerationBinding {
+        generation_digest,
+        registry_sha256: registry_binding.finalize().into(),
+    }
 }
 
 fn validate_options(options: &OpenOptions) -> Result<()> {
@@ -2486,13 +3121,14 @@ fn validate_manifest_files<S: RangeSource>(
 
 fn validate_genesis_bin<S: RangeSource>(
     source: &S,
-    manifest: &GenerationManifest,
+    file_size: Option<u64>,
+    epoch: u64,
     inline: Option<&WincodeArchiveV2Genesis>,
 ) -> Result<Option<Vec<u8>>> {
-    let Some(file) = manifest.file(GENESIS_BIN_FILE) else {
+    let Some(file_size) = file_size else {
         return Ok(None);
     };
-    if manifest.epoch != 0 {
+    if epoch != 0 {
         return Err(Error::InvalidMetadata(format!(
             "{GENESIS_BIN_FILE} is only valid for epoch 0"
         )));
@@ -2502,17 +3138,17 @@ fn validate_genesis_bin<S: RangeSource>(
             "{GENESIS_BIN_FILE} is published without inline genesis metadata"
         ))
     })?;
-    let length = usize::try_from(file.size)
+    let length = usize::try_from(file_size)
         .map_err(|_| Error::InvalidMetadata("genesis.bin size exceeds usize".into()))?;
     if length > MAX_GENESIS_BIN_BYTES {
         return Err(Error::InvalidMetadata(format!(
             "{GENESIS_BIN_FILE} is {length} bytes, above the {MAX_GENESIS_BIN_BYTES} byte limit"
         )));
     }
-    if file.size != inline.genesis_bin_len {
+    if file_size != inline.genesis_bin_len {
         return Err(Error::InvalidMetadata(format!(
             "{GENESIS_BIN_FILE} is {} bytes, inline genesis reports {}",
-            file.size, inline.genesis_bin_len
+            file_size, inline.genesis_bin_len
         )));
     }
     let bytes = source.read_range(GENESIS_BIN_FILE, 0, length)?;
@@ -2545,7 +3181,9 @@ fn hash_source_file<S: RangeSource>(
 fn parse_and_validate_index(
     bytes: &[u8],
     blocks_size: u64,
-    manifest: &GenerationManifest,
+    epoch: u64,
+    slots_per_epoch: u64,
+    default_epoch_first_slot: u64,
     options: &OpenOptions,
 ) -> Result<(ArchiveV2HotBlockIndex, u64)> {
     if bytes.len() < ARCHIVE_V2_HOT_INDEX_HEADER_LEN {
@@ -2586,10 +3224,10 @@ fn parse_and_validate_index(
             "index declares {blob_file_bytes} block bytes, manifest declares {blocks_size}"
         )));
     }
-    if row_count > manifest.slots_per_epoch {
+    if row_count > slots_per_epoch {
         return Err(Error::InvalidIndex(format!(
             "index has {row_count} rows for {} epoch slots",
-            manifest.slots_per_epoch
+            slots_per_epoch
         )));
     }
     let expected_length = (ARCHIVE_V2_HOT_INDEX_HEADER_LEN as u64)
@@ -2606,11 +3244,9 @@ fn parse_and_validate_index(
         )));
     }
 
-    let epoch_first_slot = options
-        .epoch_first_slot
-        .unwrap_or_else(|| manifest.epoch_start_slot());
+    let epoch_first_slot = options.epoch_first_slot.unwrap_or(default_epoch_first_slot);
     let epoch_last_slot = epoch_first_slot
-        .checked_add(manifest.slots_per_epoch - 1)
+        .checked_add(slots_per_epoch - 1)
         .ok_or(Error::Overflow("explicit epoch slot range"))?;
     let mut rows = Vec::with_capacity(row_count as usize);
     let mut expected_offset = 0u64;
@@ -2643,7 +3279,7 @@ fn parse_and_validate_index(
         if row.slot < epoch_first_slot || row.slot > epoch_last_slot {
             return Err(Error::InvalidIndex(format!(
                 "slot {} is outside epoch {} range {}..={}",
-                row.slot, manifest.epoch, epoch_first_slot, epoch_last_slot
+                row.slot, epoch, epoch_first_slot, epoch_last_slot
             )));
         }
         if previous_slot.is_some_and(|slot| row.slot <= slot) {
@@ -2724,18 +3360,19 @@ fn parse_and_validate_index(
 
 fn validate_metadata<S: RangeSource>(
     source: &S,
-    manifest: &GenerationManifest,
+    metadata_size: u64,
+    epoch: u64,
     index: &ArchiveV2HotBlockIndex,
     options: &OpenOptions,
 ) -> Result<(WincodeArchiveV2Footer, Option<WincodeArchiveV2Genesis>)> {
-    let meta = manifest.required_file(META_FILE)?;
-    let mut reader = RangeSourceReader::new(source, META_FILE, meta.size, options.io_chunk_size);
+    let mut reader =
+        RangeSourceReader::new(source, META_FILE, metadata_size, options.io_chunk_size);
     let mut position = 0usize;
     let mut saw_genesis = false;
     let mut genesis = None;
     let mut footer = None;
     while let Some(mut frame) = read_frame(&mut reader, options.max_meta_frame_bytes)? {
-        let record = decode_hot_metadata_record(&mut frame, manifest.epoch, position)?;
+        let record = decode_hot_metadata_record(&mut frame, epoch, position)?;
         if footer.is_some() {
             return Err(Error::InvalidMetadata(
                 "metadata contains records after its footer".into(),
@@ -2779,7 +3416,7 @@ fn validate_metadata<S: RangeSource>(
                 return Err(Error::InvalidMetadata("duplicate metadata header".into()));
             }
             (_, ArchiveV2HotMetaRecord::Genesis(value)) => {
-                if saw_genesis || manifest.epoch != 0 {
+                if saw_genesis || epoch != 0 {
                     return Err(Error::InvalidMetadata(
                         "unexpected or duplicate genesis metadata".into(),
                     ));
@@ -3675,6 +4312,78 @@ mod tests {
             Self { directory }
         }
 
+        fn parallel_blocks(block_count: usize) -> Self {
+            let directory = tempfile::tempdir().unwrap();
+            let root = directory.path();
+            fs::write(root.join(REGISTRY_FILE), []).unwrap();
+
+            let mut blocks = Vec::new();
+            let mut rows = Vec::with_capacity(block_count);
+            for block_id in 0..block_count {
+                let slot = 101 + block_id as u64;
+                let block = ArchiveV2HotBlockBlob {
+                    header: ArchiveV2HotBlockHeader {
+                        slot,
+                        parent_slot: slot - 1,
+                        blockhash_id: block_id as u32 + 1,
+                        previous_blockhash_id: block_id as u32,
+                        block_time: None,
+                        block_height: None,
+                        rewards: None,
+                    },
+                    tx_count: 0,
+                    tx_rows: Vec::new(),
+                    message_bytes: Vec::new(),
+                    metadata_bytes: Vec::new(),
+                };
+                let uncompressed =
+                    wincode::config::serialize(&block, wincode_leb128_config()).unwrap();
+                let compressed = zstd::bulk::compress(&uncompressed, 1).unwrap();
+                rows.push(ArchiveV2HotBlockIndexRow {
+                    block_id: block_id as u32,
+                    slot,
+                    compressed_offset: blocks.len() as u64,
+                    compressed_len: compressed.len() as u32,
+                    uncompressed_len: uncompressed.len() as u32,
+                    tx_count: 0,
+                    first_tx_ordinal: 0,
+                    first_signature_ordinal: 0,
+                    signature_count: 0,
+                });
+                blocks.extend_from_slice(&compressed);
+            }
+            fs::write(root.join(BLOCKS_FILE), &blocks).unwrap();
+            write_archive_v2_hot_block_index(
+                &root.join(BLOCK_INDEX_FILE),
+                blocks.len() as u64,
+                1,
+                0,
+                &rows,
+            )
+            .unwrap();
+            let records = [
+                ArchiveV2HotMetaRecord::Header(WincodeArchiveV2Header {
+                    version: WINCODE_ARCHIVE_V2_HOT_BLOCK_VERSION,
+                    flags: WINCODE_ARCHIVE_V2_FLAG_LEB128,
+                }),
+                ArchiveV2HotMetaRecord::Footer(WincodeArchiveV2Footer {
+                    blocks: block_count as u64,
+                    transactions: 0,
+                    ..WincodeArchiveV2Footer::default()
+                }),
+            ];
+            let mut metadata = Vec::new();
+            for record in records {
+                let bytes = wincode::config::serialize(&record, wincode_leb128_config()).unwrap();
+                write_u32_varint(&mut metadata, bytes.len() as u32);
+                metadata.extend_from_slice(&bytes);
+            }
+            fs::write(root.join(META_FILE), metadata).unwrap();
+            fs::write(root.join(SIGNATURES_FILE), []).unwrap();
+            write_manifest(root, true, None);
+            Self { directory }
+        }
+
         fn source(&self) -> LocalRangeSource {
             LocalRangeSource::new(self.directory.path())
         }
@@ -4186,7 +4895,16 @@ mod tests {
         };
         let archive = ArchiveReader::open_trusted(fixture.source(), identity, options).unwrap();
         assert_eq!(archive.index().rows.len(), 2);
-        assert_eq!(archive.manifest().epoch, EPOCH);
+        assert!(archive.published_manifest().is_none());
+        assert_eq!(
+            archive
+                .local_descriptor()
+                .expect("local descriptor")
+                .identity
+                .epoch,
+            EPOCH
+        );
+        assert_eq!(archive.epoch(), EPOCH);
 
         let raw_filter = archive.compile_pubkey_filter([RAW_KEY]).unwrap();
         let first = archive.scan(&raw_filter).unwrap().next().unwrap().unwrap();
@@ -4212,7 +4930,7 @@ mod tests {
         };
         let error = ArchiveReader::open_trusted(fixture.source(), identity, OpenOptions::default())
             .unwrap_err();
-        assert!(matches!(error, Error::InvalidManifest(_)));
+        assert!(matches!(error, Error::InvalidLocalDescriptor(_)));
     }
 
     #[test]
@@ -4330,6 +5048,8 @@ mod tests {
         assert_eq!(*consumed.lock().unwrap(), vec![(0, 101), (1, 102)]);
         assert_eq!(stats.block_count, 2);
         assert_eq!(stats.batch_count, 1);
+        assert_eq!(stats.effective_workers, 2);
+        assert_eq!(stats.max_active_workers, 2);
         assert_eq!(stats.max_blocks_per_batch, 2);
         assert_eq!(stats.read_call_count, 1);
         assert_eq!(stats.compressed_bytes, archive.index().blob_file_bytes);
@@ -4360,6 +5080,48 @@ mod tests {
             source.reads_for(BLOCKS_FILE),
             vec![(0, archive.index().blob_file_bytes as usize)]
         );
+    }
+
+    #[test]
+    fn ordered_parallel_uses_twelve_workers_across_twenty_four_delayed_tasks() {
+        const WORKERS: usize = 12;
+        const BLOCKS: usize = WORKERS * 2;
+
+        let fixture = Fixture::parallel_blocks(BLOCKS);
+        let archive = ArchiveReader::open(fixture.source()).unwrap();
+        let completion_barrier = Arc::new(Barrier::new(WORKERS));
+        let project_barrier = Arc::clone(&completion_barrier);
+        let consumed = Arc::new(Mutex::new(Vec::new()));
+        let ordered_consumed = Arc::clone(&consumed);
+
+        let stats = archive
+            .process_borrowed_blocks_parallel_ordered(
+                0..BLOCKS,
+                OrderedParallelBlockConfig {
+                    decode_workers: WORKERS,
+                    max_blocks_per_batch: BLOCKS,
+                    discard_rewards: true,
+                    ..OrderedParallelBlockConfig::default()
+                },
+                |_| Ok(()),
+                move |_, row_number, block| -> Result<usize> {
+                    project_barrier.wait();
+                    std::thread::sleep(Duration::from_millis(2));
+                    assert!(!block.uses_owned_fallback());
+                    Ok(row_number)
+                },
+                move |row_number, projected_row| {
+                    assert_eq!(projected_row, row_number);
+                    ordered_consumed.lock().unwrap().push(row_number);
+                    Ok(())
+                },
+            )
+            .unwrap();
+
+        assert_eq!(*consumed.lock().unwrap(), (0..BLOCKS).collect::<Vec<_>>());
+        assert_eq!(stats.block_count, BLOCKS as u64);
+        assert_eq!(stats.effective_workers, WORKERS);
+        assert_eq!(stats.max_active_workers, WORKERS);
     }
 
     #[test]
@@ -4589,6 +5351,38 @@ mod tests {
         assert!(matches!(error, Error::InvalidBlock { slot: 101, .. }));
         assert!(error.to_string().contains("row 0 failed"));
         assert!(consumed.lock().unwrap().is_empty());
+    }
+
+    #[test]
+    fn ordered_parallel_transaction_budget_splits_and_rejects_one_oversized_row() {
+        let fixture = Fixture::build();
+        let archive = ArchiveReader::open(fixture.source()).unwrap();
+        let mut rows = archive.index().rows.clone();
+        rows[0].tx_count = 40_000;
+        rows[1].tx_count = 40_000;
+
+        let plans = ordered_parallel_batch_plans(
+            &rows,
+            0..rows.len(),
+            usize::MAX,
+            MAX_ORDERED_PARALLEL_UNCOMPRESSED_BATCH_BYTES,
+            MAX_ORDERED_PARALLEL_BLOCKS_PER_BATCH,
+        )
+        .unwrap();
+        assert_eq!(plans.len(), 2);
+        assert_eq!(plans[0].transaction_count, 40_000);
+        assert_eq!(plans[1].transaction_count, 40_000);
+
+        rows[0].tx_count = u32::try_from(MAX_ORDERED_PARALLEL_TRANSACTIONS_PER_BATCH + 1).unwrap();
+        let error = ordered_parallel_batch_plans(
+            &rows,
+            0..1,
+            usize::MAX,
+            MAX_ORDERED_PARALLEL_UNCOMPRESSED_BATCH_BYTES,
+            MAX_ORDERED_PARALLEL_BLOCKS_PER_BATCH,
+        )
+        .unwrap_err();
+        assert!(matches!(error, Error::InvalidIndex(_)));
     }
 
     #[test]
@@ -5413,7 +6207,8 @@ mod tests {
         };
         let loaded = validate_genesis_bin(
             &LocalRangeSource::new(directory.path()),
-            &manifest,
+            manifest.file(GENESIS_BIN_FILE).map(|file| file.size),
+            manifest.epoch,
             Some(&inline),
         )
         .unwrap();
@@ -5426,7 +6221,8 @@ mod tests {
         .unwrap();
         let error = validate_genesis_bin(
             &LocalRangeSource::new(directory.path()),
-            &manifest,
+            manifest.file(GENESIS_BIN_FILE).map(|file| file.size),
+            manifest.epoch,
             Some(&inline),
         )
         .unwrap_err();

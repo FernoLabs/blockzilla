@@ -1,7 +1,7 @@
 use crate::{
     BlockHeader, CpiCoverage, ExecutionStatus, InstructionCoordinate, InstructionCoverage,
-    InstructionDataCoverage, MAX_CANONICAL_SHORT_VEC_ITEMS, ResolvedInstruction, TransactionHeader,
-    TransactionView,
+    InstructionDataCoverage, MAX_CANONICAL_SHORT_VEC_ITEMS, ResolvedInstruction,
+    TokenBalanceCoverage, TransactionHeader, TransactionView,
 };
 
 use super::decode::validate_classic_token_instruction_structure;
@@ -127,6 +127,8 @@ fn try_process_with_failed_outer(
         primary_signature: None,
         required_signers: &[],
         instructions,
+        token_balance_coverage: TokenBalanceCoverage::NotRequested,
+        token_balances: &[],
     })
 }
 

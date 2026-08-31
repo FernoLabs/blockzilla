@@ -1,4 +1,4 @@
-//! Strict concurrent HTTP byte stream for the CAR query adapter.
+//! Concurrent HTTP byte streams for the CAR query adapter.
 //!
 //! [`CarHttpStream`] pins one object with a `HEAD` request, then fetches fixed,
 //! closed byte ranges concurrently. It implements [`std::io::Read`] and emits
@@ -11,12 +11,25 @@
 //! that ETag and match the requested `Content-Range`, `Content-Length`, and body
 //! length.
 //!
+//! [`OperatorTrustedCarHttpStream`] is an explicit alternative for an
+//! operator-trusted HTTPS object that does not provide an ETag. It does not
+//! create an object binding. It still requires the exact HEAD object length.
+//! A partial GET must return `206 Partial Content` with the requested
+//! `Content-Range`, `Content-Length`, body length, and total object length. A
+//! server can ignore a Range header that covers the complete object. Thus, this
+//! explicit path also accepts `200 OK` only when the scheduled range is the
+//! complete object and its `Content-Length` and body length match the admitted
+//! HEAD length exactly.
+//!
 //! The configured body window is `chunk_bytes * window_chunks`. The default is
 //! 256 MiB (eight 32 MiB chunks). This bound covers range body vectors owned by
 //! this module. It is not a total process-memory bound: TLS, HTTP, channel,
 //! caller, and CAR decoder buffers can coexist with those vectors. Dropping a
 //! stream cancels queued work and joins worker threads. An active request can
 //! keep `Drop` blocked until the configured request timeout.
+//!
+//! Use [`CarHttpSession`] when one operation opens more than one object. The
+//! session keeps one connection pool and one security policy for all streams.
 
 use std::{
     collections::BTreeMap,
@@ -151,6 +164,17 @@ pub struct CarHttpIdentity {
     pub object_binding: String,
 }
 
+/// Length identity of one operator-trusted HTTPS object.
+///
+/// This identity intentionally has no ETag, object binding, or object hash.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct OperatorTrustedCarHttpIdentity {
+    /// Normalized HTTPS URL used for HEAD and range requests.
+    pub normalized_url: String,
+    /// Exact object length from the HEAD response.
+    pub content_length: u64,
+}
+
 /// A point-in-time copy of exact logical HTTP counters.
 ///
 /// A snapshot taken while workers run is not an atomic multi-counter snapshot.
@@ -207,6 +231,58 @@ impl CarHttpStatsHandle {
             workers_started: self.inner.workers_started.load(Ordering::Relaxed),
             workers_finished: self.inner.workers_finished.load(Ordering::Relaxed),
         }
+    }
+}
+
+/// Reusable HTTP client and security policy for related CAR objects.
+///
+/// A session is local to one caller policy. It does not contain object state,
+/// credentials, or stream counters. Each stream still performs its own
+/// admission checks and measures its own input.
+#[derive(Clone)]
+pub struct CarHttpSession {
+    client: Client,
+    options: CarHttpOptions,
+}
+
+impl std::fmt::Debug for CarHttpSession {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter
+            .debug_struct("CarHttpSession")
+            .field("options", &self.options)
+            .finish_non_exhaustive()
+    }
+}
+
+impl CarHttpSession {
+    /// Build one reusable client for related objects.
+    pub fn new(options: CarHttpOptions) -> Result<Self, CarHttpError> {
+        options.validate()?;
+        Ok(Self {
+            client: build_client(options)?,
+            options,
+        })
+    }
+
+    /// Return the validated policy used by this session.
+    pub const fn options(&self) -> CarHttpOptions {
+        self.options
+    }
+
+    /// Pin `url` and start one ordered range stream with this connection pool.
+    pub fn open(&self, url: &str) -> Result<CarHttpStream, CarHttpError> {
+        CarHttpStream::open_with_session(url, self)
+    }
+
+    /// Start an operator-trusted ordered range stream for one HTTPS object.
+    ///
+    /// This path accepts an object without an ETag. It never permits plain
+    /// HTTP, including when this session's strict-stream policy permits HTTP.
+    pub fn open_operator_trusted(
+        &self,
+        url: &str,
+    ) -> Result<OperatorTrustedCarHttpStream, CarHttpError> {
+        OperatorTrustedCarHttpStream::open_with_session(url, self)
     }
 }
 
@@ -331,10 +407,16 @@ struct ChunkResult {
     result: Result<Vec<u8>, CarHttpError>,
 }
 
+#[derive(Debug, Clone)]
+enum RangeValidation {
+    StrongEtag(String),
+    OperatorTrusted,
+}
+
 struct WorkerContext {
     client: Client,
     url: Url,
-    etag: String,
+    validation: RangeValidation,
     total_length: u64,
     work_rx: Arc<Mutex<Receiver<ChunkTask>>>,
     result_tx: mpsc::Sender<ChunkResult>,
@@ -349,9 +431,24 @@ struct CurrentChunk {
     position: usize,
 }
 
-/// Concurrent strict range reader that exposes one ordered byte stream.
-pub struct CarHttpStream {
-    identity: CarHttpIdentity,
+trait HttpObjectIdentity {
+    fn content_length(&self) -> u64;
+}
+
+impl HttpObjectIdentity for CarHttpIdentity {
+    fn content_length(&self) -> u64 {
+        self.content_length
+    }
+}
+
+impl HttpObjectIdentity for OperatorTrustedCarHttpIdentity {
+    fn content_length(&self) -> u64 {
+        self.content_length
+    }
+}
+
+struct OrderedCarHttpStream<I: HttpObjectIdentity> {
+    identity: I,
     options: CarHttpOptions,
     body_window_bytes: usize,
     total_chunks: u64,
@@ -369,10 +466,10 @@ pub struct CarHttpStream {
     terminal: Option<TerminalError>,
 }
 
-impl std::fmt::Debug for CarHttpStream {
+impl<I: HttpObjectIdentity + std::fmt::Debug> std::fmt::Debug for OrderedCarHttpStream<I> {
     fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         formatter
-            .debug_struct("CarHttpStream")
+            .debug_struct("OrderedCarHttpStream")
             .field("identity", &self.identity)
             .field("options", &self.options)
             .field("body_window_bytes", &self.body_window_bytes)
@@ -388,22 +485,17 @@ impl std::fmt::Debug for CarHttpStream {
     }
 }
 
-impl CarHttpStream {
-    /// Pin `url` with HEAD and start bounded range-prefetch workers.
-    pub fn open(url: &str, options: CarHttpOptions) -> Result<Self, CarHttpError> {
-        options.validate()?;
+impl<I: HttpObjectIdentity> OrderedCarHttpStream<I> {
+    fn start(
+        identity: I,
+        client: Client,
+        url: Url,
+        options: CarHttpOptions,
+        validation: RangeValidation,
+        stats: CarHttpStatsHandle,
+    ) -> Result<Self, CarHttpError> {
         let body_window_bytes = options.body_window_bytes()?;
-        let url = validate_url(url, options.allow_http)?;
-        let normalized_url = url.as_str().to_owned();
-        let stats = CarHttpStatsHandle::default();
-        let client = build_client(options)?;
-        let (content_length, strong_etag) = pin_object(&client, &url, &stats.inner)?;
-        let identity = CarHttpIdentity {
-            object_binding: object_binding(&normalized_url, content_length, &strong_etag),
-            normalized_url,
-            content_length,
-            strong_etag,
-        };
+        let content_length = identity.content_length();
 
         let chunk_bytes = u64::try_from(options.chunk_bytes)
             .map_err(|_| CarHttpError::ArithmeticOverflow("chunk size"))?;
@@ -422,15 +514,18 @@ impl CarHttpStream {
             .map_err(|_| CarHttpError::ArithmeticOverflow("worker handle allocation"))?;
 
         if total_chunks != 0 {
-            for worker_index in 0..options.workers {
+            let active_workers = options
+                .workers
+                .min(usize::try_from(total_chunks).unwrap_or(options.workers));
+            for worker_index in 0..active_workers {
                 let worker_client = client.clone();
                 let worker_url = url.clone();
-                let worker_etag = identity.strong_etag.clone();
+                let worker_validation = validation.clone();
                 let worker_rx = Arc::clone(&shared_work_rx);
                 let worker_results = result_tx.clone();
                 let worker_cancel = Arc::clone(&cancel);
                 let worker_stats = Arc::clone(&stats.inner);
-                let total_length = identity.content_length;
+                let total_length = content_length;
                 let spawn = thread::Builder::new()
                     .name(format!("car-http-{worker_index}"))
                     .spawn(move || {
@@ -438,7 +533,7 @@ impl CarHttpStream {
                         worker_loop(WorkerContext {
                             client: worker_client,
                             url: worker_url,
-                            etag: worker_etag,
+                            validation: worker_validation,
                             total_length,
                             work_rx: worker_rx,
                             result_tx: worker_results,
@@ -495,30 +590,23 @@ impl CarHttpStream {
         Ok(stream)
     }
 
-    /// Return the pinned object identity.
-    pub fn identity(&self) -> &CarHttpIdentity {
+    fn identity(&self) -> &I {
         &self.identity
     }
 
-    /// Return the validated options used by this stream.
-    pub const fn options(&self) -> CarHttpOptions {
+    const fn options(&self) -> CarHttpOptions {
         self.options
     }
 
-    /// Return the configured range-body window in bytes.
-    ///
-    /// This is not a total process-memory bound.
-    pub const fn body_window_bytes(&self) -> usize {
+    const fn body_window_bytes(&self) -> usize {
         self.body_window_bytes
     }
 
-    /// Return a cloneable stats handle that remains usable after stream drop.
-    pub fn stats_handle(&self) -> CarHttpStatsHandle {
+    fn stats_handle(&self) -> CarHttpStatsHandle {
         self.stats.clone()
     }
 
-    /// Return a point-in-time counter snapshot.
-    pub fn stats(&self) -> CarHttpStats {
+    fn stats(&self) -> CarHttpStats {
         self.stats.snapshot()
     }
 
@@ -540,7 +628,7 @@ impl CarHttpStream {
         let end_exclusive = start
             .checked_add(chunk_bytes)
             .ok_or(CarHttpError::ArithmeticOverflow("range end"))?
-            .min(self.identity.content_length);
+            .min(self.identity.content_length());
         let end = end_exclusive
             .checked_sub(1)
             .ok_or(CarHttpError::ArithmeticOverflow("closed range end"))?;
@@ -635,7 +723,7 @@ impl CarHttpStream {
         let end = start
             .checked_add(chunk_bytes)
             .ok_or(CarHttpError::ArithmeticOverflow("range end"))?
-            .min(self.identity.content_length)
+            .min(self.identity.content_length())
             .checked_sub(1)
             .ok_or(CarHttpError::ArithmeticOverflow("closed range end"))?;
         Ok(ChunkTask { index, start, end })
@@ -679,7 +767,7 @@ impl CarHttpStream {
     }
 }
 
-impl Read for CarHttpStream {
+impl<I: HttpObjectIdentity> Read for OrderedCarHttpStream<I> {
     fn read(&mut self, output: &mut [u8]) -> io::Result<usize> {
         if output.is_empty() {
             return Ok(0);
@@ -687,12 +775,12 @@ impl Read for CarHttpStream {
         if let Some(error) = &self.terminal {
             return Err(error.io_error());
         }
-        if self.bytes_delivered == self.identity.content_length {
+        if self.bytes_delivered == self.identity.content_length() {
             return Ok(0);
         }
 
         let mut written = 0usize;
-        while written < output.len() && self.bytes_delivered < self.identity.content_length {
+        while written < output.len() && self.bytes_delivered < self.identity.content_length() {
             if self.current.is_none()
                 && let Err(error) = self.install_next_chunk()
             {
@@ -755,9 +843,175 @@ impl Read for CarHttpStream {
     }
 }
 
-impl Drop for CarHttpStream {
+impl<I: HttpObjectIdentity> Drop for OrderedCarHttpStream<I> {
     fn drop(&mut self) {
         self.shutdown();
+    }
+}
+
+/// Concurrent strict range reader that exposes one ordered byte stream.
+pub struct CarHttpStream {
+    inner: OrderedCarHttpStream<CarHttpIdentity>,
+}
+
+impl std::fmt::Debug for CarHttpStream {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter
+            .debug_struct("CarHttpStream")
+            .field("inner", &self.inner)
+            .finish()
+    }
+}
+
+impl CarHttpStream {
+    /// Pin `url` with HEAD and start bounded range-prefetch workers.
+    pub fn open(url: &str, options: CarHttpOptions) -> Result<Self, CarHttpError> {
+        CarHttpSession::new(options)?.open(url)
+    }
+
+    /// Pin `url` with a reusable connection pool and start range workers.
+    pub fn open_with_session(url: &str, session: &CarHttpSession) -> Result<Self, CarHttpError> {
+        let options = session.options;
+        let url = validate_url(url, options.allow_http)?;
+        let normalized_url = url.as_str().to_owned();
+        let stats = CarHttpStatsHandle::default();
+        let client = session.client.clone();
+        let (content_length, strong_etag) = pin_object(&client, &url, &stats.inner)?;
+        let validation = RangeValidation::StrongEtag(strong_etag.clone());
+        let identity = CarHttpIdentity {
+            object_binding: object_binding(&normalized_url, content_length, &strong_etag),
+            normalized_url,
+            content_length,
+            strong_etag,
+        };
+        let inner = OrderedCarHttpStream::start(identity, client, url, options, validation, stats)?;
+        Ok(Self { inner })
+    }
+
+    /// Return the pinned object identity.
+    pub fn identity(&self) -> &CarHttpIdentity {
+        self.inner.identity()
+    }
+
+    /// Return the validated options used by this stream.
+    pub const fn options(&self) -> CarHttpOptions {
+        self.inner.options()
+    }
+
+    /// Return the configured range-body window in bytes.
+    ///
+    /// This is not a total process-memory bound.
+    pub const fn body_window_bytes(&self) -> usize {
+        self.inner.body_window_bytes()
+    }
+
+    /// Return a cloneable stats handle that remains usable after stream drop.
+    pub fn stats_handle(&self) -> CarHttpStatsHandle {
+        self.inner.stats_handle()
+    }
+
+    /// Return a point-in-time counter snapshot.
+    pub fn stats(&self) -> CarHttpStats {
+        self.inner.stats()
+    }
+}
+
+impl Read for CarHttpStream {
+    fn read(&mut self, output: &mut [u8]) -> io::Result<usize> {
+        self.inner.read(output)
+    }
+}
+
+/// Concurrent ordered reader for an operator-trusted HTTPS object.
+///
+/// This path does not require or validate an ETag and does not create an
+/// object binding. It validates the exact HEAD length and GET response shape.
+/// Partial GETs require exact range geometry. A full-object GET can use the
+/// narrow `200 OK` rule described in the module documentation.
+pub struct OperatorTrustedCarHttpStream {
+    inner: OrderedCarHttpStream<OperatorTrustedCarHttpIdentity>,
+}
+
+impl std::fmt::Debug for OperatorTrustedCarHttpStream {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter
+            .debug_struct("OperatorTrustedCarHttpStream")
+            .field("inner", &self.inner)
+            .finish()
+    }
+}
+
+impl OperatorTrustedCarHttpStream {
+    /// Admit one operator-trusted HTTPS input and start range workers.
+    pub fn open(url: &str, options: CarHttpOptions) -> Result<Self, CarHttpError> {
+        CarHttpSession::new(options)?.open_operator_trusted(url)
+    }
+
+    /// Admit one operator-trusted HTTPS input with a reusable connection pool.
+    pub fn open_with_session(url: &str, session: &CarHttpSession) -> Result<Self, CarHttpError> {
+        let url = validate_url(url, false)?;
+        Self::open_validated(url, session)
+    }
+
+    fn open_validated(url: Url, session: &CarHttpSession) -> Result<Self, CarHttpError> {
+        let options = session.options;
+        let normalized_url = url.as_str().to_owned();
+        let stats = CarHttpStatsHandle::default();
+        let client = session.client.clone();
+        let content_length = admit_operator_trusted_object(&client, &url, &stats.inner)?;
+        let identity = OperatorTrustedCarHttpIdentity {
+            normalized_url,
+            content_length,
+        };
+        let inner = OrderedCarHttpStream::start(
+            identity,
+            client,
+            url,
+            options,
+            RangeValidation::OperatorTrusted,
+            stats,
+        )?;
+        Ok(Self { inner })
+    }
+
+    #[cfg(test)]
+    fn open_http_for_test(url: &str, options: CarHttpOptions) -> Result<Self, CarHttpError> {
+        let session = CarHttpSession::new(options)?;
+        let url = validate_url(url, true)?;
+        Self::open_validated(url, &session)
+    }
+
+    /// Return the operator-trusted object length identity.
+    pub fn identity(&self) -> &OperatorTrustedCarHttpIdentity {
+        self.inner.identity()
+    }
+
+    /// Return the validated options used by this stream.
+    pub const fn options(&self) -> CarHttpOptions {
+        self.inner.options()
+    }
+
+    /// Return the configured range-body window in bytes.
+    ///
+    /// This is not a total process-memory bound.
+    pub const fn body_window_bytes(&self) -> usize {
+        self.inner.body_window_bytes()
+    }
+
+    /// Return a cloneable stats handle that remains usable after stream drop.
+    pub fn stats_handle(&self) -> CarHttpStatsHandle {
+        self.inner.stats_handle()
+    }
+
+    /// Return a point-in-time counter snapshot.
+    pub fn stats(&self) -> CarHttpStats {
+        self.inner.stats()
+    }
+}
+
+impl Read for OperatorTrustedCarHttpStream {
+    fn read(&mut self, output: &mut [u8]) -> io::Result<usize> {
+        self.inner.read(output)
     }
 }
 
@@ -815,6 +1069,26 @@ fn pin_object(
     Ok((content_length, etag))
 }
 
+fn admit_operator_trusted_object(
+    client: &Client,
+    url: &Url,
+    stats: &SharedStats,
+) -> Result<u64, CarHttpError> {
+    add_counter(&stats.head_requests, 1, "head_requests")?;
+    let response = client
+        .head(url.clone())
+        .header(ACCEPT_ENCODING, "identity")
+        .send()
+        .map_err(|source| CarHttpError::Request {
+            method: "HEAD",
+            source,
+        })?;
+    add_counter(&stats.head_responses, 1, "head_responses")?;
+    require_status("HEAD", &response, StatusCode::OK)?;
+    require_identity_coding("HEAD", response.headers())?;
+    parse_u64_header("HEAD", response.headers(), &CONTENT_LENGTH)
+}
+
 fn worker_loop(context: WorkerContext) {
     loop {
         if context.cancel.load(Ordering::Acquire) {
@@ -834,7 +1108,7 @@ fn worker_loop(context: WorkerContext) {
         let result = fetch_range(
             &context.client,
             &context.url,
-            &context.etag,
+            &context.validation,
             context.total_length,
             task,
             &context.stats,
@@ -852,41 +1126,60 @@ fn worker_loop(context: WorkerContext) {
 fn fetch_range(
     client: &Client,
     url: &Url,
-    etag: &str,
+    validation: &RangeValidation,
     total_length: u64,
     task: ChunkTask,
     stats: &SharedStats,
 ) -> Result<Vec<u8>, CarHttpError> {
     let range = format!("bytes={}-{}", task.start, task.end);
     add_counter(&stats.get_requests, 1, "get_requests")?;
-    let mut response = client
+    let mut request = client
         .get(url.clone())
         .header(ACCEPT_ENCODING, "identity")
-        .header(RANGE, range)
-        .header(IF_MATCH, etag)
-        .send()
-        .map_err(|source| CarHttpError::Request {
-            method: "GET",
-            source,
-        })?;
+        .header(RANGE, range);
+    if let RangeValidation::StrongEtag(etag) = validation {
+        request = request.header(IF_MATCH, etag);
+    }
+    let mut response = request.send().map_err(|source| CarHttpError::Request {
+        method: "GET",
+        source,
+    })?;
     add_counter(&stats.get_responses, 1, "get_responses")?;
-    require_status("GET", &response, StatusCode::PARTIAL_CONTENT)?;
+    let is_operator_trusted_full_body = matches!(validation, RangeValidation::OperatorTrusted)
+        && response.status() == StatusCode::OK
+        && task.start == 0
+        && task.end.checked_add(1) == Some(total_length);
+    if !is_operator_trusted_full_body {
+        require_status("GET", &response, StatusCode::PARTIAL_CONTENT)?;
+    }
     require_identity_coding("GET", response.headers())?;
 
-    let actual_etag = single_header_string("GET", response.headers(), &ETAG)?;
-    if actual_etag != etag {
-        return Err(CarHttpError::ChangedEtag {
-            expected: etag.to_owned(),
-            actual: actual_etag,
-        });
+    if let RangeValidation::StrongEtag(etag) = validation {
+        let actual_etag = single_header_string("GET", response.headers(), &ETAG)?;
+        if actual_etag != *etag {
+            return Err(CarHttpError::ChangedEtag {
+                expected: etag.clone(),
+                actual: actual_etag,
+            });
+        }
     }
-    let expected_content_range = format!("bytes {}-{}/{}", task.start, task.end, total_length);
-    let actual_content_range = single_header_string("GET", response.headers(), &CONTENT_RANGE)?;
-    if actual_content_range != expected_content_range {
-        return Err(CarHttpError::ContentRangeMismatch {
-            expected: expected_content_range,
-            actual: actual_content_range,
-        });
+    if is_operator_trusted_full_body {
+        if response.headers().contains_key(&CONTENT_RANGE) {
+            return Err(CarHttpError::InvalidHeader {
+                method: "GET",
+                header: "content-range",
+                detail: "must be absent from a full-object 200 response".into(),
+            });
+        }
+    } else {
+        let expected_content_range = format!("bytes {}-{}/{}", task.start, task.end, total_length);
+        let actual_content_range = single_header_string("GET", response.headers(), &CONTENT_RANGE)?;
+        if actual_content_range != expected_content_range {
+            return Err(CarHttpError::ContentRangeMismatch {
+                expected: expected_content_range,
+                actual: actual_content_range,
+            });
+        }
     }
     let expected = task.len()?;
     let actual_content_length = parse_u64_header("GET", response.headers(), &CONTENT_LENGTH)?;
@@ -1082,6 +1375,40 @@ mod tests {
         BadContentRange,
         ShortBody,
         RedirectHead,
+        OperatorTrusted,
+        OperatorTrustedChangedTotalLength,
+        OperatorTrustedShortBody,
+        OperatorTrustedFullBody,
+        OperatorTrustedFullBodyWithContentRange,
+        OperatorTrustedFullBodyShort,
+        OperatorTrustedFullBodyLong,
+        StrongEtagFullBody,
+    }
+
+    impl ServerMode {
+        const fn is_operator_trusted(self) -> bool {
+            matches!(
+                self,
+                Self::OperatorTrusted
+                    | Self::OperatorTrustedChangedTotalLength
+                    | Self::OperatorTrustedShortBody
+                    | Self::OperatorTrustedFullBody
+                    | Self::OperatorTrustedFullBodyWithContentRange
+                    | Self::OperatorTrustedFullBodyShort
+                    | Self::OperatorTrustedFullBodyLong
+            )
+        }
+
+        const fn serves_full_body(self) -> bool {
+            matches!(
+                self,
+                Self::OperatorTrustedFullBody
+                    | Self::OperatorTrustedFullBodyWithContentRange
+                    | Self::OperatorTrustedFullBodyShort
+                    | Self::OperatorTrustedFullBodyLong
+                    | Self::StrongEtagFullBody
+            )
+        }
     }
 
     #[derive(Debug, Default)]
@@ -1090,6 +1417,7 @@ mod tests {
         redirected_requests: AtomicUsize,
         active_gets: AtomicUsize,
         max_active_gets: AtomicUsize,
+        max_if_match_headers: AtomicUsize,
         completion_order: Mutex<Vec<u64>>,
     }
 
@@ -1205,7 +1533,14 @@ mod tests {
 
         match request.method.as_str() {
             "HEAD" => serve_head(&mut stream, data.len(), mode),
-            "GET" => serve_get(&mut stream, data, mode, state, &request.headers),
+            "GET" => serve_get(
+                &mut stream,
+                data,
+                mode,
+                state,
+                &request.headers,
+                request.if_match_headers,
+            ),
             _method => write_response(
                 &mut stream,
                 "405 Method Not Allowed",
@@ -1220,6 +1555,7 @@ mod tests {
         method: String,
         path: String,
         headers: HashMap<String, String>,
+        if_match_headers: usize,
     }
 
     fn read_request(stream: &mut TcpStream) -> Option<TestRequest> {
@@ -1256,14 +1592,19 @@ mod tests {
         let method = request_line.next().expect("request method").to_owned();
         let path = request_line.next().expect("request path").to_owned();
         let mut headers = HashMap::new();
+        let mut if_match_headers = 0;
         for line in lines.take_while(|line| !line.is_empty()) {
             let (name, value) = line.split_once(':').expect("fixture request header");
+            if name.eq_ignore_ascii_case("if-match") {
+                if_match_headers += 1;
+            }
             headers.insert(name.to_ascii_lowercase(), value.trim().to_owned());
         }
         Some(TestRequest {
             method,
             path,
             headers,
+            if_match_headers,
         })
     }
 
@@ -1283,6 +1624,7 @@ mod tests {
         let mut headers = vec![("Content-Length", length.to_string())];
         match mode {
             ServerMode::MissingHeadEtag => {}
+            mode if mode.is_operator_trusted() => {}
             ServerMode::WeakHeadEtag => headers.push(("ETag", "W/\"fixture-v1\"".into())),
             _ => headers.push(("ETag", FIXTURE_ETAG.into())),
         }
@@ -1295,11 +1637,17 @@ mod tests {
         mode: ServerMode,
         state: &ServerState,
         headers: &HashMap<String, String>,
+        if_match_headers: usize,
     ) {
         let _active = ActiveGet::start(state);
+        let operator_trusted = mode.is_operator_trusted();
+        state
+            .max_if_match_headers
+            .fetch_max(if_match_headers, Ordering::AcqRel);
+        assert_eq!(if_match_headers, usize::from(!operator_trusted));
         assert_eq!(
             headers.get("if-match").map(String::as_str),
-            Some(FIXTURE_ETAG)
+            (!operator_trusted).then_some(FIXTURE_ETAG)
         );
         assert_eq!(
             headers.get("accept-encoding").map(String::as_str),
@@ -1322,16 +1670,54 @@ mod tests {
             _ => {}
         }
 
+        if mode.serves_full_body() {
+            let mut body = data.to_vec();
+            if mode == ServerMode::OperatorTrustedFullBodyShort {
+                body.pop();
+            } else if mode == ServerMode::OperatorTrustedFullBodyLong {
+                body.push(0xff);
+            }
+            let declared_length = if mode == ServerMode::OperatorTrustedFullBodyShort {
+                data.len()
+            } else {
+                body.len()
+            };
+            let mut response_headers = vec![("Content-Length", declared_length.to_string())];
+            if mode == ServerMode::OperatorTrustedFullBodyWithContentRange {
+                response_headers.push((
+                    "Content-Range",
+                    format!("bytes 0-{}/{}", data.len() - 1, data.len()),
+                ));
+            }
+            if !operator_trusted {
+                response_headers.push(("ETag", FIXTURE_ETAG.into()));
+            }
+            write_response(stream, "200 OK", &response_headers, &body);
+            state
+                .completion_order
+                .lock()
+                .expect("completion order")
+                .push(start);
+            return;
+        }
+
         let expected_body = &data[start as usize..=end as usize];
-        let body = if mode == ServerMode::ShortBody {
+        let body = if matches!(
+            mode,
+            ServerMode::ShortBody | ServerMode::OperatorTrustedShortBody
+        ) {
             &expected_body[..expected_body.len().saturating_sub(1)]
         } else {
             expected_body
         };
-        let content_range = if mode == ServerMode::BadContentRange {
-            format!("bytes {}-{}/{}", start.saturating_add(1), end, data.len())
-        } else {
-            format!("bytes {start}-{end}/{}", data.len())
+        let content_range = match mode {
+            ServerMode::BadContentRange => {
+                format!("bytes {}-{}/{}", start.saturating_add(1), end, data.len())
+            }
+            ServerMode::OperatorTrustedChangedTotalLength => {
+                format!("bytes {start}-{end}/{}", data.len() + 1)
+            }
+            _ => format!("bytes {start}-{end}/{}", data.len()),
         };
         let mut response_headers = vec![
             ("Content-Range", content_range),
@@ -1342,6 +1728,7 @@ mod tests {
                 response_headers.push(("ETag", "\"fixture-v2\"".into()));
             }
             ServerMode::MissingGetEtag => {}
+            mode if mode.is_operator_trusted() => {}
             _ => response_headers.push(("ETag", FIXTURE_ETAG.into())),
         }
         write_response(stream, "206 Partial Content", &response_headers, body);
@@ -1392,6 +1779,29 @@ mod tests {
         assert_eq!(options.chunk_bytes, 32 << 20);
         assert_eq!(options.body_window_bytes().unwrap(), 256 << 20);
         assert!(!options.allow_http);
+    }
+
+    #[test]
+    fn session_opens_multiple_streams_and_small_objects_start_one_worker() {
+        let expected = fixture_data(17);
+        let server = TestServer::start(expected.clone(), ServerMode::Normal);
+        let session = CarHttpSession::new(fixture_options()).unwrap();
+        assert_eq!(session.options(), fixture_options());
+
+        for _ in 0..2 {
+            let mut stream = session.open(&server.url).unwrap();
+            let stats = stream.stats_handle();
+            let mut actual = Vec::new();
+            stream.read_to_end(&mut actual).unwrap();
+            assert_eq!(actual, expected);
+            drop(stream);
+
+            let snapshot = stats.snapshot();
+            assert_eq!(snapshot.workers_started, 1);
+            assert_eq!(snapshot.workers_finished, 1);
+            assert_eq!(snapshot.chunks_scheduled, 1);
+            assert_eq!(snapshot.chunks_delivered, 1);
+        }
     }
 
     #[test]
@@ -1463,7 +1873,7 @@ mod tests {
     }
 
     #[test]
-    fn head_requires_one_strong_etag() {
+    fn strict_head_requires_one_strong_etag() {
         for (mode, expected) in [
             (ServerMode::MissingHeadEtag, "no etag"),
             (ServerMode::WeakHeadEtag, "strong ascii etag"),
@@ -1475,6 +1885,184 @@ mod tests {
                 "unexpected error: {error}"
             );
         }
+    }
+
+    #[test]
+    fn strict_ranges_send_exactly_one_if_match_header() {
+        let expected = fixture_data(2 * 1024 + 17);
+        let server = TestServer::start(expected.clone(), ServerMode::Normal);
+        let mut stream = CarHttpStream::open(&server.url, fixture_options()).unwrap();
+        let mut actual = Vec::new();
+        stream.read_to_end(&mut actual).unwrap();
+        drop(stream);
+        assert_eq!(actual, expected);
+        assert_eq!(server.state.max_if_match_headers.load(Ordering::Acquire), 1);
+    }
+
+    #[test]
+    fn operator_trusted_stream_accepts_no_etag_and_delivers_exact_bytes() {
+        let expected = fixture_data(2 * 1024 + 17);
+        let server = TestServer::start(expected.clone(), ServerMode::OperatorTrusted);
+        let mut stream =
+            OperatorTrustedCarHttpStream::open_http_for_test(&server.url, fixture_options())
+                .unwrap();
+        assert_eq!(stream.identity().content_length, expected.len() as u64);
+        assert_eq!(stream.identity().normalized_url, server.url);
+
+        let mut actual = Vec::new();
+        stream.read_to_end(&mut actual).unwrap();
+        assert_eq!(actual, expected);
+        assert_eq!(stream.stats().bytes_delivered, expected.len() as u64);
+    }
+
+    #[test]
+    fn operator_trusted_stream_accepts_exact_full_body_200() {
+        let expected = fixture_data(17);
+        let server = TestServer::start(expected.clone(), ServerMode::OperatorTrustedFullBody);
+        let mut stream =
+            OperatorTrustedCarHttpStream::open_http_for_test(&server.url, fixture_options())
+                .unwrap();
+        let stats = stream.stats_handle();
+
+        let mut actual = Vec::new();
+        stream.read_to_end(&mut actual).unwrap();
+        assert_eq!(actual, expected);
+        drop(stream);
+
+        assert_eq!(
+            stats.snapshot(),
+            CarHttpStats {
+                head_requests: 1,
+                head_responses: 1,
+                get_requests: 1,
+                get_responses: 1,
+                get_body_bytes_received: expected.len() as u64,
+                chunks_scheduled: 1,
+                chunks_fetched: 1,
+                chunks_delivered: 1,
+                bytes_delivered: expected.len() as u64,
+                workers_started: 1,
+                workers_finished: 1,
+            }
+        );
+    }
+
+    #[test]
+    fn operator_trusted_stream_rejects_200_for_partial_task() {
+        let server = TestServer::start(
+            fixture_data(2 * 1024 + 17),
+            ServerMode::OperatorTrustedFullBody,
+        );
+        let mut stream =
+            OperatorTrustedCarHttpStream::open_http_for_test(&server.url, fixture_options())
+                .unwrap();
+        let error = stream.read_to_end(&mut Vec::new()).unwrap_err();
+        assert!(
+            error.to_string().contains("HTTP 200; expected 206"),
+            "unexpected error: {error}"
+        );
+    }
+
+    #[test]
+    fn strong_etag_stream_rejects_200_for_exact_full_task() {
+        let server = TestServer::start(fixture_data(17), ServerMode::StrongEtagFullBody);
+        let mut stream = CarHttpStream::open(&server.url, fixture_options()).unwrap();
+        let error = stream.read_to_end(&mut Vec::new()).unwrap_err();
+        assert!(
+            error.to_string().contains("HTTP 200; expected 206"),
+            "unexpected error: {error}"
+        );
+    }
+
+    #[test]
+    fn operator_trusted_full_body_200_rejects_content_range() {
+        let server = TestServer::start(
+            fixture_data(17),
+            ServerMode::OperatorTrustedFullBodyWithContentRange,
+        );
+        let mut stream =
+            OperatorTrustedCarHttpStream::open_http_for_test(&server.url, fixture_options())
+                .unwrap();
+        let error = stream.read_to_end(&mut Vec::new()).unwrap_err();
+        assert!(
+            error
+                .to_string()
+                .to_ascii_lowercase()
+                .contains("content-range"),
+            "unexpected error: {error}"
+        );
+    }
+
+    #[test]
+    fn operator_trusted_full_body_200_rejects_short_body() {
+        let server = TestServer::start(fixture_data(17), ServerMode::OperatorTrustedFullBodyShort);
+        let mut stream =
+            OperatorTrustedCarHttpStream::open_http_for_test(&server.url, fixture_options())
+                .unwrap();
+        let error = stream.read_to_end(&mut Vec::new()).unwrap_err();
+        assert!(
+            error.to_string().to_ascii_lowercase().contains("body"),
+            "unexpected error: {error}"
+        );
+    }
+
+    #[test]
+    fn operator_trusted_full_body_200_rejects_length_above_head() {
+        let server = TestServer::start(fixture_data(17), ServerMode::OperatorTrustedFullBodyLong);
+        let mut stream =
+            OperatorTrustedCarHttpStream::open_http_for_test(&server.url, fixture_options())
+                .unwrap();
+        let error = stream.read_to_end(&mut Vec::new()).unwrap_err();
+        assert!(
+            error
+                .to_string()
+                .to_ascii_lowercase()
+                .contains("content-length"),
+            "unexpected error: {error}"
+        );
+    }
+
+    #[test]
+    fn operator_trusted_stream_rejects_changed_total_length() {
+        let server = TestServer::start(
+            fixture_data(16),
+            ServerMode::OperatorTrustedChangedTotalLength,
+        );
+        let mut stream =
+            OperatorTrustedCarHttpStream::open_http_for_test(&server.url, fixture_options())
+                .unwrap();
+        let error = stream.read_to_end(&mut Vec::new()).unwrap_err();
+        assert!(
+            error
+                .to_string()
+                .to_ascii_lowercase()
+                .contains("content-range"),
+            "unexpected error: {error}"
+        );
+    }
+
+    #[test]
+    fn operator_trusted_stream_rejects_short_body() {
+        let server = TestServer::start(fixture_data(16), ServerMode::OperatorTrustedShortBody);
+        let mut stream =
+            OperatorTrustedCarHttpStream::open_http_for_test(&server.url, fixture_options())
+                .unwrap();
+        let error = stream.read_to_end(&mut Vec::new()).unwrap_err();
+        let message = error.to_string();
+        assert!(
+            message.contains("body") || message.contains("request"),
+            "unexpected error: {message}"
+        );
+    }
+
+    #[test]
+    fn public_operator_trusted_open_rejects_http_even_when_session_allows_it() {
+        let server = TestServer::start(fixture_data(16), ServerMode::OperatorTrusted);
+        let session = CarHttpSession::new(fixture_options()).unwrap();
+        let error = session.open_operator_trusted(&server.url).unwrap_err();
+        assert!(matches!(error, CarHttpError::PlainHttpDisabled));
+        thread::sleep(Duration::from_millis(10));
+        assert_eq!(server.state.requests.load(Ordering::Relaxed), 0);
     }
 
     #[test]

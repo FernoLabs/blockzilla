@@ -159,17 +159,13 @@ pub fn compute_generation_digest(manifest: &GenerationManifest) -> Result<String
     Ok(hex_lower(&hasher.finalize()))
 }
 
-/// Caller-supplied identity for a generation whose manifest is synthesized
-/// from real file sizes rather than loaded from a published
-/// `archive-v2-generation.json`.
+/// Caller-supplied identity for one operator-trusted local reader set.
 ///
 /// Used only by [`crate::ArchiveReader::open_trusted`], for sources the
-/// caller already trusts (e.g. a local NAS directory) where the manifest's
-/// cross-service integrity contract — a durable published digest, protection
-/// against partial writes or untrusted network transport — isn't needed.
-/// Unlike a published manifest, none of these fields are independently
-/// verified against the archive's own content; the caller is asserting them.
-#[derive(Debug, Clone)]
+/// caller already trusts, such as a local NAS directory. It is not a
+/// publication manifest and it does not contain content digests. The caller
+/// must change `generation_id` when it replaces the local reader set.
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct TrustedGenerationIdentity {
     pub cluster_id: String,
     pub epoch: u64,
@@ -177,37 +173,110 @@ pub struct TrustedGenerationIdentity {
     pub slots_per_epoch: u64,
 }
 
-/// Build a self-consistent [`GenerationManifest`] from real file sizes but
-/// placeholder (all-zero) content hashes.
+/// One exact-size file entry in an operator-trusted local descriptor.
 ///
-/// Only safe to open with [`crate::HashVerification::SizesOnly`], which never
-/// compares a file's declared hash against its actual bytes;
-/// [`crate::ArchiveReader::open_trusted`] enforces this.
-pub(crate) fn synthesize_trusted_manifest(
-    identity: TrustedGenerationIdentity,
-    files: Vec<(String, u64)>,
-) -> Result<GenerationManifest> {
-    let placeholder = "0".repeat(64);
-    let files = files
-        .into_iter()
-        .map(|(name, size)| GenerationFile {
-            name,
-            size,
-            sha256: placeholder.clone(),
-        })
-        .collect();
-    let mut manifest = GenerationManifest {
-        schema_version: GENERATION_MANIFEST_SCHEMA_VERSION,
-        cluster_id: identity.cluster_id,
-        epoch: identity.epoch,
-        generation_id: identity.generation_id,
-        generation_digest: placeholder,
-        slots_per_epoch: identity.slots_per_epoch,
-        complete: true,
-        files,
-    };
-    manifest.generation_digest = compute_generation_digest(&manifest)?;
-    Ok(manifest)
+/// This type has no digest field by design. It records the file identity that
+/// the pinned local source admitted at open time.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct OperatorTrustedLocalFile {
+    pub name: String,
+    pub size: u64,
+}
+
+/// Runtime descriptor for one operator-trusted local Compact V2 reader set.
+///
+/// The SDK builds this value from caller-supplied identity and file sizes read
+/// through the pinned directory source. It is separate from
+/// [`GenerationManifest`]. It is not serialized, published, or used as an
+/// epoch seal.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct OperatorTrustedLocalDescriptor {
+    pub identity: TrustedGenerationIdentity,
+    pub files: Vec<OperatorTrustedLocalFile>,
+}
+
+impl OperatorTrustedLocalDescriptor {
+    pub(crate) fn new(
+        identity: TrustedGenerationIdentity,
+        files: Vec<(String, u64)>,
+    ) -> Result<Self> {
+        let descriptor = Self {
+            identity,
+            files: files
+                .into_iter()
+                .map(|(name, size)| OperatorTrustedLocalFile { name, size })
+                .collect(),
+        };
+        descriptor.validate()?;
+        Ok(descriptor)
+    }
+
+    pub fn validate(&self) -> Result<()> {
+        validate_local_identity("cluster_id", &self.identity.cluster_id)?;
+        validate_local_identity("generation_id", &self.identity.generation_id)?;
+        if self.identity.slots_per_epoch == 0 {
+            return Err(Error::InvalidLocalDescriptor(
+                "slots_per_epoch must be greater than zero".into(),
+            ));
+        }
+        self.identity
+            .epoch
+            .checked_mul(self.identity.slots_per_epoch)
+            .and_then(|start| start.checked_add(self.identity.slots_per_epoch - 1))
+            .ok_or_else(|| {
+                Error::InvalidLocalDescriptor("epoch slot range overflows u64".into())
+            })?;
+
+        let mut names = HashSet::with_capacity(self.files.len());
+        for file in &self.files {
+            validate_object_name(&file.name)
+                .map_err(|message| Error::InvalidLocalDescriptor(message.to_owned()))?;
+            if file.name == GENERATION_MANIFEST_FILE {
+                return Err(Error::InvalidLocalDescriptor(format!(
+                    "{GENERATION_MANIFEST_FILE} is not a local descriptor input"
+                )));
+            }
+            if !names.insert(file.name.as_str()) {
+                return Err(Error::InvalidLocalDescriptor(format!(
+                    "duplicate file entry {}",
+                    file.name
+                )));
+            }
+        }
+        for required in REQUIRED_GENERATION_FILES {
+            self.required_file(required)?;
+        }
+        Ok(())
+    }
+
+    pub fn file(&self, name: &str) -> Option<&OperatorTrustedLocalFile> {
+        self.files.iter().find(|file| file.name == name)
+    }
+
+    pub fn required_file(&self, name: &str) -> Result<&OperatorTrustedLocalFile> {
+        self.file(name)
+            .ok_or_else(|| Error::MissingLocalFile(name.to_owned()))
+    }
+
+    pub fn epoch_start_slot(&self) -> u64 {
+        self.identity.epoch * self.identity.slots_per_epoch
+    }
+}
+
+fn validate_local_identity(field: &str, value: &str) -> Result<()> {
+    if value.is_empty() {
+        return Err(Error::InvalidLocalDescriptor(format!("{field} is empty")));
+    }
+    if value.len() > 4096
+        || value
+            .bytes()
+            .any(|byte| byte == 0 || byte.is_ascii_control())
+    {
+        return Err(Error::InvalidLocalDescriptor(format!(
+            "{field} is too long or contains a control character"
+        )));
+    }
+    Ok(())
 }
 
 pub(crate) fn validate_object_name(name: &str) -> std::result::Result<(), &'static str> {

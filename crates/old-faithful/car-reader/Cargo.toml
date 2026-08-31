@@ -43,7 +43,7 @@ default = ["genesis", "zstd-native"]
 compact-index = ["dep:xxhash-rust"]
 genesis = ["dep:bzip2", "dep:tar"]
 reader = ["dep:clap", "dep:tracing", "dep:tracing-subscriber", "dep:reqwest", "zstd-native"]
-query-sdk = ["dep:blockzilla-query-sdk", "dep:thiserror"]
+query-sdk = ["dep:blockzilla-query-sdk", "dep:bs58", "dep:thiserror"]
 query-sdk-http = ["query-sdk", "dep:reqwest"]
 zstd-native = ["dep:zstd"]
 zstd-wasm = ["dep:ruzstd"]
@@ -69,6 +69,7 @@ reqwest = { version = "0.13.3", default-features = false, features = [
     "rustls",
 ], optional = true }
 blockzilla-query-sdk = { path = "../../blockzilla-query-sdk", optional = true }
+bs58 = { version = "0.5.1", optional = true }
 thiserror = { version = "2.0.18", optional = true }
 
 [dev-dependencies]

@@ -27,7 +27,7 @@ pub const DEFAULT_BEARER_TOKEN_ENV: &str = "BLOCKZILLA_ARCHIVE_TOKEN";
 #[command(
     name = "blockzilla-dump",
     version,
-    about = "Read, verify, and export published Blockzilla Archive V2 generations"
+    about = "Read, verify, and export pinned Blockzilla Compact V2 reader sets"
 )]
 pub struct Cli {
     #[command(subcommand)]
@@ -184,7 +184,7 @@ pub struct DumpArgs {
         .args(["archive", "gateway"])
 ))]
 pub struct SourceArgs {
-    /// One generation directory, or a root with epoch-N generation children.
+    /// One reader-set directory, or a root with epoch-N children.
     #[arg(long)]
     pub archive: Option<PathBuf>,
     /// HTTPS Archive V2 gateway base URL.
@@ -196,6 +196,54 @@ pub struct SourceArgs {
     /// Environment variable that contains the optional gateway bearer token.
     #[arg(long, default_value = DEFAULT_BEARER_TOKEN_ENV)]
     pub bearer_token_env: String,
+    /// Operator label for the local file set. Change it when files are replaced.
+    #[arg(long, requires = "archive")]
+    pub source_generation_prefix: Option<String>,
+    /// Cluster identity used by the reader contract.
+    #[arg(long, default_value = "mainnet-beta")]
+    pub cluster_id: String,
+    /// First slot of epoch zero in this fixed-width archive series.
+    #[arg(long, default_value_t = 0)]
+    pub epoch_zero_first_slot: u64,
+    /// Exact slot count for each epoch in this archive series.
+    #[arg(long, default_value_t = 432_000)]
+    pub slots_per_epoch: u64,
+    /// Exact Compact V2 message grammar for all selected epochs.
+    #[arg(long, value_enum)]
+    pub message_schema: MessageSchemaArg,
+    /// Exact Compact V2 transaction-metadata grammar for all selected epochs.
+    #[arg(long, value_enum)]
+    pub metadata_schema: MetadataSchemaArg,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, ValueEnum)]
+pub enum MessageSchemaArg {
+    Current,
+    May24,
+}
+
+impl From<MessageSchemaArg> for blockzilla_read_sdk::CompactV2MessageSchema {
+    fn from(value: MessageSchemaArg) -> Self {
+        match value {
+            MessageSchemaArg::Current => Self::Current,
+            MessageSchemaArg::May24 => Self::May24PreUnknownFallbacks,
+        }
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, ValueEnum)]
+pub enum MetadataSchemaArg {
+    CurrentTypedError,
+    LegacyRawError,
+}
+
+impl From<MetadataSchemaArg> for blockzilla_read_sdk::CompactV2MetadataSchema {
+    fn from(value: MetadataSchemaArg) -> Self {
+        match value {
+            MetadataSchemaArg::CurrentTypedError => Self::CurrentTypedError,
+            MetadataSchemaArg::LegacyRawError => Self::LegacyRawError,
+        }
+    }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, ValueEnum)]
@@ -447,6 +495,12 @@ fn source_options(args: SourceArgs) -> Result<SourceOptions> {
         bearer_token,
         cache: args.cache,
         allow_insecure_http: false,
+        cluster_id: args.cluster_id,
+        local_generation_prefix: args.source_generation_prefix,
+        epoch_zero_first_slot: args.epoch_zero_first_slot,
+        slots_per_epoch: args.slots_per_epoch,
+        message_schema: args.message_schema.into(),
+        metadata_schema: args.metadata_schema.into(),
     };
     options.validate()?;
     Ok(options)
@@ -503,6 +557,10 @@ mod tests {
             "https://archive.example",
             "--cache",
             "/tmp/cache",
+            "--message-schema",
+            "current",
+            "--metadata-schema",
+            "current-typed-error",
             "--epoch",
             "0,100",
             "--epoch",
@@ -558,6 +616,12 @@ mod tests {
             "query",
             "--archive",
             "/archive",
+            "--source-generation-prefix",
+            "test",
+            "--message-schema",
+            "current",
+            "--metadata-schema",
+            "current-typed-error",
             "--epoch",
             "7",
             "--index",
@@ -581,6 +645,12 @@ mod tests {
             "verify",
             "--archive",
             "/archive",
+            "--source-generation-prefix",
+            "test",
+            "--message-schema",
+            "current",
+            "--metadata-schema",
+            "current-typed-error",
             "--epoch",
             "7",
         ])
@@ -619,6 +689,10 @@ mod tests {
             "https://archive.example",
             "--cache",
             "/tmp/cache",
+            "--message-schema",
+            "current",
+            "--metadata-schema",
+            "current-typed-error",
             "--epoch-range",
             "7..=9",
             "--all-checks",

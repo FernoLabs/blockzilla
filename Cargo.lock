@@ -701,6 +701,30 @@ dependencies = [
 ]
 
 [[package]]
+name = "blockzilla-car-read-sdk"
+version = "0.2.0"
+dependencies = [
+ "blockzilla-query-sdk",
+ "of-car-reader",
+ "sha2 0.11.0",
+ "thiserror 2.0.19",
+ "url",
+]
+
+[[package]]
+name = "blockzilla-compact-v2-read-sdk"
+version = "0.2.0"
+dependencies = [
+ "blockzilla-format",
+ "blockzilla-query-sdk",
+ "blockzilla-read-sdk",
+ "sha2 0.11.0",
+ "tempfile",
+ "thiserror 2.0.19",
+ "url",
+]
+
+[[package]]
 name = "blockzilla-compaction-protocol"
 version = "0.2.0"
 dependencies = [
@@ -730,6 +754,15 @@ dependencies = [
  "thiserror 2.0.19",
  "wincode 0.6.1",
  "zstd",
+]
+
+[[package]]
+name = "blockzilla-example-workloads"
+version = "0.2.0"
+dependencies = [
+ "blockzilla-query-sdk",
+ "sha2 0.11.0",
+ "thiserror 2.0.19",
 ]
 
 [[package]]
@@ -854,6 +887,20 @@ dependencies = [
 ]
 
 [[package]]
+name = "blockzilla-indexer-v3-read-sdk"
+version = "0.2.0"
+dependencies = [
+ "anyhow",
+ "blockzilla-firebase-indexer",
+ "blockzilla-query-sdk",
+ "blockzilla-read-sdk",
+ "sha2 0.11.0",
+ "tempfile",
+ "thiserror 2.0.19",
+ "url",
+]
+
+[[package]]
 name = "blockzilla-log-parser"
 version = "0.2.0"
 dependencies = [
@@ -886,7 +933,40 @@ version = "0.2.0"
 dependencies = [
  "serde",
  "serde_json",
+ "sha2 0.11.0",
  "thiserror 2.0.19",
+]
+
+[[package]]
+name = "blockzilla-read-car"
+version = "0.2.0"
+dependencies = [
+ "blockzilla-car-read-sdk",
+ "blockzilla-example-workloads",
+ "bs58",
+]
+
+[[package]]
+name = "blockzilla-read-compact-v2"
+version = "0.2.0"
+dependencies = [
+ "blockzilla-compact-v2-read-sdk",
+ "blockzilla-dump",
+ "blockzilla-example-workloads",
+ "blockzilla-query-sdk",
+ "bs58",
+ "tempfile",
+]
+
+[[package]]
+name = "blockzilla-read-indexer-v3"
+version = "0.2.0"
+dependencies = [
+ "blockzilla-dump",
+ "blockzilla-example-workloads",
+ "blockzilla-indexer-v3-read-sdk",
+ "blockzilla-query-sdk",
+ "bs58",
 ]
 
 [[package]]
@@ -3758,6 +3838,7 @@ name = "of-car-reader"
 version = "0.2.0"
 dependencies = [
  "blockzilla-query-sdk",
+ "bs58",
  "bzip2 0.6.1",
  "clap 4.6.5",
  "criterion",

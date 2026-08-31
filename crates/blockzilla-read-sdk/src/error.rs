@@ -10,6 +10,9 @@ pub enum Error {
     #[error("invalid generation manifest: {0}")]
     InvalidManifest(String),
 
+    #[error("invalid operator-trusted local descriptor: {0}")]
+    InvalidLocalDescriptor(String),
+
     #[error("Compact V2 message schema error: {0}")]
     MessageSchema(#[from] crate::message_schema::CompactV2MessageSchemaError),
 
@@ -21,6 +24,9 @@ pub enum Error {
 
     #[error("required generation file is missing from the manifest: {0}")]
     MissingFile(String),
+
+    #[error("required Compact V2 file is missing from the operator-trusted local source: {0}")]
+    MissingLocalFile(String),
 
     #[error("generation file {name} has size {actual}, expected {expected}")]
     FileSize {

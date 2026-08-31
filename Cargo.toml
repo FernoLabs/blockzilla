@@ -20,7 +20,11 @@ members = [
     "crates/blockzilla-format",
     "crates/blockzilla-log-parser",
     "crates/blockzilla-query-sdk",
+    "crates/blockzilla-example-workloads",
     "crates/blockzilla-archive-sdk",
+    "crates/blockzilla-car-read-sdk",
+    "crates/blockzilla-compact-v2-read-sdk",
+    "crates/blockzilla-indexer-v3-read-sdk",
     "crates/blockzilla-read-sdk",
     "crates/blockzilla-user-program-index",
     "crates/blockzilla-dump",
@@ -29,6 +33,9 @@ members = [
     "crates/old-faithful/slot-ranges",
     "examples/token-api",
     "examples/archive-token-events",
+    "examples/read-car",
+    "examples/read-compact-v2",
+    "examples/read-indexer-v3",
 ]
 
 [workspace.package]

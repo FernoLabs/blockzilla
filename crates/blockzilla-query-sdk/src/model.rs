@@ -17,6 +17,7 @@ pub enum CoverageReason {
     InvalidReference,
     AmbiguousInstructionData,
     InstructionDataUnavailable,
+    ProjectionNotRequested,
     UnsupportedInstruction,
     SourceUnverified,
     NonContiguousHistory,
@@ -41,7 +42,10 @@ pub enum CpiCoverage {
     Unknown(CoverageReason),
 }
 
-/// Coverage of the outer message instructions and resolved account keys.
+/// Coverage of outer instructions and their account references.
+///
+/// `Complete` means that each reference is valid and can resolve. A request can
+/// still omit the resolved account-key values from canonical output.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "kebab-case", tag = "state", content = "reason")]
 pub enum InstructionCoverage {
@@ -58,6 +62,39 @@ pub enum InstructionDataCoverage {
     Unknown(CoverageReason),
 }
 
+/// Coverage of recorded pre- and post-token balances.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "kebab-case", tag = "state", content = "reason")]
+pub enum TokenBalanceCoverage {
+    Complete,
+    NotRequested,
+    Unknown(CoverageReason),
+}
+
+/// The side of a recorded transaction token balance.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "kebab-case")]
+pub enum TokenBalanceSide {
+    Pre,
+    Post,
+}
+
+/// One source-neutral recorded token balance.
+///
+/// `balance_index` is the position in the source pre- or post-balance list.
+/// It stays stable when a request selects only one mint.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub struct RecordedTokenBalance {
+    pub side: TokenBalanceSide,
+    pub balance_index: u32,
+    pub account_index: u32,
+    pub mint: Option<[u8; 32]>,
+    pub owner: Option<[u8; 32]>,
+    pub token_program: Option<[u8; 32]>,
+    pub amount: u64,
+    pub decimals: u8,
+}
+
 /// Stable source coordinates for one outer or inner instruction.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 pub struct InstructionCoordinate {
@@ -72,12 +109,16 @@ pub struct InstructionCoordinate {
     pub stack_height: Option<u32>,
 }
 
-/// One validated instruction with all account indexes resolved to public keys.
+/// One validated instruction projection.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct ResolvedInstruction {
     pub coordinate: InstructionCoordinate,
     pub program_id: [u8; 32],
     /// Account public keys in the instruction account-index order.
+    ///
+    /// Compact V2 and Indexer V3 leave this empty when
+    /// `ScanRequest::include_instruction_accounts` is false. Program identity
+    /// and coordinates remain exact in that mode.
     pub accounts: Vec<[u8; 32]>,
     pub data_coverage: InstructionDataCoverage,
     pub data: Vec<u8>,
@@ -117,6 +158,8 @@ pub struct CanonicalTransaction {
     /// Required signer public keys in message order.
     pub required_signers: Vec<[u8; 32]>,
     pub instructions: Vec<ResolvedInstruction>,
+    pub token_balance_coverage: TokenBalanceCoverage,
+    pub token_balances: Vec<RecordedTokenBalance>,
 }
 
 impl CanonicalTransaction {
@@ -144,6 +187,19 @@ impl CanonicalTransaction {
             return Err(Error::InvalidTransaction(format!(
                 "instruction count {} exceeds the canonical short-vector limit",
                 self.instructions.len()
+            )));
+        }
+        if !matches!(self.token_balance_coverage, TokenBalanceCoverage::Complete)
+            && !self.token_balances.is_empty()
+        {
+            return Err(Error::InvalidTransaction(
+                "transaction has token balances without complete coverage".into(),
+            ));
+        }
+        if self.token_balances.len() > MAX_CANONICAL_SHORT_VEC_ITEMS * 2 {
+            return Err(Error::InvalidTransaction(format!(
+                "token-balance count {} exceeds the canonical pre/post limit",
+                self.token_balances.len()
             )));
         }
 
@@ -254,6 +310,8 @@ impl CanonicalTransaction {
             primary_signature: self.primary_signature.as_ref(),
             required_signers: &self.required_signers,
             instructions: &self.instructions,
+            token_balance_coverage: self.token_balance_coverage,
+            token_balances: &self.token_balances,
         }
     }
 }
@@ -311,6 +369,8 @@ pub struct TransactionView<'a> {
     pub primary_signature: Option<&'a [u8; 64]>,
     pub required_signers: &'a [[u8; 32]],
     pub instructions: &'a [ResolvedInstruction],
+    pub token_balance_coverage: TokenBalanceCoverage,
+    pub token_balances: &'a [RecordedTokenBalance],
 }
 
 #[cfg(test)]
@@ -350,6 +410,8 @@ mod tests {
                 primary_signature: Some([5; 64]),
                 required_signers: vec![[6; 32]],
                 instructions,
+                token_balance_coverage: TokenBalanceCoverage::NotRequested,
+                token_balances: Vec::new(),
             }],
         }
     }

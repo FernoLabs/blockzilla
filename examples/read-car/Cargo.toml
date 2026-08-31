@@ -1,0 +1,17 @@
+[package]
+name = "blockzilla-read-car"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+publish = false
+
+[[bin]]
+name = "read-car"
+path = "src/main.rs"
+
+[dependencies]
+blockzilla-car-read-sdk = { path = "../../crates/blockzilla-car-read-sdk" }
+blockzilla-example-workloads = { path = "../../crates/blockzilla-example-workloads" }
+bs58 = "0.5.1"

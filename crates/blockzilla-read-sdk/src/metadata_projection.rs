@@ -27,6 +27,7 @@ pub const MAX_COMPACT_V2_TOP_LEVEL_INSTRUCTIONS: usize = u8::MAX as usize + 1;
 /// Independent safety limit for all CPI instructions in one metadata record.
 pub const MAX_COMPACT_V2_CPI_INSTRUCTIONS: usize = 1 << 16;
 
+const MAX_COMPACT_V2_CPI_ACCOUNTS_PER_INSTRUCTION: usize = 1 << 16;
 const MAX_ERROR_BYTES: usize = 1 << 16;
 const MAX_INNER_DATA_BYTES: usize = 16 * 1024 * 1024;
 const MAX_LOG_TABLE_ITEMS: usize = 1 << 20;
@@ -125,6 +126,13 @@ pub struct ProjectedCompactV2Metadata<'de> {
     pub loaded_readonly_addresses: Vec<CompactPubkey>,
 }
 
+/// Recorded token-balance rows selected from one transaction metadata record.
+#[derive(Debug, Clone)]
+pub struct ProjectedCompactV2TokenBalances {
+    pub pre: Vec<CompactTokenBalance>,
+    pub post: Vec<CompactTokenBalance>,
+}
+
 /// A generation-bound Compact V2 metadata projector.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct CompactV2MetadataProjector {
@@ -218,6 +226,95 @@ impl CompactV2MetadataProjector {
             loaded_writable_addresses,
             loaded_readonly_addresses,
         })
+    }
+
+    /// Project only recorded pre- and post-token balances from one complete
+    /// Compact V2 metadata record.
+    ///
+    /// Other fields are parsed and validated without retaining their vectors.
+    pub fn project_token_balances(
+        self,
+        bytes: &[u8],
+        limits: CompactV2MetadataProjectionLimits,
+    ) -> CompactV2MetadataProjectionResult<ProjectedCompactV2TokenBalances> {
+        validate_limits(limits)?;
+        let mut cursor = bytes;
+        match self.schema {
+            CompactV2MetadataSchema::CurrentTypedError => {
+                read_current_execution_status(&mut cursor, limits)?;
+            }
+            CompactV2MetadataSchema::LegacyRawError => {
+                read_legacy_execution_status(&mut cursor, limits)?;
+            }
+        }
+
+        get::<u64>(&mut cursor)?; // fee
+        let pre_balance_count = skip_balances(&mut cursor, limits.total_message_accounts)?;
+        let post_balance_count = skip_balances(&mut cursor, limits.total_message_accounts)?;
+        if pre_balance_count != limits.total_message_accounts
+            || post_balance_count != limits.total_message_accounts
+        {
+            return Err(wincode::error::invalid_value(
+                "pre- and post-balance counts do not equal resolved message accounts",
+            )
+            .into());
+        }
+
+        skip_inner_instruction_groups(&mut cursor, limits)?;
+        skip_logs(&mut cursor, self.registry_entries)?;
+        let pre = read_token_balances(
+            &mut cursor,
+            limits.total_message_accounts,
+            self.registry_entries,
+        )?;
+        let post = read_token_balances(
+            &mut cursor,
+            limits.total_message_accounts,
+            self.registry_entries,
+        )?;
+        skip_rewards(&mut cursor, self.registry_entries)?;
+        skip_loaded_addresses(
+            &mut cursor,
+            limits.expected_loaded_writable,
+            self.registry_entries,
+        )?;
+        skip_loaded_addresses(
+            &mut cursor,
+            limits.expected_loaded_readonly,
+            self.registry_entries,
+        )?;
+        skip_return_data(&mut cursor, self.registry_entries)?;
+        get::<Option<u64>>(&mut cursor)?; // compute_units_consumed
+        get::<Option<u64>>(&mut cursor)?; // cost_units
+
+        if !cursor.is_empty() {
+            return Err(CompactV2MetadataProjectionError::TrailingBytes(
+                cursor.len(),
+            ));
+        }
+        Ok(ProjectedCompactV2TokenBalances { pre, post })
+    }
+
+    /// Project the exact token-balance plane retained by Indexer V3.
+    pub fn project_split_token_balances(
+        self,
+        token_balances: &[u8],
+        limits: CompactV2MetadataProjectionLimits,
+    ) -> CompactV2MetadataProjectionResult<ProjectedCompactV2TokenBalances> {
+        validate_limits(limits)?;
+        let mut cursor = token_balances;
+        let pre = read_token_balances(
+            &mut cursor,
+            limits.total_message_accounts,
+            self.registry_entries,
+        )?;
+        let post = read_token_balances(
+            &mut cursor,
+            limits.total_message_accounts,
+            self.registry_entries,
+        )?;
+        require_split_plane_consumed("token-balances", cursor)?;
+        Ok(ProjectedCompactV2TokenBalances { pre, post })
     }
 
     /// Project the three semantic metadata planes retained by Indexer V3.
@@ -620,6 +717,55 @@ fn read_inner_instruction_groups<'de>(
     }
 }
 
+fn skip_inner_instruction_groups(
+    cursor: &mut &[u8],
+    limits: CompactV2MetadataProjectionLimits,
+) -> ReadResult<()> {
+    match get::<u8>(cursor)? {
+        0 => Ok(()),
+        1 => {
+            let group_maximum = limits.top_level_instruction_count.min(cursor.len() / 2);
+            let group_count = read_bounded_len(
+                cursor,
+                group_maximum,
+                "CPI group count exceeds its semantic or input bound",
+            )?;
+            let mut previous_index = None;
+            let mut total_instructions = 0usize;
+            for _ in 0..group_count {
+                let outer_instruction_index = get::<u32>(cursor)?;
+                let outer_index = usize::try_from(outer_instruction_index)
+                    .map_err(|_| wincode::error::pointer_sized_decode_error())?;
+                if outer_index >= limits.top_level_instruction_count {
+                    return Err(wincode::error::invalid_value(
+                        "CPI group index is outside top-level instructions",
+                    ));
+                }
+                if previous_index.is_some_and(|previous| outer_instruction_index <= previous) {
+                    return Err(wincode::error::invalid_value(
+                        "CPI group indexes are not strictly increasing and unique",
+                    ));
+                }
+                previous_index = Some(outer_instruction_index);
+                let remaining_instruction_cap = MAX_COMPACT_V2_CPI_INSTRUCTIONS
+                    .saturating_sub(total_instructions)
+                    .min(cursor.len() / 4);
+                let instruction_count = read_bounded_len(
+                    cursor,
+                    remaining_instruction_cap,
+                    "CPI instruction count exceeds its safety or input bound",
+                )?;
+                total_instructions += instruction_count;
+                for _ in 0..instruction_count {
+                    read_inner_instruction(cursor, limits.total_message_accounts)?;
+                }
+            }
+            Ok(())
+        }
+        other => Err(invalid_tag_encoding(other as usize)),
+    }
+}
+
 fn read_inner_instruction<'de>(
     cursor: &mut &'de [u8],
     total_message_accounts: usize,
@@ -633,10 +779,13 @@ fn read_inner_instruction<'de>(
         ));
     }
 
+    // Repeated account indexes are legal, so the vector length is not bounded
+    // by the number of distinct resolved message accounts. The borrowed slice
+    // is still bounded by an independent safety cap and the remaining input.
     let accounts = read_bytes_bounded(
         cursor,
-        total_message_accounts,
-        "CPI account-index count exceeds resolved message accounts",
+        MAX_COMPACT_V2_CPI_ACCOUNTS_PER_INSTRUCTION,
+        "CPI account-index count exceeds its safety or input bound",
     )?;
     if accounts
         .iter()
@@ -693,6 +842,38 @@ fn skip_token_balances(
     Ok(())
 }
 
+fn read_token_balances(
+    cursor: &mut &[u8],
+    maximum: usize,
+    registry_entries: u32,
+) -> ReadResult<Vec<CompactTokenBalance>> {
+    let count = read_bounded_len(
+        cursor,
+        maximum.min(cursor.len() / 6),
+        "token-balance count exceeds its semantic or input bound",
+    )?;
+    let mut balances = Vec::with_capacity(count);
+    for _ in 0..count {
+        let account_index = get::<u32>(cursor)?;
+        let account_position = usize::try_from(account_index)
+            .map_err(|_| wincode::error::pointer_sized_decode_error())?;
+        if account_position >= maximum {
+            return Err(wincode::error::invalid_value(
+                "token-balance account index is outside resolved message accounts",
+            ));
+        }
+        balances.push(CompactTokenBalance {
+            account_index,
+            mint: get_optional_pubkey(cursor, registry_entries)?,
+            owner: get_optional_pubkey(cursor, registry_entries)?,
+            program_id: get_optional_pubkey(cursor, registry_entries)?,
+            amount: get::<u64>(cursor)?,
+            decimals: get::<u8>(cursor)?,
+        });
+    }
+    Ok(balances)
+}
+
 fn skip_rewards(cursor: &mut &[u8], registry_entries: u32) -> ReadResult<()> {
     // Five fields have a minimum one-byte representation.
     let count = read_bounded_len(
@@ -730,6 +911,27 @@ fn read_loaded_addresses(
         addresses.push(get_pubkey(cursor, registry_entries)?);
     }
     Ok(addresses)
+}
+
+fn skip_loaded_addresses(
+    cursor: &mut &[u8],
+    expected: usize,
+    registry_entries: u32,
+) -> ReadResult<()> {
+    let count = read_bounded_len(
+        cursor,
+        expected.min(cursor.len()),
+        "loaded address count exceeds the message lookup count or input bound",
+    )?;
+    if count != expected {
+        return Err(wincode::error::invalid_value(
+            "loaded address count does not equal the projected message lookup count",
+        ));
+    }
+    for _ in 0..count {
+        get_pubkey(cursor, registry_entries)?;
+    }
+    Ok(())
 }
 
 fn skip_return_data(cursor: &mut &[u8], registry_entries: u32) -> ReadResult<()> {
@@ -1492,6 +1694,16 @@ mod tests {
         (outcome, loaded, inner)
     }
 
+    fn token_split_bytes(value: &CompactMetaV1) -> Vec<u8> {
+        let mut token =
+            wincode::config::serialize(&value.pre_token_balances, wincode_leb128_config()).unwrap();
+        token.extend(
+            wincode::config::serialize(&value.post_token_balances, wincode_leb128_config())
+                .unwrap(),
+        );
+        token
+    }
+
     fn projector(schema: CompactV2MetadataSchema) -> CompactV2MetadataProjector {
         CompactV2MetadataProjector::new(schema, 100)
     }
@@ -1555,6 +1767,27 @@ mod tests {
     }
 
     #[test]
+    fn token_balance_projection_matches_complete_and_split_metadata() {
+        let value = full_metadata(None, Some(cpi_groups()));
+        let complete = projector(CompactV2MetadataSchema::CurrentTypedError)
+            .project_token_balances(&current_bytes(&value), LIMITS)
+            .unwrap();
+        let split = projector(CompactV2MetadataSchema::CurrentTypedError)
+            .project_split_token_balances(&token_split_bytes(&value), LIMITS)
+            .unwrap();
+
+        for projected in [complete, split] {
+            assert_eq!(projected.pre.len(), 1);
+            assert_eq!(projected.post.len(), 1);
+            assert_eq!(projected.pre[0].account_index, 0);
+            assert!(matches!(projected.pre[0].mint, Some(CompactPubkey::Id(2))));
+            assert_eq!(projected.pre[0].amount, 10);
+            assert_eq!(projected.post[0].amount, 9);
+            assert_eq!(projected.post[0].decimals, 6);
+        }
+    }
+
+    #[test]
     fn split_projection_matches_the_retained_semantic_fields() {
         let value = full_metadata(
             Some(CompactTransactionError::InstructionError(
@@ -1573,6 +1806,66 @@ mod tests {
             .unwrap();
 
         assert_eq!(split, full);
+    }
+
+    #[test]
+    fn repeated_cpi_account_indexes_can_exceed_distinct_account_count() {
+        let groups = vec![CompactInnerInstructions {
+            index: 0,
+            instructions: vec![CompactInnerInstruction {
+                program_id_index: 1,
+                accounts: vec![0, 1, 0, 1, 0],
+                data: vec![],
+                stack_height: Some(2),
+            }],
+        }];
+        let value = full_metadata(None, Some(groups));
+
+        let full_bytes = current_bytes(&value);
+        let full = projector(CompactV2MetadataSchema::CurrentTypedError)
+            .project(&full_bytes, LIMITS)
+            .unwrap();
+        let (outcome, loaded, inner) = current_split_bytes(&value);
+        let split = projector(CompactV2MetadataSchema::CurrentTypedError)
+            .project_split_planes(&outcome, &loaded, &inner, LIMITS)
+            .unwrap();
+
+        let expected = [0, 1, 0, 1, 0];
+        assert_eq!(
+            full.inner_instructions.unwrap()[0].instructions[0].accounts,
+            expected
+        );
+        assert_eq!(
+            split.inner_instructions.unwrap()[0].instructions[0].accounts,
+            expected
+        );
+    }
+
+    #[test]
+    fn repeated_cpi_accounts_still_require_each_index_to_resolve() {
+        let groups = vec![CompactInnerInstructions {
+            index: 0,
+            instructions: vec![CompactInnerInstruction {
+                program_id_index: 1,
+                accounts: vec![0, 4, 0, 4, 0],
+                data: vec![],
+                stack_height: Some(2),
+            }],
+        }];
+        let value = full_metadata(None, Some(groups));
+
+        let full_bytes = current_bytes(&value);
+        assert!(
+            projector(CompactV2MetadataSchema::CurrentTypedError)
+                .project(&full_bytes, LIMITS)
+                .is_err()
+        );
+        let (outcome, loaded, inner) = current_split_bytes(&value);
+        assert!(
+            projector(CompactV2MetadataSchema::CurrentTypedError)
+                .project_split_planes(&outcome, &loaded, &inner, LIMITS)
+                .is_err()
+        );
     }
 
     #[test]

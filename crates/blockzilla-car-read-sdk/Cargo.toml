@@ -1,0 +1,17 @@
+[package]
+name = "blockzilla-car-read-sdk"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+publish = false
+description = "Dedicated high-level network reader for Blockzilla CAR archives"
+readme = "README.md"
+
+[dependencies]
+blockzilla-query-sdk = { version = "0.2.0", path = "../blockzilla-query-sdk" }
+of-car-reader = { path = "../old-faithful/car-reader", default-features = false, features = ["query-sdk-http", "zstd-native"] }
+sha2 = "0.11.0"
+thiserror = "2.0.18"
+url = "2.5.8"

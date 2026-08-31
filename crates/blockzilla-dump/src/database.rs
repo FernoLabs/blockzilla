@@ -11,7 +11,10 @@ use rusqlite::{
 use serde::{Deserialize, Serialize};
 use thiserror::Error;
 
-pub const SCHEMA_VERSION: i64 = 1;
+/// Version 2 names the checkpoint payload as a runtime source descriptor.
+/// Existing version-1 databases are rejected instead of being resumed under a
+/// changed source contract.
+pub const SCHEMA_VERSION: i64 = 2;
 const APPLICATION_ID: i64 = 0x425a_4450; // "BZDP"
 
 const SCHEMA: &str = r#"
@@ -35,11 +38,10 @@ CREATE TABLE epochs (
     source_identity             TEXT,
     cluster_id                  TEXT,
     generation_id              TEXT,
-    generation_digest          BLOB CHECK (generation_digest IS NULL OR length(generation_digest) = 32),
     slots_per_epoch             INTEGER CHECK (slots_per_epoch IS NULL OR slots_per_epoch > 0),
     message_schema              TEXT,
     metadata_schema             TEXT,
-    manifest_json               TEXT,
+    source_descriptor_json      TEXT,
     block_rows_total            INTEGER CHECK (block_rows_total IS NULL OR block_rows_total >= 0),
     next_block_row              INTEGER NOT NULL DEFAULT 0 CHECK (next_block_row >= 0),
     scanned_blocks              INTEGER NOT NULL DEFAULT 0 CHECK (scanned_blocks >= 0),
@@ -49,13 +51,13 @@ CREATE TABLE epochs (
     updated_unix_seconds        INTEGER NOT NULL,
     error                       TEXT,
     CHECK (
-        (generation_digest IS NULL AND source_identity IS NULL AND cluster_id IS NULL AND generation_id IS NULL
+        (source_identity IS NULL AND cluster_id IS NULL AND generation_id IS NULL
             AND slots_per_epoch IS NULL AND message_schema IS NULL AND metadata_schema IS NULL
-            AND manifest_json IS NULL AND block_rows_total IS NULL)
+            AND source_descriptor_json IS NULL AND block_rows_total IS NULL)
         OR
-        (generation_digest IS NOT NULL AND length(source_identity) > 0 AND cluster_id IS NOT NULL AND generation_id IS NOT NULL
+        (length(source_identity) > 0 AND cluster_id IS NOT NULL AND generation_id IS NOT NULL
             AND slots_per_epoch IS NOT NULL AND length(message_schema) > 0
-            AND length(metadata_schema) > 0 AND manifest_json IS NOT NULL
+            AND length(metadata_schema) > 0 AND source_descriptor_json IS NOT NULL
             AND block_rows_total IS NOT NULL)
     ),
     CHECK (block_rows_total IS NULL OR next_block_row <= block_rows_total)
@@ -298,11 +300,10 @@ pub struct EpochBinding {
     pub source_identity: String,
     pub cluster_id: String,
     pub generation_id: String,
-    pub generation_digest: [u8; 32],
     pub slots_per_epoch: u64,
     pub message_schema: String,
     pub metadata_schema: String,
-    pub manifest_json: String,
+    pub source_descriptor_json: String,
     pub block_rows_total: u64,
 }
 
@@ -436,7 +437,7 @@ pub struct EpochStatus {
     pub epoch: u64,
     pub state: EpochState,
     pub source_identity: Option<String>,
-    pub generation_digest: Option<String>,
+    pub source_descriptor_json: Option<String>,
     pub message_schema: Option<String>,
     pub metadata_schema: Option<String>,
     pub block_rows_total: Option<u64>,
@@ -570,7 +571,7 @@ impl DumpDatabase {
         status_from_connection(&self.connection)
     }
 
-    /// Bind an epoch to one exact published generation and return its resume point.
+    /// Bind an epoch to one exact source and return its resume point.
     pub fn begin_epoch(&mut self, binding: &EpochBinding) -> Result<Checkpoint> {
         validate_binding(binding)?;
         let now = unix_seconds()?;
@@ -589,19 +590,18 @@ impl DumpDatabase {
                 transaction.execute(
                     "UPDATE epochs SET
                         source_identity = ?2, cluster_id = ?3, generation_id = ?4,
-                        generation_digest = ?5, slots_per_epoch = ?6, message_schema = ?7,
-                        metadata_schema = ?8, manifest_json = ?9, block_rows_total = ?10
+                        slots_per_epoch = ?5, message_schema = ?6,
+                        metadata_schema = ?7, source_descriptor_json = ?8, block_rows_total = ?9
                      WHERE epoch = ?1",
                     params![
                         sqlite_u64(binding.epoch, "epoch")?,
                         binding.source_identity,
                         binding.cluster_id,
                         binding.generation_id,
-                        &binding.generation_digest[..],
                         sqlite_u64(binding.slots_per_epoch, "slots_per_epoch")?,
                         binding.message_schema,
                         binding.metadata_schema,
-                        binding.manifest_json,
+                        binding.source_descriptor_json,
                         sqlite_u64(binding.block_rows_total, "block_rows_total")?,
                     ],
                 )?;
@@ -916,10 +916,10 @@ struct StoredEpochBinding {
     source_identity: String,
     cluster_id: String,
     generation_id: String,
-    generation_digest: [u8; 32],
     slots_per_epoch: u64,
     message_schema: String,
     metadata_schema: String,
+    source_descriptor_json: String,
     block_rows_total: u64,
 }
 
@@ -1021,19 +1021,18 @@ fn status_from_connection(connection: &Connection) -> Result<DumpStatus> {
     let transaction_rows = count_all(connection, "transactions")?;
     let coverage_issue_rows = count_all(connection, "coverage_issues")?;
     let mut statement = connection.prepare(
-        "SELECT epoch, state, source_identity, generation_digest, message_schema, metadata_schema,
+        "SELECT epoch, state, source_identity, source_descriptor_json, message_schema, metadata_schema,
                 block_rows_total, next_block_row, scanned_blocks, scanned_transactions,
                 matched_transactions, indeterminate_transactions, error
          FROM epochs ORDER BY epoch",
     )?;
     let epochs = statement
         .query_map([], |row| {
-            let digest: Option<Vec<u8>> = row.get(3)?;
             Ok(EpochStatus {
                 epoch: sql_u64(row, 0)?,
                 state: row.get(1)?,
                 source_identity: row.get(2)?,
-                generation_digest: digest.as_deref().map(hex_lower),
+                source_descriptor_json: row.get(3)?,
                 message_schema: row.get(4)?,
                 metadata_schema: row.get(5)?,
                 block_rows_total: sql_optional_u64(row, 6)?,
@@ -1081,35 +1080,35 @@ fn validate_binding(binding: &EpochBinding) -> Result<()> {
             message: "slots_per_epoch must be greater than zero".into(),
         });
     }
-    serde_json::from_str::<serde_json::Value>(&binding.manifest_json).map_err(|error| {
-        DumpError::InvalidCheckpoint {
+    serde_json::from_str::<serde_json::Value>(&binding.source_descriptor_json).map_err(
+        |error| DumpError::InvalidCheckpoint {
             epoch: binding.epoch,
-            message: format!("manifest_json is not valid JSON: {error}"),
-        }
-    })?;
+            message: format!("source_descriptor_json is not valid JSON: {error}"),
+        },
+    )?;
     Ok(())
 }
 
 fn stored_epoch(connection: &Connection, epoch: u64) -> Result<StoredEpoch> {
     let row = connection
         .query_row(
-            "SELECT state, source_identity, cluster_id, generation_id, generation_digest,
-                    slots_per_epoch, message_schema, metadata_schema, block_rows_total,
+            "SELECT state, source_identity, cluster_id, generation_id,
+                    slots_per_epoch, message_schema, metadata_schema, source_descriptor_json, block_rows_total,
                     next_block_row, scanned_blocks, scanned_transactions,
                     matched_transactions, indeterminate_transactions
              FROM epochs WHERE epoch = ?1",
             [sqlite_u64(epoch, "epoch")?],
             |row| {
-                let digest: Option<Vec<u8>> = row.get(4)?;
-                let binding = match digest {
-                    Some(digest) => Some(StoredEpochBinding {
-                        source_identity: row.get(1)?,
+                let source_identity: Option<String> = row.get(1)?;
+                let binding = match source_identity {
+                    Some(source_identity) => Some(StoredEpochBinding {
+                        source_identity,
                         cluster_id: row.get(2)?,
                         generation_id: row.get(3)?,
-                        generation_digest: array_32(digest, 4)?,
-                        slots_per_epoch: sql_u64(row, 5)?,
-                        message_schema: row.get(6)?,
-                        metadata_schema: row.get(7)?,
+                        slots_per_epoch: sql_u64(row, 4)?,
+                        message_schema: row.get(5)?,
+                        metadata_schema: row.get(6)?,
+                        source_descriptor_json: row.get(7)?,
                         block_rows_total: sql_u64(row, 8)?,
                     }),
                     None => None,
@@ -1135,10 +1134,10 @@ fn same_binding(stored: &StoredEpochBinding, candidate: &EpochBinding) -> bool {
     stored.source_identity == candidate.source_identity
         && stored.cluster_id == candidate.cluster_id
         && stored.generation_id == candidate.generation_id
-        && stored.generation_digest == candidate.generation_digest
         && stored.slots_per_epoch == candidate.slots_per_epoch
         && stored.message_schema == candidate.message_schema
         && stored.metadata_schema == candidate.metadata_schema
+        && stored.source_descriptor_json == candidate.source_descriptor_json
         && stored.block_rows_total == candidate.block_rows_total
 }
 
@@ -1445,12 +1444,6 @@ fn sql_optional_u64(row: &rusqlite::Row<'_>, index: usize) -> rusqlite::Result<O
             u64::try_from(value).map_err(|_| rusqlite::Error::IntegralValueOutOfRange(index, value))
         })
         .transpose()
-}
-
-fn array_32(bytes: Vec<u8>, index: usize) -> rusqlite::Result<[u8; 32]> {
-    bytes.try_into().map_err(|_| {
-        rusqlite::Error::InvalidColumnType(index, "digest".into(), rusqlite::types::Type::Blob)
-    })
 }
 
 fn unix_seconds() -> Result<i64> {

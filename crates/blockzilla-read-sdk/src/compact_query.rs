@@ -1,12 +1,19 @@
 //! Sequential source-neutral instruction projection for Compact V2 archives.
 //!
 //! This is the reference adapter. It uses the admitted `ArchiveReader`, keeps
-//! bounded registry chunks across the scan, reads each block signature window
-//! once, and publishes only through `OrderedBlockPublisher`.
+//! bounded registry chunks or one policy-bounded complete registry across the
+//! scan, reads each block signature window once, and publishes only through
+//! `OrderedBlockPublisher`.
 
 use std::{
     collections::{HashMap, VecDeque},
+    mem::size_of,
     ops::Range,
+    sync::{
+        Arc,
+        atomic::{AtomicU64, Ordering},
+    },
+    thread,
 };
 
 use blockzilla_format::{
@@ -15,14 +22,15 @@ use blockzilla_format::{
     ARCHIVE_V2_TX_FLAG_HAS_LOADED_ADDRESSES, ARCHIVE_V2_TX_FLAG_HAS_METADATA,
     ARCHIVE_V2_TX_FLAG_MESSAGE_V0, ARCHIVE_V2_TX_FLAG_METADATA_RAW_FALLBACK,
     ARCHIVE_V2_TX_FLAG_TX_RAW_FALLBACK, ARCHIVE_V2_VOTE_HASH_REGISTRY_FILE, ArchiveV2HotTxRow,
-    CompactPubkey, OwnedCompactRecentBlockhash,
+    CompactPubkey, CompactTokenBalance, OwnedCompactRecentBlockhash,
 };
 use blockzilla_query_sdk::{
     ArchiveFormat, ArchiveInstructionSource, BlockHeader, BlockSink, CanonicalBlock,
     CanonicalTransaction, CoverageReason, CpiCoverage, Error as QueryError, ExecutionStatus,
     InstructionCoordinate, InstructionCoverage, InstructionDataCoverage,
-    InstructionDataRequirement, OrderedBlockPublisher, ResolvedInstruction, ScanIoReceipt,
-    ScanReceipt, ScanRequest, SourceIdentity, SourceVerification, TransactionHeader,
+    InstructionDataRequirement, OrderedBlockPublisher, RecordedTokenBalance, ResolvedInstruction,
+    ScanIoReceipt, ScanReceipt, ScanRequest, SourceIdentity, SourceVerification,
+    TokenBalanceCoverage, TokenBalanceRequirement, TokenBalanceSide, TransactionHeader,
 };
 use thiserror::Error;
 
@@ -30,11 +38,13 @@ use crate::{
     ArchiveReader, ArchiveReaderSourceKind, BlockhashResolver, BlockhashResolverError,
     CompactV2ExecutionStatus, CompactV2MessageProjectionError, CompactV2MessageProjector,
     CompactV2MetadataProjectionError, CompactV2MetadataProjectionLimits,
-    CompactV2MetadataProjector, MAX_BLOCKHASH_REGISTRY_BYTES,
-    MAX_SIGNED_MESSAGE_CANDIDATE_COMBINATIONS, MAX_VOTE_HASH_REGISTRY_BYTES, PreviousBlockhashTail,
-    PreviousBlockhashTailSchema, ProjectedCompactV2Message, ProjectedCompactV2MessageVersion,
-    RangeSource, SignedInstructionCandidates, SignedMessageCandidates, SignedMessageError,
-    SignedMessageVersion, VoteHashRegistry, VoteHashResolver, parse_previous_blockhash_tail,
+    CompactV2MetadataProjector, MAX_BLOCKHASH_REGISTRY_BYTES, MAX_ORDERED_PARALLEL_DECODE_WORKERS,
+    MAX_ORDERED_PARALLEL_RETAINED_DECOMPRESSED_BYTES, MAX_SIGNED_MESSAGE_CANDIDATE_COMBINATIONS,
+    MAX_VOTE_HASH_REGISTRY_BYTES, OrderedParallelBlockConfig, OrderedParallelBlockStats,
+    PreviousBlockhashTail, PreviousBlockhashTailSchema, ProjectedCompactV2Message,
+    ProjectedCompactV2MessageVersion, RangeSource, SignedInstructionCandidates,
+    SignedMessageCandidates, SignedMessageError, SignedMessageVersion, VoteHashRegistry,
+    VoteHashResolver, parse_previous_blockhash_tail,
 };
 
 const REGISTRY_KEY_BYTES: usize = 32;
@@ -43,12 +53,153 @@ const REGISTRY_KEYS_PER_CHUNK: usize = 2_048;
 const REGISTRY_CACHE_CHUNKS: usize = 8;
 const PREVIOUS_BLOCKHASH_RECORDS: usize = 300;
 const MAX_SIGNATURE_BYTES_PER_BLOCK: usize = 256 * 1024 * 1024;
+/// Keep one sequential signature request within the public range gateway cap.
+const MAX_SIGNATURE_BATCH_BYTES: usize = 32 << 20;
 
 /// Maximum retained public-key payload bytes in the registry chunk cache.
 ///
 /// This value does not include `HashMap`, `Vec`, or allocator overhead.
 pub const COMPACT_V2_QUERY_REGISTRY_RETAINED_KEY_BYTES: usize =
     REGISTRY_KEYS_PER_CHUNK * REGISTRY_KEY_BYTES * REGISTRY_CACHE_CHUNKS;
+
+/// Maximum compressed allocation tokens retained by a parallel Compact V2 scan.
+pub const COMPACT_V2_PARALLEL_COMPRESSED_BUFFERS: usize = 3;
+/// Maximum block projections retained before the ordered consumer receives them.
+pub const COMPACT_V2_PARALLEL_MAX_BLOCKS_PER_BATCH: usize = 64;
+/// Maximum declared decompressed bytes retained in one parallel batch.
+pub const COMPACT_V2_PARALLEL_UNCOMPRESSED_BATCH_BYTES: usize = 32 * 1024 * 1024;
+/// Maximum payload retained by each of the two reusable projection buffers.
+pub const COMPACT_V2_PROJECTION_SCRATCH_RETAINED_BYTES: usize = 1024 * 1024;
+/// Default limit for one immutable registry used by one dense scan.
+pub const DEFAULT_COMPACT_V2_FULL_REGISTRY_BYTES: u64 = 1 << 30;
+/// Small partial scans keep the sparse cache below this transaction count.
+pub const COMPACT_V2_PARTIAL_REGISTRY_PREFETCH_MIN_TRANSACTIONS: u64 = 1_000_000;
+/// Largest source read used to prefetch the shared registry.
+pub const COMPACT_V2_REGISTRY_PREFETCH_READ_BYTES: usize = 32 * 1024 * 1024;
+
+/// Policy for automatic full-registry prefetch during a sequential scan.
+///
+/// A nonzero limit permits one complete immutable registry when the request is
+/// a full archive scan or contains at least one million transactions. The
+/// request must select fields that need public-key resolution, and the exact
+/// registry payload must fit the supplied limit. A zero-byte limit keeps the
+/// bounded eight-chunk LRU path.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct CompactV2RegistryReadPolicy {
+    max_full_registry_bytes: u64,
+    min_requested_transactions: u64,
+}
+
+impl CompactV2RegistryReadPolicy {
+    /// Disable full-registry prefetch.
+    pub const fn sparse_only() -> Self {
+        Self {
+            max_full_registry_bytes: 0,
+            min_requested_transactions: COMPACT_V2_PARTIAL_REGISTRY_PREFETCH_MIN_TRANSACTIONS,
+        }
+    }
+
+    /// Permit automatic prefetch up to the supplied complete-registry size.
+    pub const fn with_full_registry_limit(max_full_registry_bytes: u64) -> Self {
+        Self {
+            max_full_registry_bytes,
+            min_requested_transactions: COMPACT_V2_PARTIAL_REGISTRY_PREFETCH_MIN_TRANSACTIONS,
+        }
+    }
+
+    pub const fn max_full_registry_bytes(self) -> u64 {
+        self.max_full_registry_bytes
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum CompactV2ParallelRegistryMode {
+    /// One complete immutable registry is shared across all workers.
+    SharedFull,
+    /// Each used worker has its own bounded eight-chunk LRU cache.
+    SparseWorkerCache,
+}
+
+impl std::fmt::Display for CompactV2ParallelRegistryMode {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::SharedFull => formatter.write_str("shared-full"),
+            Self::SparseWorkerCache => formatter.write_str("sparse-worker-cache"),
+        }
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct CompactV2ParallelRegistryReceipt {
+    pub mode: CompactV2ParallelRegistryMode,
+    /// Bounded source calls used by the one-pass complete-registry prefetch.
+    pub prefetch_read_calls: u64,
+    /// Source bytes used by the one-pass complete-registry prefetch.
+    pub prefetch_read_bytes: u64,
+    /// Exact shared payload for `SharedFull`; a checked worst-case retained
+    /// worker-cache payload for `SparseWorkerCache`.
+    pub resident_bound_bytes: u64,
+}
+
+/// Worker selection for an ordered parallel Compact V2 scan.
+///
+/// The scan keeps one monotonic source reader and publishes results in exact
+/// block-index order. Workers borrow current-schema transaction lanes from
+/// recycled decompression storage while they build the owned canonical
+/// projection required by the common query SDK.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct CompactV2ParallelScanConfig {
+    /// Parallel zstd-decode and canonical-projection workers.
+    pub workers: usize,
+    /// Largest complete registry that can be shared by all workers. Zero
+    /// keeps the sparse worker-local cache. A nonzero limit applies to full
+    /// scans and partial scans with at least one million requested
+    /// transactions.
+    pub max_full_registry_bytes: u64,
+}
+
+impl CompactV2ParallelScanConfig {
+    pub const fn new(workers: usize) -> Self {
+        Self {
+            workers,
+            max_full_registry_bytes: DEFAULT_COMPACT_V2_FULL_REGISTRY_BYTES,
+        }
+    }
+
+    pub const fn with_full_registry_limit(mut self, bytes: u64) -> Self {
+        self.max_full_registry_bytes = bytes;
+        self
+    }
+}
+
+impl Default for CompactV2ParallelScanConfig {
+    fn default() -> Self {
+        let workers = thread::available_parallelism()
+            .map(usize::from)
+            .unwrap_or(1)
+            .min(MAX_ORDERED_PARALLEL_DECODE_WORKERS);
+        Self::new(workers)
+    }
+}
+
+/// Common query receipt plus bounded parallel-pipeline measurements.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct CompactV2ParallelScanReceipt {
+    pub scan: ScanReceipt,
+    pub pipeline: OrderedParallelBlockStats,
+    /// Worker count supplied in [`CompactV2ParallelScanConfig`].
+    pub requested_workers: usize,
+    /// Distinct private-pool workers that decoded at least one block.
+    pub effective_workers: usize,
+    /// Peak simultaneous decode-and-project callbacks.
+    pub max_active_workers: usize,
+    pub compressed_buffer_count: usize,
+    /// Largest owned canonical payload for one projected block.
+    pub max_projected_block_bytes: u64,
+    /// Largest owned canonical payload waiting for ordered delivery.
+    pub max_projected_batch_bytes: u64,
+    pub registry: CompactV2ParallelRegistryReceipt,
+}
 
 #[derive(Debug, Error)]
 pub enum CompactV2InstructionSourceError {
@@ -80,6 +231,25 @@ pub enum CompactV2InstructionSourceError {
     Invalid(String),
 }
 
+#[derive(Debug, Error)]
+enum CompactV2ParallelScanError {
+    #[error("parallel Compact V2 reader failed")]
+    Reader(#[from] crate::Error),
+    #[error("parallel Compact V2 projection failed")]
+    Projection(#[from] CompactV2InstructionSourceError),
+    #[error(transparent)]
+    Query(#[from] QueryError),
+}
+
+impl CompactV2ParallelScanError {
+    fn into_query_error(self) -> QueryError {
+        match self {
+            Self::Query(error) => error,
+            other => source_error(other),
+        }
+    }
+}
+
 pub type CompactV2InstructionSourceResult<T> =
     std::result::Result<T, CompactV2InstructionSourceError>;
 
@@ -89,13 +259,15 @@ pub type CompactV2InstructionSourceResult<T> =
 /// `epoch` and `slots_per_epoch`, but it does not record a warm-up-aware first
 /// slot. The adapter never derives this value with `epoch * slots_per_epoch`.
 /// When `signatures.bin` exists, the adapter reads one signature window for
-/// each non-empty block so it can publish `primary_signature`. This read also
-/// supplies the proof used only when selected instruction data is ambiguous.
+/// each non-empty block when primary signatures or instruction data are
+/// requested. A selected ambiguous instruction uses this read as its exact
+/// signature proof.
 #[derive(Debug)]
 pub struct CompactV2InstructionSource<S> {
     reader: ArchiveReader<S>,
     identity: SourceIdentity,
     context: ExactContext,
+    projection_scratch: TransactionProjectionScratch,
 }
 
 impl<S: RangeSource> CompactV2InstructionSource<S> {
@@ -103,20 +275,19 @@ impl<S: RangeSource> CompactV2InstructionSource<S> {
         reader: ArchiveReader<S>,
         first_slot: u64,
     ) -> CompactV2InstructionSourceResult<Self> {
-        let manifest = reader.manifest();
         let block_count = u32::try_from(reader.index().rows.len()).map_err(|_| {
             CompactV2InstructionSourceError::Invalid(
                 "block row count exceeds the source-neutral u32 limit".into(),
             )
         })?;
         let last_slot = first_slot
-            .checked_add(manifest.slots_per_epoch.saturating_sub(1))
+            .checked_add(reader.slots_per_epoch().saturating_sub(1))
             .ok_or_else(|| {
                 CompactV2InstructionSourceError::Invalid(
                     "explicit epoch slot range overflows u64".into(),
                 )
             })?;
-        if manifest.slots_per_epoch == 0 {
+        if reader.slots_per_epoch() == 0 {
             return Err(CompactV2InstructionSourceError::Invalid(
                 "slots_per_epoch is zero".into(),
             ));
@@ -134,19 +305,34 @@ impl<S: RangeSource> CompactV2InstructionSource<S> {
         }
 
         let (verification, binding) = match reader.source_kind() {
-            ArchiveReaderSourceKind::PublishedManifest => (
-                SourceVerification::PublishedManifest,
-                Some(manifest.generation_digest.clone()),
+            ArchiveReaderSourceKind::PublishedManifest => {
+                return Err(CompactV2InstructionSourceError::Invalid(
+                    "publication-manifest readers are retired; reopen the archive as a pinned local or strong-ETag object set"
+                        .into(),
+                ));
+            }
+            ArchiveReaderSourceKind::OperatorTrusted => (
+                SourceVerification::OperatorTrusted,
+                Some(format!(
+                    "operator-trusted-candidate-id={}",
+                    reader.generation_label()
+                )),
             ),
-            ArchiveReaderSourceKind::OperatorTrusted => (SourceVerification::OperatorTrusted, None),
+            ArchiveReaderSourceKind::ObjectSetBound => (
+                SourceVerification::ObjectSetBound,
+                reader
+                    .archive_descriptor()
+                    .and_then(|descriptor| descriptor.source_binding.object_set_id())
+                    .map(str::to_owned),
+            ),
         };
         let identity = SourceIdentity {
             format: ArchiveFormat::CompactV2,
-            label: manifest.generation_id.clone(),
-            cluster_id: Some(manifest.cluster_id.clone()),
-            epoch: manifest.epoch,
+            label: reader.generation_label().to_owned(),
+            cluster_id: Some(reader.cluster_id().to_owned()),
+            epoch: reader.epoch(),
             first_slot,
-            slots_per_epoch: manifest.slots_per_epoch,
+            slots_per_epoch: reader.slots_per_epoch(),
             block_count,
             verification,
             binding,
@@ -156,6 +342,7 @@ impl<S: RangeSource> CompactV2InstructionSource<S> {
             reader,
             identity,
             context: ExactContext::default(),
+            projection_scratch: TransactionProjectionScratch::default(),
         })
     }
 
@@ -167,9 +354,256 @@ impl<S: RangeSource> CompactV2InstructionSource<S> {
         self.reader
     }
 
+    /// Release a complete registry image retained by an earlier dense scan.
+    pub fn release_full_registry(&mut self) -> bool {
+        self.context.shared_registry.take().is_some()
+    }
+
+    /// Release a complete registry image when it exceeds `max_bytes`.
+    pub fn release_full_registry_above(&mut self, max_bytes: u64) -> bool {
+        let must_release = self
+            .context
+            .shared_registry
+            .as_ref()
+            .is_some_and(|registry| {
+                u64::try_from(registry.bytes.len()).map_or(true, |bytes| bytes > max_bytes)
+            });
+        must_release && self.release_full_registry()
+    }
+
+    /// Decode an ordered range with an explicit automatic registry policy.
+    ///
+    /// A large sequential exact-instruction scan has the same registry access
+    /// risk as a parallel scan. The common trait entry point keeps the sparse
+    /// policy for compatibility. Higher-level SDKs can use this method to
+    /// enable the bounded dense policy.
+    pub fn scan_ordered_with_registry_policy(
+        &mut self,
+        request: &ScanRequest,
+        registry_policy: CompactV2RegistryReadPolicy,
+        sink: &mut dyn BlockSink,
+    ) -> blockzilla_query_sdk::Result<ScanReceipt> {
+        self.scan_inner(request, registry_policy, sink)
+    }
+
+    /// Decode and project blocks in parallel, then publish them in exact
+    /// source order through the common query contract.
+    ///
+    /// This path supports requests that do not select instruction payload
+    /// bytes. Exact instruction-data reconstruction can load large blockhash
+    /// and vote-hash sidecars; the sequential scan keeps one bounded copy of
+    /// that state. The USDC, Pump.fun, and FireWatch reference workloads all
+    /// request `InstructionDataRequirement::None` and can use this path.
+    pub fn scan_ordered_parallel(
+        &mut self,
+        request: &ScanRequest,
+        sink: &mut dyn BlockSink,
+        config: CompactV2ParallelScanConfig,
+    ) -> blockzilla_query_sdk::Result<CompactV2ParallelScanReceipt> {
+        if !matches!(request.instruction_data, InstructionDataRequirement::None) {
+            return Err(source_error(CompactV2InstructionSourceError::Invalid(
+                "parallel Compact V2 scans require InstructionDataRequirement::None; use scan_ordered when exact instruction payload bytes are required".into(),
+            )));
+        }
+        let parallel = compact_v2_parallel_reader_config(config).map_err(source_error)?;
+        let identity = self.identity.clone();
+        let mut publisher = OrderedBlockPublisher::new(&identity, request, sink)?;
+        let start = request
+            .range
+            .map_or(0usize, |range| range.first_block as usize);
+        let end = request
+            .range
+            .map_or(identity.block_count as usize, |range| {
+                usize::try_from(
+                    range
+                        .first_block
+                        .checked_add(range.block_count.get())
+                        .expect("OrderedBlockPublisher validated the requested u32 range"),
+                )
+                .expect("u32 fits the supported address space")
+            });
+        let decoded_bytes =
+            self.reader.index().rows[start..end]
+                .iter()
+                .try_fold(0_u64, |decoded_bytes, row| {
+                    decoded_bytes
+                        .checked_add(u64::from(row.uncompressed_len))
+                        .ok_or_else(|| {
+                            source_error(CompactV2InstructionSourceError::Invalid(
+                                "parallel decoded-byte count overflow".into(),
+                            ))
+                        })
+                })?;
+        let requested_transactions =
+            requested_transaction_count(&self.reader, start..end).map_err(source_error)?;
+        let (shared_registry, mut registry_receipt) = prepare_parallel_registry(
+            &self.reader,
+            start,
+            end,
+            request,
+            requested_transactions,
+            config,
+        )
+        .map_err(source_error)?;
+        let read_signatures = request.include_primary_signatures;
+        let mut signature_scan =
+            ContiguousSignatureScan::new(&self.reader, start..end, read_signatures);
+        let mut context_io = ContextIo {
+            calls: registry_receipt.prefetch_read_calls,
+            bytes: registry_receipt.prefetch_read_bytes,
+        };
+        let reader = &self.reader;
+        let projected_bytes_current = AtomicU64::new(0);
+        let max_projected_block_bytes = AtomicU64::new(0);
+        let max_projected_batch_bytes = AtomicU64::new(0);
+
+        let pipeline = reader
+            .process_borrowed_blocks_parallel_ordered(
+                start..end,
+                parallel,
+                |_| {
+                    Ok::<_, CompactV2ParallelScanError>(ParallelProjectionWorker::new(
+                        shared_registry.clone(),
+                    ))
+                },
+                |worker, _row_number, block| {
+                    let context_io_before = worker.context.io;
+                    let source_row = block.index_row;
+                    let mut signature_counts =
+                        read_signatures.then(|| Vec::with_capacity(block.tx_rows_len()));
+                    let mut transactions = Vec::with_capacity(block.tx_rows_len());
+                    for row in block.tx_rows() {
+                        if let Some(counts) = &mut signature_counts {
+                            counts.push(row.signature_count);
+                        }
+                        transactions.push(Self::project_transaction(
+                            reader,
+                            &mut worker.context,
+                            &mut worker.scratch,
+                            request,
+                            source_row.slot,
+                            row,
+                            block.message_bytes(),
+                            block.metadata_bytes(),
+                            None,
+                        )?);
+                    }
+                    let owned_payload_bytes = canonical_projection_owned_payload_bytes(
+                        &transactions,
+                        transactions.capacity(),
+                        signature_counts.as_deref(),
+                        signature_counts.as_ref().map_or(0, Vec::capacity),
+                    )?;
+                    max_projected_block_bytes.fetch_max(owned_payload_bytes, Ordering::Relaxed);
+                    let current = atomic_checked_add(
+                        &projected_bytes_current,
+                        owned_payload_bytes,
+                        "parallel projected output bytes",
+                    )?;
+                    max_projected_batch_bytes.fetch_max(current, Ordering::Relaxed);
+                    let context_io = worker.context.io.difference(context_io_before)?;
+                    Ok(ParallelProjectedBlock {
+                        canonical: CanonicalBlock {
+                            header: BlockHeader {
+                                epoch: identity.epoch,
+                                block_ordinal: source_row.block_id,
+                                slot: source_row.slot,
+                            },
+                            transactions,
+                        },
+                        signature_counts,
+                        context_io,
+                        owned_payload_bytes,
+                    })
+                },
+                |row_number, mut projected| {
+                    let source_row = reader.index().rows.get(row_number).ok_or_else(|| {
+                        CompactV2InstructionSourceError::Invalid(
+                            "parallel ordered result is outside the archive index".into(),
+                        )
+                    })?;
+                    let signatures = signature_scan.read_block(source_row)?;
+                    assign_primary_signatures(
+                        source_row.slot,
+                        &mut projected.canonical.transactions,
+                        projected.signature_counts.as_deref(),
+                        signatures,
+                    )?;
+                    context_io.checked_add(projected.context_io)?;
+                    publisher.publish(&projected.canonical)?;
+                    let previous = projected_bytes_current
+                        .fetch_sub(projected.owned_payload_bytes, Ordering::AcqRel);
+                    if previous < projected.owned_payload_bytes {
+                        return Err(CompactV2InstructionSourceError::Invalid(
+                            "parallel projected output byte accounting underflow".into(),
+                        )
+                        .into());
+                    }
+                    Ok(())
+                },
+            )
+            .map_err(CompactV2ParallelScanError::into_query_error)?;
+
+        if matches!(
+            registry_receipt.mode,
+            CompactV2ParallelRegistryMode::SparseWorkerCache
+        ) {
+            registry_receipt.resident_bound_bytes = u64::try_from(pipeline.effective_workers)
+                .ok()
+                .and_then(|workers| {
+                    workers.checked_mul(COMPACT_V2_QUERY_REGISTRY_RETAINED_KEY_BYTES as u64)
+                })
+                .ok_or_else(|| {
+                    source_error(CompactV2InstructionSourceError::Invalid(
+                        "sparse registry resident bound overflow".into(),
+                    ))
+                })?;
+        }
+
+        let signature_io = signature_scan.finish().map_err(source_error)?;
+        let source_read_calls = pipeline
+            .read_call_count
+            .checked_add(signature_io.calls)
+            .and_then(|calls| calls.checked_add(context_io.calls))
+            .ok_or_else(|| {
+                source_error(CompactV2InstructionSourceError::Invalid(
+                    "parallel scan source-read count overflow".into(),
+                ))
+            })?;
+        let source_read_bytes = pipeline
+            .compressed_bytes
+            .checked_add(signature_io.bytes)
+            .and_then(|bytes| bytes.checked_add(context_io.bytes))
+            .ok_or_else(|| {
+                source_error(CompactV2InstructionSourceError::Invalid(
+                    "parallel scan source-read byte count overflow".into(),
+                ))
+            })?;
+        publisher.set_io_receipt(ScanIoReceipt {
+            source_read_calls: Some(source_read_calls),
+            source_read_bytes: Some(source_read_bytes),
+            decoded_bytes: Some(decoded_bytes),
+            cache_read_calls: None,
+            cache_read_bytes: None,
+        });
+        let scan = publisher.finish()?;
+        Ok(CompactV2ParallelScanReceipt {
+            scan,
+            pipeline,
+            requested_workers: config.workers,
+            effective_workers: pipeline.effective_workers,
+            max_active_workers: pipeline.max_active_workers,
+            compressed_buffer_count: parallel.compressed_buffer_count,
+            max_projected_block_bytes: max_projected_block_bytes.load(Ordering::Relaxed),
+            max_projected_batch_bytes: max_projected_batch_bytes.load(Ordering::Relaxed),
+            registry: registry_receipt,
+        })
+    }
+
     fn scan_inner(
         &mut self,
         request: &ScanRequest,
+        registry_policy: CompactV2RegistryReadPolicy,
         sink: &mut dyn BlockSink,
     ) -> blockzilla_query_sdk::Result<ScanReceipt> {
         let identity = self.identity.clone();
@@ -190,7 +624,22 @@ impl<S: RangeSource> CompactV2InstructionSource<S> {
             });
         let reader = &self.reader;
         let context = &mut self.context;
+        let projection_scratch = &mut self.projection_scratch;
         let context_io_before = context.io;
+        let requested_transactions =
+            requested_transaction_count(reader, start..end).map_err(source_error)?;
+        context
+            .prepare_registry_for_scan(
+                reader,
+                request,
+                start == 0 && end == reader.index().rows.len(),
+                requested_transactions,
+                registry_policy,
+            )
+            .map_err(source_error)?;
+        let read_signatures = request.include_primary_signatures
+            || !matches!(request.instruction_data, InstructionDataRequirement::None);
+        let mut signature_scan = ContiguousSignatureScan::new(reader, start..end, read_signatures);
         let mut blocks = reader
             .borrowed_blocks_without_rewards_range(Range { start, end })
             .map_err(source_error)?;
@@ -198,14 +647,14 @@ impl<S: RangeSource> CompactV2InstructionSource<S> {
         while let Some(block) = blocks.next_block() {
             let block = block.map_err(source_error)?;
             let source_row = block.index_row;
-            let signatures = context
-                .read_block_signatures(reader, &source_row)
+            let signatures = signature_scan
+                .read_block(&source_row)
                 .map_err(source_error)?;
             let mut signature_cursor = 0usize;
             let mut transactions = Vec::with_capacity(block.tx_rows_len());
 
             for row in block.tx_rows() {
-                let transaction_signatures = match signatures.as_deref() {
+                let transaction_signatures = match signatures {
                     Some(signatures) => {
                         let end = signature_cursor
                             .checked_add(usize::from(row.signature_count))
@@ -225,6 +674,7 @@ impl<S: RangeSource> CompactV2InstructionSource<S> {
                 let transaction = Self::project_transaction(
                     reader,
                     context,
+                    projection_scratch,
                     request,
                     source_row.slot,
                     row,
@@ -259,6 +709,7 @@ impl<S: RangeSource> CompactV2InstructionSource<S> {
         }
 
         let block_io = blocks.io_stats();
+        let signature_io = signature_scan.finish().map_err(source_error)?;
         let context_io = context
             .io
             .difference(context_io_before)
@@ -267,7 +718,8 @@ impl<S: RangeSource> CompactV2InstructionSource<S> {
             source_read_calls: Some(
                 block_io
                     .source_read_calls
-                    .checked_add(context_io.calls)
+                    .checked_add(signature_io.calls)
+                    .and_then(|calls| calls.checked_add(context_io.calls))
                     .ok_or_else(|| {
                         source_error(CompactV2InstructionSourceError::Invalid(
                             "scan source-read count overflow".into(),
@@ -277,7 +729,8 @@ impl<S: RangeSource> CompactV2InstructionSource<S> {
             source_read_bytes: Some(
                 block_io
                     .source_read_bytes
-                    .checked_add(context_io.bytes)
+                    .checked_add(signature_io.bytes)
+                    .and_then(|bytes| bytes.checked_add(context_io.bytes))
                     .ok_or_else(|| {
                         source_error(CompactV2InstructionSourceError::Invalid(
                             "scan source-read byte count overflow".into(),
@@ -295,6 +748,7 @@ impl<S: RangeSource> CompactV2InstructionSource<S> {
     fn project_transaction(
         reader: &ArchiveReader<S>,
         context: &mut ExactContext,
+        scratch: &mut TransactionProjectionScratch,
         request: &ScanRequest,
         slot: u64,
         row: ArchiveV2HotTxRow,
@@ -302,9 +756,40 @@ impl<S: RangeSource> CompactV2InstructionSource<S> {
         metadata_lane: &[u8],
         signatures: Option<&[[u8; 64]]>,
     ) -> CompactV2InstructionSourceResult<CanonicalTransaction> {
-        let primary_signature = signatures
-            .and_then(|signatures| signatures.first())
-            .copied();
+        let result = Self::project_transaction_inner(
+            reader,
+            context,
+            scratch,
+            request,
+            slot,
+            row,
+            message_lane,
+            metadata_lane,
+            signatures,
+        );
+        scratch.finish_transaction();
+        result
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn project_transaction_inner(
+        reader: &ArchiveReader<S>,
+        context: &mut ExactContext,
+        scratch: &mut TransactionProjectionScratch,
+        request: &ScanRequest,
+        slot: u64,
+        row: ArchiveV2HotTxRow,
+        message_lane: &[u8],
+        metadata_lane: &[u8],
+        signatures: Option<&[[u8; 64]]>,
+    ) -> CompactV2InstructionSourceResult<CanonicalTransaction> {
+        let primary_signature = if request.include_primary_signatures {
+            signatures
+                .and_then(|signatures| signatures.first())
+                .copied()
+        } else {
+            None
+        };
         if row.flags & ARCHIVE_V2_TX_FLAG_METADATA_RAW_FALLBACK != 0
             && row.flags & ARCHIVE_V2_TX_FLAG_HAS_METADATA == 0
         {
@@ -314,6 +799,11 @@ impl<S: RangeSource> CompactV2InstructionSource<S> {
             )));
         }
         if row.flags & ARCHIVE_V2_TX_FLAG_TX_RAW_FALLBACK != 0 {
+            let token_balance_coverage = if request.token_balances.is_requested() {
+                TokenBalanceCoverage::Unknown(CoverageReason::RawTransaction)
+            } else {
+                TokenBalanceCoverage::NotRequested
+            };
             return Ok(CanonicalTransaction {
                 header: TransactionHeader {
                     tx_index: row.tx_index,
@@ -327,19 +817,23 @@ impl<S: RangeSource> CompactV2InstructionSource<S> {
                 primary_signature,
                 required_signers: Vec::new(),
                 instructions: Vec::new(),
+                token_balance_coverage,
+                token_balances: Vec::new(),
             });
         }
 
         let message_bytes = lane_region(message_lane, row.message_offset, row.message_len)?;
         let projector =
             CompactV2MessageProjector::new(reader.message_schema(), reader.registry_entries());
-        let (message, static_keys) = Self::project_requested_message(
+        let message = Self::project_requested_message(
             reader,
             context,
+            scratch,
             projector,
             message_bytes,
             &request.instruction_data,
             !request.require_complete_instruction_data,
+            request.include_instructions && request.include_instruction_accounts,
         )?;
         let message_is_v0 = matches!(
             message.version(),
@@ -368,6 +862,7 @@ impl<S: RangeSource> CompactV2InstructionSource<S> {
             )));
         }
 
+        let mut exact_metadata_bytes = None;
         let metadata = if row.flags & ARCHIVE_V2_TX_FLAG_HAS_METADATA == 0 {
             reject_set_flag(row, ARCHIVE_V2_TX_FLAG_HAS_ERROR, "HAS_ERROR")?;
             reject_set_flag(row, ARCHIVE_V2_TX_FLAG_HAS_INNER_IX, "HAS_INNER_IX")?;
@@ -381,35 +876,40 @@ impl<S: RangeSource> CompactV2InstructionSource<S> {
             ProjectedMetadata::Raw
         } else {
             let bytes = lane_region(metadata_lane, row.metadata_offset, row.metadata_len)?;
-            let limits = CompactV2MetadataProjectionLimits::for_message(&message);
-            let metadata = CompactV2MetadataProjector::new(
-                reader.metadata_schema(),
-                reader.registry_entries(),
-            )
-            .project(bytes, limits)?;
-            require_flag_state(
-                row,
-                ARCHIVE_V2_TX_FLAG_HAS_ERROR,
-                "HAS_ERROR",
-                !metadata.execution_status.is_success(),
-            )?;
-            require_flag_state(
-                row,
-                ARCHIVE_V2_TX_FLAG_HAS_INNER_IX,
-                "HAS_INNER_IX",
-                metadata.inner_instructions.is_some(),
-            )?;
-            require_flag_state(
-                row,
-                ARCHIVE_V2_TX_FLAG_HAS_LOADED_ADDRESSES,
-                "HAS_LOADED_ADDRESSES",
-                !metadata.loaded_writable_addresses.is_empty()
-                    || !metadata.loaded_readonly_addresses.is_empty(),
-            )?;
-            ProjectedMetadata::Exact(metadata)
+            exact_metadata_bytes = Some(bytes);
+            if !request.include_instructions && !request.include_execution_status {
+                ProjectedMetadata::ExactUnprojected
+            } else {
+                let limits = CompactV2MetadataProjectionLimits::for_message(&message);
+                let metadata = CompactV2MetadataProjector::new(
+                    reader.metadata_schema(),
+                    reader.registry_entries(),
+                )
+                .project(bytes, limits)?;
+                require_flag_state(
+                    row,
+                    ARCHIVE_V2_TX_FLAG_HAS_ERROR,
+                    "HAS_ERROR",
+                    !metadata.execution_status.is_success(),
+                )?;
+                require_flag_state(
+                    row,
+                    ARCHIVE_V2_TX_FLAG_HAS_INNER_IX,
+                    "HAS_INNER_IX",
+                    metadata.inner_instructions.is_some(),
+                )?;
+                require_flag_state(
+                    row,
+                    ARCHIVE_V2_TX_FLAG_HAS_LOADED_ADDRESSES,
+                    "HAS_LOADED_ADDRESSES",
+                    !metadata.loaded_writable_addresses.is_empty()
+                        || !metadata.loaded_readonly_addresses.is_empty(),
+                )?;
+                ProjectedMetadata::Exact(metadata)
+            }
         };
 
-        let (status, failed_outer_instruction_index, cpi_coverage) = match &metadata {
+        let (recorded_status, recorded_failed_outer, recorded_cpi) = match &metadata {
             ProjectedMetadata::Absent => (
                 ExecutionStatus::Unknown(CoverageReason::MetadataAbsent),
                 None,
@@ -437,34 +937,91 @@ impl<S: RangeSource> CompactV2InstructionSource<S> {
                 };
                 (status, failed, cpi)
             }
+            ProjectedMetadata::ExactUnprojected => (
+                ExecutionStatus::Unknown(CoverageReason::ProjectionNotRequested),
+                None,
+                CpiCoverage::Unknown(CoverageReason::ProjectionNotRequested),
+            ),
         };
 
-        let loaded_keys = match &metadata {
-            ProjectedMetadata::Exact(metadata) => {
-                let mut keys = Vec::with_capacity(
-                    metadata.loaded_writable_addresses.len()
-                        + metadata.loaded_readonly_addresses.len(),
-                );
-                for reference in metadata
-                    .loaded_writable_addresses
-                    .iter()
-                    .chain(&metadata.loaded_readonly_addresses)
+        let (status, failed_outer_instruction_index) = if request.include_execution_status {
+            (recorded_status, recorded_failed_outer)
+        } else {
+            (
+                ExecutionStatus::Unknown(CoverageReason::ProjectionNotRequested),
+                None,
+            )
+        };
+        let cpi_coverage = if request.include_instructions {
+            recorded_cpi
+        } else {
+            CpiCoverage::Unknown(CoverageReason::ProjectionNotRequested)
+        };
+
+        let loaded_key_count = if !request.include_instructions {
+            None
+        } else {
+            match &metadata {
+                ProjectedMetadata::Exact(metadata) => Some(
+                    metadata
+                        .loaded_writable_addresses
+                        .len()
+                        .checked_add(metadata.loaded_readonly_addresses.len())
+                        .ok_or_else(|| {
+                            CompactV2InstructionSourceError::Invalid(
+                                "loaded-address count overflow".into(),
+                            )
+                        })?,
+                ),
+                ProjectedMetadata::Absent
+                | ProjectedMetadata::Raw
+                | ProjectedMetadata::ExactUnprojected
+                    if message.expected_loaded_addresses() == 0 =>
                 {
-                    keys.push(context.resolve_pubkey(reader, *reference)?);
+                    Some(0)
                 }
-                Some(keys)
+                ProjectedMetadata::Absent
+                | ProjectedMetadata::Raw
+                | ProjectedMetadata::ExactUnprojected => None,
             }
-            ProjectedMetadata::Absent | ProjectedMetadata::Raw
-                if message.expected_loaded_addresses() == 0 =>
-            {
-                Some(Vec::new())
-            }
-            ProjectedMetadata::Absent | ProjectedMetadata::Raw => None,
         };
 
-        let (instruction_coverage, instructions) = if let Some(loaded_keys) = loaded_keys {
-            let mut account_keys = static_keys;
-            account_keys.extend(loaded_keys);
+        let (instruction_coverage, instructions) = if !request.include_instructions {
+            (
+                InstructionCoverage::Unknown(CoverageReason::ProjectionNotRequested),
+                Vec::new(),
+            )
+        } else if let Some(loaded_key_count) = loaded_key_count {
+            let account_key_count = message
+                .static_account_keys()
+                .len()
+                .checked_add(loaded_key_count)
+                .ok_or_else(|| {
+                    CompactV2InstructionSourceError::Invalid(
+                        "combined account-key count overflow".into(),
+                    )
+                })?;
+            if request.include_instruction_accounts {
+                scratch
+                    .account_keys
+                    .try_reserve(loaded_key_count)
+                    .map_err(|_| {
+                        CompactV2InstructionSourceError::Invalid(
+                            "failed to reserve projected loaded account keys".into(),
+                        )
+                    })?;
+                if let ProjectedMetadata::Exact(metadata) = &metadata {
+                    for reference in metadata
+                        .loaded_writable_addresses
+                        .iter()
+                        .chain(&metadata.loaded_readonly_addresses)
+                    {
+                        scratch
+                            .account_keys
+                            .push(context.resolve_pubkey(reader, *reference)?);
+                    }
+                }
+            }
             let instructions = Self::project_instructions(
                 reader,
                 context,
@@ -472,7 +1029,8 @@ impl<S: RangeSource> CompactV2InstructionSource<S> {
                 message_bytes,
                 &message,
                 &metadata,
-                &account_keys,
+                &scratch.account_keys,
+                account_key_count,
                 signatures,
             )?;
             (InstructionCoverage::Complete, instructions)
@@ -481,17 +1039,75 @@ impl<S: RangeSource> CompactV2InstructionSource<S> {
                 ProjectedMetadata::Absent => CoverageReason::MetadataAbsent,
                 ProjectedMetadata::Raw => CoverageReason::RawMetadata,
                 ProjectedMetadata::Exact(_) => unreachable!("exact metadata supplied loaded keys"),
+                ProjectedMetadata::ExactUnprojected => {
+                    unreachable!("instruction projection requires exact metadata")
+                }
             };
             (InstructionCoverage::Unknown(reason), Vec::new())
         };
 
-        let required = usize::from(message.header().num_required_signatures);
-        let required_signers = static_keys_prefix(&message, required)?
-            .iter()
-            .map(|reference| context.resolve_pubkey(reader, *reference))
-            .collect::<CompactV2InstructionSourceResult<Vec<_>>>()?;
+        let required_signers = if request.include_required_signers {
+            let required = usize::from(message.header().num_required_signatures);
+            let references = static_keys_prefix(&message, required)?;
+            if request.include_instruction_accounts {
+                scratch
+                    .account_keys
+                    .get(..required)
+                    .ok_or_else(|| {
+                        CompactV2InstructionSourceError::Invalid(
+                            "required signer range exceeds resolved static account keys".into(),
+                        )
+                    })?
+                    .to_vec()
+            } else {
+                references
+                    .iter()
+                    .map(|reference| context.resolve_pubkey(reader, *reference))
+                    .collect::<CompactV2InstructionSourceResult<Vec<_>>>()?
+            }
+        } else {
+            Vec::new()
+        };
 
-        Ok(CanonicalTransaction {
+        let (token_balance_coverage, token_balances) = match &request.token_balances {
+            TokenBalanceRequirement::None => (TokenBalanceCoverage::NotRequested, Vec::new()),
+            requirement => match (&metadata, exact_metadata_bytes) {
+                (
+                    ProjectedMetadata::Exact(_) | ProjectedMetadata::ExactUnprojected,
+                    Some(bytes),
+                ) => {
+                    let projected = CompactV2MetadataProjector::new(
+                        reader.metadata_schema(),
+                        reader.registry_entries(),
+                    )
+                    .project_token_balances(
+                        bytes,
+                        CompactV2MetadataProjectionLimits::for_message(&message),
+                    )?;
+                    let balances = Self::resolve_token_balances(
+                        reader,
+                        context,
+                        requirement,
+                        projected.pre,
+                        projected.post,
+                    )?;
+                    (TokenBalanceCoverage::Complete, balances)
+                }
+                (ProjectedMetadata::Absent, _) => (
+                    TokenBalanceCoverage::Unknown(CoverageReason::MetadataAbsent),
+                    Vec::new(),
+                ),
+                (ProjectedMetadata::Raw, _) => (
+                    TokenBalanceCoverage::Unknown(CoverageReason::RawMetadata),
+                    Vec::new(),
+                ),
+                (ProjectedMetadata::Exact(_) | ProjectedMetadata::ExactUnprojected, None) => {
+                    unreachable!("exact metadata has bytes")
+                }
+            },
+        };
+
+        let transaction = CanonicalTransaction {
             header: TransactionHeader {
                 tx_index: row.tx_index,
                 status,
@@ -502,47 +1118,119 @@ impl<S: RangeSource> CompactV2InstructionSource<S> {
             primary_signature,
             required_signers,
             instructions,
-        })
+            token_balance_coverage,
+            token_balances,
+        };
+        Ok(transaction)
     }
 
+    fn resolve_token_balances(
+        reader: &ArchiveReader<S>,
+        context: &mut ExactContext,
+        requirement: &TokenBalanceRequirement,
+        pre: Vec<CompactTokenBalance>,
+        post: Vec<CompactTokenBalance>,
+    ) -> CompactV2InstructionSourceResult<Vec<RecordedTokenBalance>> {
+        let mut output = Vec::new();
+        output
+            .try_reserve(pre.len().saturating_add(post.len()))
+            .map_err(|_| {
+                CompactV2InstructionSourceError::Invalid(
+                    "failed to reserve projected token balances".into(),
+                )
+            })?;
+        for (side, balances) in [(TokenBalanceSide::Pre, pre), (TokenBalanceSide::Post, post)] {
+            for (balance_index, balance) in balances.into_iter().enumerate() {
+                let mint = balance
+                    .mint
+                    .map(|reference| context.resolve_pubkey(reader, reference))
+                    .transpose()?;
+                if !requirement.selects(mint.as_ref()) {
+                    continue;
+                }
+                let owner = balance
+                    .owner
+                    .map(|reference| context.resolve_pubkey(reader, reference))
+                    .transpose()?;
+                let token_program = balance
+                    .program_id
+                    .map(|reference| context.resolve_pubkey(reader, reference))
+                    .transpose()?;
+                output.push(RecordedTokenBalance {
+                    side,
+                    balance_index: u32::try_from(balance_index).map_err(|_| {
+                        CompactV2InstructionSourceError::Invalid(
+                            "token-balance index exceeds u32".into(),
+                        )
+                    })?,
+                    account_index: balance.account_index,
+                    mint,
+                    owner,
+                    token_program,
+                    amount: balance.amount,
+                    decimals: balance.decimals,
+                });
+            }
+        }
+        Ok(output)
+    }
+
+    #[allow(clippy::too_many_arguments)]
     fn project_requested_message<'a>(
         reader: &ArchiveReader<S>,
         context: &mut ExactContext,
+        scratch: &mut TransactionProjectionScratch,
         projector: CompactV2MessageProjector,
         bytes: &'a [u8],
         requirement: &InstructionDataRequirement,
         relaxed: bool,
-    ) -> CompactV2InstructionSourceResult<(ProjectedCompactV2Message<'a>, Vec<[u8; 32]>)> {
+        resolve_keys: bool,
+    ) -> CompactV2InstructionSourceResult<ProjectedCompactV2Message<'a>> {
+        scratch.account_keys.clear();
+        scratch.selected_references.clear();
         match requirement {
             InstructionDataRequirement::All => {
                 let message =
                     Self::project_all_with_vote_retry(reader, context, projector, bytes, relaxed)?;
-                let static_keys = Self::resolve_static_keys(reader, context, &message)?;
-                Ok((message, static_keys))
+                if resolve_keys {
+                    Self::resolve_static_keys_into(
+                        reader,
+                        context,
+                        &message,
+                        &mut scratch.account_keys,
+                    )?;
+                }
+                Ok(message)
             }
             InstructionDataRequirement::None => {
                 let message =
                     projector.project_with_instruction_data_for_programs(bytes, &[], None)?;
-                let static_keys = Self::resolve_static_keys(reader, context, &message)?;
-                Ok((message, static_keys))
+                if resolve_keys {
+                    Self::resolve_static_keys_into(
+                        reader,
+                        context,
+                        &message,
+                        &mut scratch.account_keys,
+                    )?;
+                }
+                Ok(message)
             }
             InstructionDataRequirement::Programs(programs) => {
                 let unselected =
                     projector.project_with_instruction_data_for_programs(bytes, &[], None)?;
-                let static_keys = Self::resolve_static_keys(reader, context, &unselected)?;
-                let mut selected_references = Vec::new();
                 for instruction in unselected.instructions() {
                     let index = usize::from(instruction.program_id_index());
-                    let program = *static_keys.get(index).ok_or_else(|| {
-                        CompactV2InstructionSourceError::Invalid(
-                            "projected program index is outside static keys".into(),
-                        )
-                    })?;
-                    if programs.contains(&program) {
-                        let reference = unselected.static_account_keys()[index];
-                        if !selected_references.contains(&reference) {
-                            selected_references.push(reference);
-                        }
+                    let reference =
+                        *unselected.static_account_keys().get(index).ok_or_else(|| {
+                            CompactV2InstructionSourceError::Invalid(
+                                "projected program index is outside static keys".into(),
+                            )
+                        })?;
+                    let program = context.resolve_pubkey(reader, reference)?;
+                    if programs.contains(&program)
+                        && !scratch.selected_references.contains(&reference)
+                    {
+                        scratch.selected_references.push(reference);
                     }
                 }
                 let message = Self::project_selected_with_vote_retry(
@@ -550,12 +1238,40 @@ impl<S: RangeSource> CompactV2InstructionSource<S> {
                     context,
                     projector,
                     bytes,
-                    &selected_references,
+                    &scratch.selected_references,
                     relaxed,
                 )?;
-                Ok((message, static_keys))
+                if resolve_keys {
+                    Self::resolve_static_keys_into(
+                        reader,
+                        context,
+                        &message,
+                        &mut scratch.account_keys,
+                    )?;
+                }
+                Ok(message)
             }
         }
+    }
+
+    fn resolve_static_keys_into(
+        reader: &ArchiveReader<S>,
+        context: &mut ExactContext,
+        message: &ProjectedCompactV2Message<'_>,
+        output: &mut Vec<[u8; REGISTRY_KEY_BYTES]>,
+    ) -> CompactV2InstructionSourceResult<()> {
+        output.clear();
+        output
+            .try_reserve(message.static_account_keys().len())
+            .map_err(|_| {
+                CompactV2InstructionSourceError::Invalid(
+                    "failed to reserve projected static account keys".into(),
+                )
+            })?;
+        for reference in message.static_account_keys() {
+            output.push(context.resolve_pubkey(reader, *reference)?);
+        }
+        Ok(())
     }
 
     fn resolve_static_keys(
@@ -641,6 +1357,7 @@ impl<S: RangeSource> CompactV2InstructionSource<S> {
         message: &ProjectedCompactV2Message<'_>,
         metadata: &ProjectedMetadata<'_>,
         account_keys: &[[u8; 32]],
+        account_key_count: usize,
         signatures: Option<&[[u8; 64]]>,
     ) -> CompactV2InstructionSourceResult<Vec<ResolvedInstruction>> {
         let has_selected_ambiguity = message.instructions().iter().any(|instruction| {
@@ -689,14 +1406,30 @@ impl<S: RangeSource> CompactV2InstructionSource<S> {
 
         let inner_groups = match metadata {
             ProjectedMetadata::Exact(metadata) => metadata.inner_instructions.as_deref(),
-            ProjectedMetadata::Absent | ProjectedMetadata::Raw => None,
+            ProjectedMetadata::Absent
+            | ProjectedMetadata::Raw
+            | ProjectedMetadata::ExactUnprojected => None,
         };
         let mut next_group = inner_groups.into_iter().flatten().peekable();
         let mut output = Vec::new();
 
         for (outer_index, instruction) in message.instructions().iter().enumerate() {
-            let program_id = resolve_index(account_keys, instruction.program_id_index())?;
-            let accounts = resolve_indexes(account_keys, instruction.accounts())?;
+            let program_id = if request.include_instruction_accounts {
+                resolve_index(account_keys, instruction.program_id_index())?
+            } else {
+                let reference = projected_account_reference(
+                    message,
+                    metadata,
+                    usize::from(instruction.program_id_index()),
+                )?;
+                context.resolve_pubkey(reader, reference)?
+            };
+            let accounts = project_instruction_accounts(
+                request.include_instruction_accounts,
+                account_keys,
+                account_key_count,
+                instruction.accounts(),
+            )?;
             let (data_coverage, data) = match instruction.data_candidates() {
                 None => (InstructionDataCoverage::NotRequested, Vec::new()),
                 Some([]) => (
@@ -745,8 +1478,23 @@ impl<S: RangeSource> CompactV2InstructionSource<S> {
             {
                 let group = next_group.next().expect("peek proved a CPI group");
                 for (inner_index, inner) in group.instructions.iter().enumerate() {
-                    let program_id = resolve_index_u32(account_keys, inner.program_id_index)?;
-                    let accounts = resolve_indexes(account_keys, inner.accounts)?;
+                    let program_id = if request.include_instruction_accounts {
+                        resolve_index_u32(account_keys, inner.program_id_index)?
+                    } else {
+                        let index = usize::try_from(inner.program_id_index).map_err(|_| {
+                            CompactV2InstructionSourceError::Invalid(
+                                "CPI account index exceeds address space".into(),
+                            )
+                        })?;
+                        let reference = projected_account_reference(message, metadata, index)?;
+                        context.resolve_pubkey(reader, reference)?
+                    };
+                    let accounts = project_instruction_accounts(
+                        request.include_instruction_accounts,
+                        account_keys,
+                        account_key_count,
+                        inner.accounts,
+                    )?;
                     let selected =
                         instruction_data_required(&request.instruction_data, &program_id);
                     let (data_coverage, data) = if selected {
@@ -791,8 +1539,7 @@ impl<S: RangeSource> CompactV2InstructionSource<S> {
             OwnedCompactRecentBlockhash::Id(id)
                 if *id < 0
                     && reader
-                        .manifest()
-                        .file(ARCHIVE_V2_PREV_BLOCKHASH_TAIL_FILE)
+                        .file_size(ARCHIVE_V2_PREV_BLOCKHASH_TAIL_FILE)
                         .is_none() =>
             {
                 return Err(CompactV2InstructionSourceError::MissingSidecar {
@@ -873,8 +1620,363 @@ impl<S: RangeSource> ArchiveInstructionSource for CompactV2InstructionSource<S> 
         request: &ScanRequest,
         sink: &mut dyn BlockSink,
     ) -> blockzilla_query_sdk::Result<ScanReceipt> {
-        self.scan_inner(request, sink)
+        self.scan_inner(request, CompactV2RegistryReadPolicy::sparse_only(), sink)
     }
+}
+
+struct ParallelProjectedBlock {
+    canonical: CanonicalBlock,
+    signature_counts: Option<Vec<u8>>,
+    context_io: ContextIo,
+    owned_payload_bytes: u64,
+}
+
+struct ParallelProjectionWorker {
+    context: ExactContext,
+    scratch: TransactionProjectionScratch,
+}
+
+impl ParallelProjectionWorker {
+    fn new(shared_registry: Option<Arc<SharedRegistry>>) -> Self {
+        Self {
+            context: ExactContext::with_shared_registry(shared_registry),
+            scratch: TransactionProjectionScratch::default(),
+        }
+    }
+}
+
+#[derive(Debug, Default)]
+struct TransactionProjectionScratch {
+    account_keys: Vec<[u8; REGISTRY_KEY_BYTES]>,
+    selected_references: Vec<CompactPubkey>,
+}
+
+impl TransactionProjectionScratch {
+    fn finish_transaction(&mut self) {
+        retain_or_release_scratch(
+            &mut self.account_keys,
+            COMPACT_V2_PROJECTION_SCRATCH_RETAINED_BYTES,
+        );
+        retain_or_release_scratch(
+            &mut self.selected_references,
+            COMPACT_V2_PROJECTION_SCRATCH_RETAINED_BYTES,
+        );
+    }
+}
+
+fn retain_or_release_scratch<T>(values: &mut Vec<T>, byte_limit: usize) {
+    let retained_bytes = values.capacity().saturating_mul(size_of::<T>());
+    if retained_bytes > byte_limit {
+        *values = Vec::new();
+    } else {
+        values.clear();
+    }
+}
+
+fn canonical_projection_owned_payload_bytes(
+    transactions: &[CanonicalTransaction],
+    transaction_capacity: usize,
+    signature_counts: Option<&[u8]>,
+    signature_count_capacity: usize,
+) -> CompactV2InstructionSourceResult<u64> {
+    let mut bytes = capacity_bytes::<CanonicalTransaction>(transaction_capacity)?;
+    if signature_counts.is_some() {
+        checked_add_payload(&mut bytes, capacity_bytes::<u8>(signature_count_capacity)?)?;
+    }
+    for transaction in transactions {
+        checked_add_payload(
+            &mut bytes,
+            capacity_bytes::<[u8; REGISTRY_KEY_BYTES]>(transaction.required_signers.capacity())?,
+        )?;
+        checked_add_payload(
+            &mut bytes,
+            capacity_bytes::<ResolvedInstruction>(transaction.instructions.capacity())?,
+        )?;
+        for instruction in &transaction.instructions {
+            checked_add_payload(
+                &mut bytes,
+                capacity_bytes::<[u8; REGISTRY_KEY_BYTES]>(instruction.accounts.capacity())?,
+            )?;
+            checked_add_payload(
+                &mut bytes,
+                capacity_bytes::<u8>(instruction.data.capacity())?,
+            )?;
+        }
+        checked_add_payload(
+            &mut bytes,
+            capacity_bytes::<RecordedTokenBalance>(transaction.token_balances.capacity())?,
+        )?;
+    }
+    Ok(bytes)
+}
+
+fn capacity_bytes<T>(capacity: usize) -> CompactV2InstructionSourceResult<u64> {
+    let bytes = capacity.checked_mul(size_of::<T>()).ok_or_else(|| {
+        CompactV2InstructionSourceError::Invalid("projected output capacity overflow".into())
+    })?;
+    u64::try_from(bytes).map_err(|_| {
+        CompactV2InstructionSourceError::Invalid("projected output capacity exceeds u64".into())
+    })
+}
+
+fn checked_add_payload(total: &mut u64, value: u64) -> CompactV2InstructionSourceResult<()> {
+    *total = total.checked_add(value).ok_or_else(|| {
+        CompactV2InstructionSourceError::Invalid("projected output byte count overflow".into())
+    })?;
+    Ok(())
+}
+
+fn atomic_checked_add(
+    value: &AtomicU64,
+    amount: u64,
+    label: &'static str,
+) -> CompactV2InstructionSourceResult<u64> {
+    value
+        .fetch_update(Ordering::AcqRel, Ordering::Acquire, |current| {
+            current.checked_add(amount)
+        })
+        .map(|previous| previous + amount)
+        .map_err(|_| CompactV2InstructionSourceError::Invalid(format!("{label} overflow")))
+}
+
+#[derive(Debug)]
+struct SharedRegistry {
+    bytes: Vec<u8>,
+}
+
+impl SharedRegistry {
+    fn resolve(&self, id: u32) -> Option<[u8; REGISTRY_KEY_BYTES]> {
+        let start = usize::try_from(id.checked_sub(1)?)
+            .ok()?
+            .checked_mul(REGISTRY_KEY_BYTES)?;
+        let end = start.checked_add(REGISTRY_KEY_BYTES)?;
+        let bytes = self.bytes.get(start..end)?;
+        let mut key = [0_u8; REGISTRY_KEY_BYTES];
+        key.copy_from_slice(bytes);
+        Some(key)
+    }
+}
+
+fn requested_transaction_count<S: RangeSource>(
+    reader: &ArchiveReader<S>,
+    range: Range<usize>,
+) -> CompactV2InstructionSourceResult<u64> {
+    reader.index().rows[range]
+        .iter()
+        .try_fold(0_u64, |transactions, row| {
+            transactions
+                .checked_add(u64::from(row.tx_count))
+                .ok_or_else(|| {
+                    CompactV2InstructionSourceError::Invalid(
+                        "requested transaction count overflow".into(),
+                    )
+                })
+        })
+}
+
+fn prepare_parallel_registry<S: RangeSource>(
+    reader: &ArchiveReader<S>,
+    start: usize,
+    end: usize,
+    request: &ScanRequest,
+    requested_transactions: u64,
+    config: CompactV2ParallelScanConfig,
+) -> CompactV2InstructionSourceResult<(
+    Option<Arc<SharedRegistry>>,
+    CompactV2ParallelRegistryReceipt,
+)> {
+    let sparse = || CompactV2ParallelRegistryReceipt {
+        mode: CompactV2ParallelRegistryMode::SparseWorkerCache,
+        prefetch_read_calls: 0,
+        prefetch_read_bytes: 0,
+        resident_bound_bytes: 0,
+    };
+    let full_scan = start == 0 && end == reader.index().rows.len();
+    let registry_bytes = u64::from(reader.registry_entries())
+        .checked_mul(REGISTRY_KEY_BYTES as u64)
+        .ok_or_else(|| {
+            CompactV2InstructionSourceError::Invalid("registry byte size overflow".into())
+        })?;
+    if !should_prefetch_parallel_registry(
+        config,
+        full_scan,
+        requested_transactions,
+        request_needs_registry(request),
+        registry_bytes,
+    ) {
+        return Ok((None, sparse()));
+    }
+    let Some((shared, io)) = prefetch_shared_registry(reader, registry_bytes)? else {
+        return Ok((None, sparse()));
+    };
+    Ok((
+        Some(shared),
+        CompactV2ParallelRegistryReceipt {
+            mode: CompactV2ParallelRegistryMode::SharedFull,
+            prefetch_read_calls: io.calls,
+            prefetch_read_bytes: io.bytes,
+            resident_bound_bytes: registry_bytes,
+        },
+    ))
+}
+
+fn prefetch_shared_registry<S: RangeSource>(
+    reader: &ArchiveReader<S>,
+    registry_bytes: u64,
+) -> CompactV2InstructionSourceResult<Option<(Arc<SharedRegistry>, ContextIo)>> {
+    let Ok(registry_len) = usize::try_from(registry_bytes) else {
+        return Ok(None);
+    };
+    let mut bytes = Vec::new();
+    if bytes.try_reserve_exact(registry_len).is_err() {
+        return Ok(None);
+    }
+    bytes.resize(registry_len, 0);
+    let mut io = ContextIo::default();
+    let mut offset = 0_u64;
+    for chunk in bytes.chunks_mut(COMPACT_V2_REGISTRY_PREFETCH_READ_BYTES) {
+        reader
+            .source()
+            .read_range_into_slice(crate::manifest::REGISTRY_FILE, offset, chunk)?;
+        io.record(chunk.len())?;
+        offset = offset
+            .checked_add(u64::try_from(chunk.len()).map_err(|_| {
+                CompactV2InstructionSourceError::Invalid(
+                    "registry prefetch chunk length exceeds u64".into(),
+                )
+            })?)
+            .ok_or_else(|| {
+                CompactV2InstructionSourceError::Invalid("registry prefetch offset overflow".into())
+            })?;
+    }
+    if offset != registry_bytes {
+        return Err(CompactV2InstructionSourceError::Invalid(format!(
+            "registry prefetch read {offset} bytes, expected {registry_bytes}"
+        )));
+    }
+    Ok(Some((Arc::new(SharedRegistry { bytes }), io)))
+}
+
+fn request_needs_registry(request: &ScanRequest) -> bool {
+    request.include_instructions
+        || request.include_required_signers
+        || request.token_balances.is_requested()
+}
+
+fn should_prefetch_parallel_registry(
+    config: CompactV2ParallelScanConfig,
+    full_scan: bool,
+    requested_transactions: u64,
+    request_needs_registry: bool,
+    registry_bytes: u64,
+) -> bool {
+    should_prefetch_registry(
+        config.max_full_registry_bytes,
+        COMPACT_V2_PARTIAL_REGISTRY_PREFETCH_MIN_TRANSACTIONS,
+        full_scan,
+        requested_transactions,
+        request_needs_registry,
+        registry_bytes,
+    )
+}
+
+fn should_prefetch_sequential_registry(
+    policy: CompactV2RegistryReadPolicy,
+    full_scan: bool,
+    requested_transactions: u64,
+    request_needs_registry: bool,
+    registry_bytes: u64,
+) -> bool {
+    should_prefetch_registry(
+        policy.max_full_registry_bytes,
+        policy.min_requested_transactions,
+        full_scan,
+        requested_transactions,
+        request_needs_registry,
+        registry_bytes,
+    )
+}
+
+fn should_prefetch_registry(
+    max_full_registry_bytes: u64,
+    min_requested_transactions: u64,
+    full_scan: bool,
+    requested_transactions: u64,
+    request_needs_registry: bool,
+    registry_bytes: u64,
+) -> bool {
+    request_needs_registry
+        && max_full_registry_bytes != 0
+        && registry_bytes <= max_full_registry_bytes
+        && (full_scan || requested_transactions >= min_requested_transactions)
+}
+
+fn compact_v2_parallel_reader_config(
+    config: CompactV2ParallelScanConfig,
+) -> CompactV2InstructionSourceResult<OrderedParallelBlockConfig> {
+    if config.workers == 0 || config.workers > MAX_ORDERED_PARALLEL_DECODE_WORKERS {
+        return Err(CompactV2InstructionSourceError::Invalid(format!(
+            "parallel Compact V2 workers must be in 1..={MAX_ORDERED_PARALLEL_DECODE_WORKERS}"
+        )));
+    }
+    Ok(OrderedParallelBlockConfig {
+        decode_workers: config.workers,
+        compressed_buffer_count: config
+            .workers
+            .clamp(1, COMPACT_V2_PARALLEL_COMPRESSED_BUFFERS),
+        max_blocks_per_batch: COMPACT_V2_PARALLEL_MAX_BLOCKS_PER_BATCH,
+        uncompressed_batch_budget_bytes: COMPACT_V2_PARALLEL_UNCOMPRESSED_BATCH_BYTES,
+        retained_decompressed_bytes_per_worker: (32 * 1024 * 1024)
+            .min(MAX_ORDERED_PARALLEL_RETAINED_DECOMPRESSED_BYTES / config.workers),
+        discard_rewards: true,
+        ..OrderedParallelBlockConfig::default()
+    })
+}
+
+fn assign_primary_signatures(
+    slot: u64,
+    transactions: &mut [CanonicalTransaction],
+    signature_counts: Option<&[u8]>,
+    signatures: Option<&[[u8; SIGNATURE_BYTES]]>,
+) -> CompactV2InstructionSourceResult<()> {
+    let Some(signatures) = signatures else {
+        return Ok(());
+    };
+    let counts = signature_counts.ok_or_else(|| {
+        CompactV2InstructionSourceError::Invalid(format!(
+            "slot {slot} loaded signatures without projected signature counts"
+        ))
+    })?;
+    if counts.len() != transactions.len() {
+        return Err(CompactV2InstructionSourceError::Invalid(format!(
+            "slot {slot} has {} projected transactions and {} signature counts",
+            transactions.len(),
+            counts.len()
+        )));
+    }
+    let mut cursor = 0usize;
+    for (transaction, count) in transactions.iter_mut().zip(counts) {
+        let end = cursor
+            .checked_add(usize::from(*count))
+            .filter(|end| *end <= signatures.len())
+            .ok_or_else(|| {
+                CompactV2InstructionSourceError::Invalid(format!(
+                    "slot {slot} transaction {} signature range exceeds its block window",
+                    transaction.header.tx_index
+                ))
+            })?;
+        transaction.primary_signature = (*count != 0)
+            .then(|| signatures.get(cursor).copied())
+            .flatten();
+        cursor = end;
+    }
+    if cursor != signatures.len() {
+        return Err(CompactV2InstructionSourceError::Invalid(format!(
+            "slot {slot} projected rows consume {cursor} of {} block signatures",
+            signatures.len()
+        )));
+    }
+    Ok(())
 }
 
 fn source_error(error: impl std::error::Error + Send + Sync + 'static) -> QueryError {
@@ -1019,6 +2121,60 @@ fn resolve_indexes(
         .collect()
 }
 
+fn projected_account_reference(
+    message: &ProjectedCompactV2Message<'_>,
+    metadata: &ProjectedMetadata<'_>,
+    index: usize,
+) -> CompactV2InstructionSourceResult<CompactPubkey> {
+    if let Some(reference) = message.static_account_keys().get(index) {
+        return Ok(*reference);
+    }
+    let loaded_index = index
+        .checked_sub(message.static_account_keys().len())
+        .ok_or_else(|| {
+            CompactV2InstructionSourceError::Invalid(format!(
+                "message account index {index} is outside projected keys"
+            ))
+        })?;
+    let ProjectedMetadata::Exact(metadata) = metadata else {
+        return Err(CompactV2InstructionSourceError::Invalid(format!(
+            "message account index {index} requires unavailable loaded keys"
+        )));
+    };
+    metadata
+        .loaded_writable_addresses
+        .iter()
+        .chain(&metadata.loaded_readonly_addresses)
+        .nth(loaded_index)
+        .copied()
+        .ok_or_else(|| {
+            CompactV2InstructionSourceError::Invalid(format!(
+                "message account index {index} is outside projected keys"
+            ))
+        })
+}
+
+fn project_instruction_accounts(
+    include_accounts: bool,
+    account_keys: &[[u8; 32]],
+    account_key_count: usize,
+    indexes: &[u8],
+) -> CompactV2InstructionSourceResult<Vec<[u8; 32]>> {
+    if include_accounts {
+        return resolve_indexes(account_keys, indexes);
+    }
+    if let Some(index) = indexes
+        .iter()
+        .copied()
+        .find(|index| usize::from(*index) >= account_key_count)
+    {
+        return Err(CompactV2InstructionSourceError::Invalid(format!(
+            "message account index {index} is outside projected keys"
+        )));
+    }
+    Ok(Vec::new())
+}
+
 #[allow(clippy::too_many_arguments)]
 fn push_instruction(
     output: &mut Vec<ResolvedInstruction>,
@@ -1075,6 +2231,7 @@ enum ProjectedMetadata<'a> {
     Absent,
     Raw,
     Exact(crate::ProjectedCompactV2Metadata<'a>),
+    ExactUnprojected,
 }
 
 enum SelectedOuterData {
@@ -1120,10 +2277,296 @@ impl ContextIo {
             })?,
         })
     }
+
+    fn checked_add(&mut self, other: Self) -> CompactV2InstructionSourceResult<()> {
+        self.calls = self.calls.checked_add(other.calls).ok_or_else(|| {
+            CompactV2InstructionSourceError::Invalid("context read count overflow".into())
+        })?;
+        self.bytes = self.bytes.checked_add(other.bytes).ok_or_else(|| {
+            CompactV2InstructionSourceError::Invalid("context read bytes overflow".into())
+        })?;
+        Ok(())
+    }
+}
+
+/// One bounded, zero-gap signature window for an ordered block scan.
+///
+/// The public signature plane is contiguous in block order. Reading one
+/// window avoids one small HTTP request for every non-empty block while the
+/// returned per-block slices remain exact.
+struct ContiguousSignatureScan<'a, S> {
+    reader: &'a ArchiveReader<S>,
+    requested_range: Range<usize>,
+    next_block: usize,
+    read_signatures: bool,
+    batch: Option<SignatureBatch>,
+    io: ContextIo,
+}
+
+struct SignatureBatch {
+    block_range: Range<usize>,
+    first_signature_ordinal: u64,
+    signatures: Vec<[u8; SIGNATURE_BYTES]>,
+}
+
+impl<S: RangeSource> ContiguousSignatureScan<'_, S> {
+    fn new(
+        reader: &ArchiveReader<S>,
+        requested_range: Range<usize>,
+        read_signatures: bool,
+    ) -> ContiguousSignatureScan<'_, S> {
+        let next_block = requested_range.start;
+        ContiguousSignatureScan {
+            reader,
+            requested_range,
+            next_block,
+            read_signatures,
+            batch: None,
+            io: ContextIo::default(),
+        }
+    }
+
+    fn read_block(
+        &mut self,
+        row: &blockzilla_format::ArchiveV2HotBlockIndexRow,
+    ) -> CompactV2InstructionSourceResult<Option<&[[u8; SIGNATURE_BYTES]]>> {
+        if self.next_block >= self.requested_range.end {
+            return Err(CompactV2InstructionSourceError::Invalid(
+                "signature scan received too many blocks".into(),
+            ));
+        }
+        let expected = self
+            .reader
+            .index()
+            .rows
+            .get(self.next_block)
+            .ok_or_else(|| {
+                CompactV2InstructionSourceError::Invalid(
+                    "signature scan block is outside the archive index".into(),
+                )
+            })?;
+        if expected.block_id != row.block_id
+            || expected.tx_count != row.tx_count
+            || expected.first_signature_ordinal != row.first_signature_ordinal
+            || expected.signature_count != row.signature_count
+        {
+            return Err(CompactV2InstructionSourceError::Invalid(format!(
+                "signature scan block {} differs from index row {}",
+                row.block_id, self.next_block
+            )));
+        }
+        if !self.read_signatures {
+            self.next_block += 1;
+            return Ok(None);
+        }
+        if !self.reader.signatures_available() {
+            self.next_block += 1;
+            return Ok(None);
+        }
+
+        if self
+            .batch
+            .as_ref()
+            .is_none_or(|batch| !batch.block_range.contains(&self.next_block))
+        {
+            self.batch = Some(load_signature_batch(
+                self.reader,
+                self.next_block,
+                self.requested_range.end,
+                &mut self.io,
+            )?);
+        }
+        let batch = self.batch.as_ref().ok_or_else(|| {
+            CompactV2InstructionSourceError::Invalid("signature batch is missing".into())
+        })?;
+        let row_end = row
+            .first_signature_ordinal
+            .checked_add(u64::from(row.signature_count))
+            .ok_or_else(|| {
+                CompactV2InstructionSourceError::Invalid(
+                    "block signature ordinal end overflow".into(),
+                )
+            })?;
+        let start = row
+            .first_signature_ordinal
+            .checked_sub(batch.first_signature_ordinal)
+            .and_then(|value| usize::try_from(value).ok())
+            .ok_or_else(|| {
+                CompactV2InstructionSourceError::Invalid(
+                    "block signature range starts before its batch".into(),
+                )
+            })?;
+        let end = row_end
+            .checked_sub(batch.first_signature_ordinal)
+            .and_then(|value| usize::try_from(value).ok())
+            .ok_or_else(|| {
+                CompactV2InstructionSourceError::Invalid(
+                    "block signature range ends before its batch".into(),
+                )
+            })?;
+        let selected = batch.signatures.get(start..end).ok_or_else(|| {
+            CompactV2InstructionSourceError::Invalid(
+                "block signature range exceeds its loaded batch".into(),
+            )
+        })?;
+        self.next_block += 1;
+        Ok(Some(selected))
+    }
+
+    fn finish(self) -> CompactV2InstructionSourceResult<ContextIo> {
+        if self.next_block != self.requested_range.end {
+            return Err(CompactV2InstructionSourceError::Invalid(
+                "signature scan ended before all requested blocks".into(),
+            ));
+        }
+        Ok(self.io)
+    }
+}
+
+fn load_signature_batch<S: RangeSource>(
+    reader: &ArchiveReader<S>,
+    start: usize,
+    requested_end: usize,
+    io: &mut ContextIo,
+) -> CompactV2InstructionSourceResult<SignatureBatch> {
+    let rows = &reader.index().rows;
+    let first = rows.get(start).ok_or_else(|| {
+        CompactV2InstructionSourceError::Invalid(
+            "signature batch starts outside the archive index".into(),
+        )
+    })?;
+    let first_signature_ordinal = first.first_signature_ordinal;
+    let mut expected_ordinal = first_signature_ordinal;
+    let mut block_end = start;
+    while block_end < requested_end {
+        let row = rows.get(block_end).ok_or_else(|| {
+            CompactV2InstructionSourceError::Invalid(
+                "signature batch block is outside the archive index".into(),
+            )
+        })?;
+        if row.first_signature_ordinal != expected_ordinal {
+            return Err(CompactV2InstructionSourceError::Invalid(format!(
+                "block {} signature ordinals are not contiguous",
+                row.block_id
+            )));
+        }
+        validate_signature_row(row)?;
+        let next_ordinal = expected_ordinal
+            .checked_add(u64::from(row.signature_count))
+            .ok_or_else(|| {
+                CompactV2InstructionSourceError::Invalid(
+                    "signature batch ordinal end overflow".into(),
+                )
+            })?;
+        let candidate_bytes = next_ordinal
+            .checked_sub(first_signature_ordinal)
+            .and_then(|count| count.checked_mul(SIGNATURE_BYTES as u64))
+            .and_then(|bytes| usize::try_from(bytes).ok())
+            .ok_or_else(|| {
+                CompactV2InstructionSourceError::Invalid(
+                    "signature batch byte length overflow".into(),
+                )
+            })?;
+        if block_end > start && candidate_bytes > MAX_SIGNATURE_BATCH_BYTES {
+            break;
+        }
+        expected_ordinal = next_ordinal;
+        block_end += 1;
+        if candidate_bytes > MAX_SIGNATURE_BATCH_BYTES {
+            // A valid large block is one isolated, bounded batch.
+            break;
+        }
+    }
+    if block_end == start {
+        return Err(CompactV2InstructionSourceError::Invalid(
+            "signature batch planner made no progress".into(),
+        ));
+    }
+
+    let signature_count = expected_ordinal
+        .checked_sub(first_signature_ordinal)
+        .and_then(|count| usize::try_from(count).ok())
+        .ok_or_else(|| {
+            CompactV2InstructionSourceError::Invalid("signature batch record count overflow".into())
+        })?;
+    let mut signatures = Vec::new();
+    signatures.try_reserve_exact(signature_count).map_err(|_| {
+        CompactV2InstructionSourceError::Invalid(
+            "cannot reserve the bounded signature batch".into(),
+        )
+    })?;
+    let total_bytes = signature_count
+        .checked_mul(SIGNATURE_BYTES)
+        .ok_or_else(|| {
+            CompactV2InstructionSourceError::Invalid("signature batch byte length overflow".into())
+        })?;
+    let mut read_bytes = 0usize;
+    while read_bytes < total_bytes {
+        let length = (total_bytes - read_bytes).min(MAX_SIGNATURE_BATCH_BYTES);
+        let offset = first_signature_ordinal
+            .checked_mul(SIGNATURE_BYTES as u64)
+            .and_then(|offset| offset.checked_add(read_bytes as u64))
+            .ok_or_else(|| {
+                CompactV2InstructionSourceError::Invalid(
+                    "signature batch read offset overflow".into(),
+                )
+            })?;
+        let bytes = reader
+            .source()
+            .read_range(crate::manifest::SIGNATURES_FILE, offset, length)?;
+        if bytes.len() != length || !bytes.len().is_multiple_of(SIGNATURE_BYTES) {
+            return Err(CompactV2InstructionSourceError::Invalid(format!(
+                "signature batch returned {} bytes; expected {length}",
+                bytes.len()
+            )));
+        }
+        io.record(bytes.len())?;
+        signatures.extend(bytes.chunks_exact(SIGNATURE_BYTES).map(|bytes| {
+            let mut signature = [0u8; SIGNATURE_BYTES];
+            signature.copy_from_slice(bytes);
+            signature
+        }));
+        read_bytes += length;
+    }
+    if signatures.len() != signature_count {
+        return Err(CompactV2InstructionSourceError::Invalid(
+            "signature batch record count differs from its block rows".into(),
+        ));
+    }
+    Ok(SignatureBatch {
+        block_range: start..block_end,
+        first_signature_ordinal,
+        signatures,
+    })
+}
+
+fn validate_signature_row(
+    row: &blockzilla_format::ArchiveV2HotBlockIndexRow,
+) -> CompactV2InstructionSourceResult<()> {
+    let length = usize::try_from(row.signature_count)
+        .ok()
+        .and_then(|count| count.checked_mul(SIGNATURE_BYTES))
+        .ok_or_else(|| {
+            CompactV2InstructionSourceError::Invalid("block signature byte length overflow".into())
+        })?;
+    let row_bound = usize::try_from(row.tx_count)
+        .ok()
+        .and_then(|count| count.checked_mul(usize::from(u8::MAX)))
+        .and_then(|count| count.checked_mul(SIGNATURE_BYTES))
+        .unwrap_or(usize::MAX)
+        .min(MAX_SIGNATURE_BYTES_PER_BLOCK);
+    if length > row_bound {
+        return Err(CompactV2InstructionSourceError::Invalid(format!(
+            "block {} signature window is {length} bytes, above {row_bound}",
+            row.block_id
+        )));
+    }
+    Ok(())
 }
 
 #[derive(Debug, Default)]
 struct ExactContext {
+    shared_registry: Option<Arc<SharedRegistry>>,
     registry_chunks: HashMap<u32, Vec<[u8; 32]>>,
     registry_lru: VecDeque<u32>,
     vote_hashes_loaded: bool,
@@ -1133,6 +2576,49 @@ struct ExactContext {
 }
 
 impl ExactContext {
+    fn with_shared_registry(shared_registry: Option<Arc<SharedRegistry>>) -> Self {
+        Self {
+            shared_registry,
+            ..Self::default()
+        }
+    }
+
+    fn prepare_registry_for_scan<S: RangeSource>(
+        &mut self,
+        reader: &ArchiveReader<S>,
+        request: &ScanRequest,
+        full_scan: bool,
+        requested_transactions: u64,
+        policy: CompactV2RegistryReadPolicy,
+    ) -> CompactV2InstructionSourceResult<()> {
+        if self.shared_registry.is_some() {
+            return Ok(());
+        }
+        let registry_bytes = u64::from(reader.registry_entries())
+            .checked_mul(REGISTRY_KEY_BYTES as u64)
+            .ok_or_else(|| {
+                CompactV2InstructionSourceError::Invalid("registry byte size overflow".into())
+            })?;
+        if !should_prefetch_sequential_registry(
+            policy,
+            full_scan,
+            requested_transactions,
+            request_needs_registry(request),
+            registry_bytes,
+        ) {
+            return Ok(());
+        }
+        let Some((registry, prefetch_io)) = prefetch_shared_registry(reader, registry_bytes)?
+        else {
+            return Ok(());
+        };
+        self.io.checked_add(prefetch_io)?;
+        self.registry_chunks.clear();
+        self.registry_lru.clear();
+        self.shared_registry = Some(registry);
+        Ok(())
+    }
+
     fn resolve_pubkey<S: RangeSource>(
         &mut self,
         reader: &ArchiveReader<S>,
@@ -1149,6 +2635,13 @@ impl ExactContext {
                 "registry ID {id} is outside 1..={}",
                 reader.registry_entries()
             )));
+        }
+        if let Some(registry) = &self.shared_registry {
+            return registry.resolve(id).ok_or_else(|| {
+                CompactV2InstructionSourceError::Invalid(format!(
+                    "registry ID {id} is outside the shared complete registry"
+                ))
+            });
         }
         let zero_based = usize::try_from(id - 1).map_err(|_| {
             CompactV2InstructionSourceError::Invalid("registry ID exceeds address space".into())
@@ -1240,61 +2733,6 @@ impl ExactContext {
         }
     }
 
-    fn read_block_signatures<S: RangeSource>(
-        &mut self,
-        reader: &ArchiveReader<S>,
-        row: &blockzilla_format::ArchiveV2HotBlockIndexRow,
-    ) -> CompactV2InstructionSourceResult<Option<Vec<[u8; 64]>>> {
-        if !reader.signatures_available() {
-            return Ok(None);
-        }
-        let length = usize::try_from(row.signature_count)
-            .ok()
-            .and_then(|count| count.checked_mul(SIGNATURE_BYTES))
-            .ok_or_else(|| {
-                CompactV2InstructionSourceError::Invalid(
-                    "block signature byte length overflow".into(),
-                )
-            })?;
-        let row_bound = usize::try_from(row.tx_count)
-            .ok()
-            .and_then(|count| count.checked_mul(usize::from(u8::MAX)))
-            .and_then(|count| count.checked_mul(SIGNATURE_BYTES))
-            .unwrap_or(usize::MAX)
-            .min(MAX_SIGNATURE_BYTES_PER_BLOCK);
-        if length > row_bound {
-            return Err(CompactV2InstructionSourceError::Invalid(format!(
-                "block {} signature window is {length} bytes, above {row_bound}",
-                row.block_id
-            )));
-        }
-        if length == 0 {
-            return Ok(Some(Vec::new()));
-        }
-        let offset = row
-            .first_signature_ordinal
-            .checked_mul(SIGNATURE_BYTES as u64)
-            .ok_or_else(|| {
-                CompactV2InstructionSourceError::Invalid(
-                    "block signature byte offset overflow".into(),
-                )
-            })?;
-        let bytes = reader
-            .source()
-            .read_range(crate::manifest::SIGNATURES_FILE, offset, length)?;
-        self.io.record(bytes.len())?;
-        Ok(Some(
-            bytes
-                .chunks_exact(SIGNATURE_BYTES)
-                .map(|bytes| {
-                    let mut signature = [0u8; 64];
-                    signature.copy_from_slice(bytes);
-                    signature
-                })
-                .collect(),
-        ))
-    }
-
     fn vote_hashes(&self) -> Option<&dyn VoteHashResolver> {
         self.vote_hashes
             .as_ref()
@@ -1308,7 +2746,7 @@ impl ExactContext {
         if self.vote_hashes_loaded {
             return Ok(());
         }
-        let Some(binding) = reader.manifest().file(ARCHIVE_V2_VOTE_HASH_REGISTRY_FILE) else {
+        let Some(binding_size) = reader.file_size(ARCHIVE_V2_VOTE_HASH_REGISTRY_FILE) else {
             self.vote_hashes_loaded = true;
             return Ok(());
         };
@@ -1321,7 +2759,7 @@ impl ExactContext {
                 CompactV2InstructionSourceError::Invalid("vote-hash registry bound overflow".into())
             })?
             .min(MAX_VOTE_HASH_REGISTRY_BYTES);
-        let size = usize::try_from(binding.size).map_err(|_| {
+        let size = usize::try_from(binding_size).map_err(|_| {
             CompactV2InstructionSourceError::Invalid(
                 "vote-hash registry size exceeds address space".into(),
             )
@@ -1345,13 +2783,12 @@ impl ExactContext {
         reader: &ArchiveReader<S>,
     ) -> CompactV2InstructionSourceResult<&'a BlockhashResolver> {
         if self.blockhashes.is_none() {
-            let current = reader
-                .manifest()
-                .file(ARCHIVE_V2_BLOCKHASH_REGISTRY_FILE)
-                .ok_or(CompactV2InstructionSourceError::MissingSidecar {
+            let current_size = reader.file_size(ARCHIVE_V2_BLOCKHASH_REGISTRY_FILE).ok_or(
+                CompactV2InstructionSourceError::MissingSidecar {
                     object: ARCHIVE_V2_BLOCKHASH_REGISTRY_FILE,
                     purpose: "ambiguous signed-message recent blockhash",
-                })?;
+                },
+            )?;
             let maximum = reader
                 .index()
                 .rows
@@ -1364,7 +2801,7 @@ impl ExactContext {
                     )
                 })?
                 .min(MAX_BLOCKHASH_REGISTRY_BYTES);
-            let current_size = usize::try_from(current.size).map_err(|_| {
+            let current_size = usize::try_from(current_size).map_err(|_| {
                 CompactV2InstructionSourceError::Invalid(
                     "blockhash registry size exceeds address space".into(),
                 )
@@ -1380,15 +2817,14 @@ impl ExactContext {
                     .read_range(ARCHIVE_V2_BLOCKHASH_REGISTRY_FILE, 0, current_size)?;
             self.io.record(current.len())?;
 
-            let previous = if reader.manifest().epoch == 0 {
+            let previous = if reader.epoch() == 0 {
                 PreviousBlockhashTail {
                     schema: PreviousBlockhashTailSchema::CurrentHashAndSlot,
                     entries: Vec::new(),
                 }
             } else {
-                let binding = reader
-                    .manifest()
-                    .file(ARCHIVE_V2_PREV_BLOCKHASH_TAIL_FILE)
+                let binding_size = reader
+                    .file_size(ARCHIVE_V2_PREV_BLOCKHASH_TAIL_FILE)
                     .ok_or(CompactV2InstructionSourceError::MissingSidecar {
                         object: ARCHIVE_V2_PREV_BLOCKHASH_TAIL_FILE,
                         purpose: "ambiguous signed-message previous blockhash",
@@ -1400,7 +2836,7 @@ impl ExactContext {
                             "previous blockhash tail bound overflow".into(),
                         )
                     })?;
-                let size = usize::try_from(binding.size).map_err(|_| {
+                let size = usize::try_from(binding_size).map_err(|_| {
                     CompactV2InstructionSourceError::Invalid(
                         "previous blockhash tail size exceeds address space".into(),
                     )
@@ -1432,7 +2868,12 @@ impl ExactContext {
 
 #[cfg(test)]
 mod tests {
-    use std::{fs, num::NonZeroU32, path::Path};
+    use std::{
+        fs,
+        num::NonZeroU32,
+        path::Path,
+        sync::{Arc, Mutex},
+    };
 
     use blockzilla_format::{
         ARCHIVE_V2_TX_FLAG_HAS_ERROR, ARCHIVE_V2_TX_FLAG_HAS_INNER_IX,
@@ -1441,13 +2882,14 @@ mod tests {
         ArchiveV2HotMetaRecord, ArchiveV2HotV0Message, ArchiveV2VoteHashRef,
         ArchiveV2VoteStateUpdate, ArchiveV2VoteTowerSync, CompactInnerInstruction,
         CompactInnerInstructions, CompactInstructionError, CompactMessageHeader, CompactMetaV1,
-        CompactTransactionError, OwnedCompactAddressTableLookup, WINCODE_ARCHIVE_V2_FLAG_LEB128,
-        WINCODE_ARCHIVE_V2_HOT_BLOCK_VERSION, WincodeArchiveV2Footer, WincodeArchiveV2Header,
-        wincode_leb128_config, write_archive_v2_hot_block_index,
+        CompactTokenBalance, CompactTransactionError, OwnedCompactAddressTableLookup,
+        WINCODE_ARCHIVE_V2_FLAG_LEB128, WINCODE_ARCHIVE_V2_HOT_BLOCK_VERSION,
+        WincodeArchiveV2Footer, WincodeArchiveV2Header, wincode_leb128_config,
+        write_archive_v2_hot_block_index,
     };
     use blockzilla_query_sdk::{
-        ArchiveInstructionSourceExt, BlockView, CpiCoverage, ExecutionStatus, InstructionCoverage,
-        InstructionDataCoverage, ScanRange,
+        ArchiveInstructionSourceExt, BlockView, CanonicalBlock, CpiCoverage, ExecutionStatus,
+        InstructionCoverage, InstructionDataCoverage, ScanRange,
     };
     use ed25519_dalek::{Signer, SigningKey};
     use sha2::{Digest, Sha256};
@@ -1473,6 +2915,9 @@ mod tests {
     const CPI_PROGRAM: [u8; 32] = [4; 32];
     const LOOKUP_TABLE: [u8; 32] = [5; 32];
     const LOADED_ACCOUNT: [u8; 32] = [6; 32];
+    const TARGET_MINT: [u8; 32] = [7; 32];
+    const OTHER_MINT: [u8; 32] = [8; 32];
+    const TOKEN_OWNER: [u8; 32] = [9; 32];
 
     struct Fixture {
         directory: TempDir,
@@ -1480,6 +2925,148 @@ mod tests {
         signatures: Vec<[u8; 64]>,
         decoded_bytes: u64,
         compressed_bytes: u64,
+    }
+
+    #[derive(Clone)]
+    struct CountingSource {
+        inner: LocalRangeSource,
+        reads: Arc<Mutex<Vec<(String, u64, usize)>>>,
+    }
+
+    impl CountingSource {
+        fn new(inner: LocalRangeSource) -> Self {
+            Self {
+                inner,
+                reads: Arc::new(Mutex::new(Vec::new())),
+            }
+        }
+
+        fn clear(&self) {
+            self.reads.lock().unwrap().clear();
+        }
+
+        fn reads_for(&self, object: &str) -> Vec<(u64, usize)> {
+            self.reads
+                .lock()
+                .unwrap()
+                .iter()
+                .filter(|(name, _, _)| name == object)
+                .map(|(_, offset, length)| (*offset, *length))
+                .collect()
+        }
+
+        fn record(&self, object: &str, offset: u64, length: usize) {
+            self.reads
+                .lock()
+                .unwrap()
+                .push((object.to_owned(), offset, length));
+        }
+    }
+
+    impl RangeSource for CountingSource {
+        fn size(&self, object: &str) -> crate::SourceResult<Option<u64>> {
+            self.inner.size(object)
+        }
+
+        fn read_range(
+            &self,
+            object: &str,
+            offset: u64,
+            length: usize,
+        ) -> crate::SourceResult<Vec<u8>> {
+            self.record(object, offset, length);
+            self.inner.read_range(object, offset, length)
+        }
+
+        fn read_range_into(
+            &self,
+            object: &str,
+            offset: u64,
+            length: usize,
+            destination: &mut Vec<u8>,
+        ) -> crate::SourceResult<()> {
+            self.record(object, offset, length);
+            self.inner
+                .read_range_into(object, offset, length, destination)
+        }
+
+        fn read_range_into_slice(
+            &self,
+            object: &str,
+            offset: u64,
+            destination: &mut [u8],
+        ) -> crate::SourceResult<()> {
+            self.record(object, offset, destination.len());
+            self.inner
+                .read_range_into_slice(object, offset, destination)
+        }
+    }
+
+    #[derive(Clone)]
+    struct FailingRegistrySource {
+        inner: LocalRangeSource,
+        fail_registry_reads: Arc<Mutex<bool>>,
+    }
+
+    impl FailingRegistrySource {
+        fn new(inner: LocalRangeSource) -> Self {
+            Self {
+                inner,
+                fail_registry_reads: Arc::new(Mutex::new(false)),
+            }
+        }
+
+        fn arm(&self) {
+            *self.fail_registry_reads.lock().unwrap() = true;
+        }
+
+        fn reject_registry_read(&self, object: &str) -> crate::SourceResult<()> {
+            if object == REGISTRY_FILE && *self.fail_registry_reads.lock().unwrap() {
+                return Err(crate::SourceError::Protocol(
+                    "injected registry prefetch failure".into(),
+                ));
+            }
+            Ok(())
+        }
+    }
+
+    impl RangeSource for FailingRegistrySource {
+        fn size(&self, object: &str) -> crate::SourceResult<Option<u64>> {
+            self.inner.size(object)
+        }
+
+        fn read_range(
+            &self,
+            object: &str,
+            offset: u64,
+            length: usize,
+        ) -> crate::SourceResult<Vec<u8>> {
+            self.reject_registry_read(object)?;
+            self.inner.read_range(object, offset, length)
+        }
+
+        fn read_range_into(
+            &self,
+            object: &str,
+            offset: u64,
+            length: usize,
+            destination: &mut Vec<u8>,
+        ) -> crate::SourceResult<()> {
+            self.reject_registry_read(object)?;
+            self.inner
+                .read_range_into(object, offset, length, destination)
+        }
+
+        fn read_range_into_slice(
+            &self,
+            object: &str,
+            offset: u64,
+            destination: &mut [u8],
+        ) -> crate::SourceResult<()> {
+            self.reject_registry_read(object)?;
+            self.inner
+                .read_range_into_slice(object, offset, destination)
+        }
     }
 
     impl Fixture {
@@ -1840,12 +3427,19 @@ mod tests {
         }
 
         fn trusted_reader(&self) -> ArchiveReader<LocalRangeSource> {
+            self.trusted_reader_with_candidate("compact-query-fixture")
+        }
+
+        fn trusted_reader_with_candidate(
+            &self,
+            candidate_id: &str,
+        ) -> ArchiveReader<LocalRangeSource> {
             ArchiveReader::open_trusted(
                 LocalRangeSource::new(self.directory.path()),
                 TrustedGenerationIdentity {
                     cluster_id: "testnet".into(),
                     epoch: EPOCH,
-                    generation_id: "compact-query-fixture".into(),
+                    generation_id: candidate_id.into(),
                     slots_per_epoch: SLOTS_PER_EPOCH,
                 },
                 OpenOptions {
@@ -1860,6 +3454,23 @@ mod tests {
             write_manifest(self.directory.path());
             ArchiveReader::open(LocalRangeSource::new(self.directory.path())).unwrap()
         }
+    }
+
+    fn open_trusted_test_reader<S: RangeSource>(source: S) -> ArchiveReader<S> {
+        ArchiveReader::open_trusted(
+            source,
+            TrustedGenerationIdentity {
+                cluster_id: "testnet".into(),
+                epoch: EPOCH,
+                generation_id: "compact-query-policy-fixture".into(),
+                slots_per_epoch: SLOTS_PER_EPOCH,
+            },
+            OpenOptions {
+                hash_verification: HashVerification::SizesOnly,
+                ..OpenOptions::default()
+            },
+        )
+        .unwrap()
     }
 
     struct TxFixture {
@@ -2089,7 +3700,10 @@ mod tests {
             source.identity().verification,
             SourceVerification::OperatorTrusted
         );
-        assert_eq!(source.identity().binding, None);
+        assert_eq!(
+            source.identity().binding.as_deref(),
+            Some("operator-trusted-candidate-id=compact-query-fixture")
+        );
 
         let request = ScanRequest::all()
             .allow_incomplete_instructions()
@@ -2204,6 +3818,924 @@ mod tests {
     }
 
     #[test]
+    fn program_only_projection_skips_instruction_account_resolution_and_allocation() {
+        let far_account_id = REGISTRY_KEYS_PER_CHUNK + 1;
+        let farther_account_id = 2 * REGISTRY_KEYS_PER_CHUNK + 1;
+        let mut registry = vec![[0u8; 32]; farther_account_id];
+        registry[0] = [0x11; 32];
+        registry[1] = TOKEN_PROGRAM;
+        registry[far_account_id - 1] = [0xa1; 32];
+        registry[farther_account_id - 1] = [0xa2; 32];
+        let message =
+            blockzilla_format::ArchiveV2HotMessagePayload::Legacy(ArchiveV2HotLegacyMessage {
+                header: header(),
+                account_keys: vec![
+                    CompactPubkey::Id(1),
+                    CompactPubkey::Id(2),
+                    CompactPubkey::Id(u32::try_from(far_account_id).unwrap()),
+                    CompactPubkey::Id(u32::try_from(farther_account_id).unwrap()),
+                ],
+                recent_blockhash: OwnedCompactRecentBlockhash::Nonce([13; 32]),
+                instructions: vec![raw_instruction(1, &[2, 3], &[])],
+            });
+        let fixture = Fixture::build(
+            registry,
+            vec![vec![TxFixture::exact(
+                message,
+                metadata(4, None, Some(Vec::new()), vec![], vec![]),
+                ARCHIVE_V2_TX_FLAG_HAS_INNER_IX,
+            )]],
+            None,
+        );
+
+        let run = |request: &ScanRequest| {
+            let range_source = CountingSource::new(LocalRangeSource::new(fixture.directory.path()));
+            let observed_source = range_source.clone();
+            let reader = ArchiveReader::open_trusted(
+                range_source,
+                TrustedGenerationIdentity {
+                    cluster_id: "testnet".into(),
+                    epoch: EPOCH,
+                    generation_id: "compact-query-program-only-fixture".into(),
+                    slots_per_epoch: SLOTS_PER_EPOCH,
+                },
+                OpenOptions {
+                    hash_verification: HashVerification::SizesOnly,
+                    ..OpenOptions::default()
+                },
+            )
+            .unwrap();
+            observed_source.clear();
+            let mut source = CompactV2InstructionSource::new(reader, FIRST_SLOT).unwrap();
+            let mut transaction = None;
+            let mut account_capacity_is_zero = false;
+            source
+                .for_each_block(request, |block| {
+                    let projected = &block.transactions[0];
+                    account_capacity_is_zero = projected
+                        .instructions
+                        .iter()
+                        .all(|instruction| instruction.accounts.capacity() == 0);
+                    transaction = Some(projected.clone());
+                    Ok(())
+                })
+                .unwrap();
+            (
+                transaction.unwrap(),
+                account_capacity_is_zero,
+                observed_source.reads_for(REGISTRY_FILE),
+            )
+        };
+
+        let full_request = ScanRequest::all()
+            .allow_unverified_source()
+            .without_primary_signatures()
+            .without_instruction_data();
+        let (full, _, full_registry_reads) = run(&full_request);
+        let (program_only, no_account_allocation, program_only_registry_reads) =
+            run(&full_request.clone().without_instruction_accounts());
+
+        let mut expected = full;
+        for instruction in &mut expected.instructions {
+            instruction.accounts.clear();
+        }
+        assert_eq!(program_only, expected);
+        assert!(no_account_allocation);
+        assert_eq!(program_only_registry_reads.len(), 1);
+        assert_eq!(full_registry_reads.len(), 3);
+    }
+
+    #[test]
+    fn program_only_projection_keeps_loaded_cpi_programs_and_signers() {
+        let fixture = Fixture::main();
+        let mut source =
+            CompactV2InstructionSource::new(fixture.trusted_reader(), FIRST_SLOT).unwrap();
+        let request = ScanRequest::all()
+            .allow_incomplete_instructions()
+            .allow_incomplete_cpi()
+            .allow_unknown_execution()
+            .without_primary_signatures()
+            .without_instruction_accounts()
+            .without_instruction_data();
+        let mut observed = None;
+        source
+            .for_each_block(&request, |block| {
+                if block.header.block_ordinal == 1 {
+                    observed = block.transactions.get(1).cloned();
+                }
+                Ok(())
+            })
+            .unwrap();
+
+        let transaction = observed.unwrap();
+        assert_eq!(transaction.required_signers, [fixture.signer]);
+        assert_eq!(transaction.instructions.len(), 2);
+        assert_eq!(transaction.instructions[0].program_id, TOKEN_PROGRAM);
+        assert_eq!(transaction.instructions[1].program_id, CPI_PROGRAM);
+        assert_eq!(transaction.instructions[1].coordinate.inner_index, Some(0));
+        assert!(transaction.instructions.iter().all(|instruction| {
+            instruction.accounts.is_empty() && instruction.accounts.capacity() == 0
+        }));
+    }
+
+    #[test]
+    fn program_only_projection_rejects_an_invalid_instruction_account_index() {
+        let fixture = Fixture::build(
+            vec![[0x11; 32], TOKEN_PROGRAM],
+            vec![vec![TxFixture::exact(
+                legacy_message(vec![raw_instruction(1, &[2], &[])]),
+                metadata(2, None, Some(Vec::new()), vec![], vec![]),
+                ARCHIVE_V2_TX_FLAG_HAS_INNER_IX,
+            )]],
+            None,
+        );
+        let mut source =
+            CompactV2InstructionSource::new(fixture.trusted_reader(), FIRST_SLOT).unwrap();
+        let request = ScanRequest::all()
+            .without_primary_signatures()
+            .without_instruction_accounts()
+            .without_instruction_data();
+        let mut published_blocks = 0;
+        let error = source
+            .for_each_block(&request, |_| {
+                published_blocks += 1;
+                Ok(())
+            })
+            .unwrap_err();
+
+        assert_eq!(published_blocks, 0);
+        let QueryError::Source { source, .. } = error else {
+            panic!("unexpected query error: {error}");
+        };
+        assert!(
+            source.to_string().contains("account index"),
+            "unexpected source error: {source}"
+        );
+    }
+
+    #[test]
+    fn ordered_scan_coalesces_contiguous_block_signature_windows() {
+        const BLOCKS: usize = 4;
+        let blocks = (0..BLOCKS)
+            .map(|block| vec![TxFixture::raw_transaction(vec![block as u8])])
+            .collect::<Vec<_>>();
+        let signatures = (0..BLOCKS)
+            .map(|block| [block as u8 + 1; SIGNATURE_BYTES])
+            .collect::<Vec<_>>();
+        let fixture = Fixture::build(Vec::new(), blocks, Some(signatures.clone()));
+        let mut source =
+            CompactV2InstructionSource::new(fixture.trusted_reader(), FIRST_SLOT).unwrap();
+        let request = ScanRequest::all()
+            .allow_unverified_source()
+            .allow_incomplete_instructions()
+            .allow_incomplete_cpi()
+            .allow_unknown_execution()
+            .without_instruction_data();
+        let mut observed = Vec::new();
+        let receipt = source
+            .for_each_block(&request, |block| {
+                observed.push(block.transactions[0].primary_signature.unwrap());
+                Ok(())
+            })
+            .unwrap();
+
+        assert_eq!(observed, signatures);
+        assert_eq!(receipt.blocks, BLOCKS as u64);
+        assert_eq!(receipt.transactions, BLOCKS as u64);
+        assert_eq!(receipt.io.source_read_calls, Some(2));
+        assert_eq!(
+            receipt.io.source_read_bytes,
+            Some(fixture.compressed_bytes + (BLOCKS * SIGNATURE_BYTES) as u64)
+        );
+    }
+
+    #[test]
+    fn sequential_dense_registry_policy_applies_the_full_scan_threshold_and_size_bounds() {
+        let registry_bytes = 889_551_808;
+        let policy = CompactV2RegistryReadPolicy::with_full_registry_limit(registry_bytes);
+
+        assert_eq!(policy.max_full_registry_bytes(), registry_bytes);
+        assert!(should_prefetch_sequential_registry(
+            policy,
+            false,
+            COMPACT_V2_PARTIAL_REGISTRY_PREFETCH_MIN_TRANSACTIONS,
+            true,
+            registry_bytes,
+        ));
+        assert!(!should_prefetch_sequential_registry(
+            policy,
+            false,
+            COMPACT_V2_PARTIAL_REGISTRY_PREFETCH_MIN_TRANSACTIONS - 1,
+            true,
+            registry_bytes,
+        ));
+        assert!(should_prefetch_sequential_registry(
+            policy,
+            true,
+            1,
+            true,
+            registry_bytes,
+        ));
+        assert!(!should_prefetch_sequential_registry(
+            policy,
+            true,
+            1,
+            false,
+            registry_bytes,
+        ));
+        assert!(!should_prefetch_sequential_registry(
+            CompactV2RegistryReadPolicy::sparse_only(),
+            true,
+            COMPACT_V2_PARTIAL_REGISTRY_PREFETCH_MIN_TRANSACTIONS,
+            true,
+            registry_bytes,
+        ));
+        assert!(!should_prefetch_sequential_registry(
+            CompactV2RegistryReadPolicy::with_full_registry_limit(registry_bytes - 1),
+            true,
+            COMPACT_V2_PARTIAL_REGISTRY_PREFETCH_MIN_TRANSACTIONS,
+            true,
+            registry_bytes,
+        ));
+    }
+
+    #[test]
+    fn sequential_dense_registry_prefetch_is_in_the_scan_io_receipt_once() {
+        let fixture = Fixture::main();
+        let counted = CountingSource::new(LocalRangeSource::new(fixture.directory.path()));
+        let observed = counted.clone();
+        let reader = open_trusted_test_reader(counted);
+        observed.clear();
+        let mut source = CompactV2InstructionSource::new(reader, FIRST_SLOT).unwrap();
+        let request = ScanRequest::all()
+            .allow_unverified_source()
+            .allow_incomplete_instructions()
+            .allow_incomplete_cpi()
+            .allow_unknown_execution()
+            .with_instruction_data_for([TOKEN_PROGRAM]);
+        struct NoopSink;
+        impl BlockSink for NoopSink {
+            fn visit_block(&mut self, _block: BlockView<'_>) -> blockzilla_query_sdk::Result<()> {
+                Ok(())
+            }
+        }
+        let policy = CompactV2RegistryReadPolicy::with_full_registry_limit(
+            DEFAULT_COMPACT_V2_FULL_REGISTRY_BYTES,
+        );
+
+        let first = source
+            .scan_ordered_with_registry_policy(&request, policy, &mut NoopSink)
+            .unwrap();
+        assert!(source.context.shared_registry.is_some());
+        assert_eq!(observed.reads_for(REGISTRY_FILE), vec![(0, 6 * 32)]);
+        assert_eq!(first.io.source_read_calls, Some(3));
+        assert_eq!(
+            first.io.source_read_bytes,
+            Some(fixture.compressed_bytes + 6 * 32 + 7 * SIGNATURE_BYTES as u64)
+        );
+
+        observed.clear();
+        let second = source
+            .scan_ordered_with_registry_policy(&request, policy, &mut NoopSink)
+            .unwrap();
+        assert!(observed.reads_for(REGISTRY_FILE).is_empty());
+        assert_eq!(second.io.source_read_calls, Some(2));
+        assert_eq!(
+            second.io.source_read_bytes,
+            Some(fixture.compressed_bytes + 7 * SIGNATURE_BYTES as u64)
+        );
+    }
+
+    #[test]
+    fn sequential_small_partial_scan_keeps_the_sparse_registry_cache() {
+        let signing_key = SigningKey::from_bytes(&[63; 32]);
+        let signer = signing_key.verifying_key().to_bytes();
+        let registry_entries = REGISTRY_KEYS_PER_CHUNK * (REGISTRY_CACHE_CHUNKS + 1);
+        let mut registry = vec![[0_u8; REGISTRY_KEY_BYTES]; registry_entries];
+        registry[0] = signer;
+        registry[1] = TOKEN_PROGRAM;
+        let blocks = (0..2)
+            .map(|value| {
+                vec![TxFixture::exact(
+                    legacy_message(vec![raw_instruction(1, &[0], &[value])]),
+                    metadata(2, None, Some(Vec::new()), vec![], vec![]),
+                    ARCHIVE_V2_TX_FLAG_HAS_INNER_IX,
+                )]
+            })
+            .collect();
+        let fixture = Fixture::build(registry, blocks, None);
+        let counted = CountingSource::new(LocalRangeSource::new(fixture.directory.path()));
+        let observed = counted.clone();
+        let reader = open_trusted_test_reader(counted);
+        let selected_compressed_bytes = u64::from(reader.index().rows[0].compressed_len);
+        observed.clear();
+        let mut source = CompactV2InstructionSource::new(reader, FIRST_SLOT).unwrap();
+        let request = ScanRequest::bounded(ScanRange {
+            first_block: 0,
+            block_count: NonZeroU32::new(1).unwrap(),
+        })
+        .allow_unverified_source()
+        .with_instruction_data_for([TOKEN_PROGRAM]);
+        struct NoopSink;
+        impl BlockSink for NoopSink {
+            fn visit_block(&mut self, _block: BlockView<'_>) -> blockzilla_query_sdk::Result<()> {
+                Ok(())
+            }
+        }
+
+        let receipt = source
+            .scan_ordered_with_registry_policy(
+                &request,
+                CompactV2RegistryReadPolicy::with_full_registry_limit(
+                    DEFAULT_COMPACT_V2_FULL_REGISTRY_BYTES,
+                ),
+                &mut NoopSink,
+            )
+            .unwrap();
+
+        assert!(source.context.shared_registry.is_none());
+        assert_eq!(source.context.registry_chunks.len(), 1);
+        assert_eq!(
+            observed.reads_for(REGISTRY_FILE),
+            vec![(0, REGISTRY_KEYS_PER_CHUNK * REGISTRY_KEY_BYTES)]
+        );
+        assert_eq!(receipt.io.source_read_calls, Some(2));
+        assert_eq!(
+            receipt.io.source_read_bytes,
+            Some(
+                selected_compressed_bytes
+                    + u64::try_from(REGISTRY_KEYS_PER_CHUNK * REGISTRY_KEY_BYTES).unwrap()
+            )
+        );
+    }
+
+    #[test]
+    fn sequential_dense_registry_prefetch_propagates_source_errors_before_publication() {
+        let fixture = Fixture::main();
+        let failing = FailingRegistrySource::new(LocalRangeSource::new(fixture.directory.path()));
+        let control = failing.clone();
+        let reader = open_trusted_test_reader(failing);
+        control.arm();
+        let mut source = CompactV2InstructionSource::new(reader, FIRST_SLOT).unwrap();
+        let request = ScanRequest::all()
+            .allow_unverified_source()
+            .allow_incomplete_instructions()
+            .allow_incomplete_cpi()
+            .allow_unknown_execution()
+            .without_instruction_data();
+        struct CountingSink(usize);
+        impl BlockSink for CountingSink {
+            fn visit_block(&mut self, _block: BlockView<'_>) -> blockzilla_query_sdk::Result<()> {
+                self.0 += 1;
+                Ok(())
+            }
+        }
+        let mut sink = CountingSink(0);
+
+        let error = source
+            .scan_ordered_with_registry_policy(
+                &request,
+                CompactV2RegistryReadPolicy::with_full_registry_limit(
+                    DEFAULT_COMPACT_V2_FULL_REGISTRY_BYTES,
+                ),
+                &mut sink,
+            )
+            .unwrap_err();
+
+        assert!(
+            format!("{error:?}").contains("injected registry prefetch failure"),
+            "{error:?}"
+        );
+        assert_eq!(sink.0, 0);
+        assert!(source.context.shared_registry.is_none());
+    }
+
+    #[test]
+    fn parallel_borrowed_scan_matches_sequential_order_output_and_io() {
+        const BLOCKS: usize = 8;
+        let blocks = (0..BLOCKS)
+            .map(|block| vec![TxFixture::raw_transaction(vec![block as u8])])
+            .collect::<Vec<_>>();
+        let signatures = (0..BLOCKS)
+            .map(|block| [block as u8 + 1; SIGNATURE_BYTES])
+            .collect::<Vec<_>>();
+        let fixture = Fixture::build(Vec::new(), blocks, Some(signatures));
+        let request = ScanRequest::all()
+            .allow_unverified_source()
+            .allow_incomplete_instructions()
+            .allow_incomplete_cpi()
+            .allow_unknown_execution()
+            .without_instruction_data();
+
+        let mut sequential =
+            CompactV2InstructionSource::new(fixture.trusted_reader(), FIRST_SLOT).unwrap();
+        let mut expected = Vec::<CanonicalBlock>::new();
+        let sequential_receipt = sequential
+            .for_each_block(&request, |block| {
+                expected.push(CanonicalBlock {
+                    header: block.header,
+                    transactions: block.transactions.to_vec(),
+                });
+                Ok(())
+            })
+            .unwrap();
+
+        let mut parallel =
+            CompactV2InstructionSource::new(fixture.trusted_reader(), FIRST_SLOT).unwrap();
+        let mut actual = Vec::<CanonicalBlock>::new();
+        struct CollectSink<'a>(&'a mut Vec<CanonicalBlock>);
+        impl BlockSink for CollectSink<'_> {
+            fn visit_block(&mut self, block: BlockView<'_>) -> blockzilla_query_sdk::Result<()> {
+                self.0.push(CanonicalBlock {
+                    header: block.header,
+                    transactions: block.transactions.to_vec(),
+                });
+                Ok(())
+            }
+        }
+        let mut sink = CollectSink(&mut actual);
+        let parallel_receipt = parallel
+            .scan_ordered_parallel(&request, &mut sink, CompactV2ParallelScanConfig::new(2))
+            .unwrap();
+
+        assert_eq!(actual, expected);
+        assert_eq!(parallel_receipt.scan, sequential_receipt);
+        assert_eq!(parallel_receipt.requested_workers, 2);
+        assert!((1..=2).contains(&parallel_receipt.effective_workers));
+        assert!((1..=2).contains(&parallel_receipt.max_active_workers));
+        assert_eq!(parallel_receipt.compressed_buffer_count, 2);
+        assert!(parallel_receipt.max_projected_block_bytes > 0);
+        assert!(
+            parallel_receipt.max_projected_batch_bytes
+                >= parallel_receipt.max_projected_block_bytes
+        );
+        assert!(
+            parallel_receipt.pipeline.max_transactions_per_batch
+                <= crate::MAX_ORDERED_PARALLEL_TRANSACTIONS_PER_BATCH
+        );
+        assert!(
+            parallel_receipt.pipeline.max_blocks_per_batch
+                <= COMPACT_V2_PARALLEL_MAX_BLOCKS_PER_BATCH
+        );
+        assert!(
+            parallel_receipt
+                .pipeline
+                .max_declared_uncompressed_batch_bytes
+                <= COMPACT_V2_PARALLEL_UNCOMPRESSED_BATCH_BYTES as u64
+        );
+    }
+
+    #[test]
+    fn one_and_twelve_worker_scans_match_and_share_one_registry_prefetch() {
+        const BLOCKS: usize = 24;
+        let signing_key = SigningKey::from_bytes(&[61; 32]);
+        let signer = signing_key.verifying_key().to_bytes();
+        let blocks = (0..BLOCKS)
+            .map(|block| {
+                vec![TxFixture::exact(
+                    legacy_message(vec![raw_instruction(1, &[0], &[block as u8])]),
+                    metadata(2, None, Some(Vec::new()), vec![], vec![]),
+                    ARCHIVE_V2_TX_FLAG_HAS_INNER_IX,
+                )]
+            })
+            .collect::<Vec<_>>();
+        let signatures = (0..BLOCKS)
+            .map(|block| [block as u8 + 1; SIGNATURE_BYTES])
+            .collect::<Vec<_>>();
+        let fixture = Fixture::build(vec![signer, TOKEN_PROGRAM], blocks, Some(signatures));
+        let request = ScanRequest::all()
+            .allow_unverified_source()
+            .without_instruction_data();
+
+        fn run(
+            fixture: &Fixture,
+            request: &ScanRequest,
+            workers: usize,
+        ) -> (Vec<CanonicalBlock>, CompactV2ParallelScanReceipt) {
+            struct CollectSink<'a>(&'a mut Vec<CanonicalBlock>);
+            impl BlockSink for CollectSink<'_> {
+                fn visit_block(
+                    &mut self,
+                    block: BlockView<'_>,
+                ) -> blockzilla_query_sdk::Result<()> {
+                    self.0.push(CanonicalBlock {
+                        header: block.header,
+                        transactions: block.transactions.to_vec(),
+                    });
+                    Ok(())
+                }
+            }
+
+            let mut source =
+                CompactV2InstructionSource::new(fixture.trusted_reader(), FIRST_SLOT).unwrap();
+            let mut blocks = Vec::new();
+            let mut sink = CollectSink(&mut blocks);
+            let receipt = source
+                .scan_ordered_parallel(
+                    request,
+                    &mut sink,
+                    CompactV2ParallelScanConfig::new(workers),
+                )
+                .unwrap();
+            (blocks, receipt)
+        }
+
+        let (single_blocks, single) = run(&fixture, &request, 1);
+        let (parallel_blocks, parallel) = run(&fixture, &request, 12);
+        assert_eq!(parallel_blocks, single_blocks);
+        assert_eq!(parallel.scan, single.scan);
+        assert_eq!(parallel.pipeline.block_count, BLOCKS as u64);
+        assert_eq!(parallel.requested_workers, 12);
+        assert!((1..=12).contains(&parallel.effective_workers));
+        assert!((1..=parallel.effective_workers).contains(&parallel.max_active_workers));
+
+        for receipt in [single, parallel] {
+            assert_eq!(
+                receipt.registry.mode,
+                CompactV2ParallelRegistryMode::SharedFull
+            );
+            assert_eq!(receipt.registry.prefetch_read_calls, 1);
+            assert_eq!(receipt.registry.prefetch_read_bytes, 2 * 32);
+            assert_eq!(receipt.registry.resident_bound_bytes, 2 * 32);
+        }
+    }
+
+    #[test]
+    fn shared_registry_prefetch_is_not_repeated_by_workers() {
+        const BLOCKS: usize = 24;
+        let signing_key = SigningKey::from_bytes(&[62; 32]);
+        let signer = signing_key.verifying_key().to_bytes();
+        let blocks = (0..BLOCKS)
+            .map(|block| {
+                vec![TxFixture::exact(
+                    legacy_message(vec![raw_instruction(1, &[0], &[block as u8])]),
+                    metadata(2, None, Some(Vec::new()), vec![], vec![]),
+                    ARCHIVE_V2_TX_FLAG_HAS_INNER_IX,
+                )]
+            })
+            .collect::<Vec<_>>();
+        let fixture = Fixture::build(vec![signer, TOKEN_PROGRAM], blocks, None);
+        let source = CountingSource::new(LocalRangeSource::new(fixture.directory.path()));
+        let observed = source.clone();
+        let reader = ArchiveReader::open_trusted(
+            source,
+            TrustedGenerationIdentity {
+                cluster_id: "testnet".into(),
+                epoch: EPOCH,
+                generation_id: "compact-query-counting-fixture".into(),
+                slots_per_epoch: SLOTS_PER_EPOCH,
+            },
+            OpenOptions {
+                hash_verification: HashVerification::SizesOnly,
+                ..OpenOptions::default()
+            },
+        )
+        .unwrap();
+        observed.clear();
+
+        struct NoopSink;
+        impl BlockSink for NoopSink {
+            fn visit_block(&mut self, _block: BlockView<'_>) -> blockzilla_query_sdk::Result<()> {
+                Ok(())
+            }
+        }
+
+        let mut query = CompactV2InstructionSource::new(reader, FIRST_SLOT).unwrap();
+        let receipt = query
+            .scan_ordered_parallel(
+                &ScanRequest::all()
+                    .allow_unverified_source()
+                    .without_primary_signatures()
+                    .without_instruction_data(),
+                &mut NoopSink,
+                CompactV2ParallelScanConfig::new(12),
+            )
+            .unwrap();
+
+        assert_eq!(
+            receipt.registry.mode,
+            CompactV2ParallelRegistryMode::SharedFull
+        );
+        assert_eq!(receipt.registry.prefetch_read_calls, 1);
+        assert_eq!(observed.reads_for(REGISTRY_FILE), vec![(0, 64)]);
+    }
+
+    #[test]
+    fn large_partial_registry_policy_uses_the_one_million_transaction_threshold() {
+        let config = CompactV2ParallelScanConfig::new(12);
+        let registry_bytes = 889_551_808;
+        let fields_without_pubkeys = ScanRequest::all()
+            .without_instructions()
+            .without_required_signers();
+
+        assert!(!request_needs_registry(&fields_without_pubkeys));
+        assert!(request_needs_registry(
+            &fields_without_pubkeys.with_token_balances()
+        ));
+
+        assert!(should_prefetch_parallel_registry(
+            config,
+            false,
+            COMPACT_V2_PARTIAL_REGISTRY_PREFETCH_MIN_TRANSACTIONS,
+            true,
+            registry_bytes,
+        ));
+        assert!(!should_prefetch_parallel_registry(
+            config,
+            false,
+            COMPACT_V2_PARTIAL_REGISTRY_PREFETCH_MIN_TRANSACTIONS - 1,
+            true,
+            registry_bytes,
+        ));
+        assert!(should_prefetch_parallel_registry(
+            config,
+            true,
+            1,
+            true,
+            registry_bytes,
+        ));
+        assert!(!should_prefetch_parallel_registry(
+            config,
+            false,
+            COMPACT_V2_PARTIAL_REGISTRY_PREFETCH_MIN_TRANSACTIONS,
+            false,
+            registry_bytes,
+        ));
+        assert!(!should_prefetch_parallel_registry(
+            config.with_full_registry_limit(registry_bytes - 1),
+            false,
+            COMPACT_V2_PARTIAL_REGISTRY_PREFETCH_MIN_TRANSACTIONS,
+            true,
+            registry_bytes,
+        ));
+
+        let fixture = Fixture::main();
+        let reader = fixture.trusted_reader();
+        let request = ScanRequest::all()
+            .allow_unverified_source()
+            .without_instruction_data();
+        let (shared, receipt) = prepare_parallel_registry(
+            &reader,
+            0,
+            1,
+            &request,
+            COMPACT_V2_PARTIAL_REGISTRY_PREFETCH_MIN_TRANSACTIONS,
+            config,
+        )
+        .unwrap();
+        assert!(shared.is_some());
+        assert_eq!(receipt.mode, CompactV2ParallelRegistryMode::SharedFull);
+
+        let (shared, receipt) = prepare_parallel_registry(
+            &reader,
+            0,
+            1,
+            &request,
+            COMPACT_V2_PARTIAL_REGISTRY_PREFETCH_MIN_TRANSACTIONS - 1,
+            config,
+        )
+        .unwrap();
+        assert!(shared.is_none());
+        assert_eq!(
+            receipt.mode,
+            CompactV2ParallelRegistryMode::SparseWorkerCache
+        );
+    }
+
+    #[test]
+    fn zero_full_registry_limit_uses_the_sparse_fallback() {
+        let fixture = Fixture::main();
+        let mut source =
+            CompactV2InstructionSource::new(fixture.trusted_reader(), FIRST_SLOT).unwrap();
+        struct NoopSink;
+        impl BlockSink for NoopSink {
+            fn visit_block(&mut self, _block: BlockView<'_>) -> blockzilla_query_sdk::Result<()> {
+                Ok(())
+            }
+        }
+        let request = ScanRequest::all()
+            .allow_unverified_source()
+            .allow_incomplete_instructions()
+            .allow_incomplete_cpi()
+            .allow_unknown_execution()
+            .without_instruction_data();
+        let receipt = source
+            .scan_ordered_parallel(
+                &request,
+                &mut NoopSink,
+                CompactV2ParallelScanConfig::new(2).with_full_registry_limit(0),
+            )
+            .unwrap();
+        assert_eq!(
+            receipt.registry.mode,
+            CompactV2ParallelRegistryMode::SparseWorkerCache
+        );
+        assert_eq!(receipt.registry.prefetch_read_calls, 0);
+        assert_eq!(
+            receipt.registry.resident_bound_bytes,
+            u64::try_from(receipt.effective_workers).unwrap()
+                * u64::try_from(COMPACT_V2_QUERY_REGISTRY_RETAINED_KEY_BYTES).unwrap()
+        );
+    }
+
+    #[test]
+    fn parallel_scan_rejects_instruction_payload_requests() {
+        let fixture = Fixture::main();
+        let mut source =
+            CompactV2InstructionSource::new(fixture.trusted_reader(), FIRST_SLOT).unwrap();
+        struct NoopSink;
+        impl BlockSink for NoopSink {
+            fn visit_block(&mut self, _block: BlockView<'_>) -> blockzilla_query_sdk::Result<()> {
+                Ok(())
+            }
+        }
+        let mut sink = NoopSink;
+        let error = source
+            .scan_ordered_parallel(
+                &ScanRequest::all(),
+                &mut sink,
+                CompactV2ParallelScanConfig::new(2),
+            )
+            .unwrap_err();
+        assert!(
+            format!("{error:?}").contains("InstructionDataRequirement::None"),
+            "{error:?}"
+        );
+    }
+
+    #[test]
+    fn parallel_config_has_explicit_memory_bounds() {
+        let config =
+            compact_v2_parallel_reader_config(CompactV2ParallelScanConfig::new(12)).unwrap();
+        assert_eq!(config.decode_workers, 12);
+        assert_eq!(config.compressed_buffer_count, 3);
+        assert_eq!(config.max_blocks_per_batch, 64);
+        assert_eq!(config.uncompressed_batch_budget_bytes, 32 * 1024 * 1024);
+        assert!(
+            config.retained_decompressed_bytes_per_worker * config.decode_workers
+                <= MAX_ORDERED_PARALLEL_RETAINED_DECOMPRESSED_BYTES
+        );
+        assert!(CompactV2ParallelScanConfig::default().workers >= 1);
+        assert!(
+            CompactV2ParallelScanConfig::default().workers <= MAX_ORDERED_PARALLEL_DECODE_WORKERS
+        );
+    }
+
+    #[test]
+    fn projection_scratch_reuses_small_buffers_and_releases_large_buffers() {
+        let mut scratch = TransactionProjectionScratch::default();
+        scratch.account_keys.reserve(32);
+        scratch.account_keys.push([1; REGISTRY_KEY_BYTES]);
+        let small_capacity = scratch.account_keys.capacity();
+        scratch.finish_transaction();
+        assert!(scratch.account_keys.is_empty());
+        assert_eq!(scratch.account_keys.capacity(), small_capacity);
+
+        let oversized = COMPACT_V2_PROJECTION_SCRATCH_RETAINED_BYTES
+            / size_of::<[u8; REGISTRY_KEY_BYTES]>()
+            + 1;
+        scratch.account_keys.reserve(oversized);
+        scratch.account_keys.push([2; REGISTRY_KEY_BYTES]);
+        scratch.finish_transaction();
+        assert!(scratch.account_keys.is_empty());
+        assert_eq!(scratch.account_keys.capacity(), 0);
+    }
+
+    #[test]
+    fn omitted_primary_signatures_skip_the_signature_plane_when_data_is_not_requested() {
+        const BLOCKS: usize = 4;
+        let blocks = (0..BLOCKS)
+            .map(|block| vec![TxFixture::raw_transaction(vec![block as u8])])
+            .collect::<Vec<_>>();
+        let signatures = (0..BLOCKS)
+            .map(|block| [block as u8 + 1; SIGNATURE_BYTES])
+            .collect::<Vec<_>>();
+        let fixture = Fixture::build(Vec::new(), blocks, Some(signatures));
+        let mut source =
+            CompactV2InstructionSource::new(fixture.trusted_reader(), FIRST_SLOT).unwrap();
+        let request = ScanRequest::all()
+            .allow_unverified_source()
+            .allow_incomplete_instructions()
+            .allow_incomplete_cpi()
+            .allow_unknown_execution()
+            .without_instruction_data()
+            .without_primary_signatures();
+        let mut observed = Vec::new();
+        let receipt = source
+            .for_each_block(&request, |block| {
+                observed.push(block.transactions[0].primary_signature);
+                Ok(())
+            })
+            .unwrap();
+
+        assert_eq!(observed, vec![None; BLOCKS]);
+        assert_eq!(receipt.blocks, BLOCKS as u64);
+        assert_eq!(receipt.transactions, BLOCKS as u64);
+        assert_eq!(receipt.io.source_read_calls, Some(1));
+        assert_eq!(receipt.io.source_read_bytes, Some(fixture.compressed_bytes));
+    }
+
+    #[test]
+    fn token_balance_only_scan_filters_mints_and_omits_other_message_planes() {
+        let signer = SigningKey::from_bytes(&[52; 32]).verifying_key().to_bytes();
+        let mut exact_metadata = metadata(2, None, None, vec![], vec![]);
+        exact_metadata.pre_token_balances = vec![
+            CompactTokenBalance {
+                account_index: 0,
+                mint: Some(CompactPubkey::Id(5)),
+                owner: Some(CompactPubkey::Id(4)),
+                program_id: Some(CompactPubkey::Id(2)),
+                amount: 11,
+                decimals: 6,
+            },
+            CompactTokenBalance {
+                account_index: 1,
+                mint: Some(CompactPubkey::Id(3)),
+                owner: Some(CompactPubkey::Id(4)),
+                program_id: Some(CompactPubkey::Id(2)),
+                amount: 22,
+                decimals: 6,
+            },
+        ];
+        exact_metadata.post_token_balances = vec![CompactTokenBalance {
+            account_index: 1,
+            mint: Some(CompactPubkey::Id(3)),
+            owner: Some(CompactPubkey::Id(4)),
+            program_id: Some(CompactPubkey::Id(2)),
+            amount: 33,
+            decimals: 6,
+        }];
+        let fixture = Fixture::build(
+            vec![signer, TOKEN_PROGRAM, TARGET_MINT, TOKEN_OWNER, OTHER_MINT],
+            vec![vec![TxFixture::exact(
+                legacy_message(Vec::new()),
+                exact_metadata,
+                0,
+            )]],
+            Some(vec![[52; 64]]),
+        );
+        let mut source =
+            CompactV2InstructionSource::new(fixture.trusted_reader(), FIRST_SLOT).unwrap();
+        let request = ScanRequest::all()
+            .without_instructions()
+            .without_required_signers()
+            .without_execution_status()
+            .without_primary_signatures()
+            .with_token_balances_for([TARGET_MINT]);
+        let mut observed = None;
+        let receipt = source
+            .for_each_block(&request, |block| {
+                let transaction = &block.transactions[0];
+                observed = Some((
+                    transaction.primary_signature,
+                    transaction.required_signers.clone(),
+                    transaction.header,
+                    transaction.instructions.clone(),
+                    transaction.token_balance_coverage,
+                    transaction.token_balances.clone(),
+                ));
+                Ok(())
+            })
+            .unwrap();
+
+        let (signature, signers, header, instructions, coverage, balances) = observed.unwrap();
+        assert_eq!(signature, None);
+        assert!(signers.is_empty());
+        assert_eq!(
+            header.status,
+            ExecutionStatus::Unknown(CoverageReason::ProjectionNotRequested)
+        );
+        assert_eq!(
+            header.instruction_coverage,
+            InstructionCoverage::Unknown(CoverageReason::ProjectionNotRequested)
+        );
+        assert_eq!(
+            header.cpi_coverage,
+            CpiCoverage::Unknown(CoverageReason::ProjectionNotRequested)
+        );
+        assert!(instructions.is_empty());
+        assert_eq!(coverage, TokenBalanceCoverage::Complete);
+        assert_eq!(balances.len(), 2);
+        assert_eq!(balances[0].side, TokenBalanceSide::Pre);
+        assert_eq!(balances[0].balance_index, 1);
+        assert_eq!(balances[0].account_index, 1);
+        assert_eq!(balances[0].mint, Some(TARGET_MINT));
+        assert_eq!(balances[0].owner, Some(TOKEN_OWNER));
+        assert_eq!(balances[0].token_program, Some(TOKEN_PROGRAM));
+        assert_eq!((balances[0].amount, balances[0].decimals), (22, 6));
+        assert_eq!(balances[1].side, TokenBalanceSide::Post);
+        assert_eq!(balances[1].balance_index, 0);
+        assert_eq!((balances[1].amount, balances[1].decimals), (33, 6));
+        assert_eq!(receipt.instructions, 0);
+        assert_eq!(receipt.transactions_with_incomplete_token_balances, 0);
+        assert_eq!(receipt.io.source_read_calls, Some(2));
+        assert_eq!(
+            receipt.io.source_read_bytes,
+            Some(fixture.compressed_bytes + 5 * 32)
+        );
+    }
+
+    #[test]
     fn selected_ambiguity_requires_and_uses_exact_signature_proof() {
         let (missing, _) = Fixture::ambiguous(false);
         let mut source =
@@ -2253,6 +4785,28 @@ mod tests {
             })
             .unwrap();
         assert_eq!(observed, Some((selected_data, Some(expected_signature))));
+
+        let (proved, selected_data) = Fixture::ambiguous(true);
+        let mut source =
+            CompactV2InstructionSource::new(proved.trusted_reader(), FIRST_SLOT).unwrap();
+        let mut observed = None;
+        let receipt = source
+            .for_each_block(&ScanRequest::all().without_primary_signatures(), |block| {
+                observed = Some((
+                    block.transactions[0].instructions[0].data.clone(),
+                    block.transactions[0].primary_signature,
+                ));
+                Ok(())
+            })
+            .unwrap();
+        assert_eq!(observed, Some((selected_data, None)));
+        assert!(
+            receipt
+                .io
+                .source_read_bytes
+                .is_some_and(|bytes| bytes >= SIGNATURE_BYTES as u64),
+            "selected instruction data must retain its signature proof read"
+        );
     }
 
     #[test]
@@ -2359,7 +4913,7 @@ mod tests {
             ARCHIVE_V2_PREV_BLOCKHASH_TAIL_FILE,
             ARCHIVE_V2_VOTE_HASH_REGISTRY_FILE,
         ] {
-            assert!(reader.manifest().file(name).is_some(), "missing {name}");
+            assert!(reader.file_size(name).is_some(), "missing {name}");
         }
         let mut source = CompactV2InstructionSource::new(reader, FIRST_SLOT).unwrap();
         let mut observed = None;
@@ -2434,7 +4988,7 @@ mod tests {
     }
 
     #[test]
-    fn source_identity_preserves_published_and_operator_trust() {
+    fn source_identity_preserves_operator_trust_and_rejects_published_manifest() {
         let fixture = Fixture::main();
         let trusted =
             CompactV2InstructionSource::new(fixture.trusted_reader(), FIRST_SLOT).unwrap();
@@ -2442,16 +4996,26 @@ mod tests {
             trusted.identity().verification,
             SourceVerification::OperatorTrusted
         );
-        assert_eq!(trusted.identity().binding, None);
-
-        let published =
-            CompactV2InstructionSource::new(fixture.published_reader(), FIRST_SLOT).unwrap();
         assert_eq!(
-            published.identity().verification,
-            SourceVerification::PublishedManifest
+            trusted.identity().binding.as_deref(),
+            Some("operator-trusted-candidate-id=compact-query-fixture")
         );
-        assert!(published.identity().binding.is_some());
-        assert_eq!(published.identity().first_slot, FIRST_SLOT);
+        let reopened =
+            CompactV2InstructionSource::new(fixture.trusted_reader(), FIRST_SLOT).unwrap();
+        assert_eq!(trusted.identity().binding, reopened.identity().binding);
+
+        let replacement = CompactV2InstructionSource::new(
+            fixture.trusted_reader_with_candidate("compact-query-fixture-r2"),
+            FIRST_SLOT,
+        )
+        .unwrap();
+        assert_ne!(trusted.identity().binding, replacement.identity().binding);
+
+        let error =
+            CompactV2InstructionSource::new(fixture.published_reader(), FIRST_SLOT).unwrap_err();
+        assert!(format!("{error}").contains(
+            "publication-manifest readers are retired; reopen the archive as a pinned local or strong-ETag object set"
+        ));
     }
 
     #[test]

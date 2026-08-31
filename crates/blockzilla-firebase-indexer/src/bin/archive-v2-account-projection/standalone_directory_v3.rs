@@ -1351,13 +1351,26 @@ struct DenseRecord {
     lengths: [u32; DENSE_FIELD_COUNT],
 }
 
-#[derive(Debug)]
+#[derive(Debug, Default)]
 struct DecodedGroup {
     records: Vec<DenseRecord>,
     rewards: Vec<Option<u32>>,
     raw_fallbacks: Vec<Option<u32>>,
     reward_record_count: u16,
     raw_record_count: u16,
+}
+
+impl DecodedGroup {
+    fn prepare(&mut self, tx_in_group: usize) {
+        self.records.clear();
+        self.rewards.clear();
+        self.raw_fallbacks.clear();
+        self.records.reserve(tx_in_group);
+        self.rewards.resize(tx_in_group, None);
+        self.raw_fallbacks.resize(tx_in_group, None);
+        self.reward_record_count = 0;
+        self.raw_record_count = 0;
+    }
 }
 
 #[derive(Debug, Default, Clone, Copy, PartialEq, Eq)]
@@ -1373,6 +1386,99 @@ pub struct DecodedDirectory<'a> {
     pub header: DirectoryHeader,
     checkpoints: Vec<Checkpoint>,
     validation_scans: DirectoryScanCounters,
+}
+
+/// An ordered transaction cursor over one validated directory.
+///
+/// The cursor keeps one decoded checkpoint group and reuses its storage. A
+/// complete scan decodes every group once. A selected scan accepts only
+/// strictly increasing transaction indexes and decodes every required group
+/// once, including when several selected transactions share that group.
+#[derive(Debug)]
+pub struct DirectoryCursor<'directory, 'bytes, 'selection> {
+    directory: &'directory DecodedDirectory<'bytes>,
+    first_signature_ordinal: u64,
+    selected_indexes: Option<&'selection [u32]>,
+    next_selection: usize,
+    group_index: Option<u32>,
+    decoded_group_count: u32,
+    group: DecodedGroup,
+    next_local: usize,
+    object_ends: [u32; OBJECT_COUNT],
+    signature_prefix: u64,
+    finished: bool,
+}
+
+#[allow(clippy::too_many_arguments)]
+fn selected_transaction(
+    tx_index: u32,
+    local_index: usize,
+    record: DenseRecord,
+    reward_len: Option<u32>,
+    raw_fallback_len: Option<u32>,
+    starts: [u32; OBJECT_COUNT],
+    object_ends: [u32; OBJECT_COUNT],
+    relative_signature_start: u64,
+    relative_signature_end: u64,
+    first_signature_ordinal: u64,
+    reward_record_count: u16,
+    raw_record_count: u16,
+) -> DirectoryResult<SelectedTransaction> {
+    let kind = metadata_kind(record.source_flags)?;
+    let mut objects = array::from_fn(|_| ObjectSlice::Absent);
+    objects[0] = ObjectSlice::Stored(starts[0]..object_ends[0]);
+    if kind == MetadataKind::Decoded {
+        for index in 1..DENSE_FIELD_COUNT {
+            objects[index] = ObjectSlice::Stored(starts[index]..object_ends[index]);
+        }
+    }
+    let reward = match (kind, reward_len) {
+        (MetadataKind::Decoded, Some(_))
+            if record.effect_state & EFFECT_STATE_SEMANTIC_REWARDS != 0 =>
+        {
+            objects[7] = ObjectSlice::Stored(starts[7]..object_ends[7]);
+            RewardSlice::SemanticStored(starts[7]..object_ends[7])
+        }
+        (MetadataKind::Decoded, Some(_)) => {
+            objects[7] = ObjectSlice::Stored(starts[7]..object_ends[7]);
+            RewardSlice::NoncanonicalEmptyStored(starts[7]..object_ends[7])
+        }
+        (MetadataKind::Decoded, None) => {
+            objects[7] = ObjectSlice::ImplicitCanonicalEmpty;
+            RewardSlice::ImplicitCanonicalEmpty
+        }
+        (MetadataKind::Missing | MetadataKind::RawFallback, None) => RewardSlice::Absent,
+        _ => return Err(DirectoryError::new("invalid reward sparse semantics")),
+    };
+    if raw_fallback_len.is_some() {
+        objects[8] = ObjectSlice::Stored(starts[8]..object_ends[8]);
+    }
+    let absolute_start = first_signature_ordinal
+        .checked_add(relative_signature_start)
+        .ok_or_else(|| DirectoryError::new("absolute signature start overflow"))?;
+    let absolute_end = first_signature_ordinal
+        .checked_add(relative_signature_end)
+        .ok_or_else(|| DirectoryError::new("absolute signature end overflow"))?;
+    let byte_start = absolute_start
+        .checked_mul(SIGNATURE_BYTES)
+        .ok_or_else(|| DirectoryError::new("signature byte start overflow"))?;
+    let byte_end = absolute_end
+        .checked_mul(SIGNATURE_BYTES)
+        .ok_or_else(|| DirectoryError::new("signature byte end overflow"))?;
+    Ok(SelectedTransaction {
+        tx_index,
+        source_flags: record.source_flags,
+        effect_state: record.effect_state,
+        signature_count: record.signature_count,
+        objects,
+        reward,
+        relative_signature_ordinals: relative_signature_start..relative_signature_end,
+        absolute_signature_ordinals: absolute_start..absolute_end,
+        absolute_signature_bytes: byte_start..byte_end,
+        dense_records_scanned: u16::try_from(local_index + 1).expect("group length is at most 128"),
+        reward_records_scanned: reward_record_count,
+        raw_records_scanned: raw_record_count,
+    })
 }
 
 impl<'a> DecodedDirectory<'a> {
@@ -1486,8 +1592,9 @@ impl<'a> DecodedDirectory<'a> {
             checkpoints,
             validation_scans: DirectoryScanCounters::default(),
         };
+        let mut decoded_group = DecodedGroup::default();
         for group in 0..decoded.header.group_count {
-            let decoded_group = decoded.decode_group(group)?;
+            decoded.decode_group_into(group, &mut decoded_group)?;
             decoded.validation_scans.dense_records = decoded
                 .validation_scans
                 .dense_records
@@ -1509,6 +1616,62 @@ impl<'a> DecodedDirectory<'a> {
 
     pub const fn validation_scan_counters(&self) -> DirectoryScanCounters {
         self.validation_scans
+    }
+
+    /// Iterate over all transactions in increasing transaction-index order.
+    pub fn cursor<'directory>(
+        &'directory self,
+        first_signature_ordinal: u64,
+    ) -> DirectoryCursor<'directory, 'a, 'directory> {
+        DirectoryCursor {
+            directory: self,
+            first_signature_ordinal,
+            selected_indexes: None,
+            next_selection: 0,
+            group_index: None,
+            decoded_group_count: 0,
+            group: DecodedGroup::default(),
+            next_local: 0,
+            object_ends: [0; OBJECT_COUNT],
+            signature_prefix: 0,
+            finished: false,
+        }
+    }
+
+    /// Iterate over selected transactions in strictly increasing index order.
+    ///
+    /// Empty selections are valid. Invalid, duplicate, decreasing, or
+    /// out-of-block indexes are rejected before iteration starts.
+    pub fn selected_cursor<'directory, 'selection>(
+        &'directory self,
+        first_signature_ordinal: u64,
+        selected_indexes: &'selection [u32],
+    ) -> DirectoryResult<DirectoryCursor<'directory, 'a, 'selection>> {
+        let mut previous = None;
+        for &tx_index in selected_indexes {
+            require(
+                tx_index < self.header.tx_count,
+                "selected transaction index is outside block",
+            )?;
+            require(
+                previous.is_none_or(|value| tx_index > value),
+                "selected transaction indexes are not strictly increasing",
+            )?;
+            previous = Some(tx_index);
+        }
+        Ok(DirectoryCursor {
+            directory: self,
+            first_signature_ordinal,
+            selected_indexes: Some(selected_indexes),
+            next_selection: 0,
+            group_index: None,
+            decoded_group_count: 0,
+            group: DecodedGroup::default(),
+            next_local: 0,
+            object_ends: [0; OBJECT_COUNT],
+            signature_prefix: 0,
+            finished: false,
+        })
     }
 
     pub fn object_lengths(&self) -> [u32; OBJECT_COUNT] {
@@ -1575,64 +1738,20 @@ impl<'a> DecodedDirectory<'a> {
                 .checked_add(u64::from(record.signature_count))
                 .ok_or_else(|| DirectoryError::new("lookup signature prefix overflow"))?;
             if local == local_index {
-                let kind = metadata_kind(record.source_flags)?;
-                let mut objects = array::from_fn(|_| ObjectSlice::Absent);
-                objects[0] = ObjectSlice::Stored(starts[0]..object_ends[0]);
-                if kind == MetadataKind::Decoded {
-                    for index in 1..DENSE_FIELD_COUNT {
-                        objects[index] = ObjectSlice::Stored(starts[index]..object_ends[index]);
-                    }
-                }
-                let reward = match (kind, group.rewards[local]) {
-                    (MetadataKind::Decoded, Some(_))
-                        if record.effect_state & EFFECT_STATE_SEMANTIC_REWARDS != 0 =>
-                    {
-                        objects[7] = ObjectSlice::Stored(starts[7]..object_ends[7]);
-                        RewardSlice::SemanticStored(starts[7]..object_ends[7])
-                    }
-                    (MetadataKind::Decoded, Some(_)) => {
-                        objects[7] = ObjectSlice::Stored(starts[7]..object_ends[7]);
-                        RewardSlice::NoncanonicalEmptyStored(starts[7]..object_ends[7])
-                    }
-                    (MetadataKind::Decoded, None) => {
-                        objects[7] = ObjectSlice::ImplicitCanonicalEmpty;
-                        RewardSlice::ImplicitCanonicalEmpty
-                    }
-                    (MetadataKind::Missing | MetadataKind::RawFallback, None) => {
-                        RewardSlice::Absent
-                    }
-                    _ => return Err(DirectoryError::new("invalid reward sparse semantics")),
-                };
-                if group.raw_fallbacks[local].is_some() {
-                    objects[8] = ObjectSlice::Stored(starts[8]..object_ends[8]);
-                }
-                let absolute_start = first_signature_ordinal
-                    .checked_add(relative_start)
-                    .ok_or_else(|| DirectoryError::new("absolute signature start overflow"))?;
-                let absolute_end = first_signature_ordinal
-                    .checked_add(signature_prefix)
-                    .ok_or_else(|| DirectoryError::new("absolute signature end overflow"))?;
-                let byte_start = absolute_start
-                    .checked_mul(SIGNATURE_BYTES)
-                    .ok_or_else(|| DirectoryError::new("signature byte start overflow"))?;
-                let byte_end = absolute_end
-                    .checked_mul(SIGNATURE_BYTES)
-                    .ok_or_else(|| DirectoryError::new("signature byte end overflow"))?;
-                return Ok(SelectedTransaction {
+                return selected_transaction(
                     tx_index,
-                    source_flags: record.source_flags,
-                    effect_state: record.effect_state,
-                    signature_count: record.signature_count,
-                    objects,
-                    reward,
-                    relative_signature_ordinals: relative_start..signature_prefix,
-                    absolute_signature_ordinals: absolute_start..absolute_end,
-                    absolute_signature_bytes: byte_start..byte_end,
-                    dense_records_scanned: u16::try_from(local + 1)
-                        .expect("group length is at most 128"),
-                    reward_records_scanned: group.reward_record_count,
-                    raw_records_scanned: group.raw_record_count,
-                });
+                    local,
+                    record,
+                    group.rewards[local],
+                    group.raw_fallbacks[local],
+                    starts,
+                    object_ends,
+                    relative_start,
+                    signature_prefix,
+                    first_signature_ordinal,
+                    group.reward_record_count,
+                    group.raw_record_count,
+                );
             }
         }
         Err(DirectoryError::new(
@@ -1641,6 +1760,12 @@ impl<'a> DecodedDirectory<'a> {
     }
 
     fn decode_group(&self, group_index: u32) -> DirectoryResult<DecodedGroup> {
+        let mut group = DecodedGroup::default();
+        self.decode_group_into(group_index, &mut group)?;
+        Ok(group)
+    }
+
+    fn decode_group_into(&self, group_index: u32, group: &mut DecodedGroup) -> DirectoryResult<()> {
         require(
             group_index < self.header.group_count,
             "group index is outside directory",
@@ -1650,17 +1775,18 @@ impl<'a> DecodedDirectory<'a> {
         let first_tx = group_index * u32::from(self.header.stride);
         let tx_in_group =
             (self.header.tx_count - first_tx).min(u32::from(self.header.stride)) as usize;
-        let (rewards, reward_record_count) = self.parse_sparse_group(
+        group.prepare(tx_in_group);
+        group.reward_record_count = self.parse_sparse_group_into(
             REWARD_SECTION,
             checkpoint.reward_offset,
             next.reward_offset,
-            tx_in_group,
+            &mut group.rewards,
         )?;
-        let (raw_fallbacks, raw_record_count) = self.parse_sparse_group(
+        group.raw_record_count = self.parse_sparse_group_into(
             RAW_SECTION,
             checkpoint.raw_offset,
             next.raw_offset,
-            tx_in_group,
+            &mut group.raw_fallbacks,
         )?;
         let dense_section = self.header.sections[DENSE_SECTION];
         let dense_bytes = &self.bytes[dense_section.range()];
@@ -1670,7 +1796,6 @@ impl<'a> DecodedDirectory<'a> {
             limit <= dense_bytes.len(),
             "checkpoint dense offset exceeds section",
         )?;
-        let mut records = Vec::with_capacity(tx_in_group);
         for _ in 0..tx_in_group {
             let control = read_uleb_u32(dense_bytes, &mut cursor, limit)?;
             require(
@@ -1684,7 +1809,7 @@ impl<'a> DecodedDirectory<'a> {
             for length in &mut lengths {
                 *length = read_uleb_u32(dense_bytes, &mut cursor, limit)?;
             }
-            records.push(DenseRecord {
+            group.records.push(DenseRecord {
                 source_flags,
                 effect_state,
                 signature_count,
@@ -1699,17 +1824,17 @@ impl<'a> DecodedDirectory<'a> {
         let mut object_ends = checkpoint.object_ends;
         let mut signature_prefix = checkpoint.signature_prefix;
         for local in 0..tx_in_group {
-            let record = records[local];
-            validate_wire_record(&record, rewards[local], raw_fallbacks[local])?;
+            let record = group.records[local];
+            validate_wire_record(&record, group.rewards[local], group.raw_fallbacks[local])?;
             for (index, length) in record.lengths.into_iter().enumerate() {
                 object_ends[index] =
                     checked_add_u32(object_ends[index], length, "decoded object end")?;
             }
-            if let Some(length) = rewards[local] {
+            if let Some(length) = group.rewards[local] {
                 object_ends[7] =
                     checked_add_u32(object_ends[7], length, "decoded reward object end")?;
             }
-            if let Some(length) = raw_fallbacks[local] {
+            if let Some(length) = group.raw_fallbacks[local] {
                 object_ends[8] = checked_add_u32(object_ends[8], length, "decoded raw object end")?;
             }
             signature_prefix = signature_prefix
@@ -1724,22 +1849,16 @@ impl<'a> DecodedDirectory<'a> {
             signature_prefix == next.signature_prefix,
             "checkpoint signature prefix differs from decoded records",
         )?;
-        Ok(DecodedGroup {
-            records,
-            rewards,
-            raw_fallbacks,
-            reward_record_count,
-            raw_record_count,
-        })
+        Ok(())
     }
 
-    fn parse_sparse_group(
+    fn parse_sparse_group_into(
         &self,
         section_index: usize,
         start: u32,
         end: u32,
-        tx_in_group: usize,
-    ) -> DirectoryResult<(Vec<Option<u32>>, u16)> {
+        lengths: &mut [Option<u32>],
+    ) -> DirectoryResult<u16> {
         require(start <= end, "sparse checkpoint offsets decrease")?;
         let section = self.header.sections[section_index];
         require(
@@ -1749,7 +1868,7 @@ impl<'a> DecodedDirectory<'a> {
         let bytes = &self.bytes[section.range()];
         let mut cursor = start as usize;
         let limit = end as usize;
-        let mut lengths = vec![None; tx_in_group];
+        let tx_in_group = lengths.len();
         let mut prior_local: Option<u32> = None;
         let mut count = 0_u16;
         while cursor < limit {
@@ -1779,9 +1898,142 @@ impl<'a> DecodedDirectory<'a> {
                 .ok_or_else(|| DirectoryError::new("sparse record count overflow"))?;
         }
         require(cursor == limit, "sparse checkpoint splits a record")?;
-        Ok((lengths, count))
+        Ok(count)
     }
 }
+
+impl DirectoryCursor<'_, '_, '_> {
+    /// Number of checkpoint groups decoded by this cursor.
+    pub const fn decoded_group_count(&self) -> u32 {
+        self.decoded_group_count
+    }
+}
+
+impl<'directory, 'bytes, 'selection> Iterator for DirectoryCursor<'directory, 'bytes, 'selection> {
+    type Item = DirectoryResult<SelectedTransaction>;
+
+    fn next(&mut self) -> Option<Self::Item> {
+        if self.finished {
+            return None;
+        }
+        let tx_index = match self.selected_indexes {
+            Some(indexes) => indexes.get(self.next_selection).copied(),
+            None => u32::try_from(self.next_selection)
+                .ok()
+                .filter(|index| *index < self.directory.header.tx_count),
+        };
+        let Some(tx_index) = tx_index else {
+            self.finished = true;
+            return None;
+        };
+        self.next_selection += 1;
+
+        let stride = u32::from(self.directory.header.stride);
+        let group_index = tx_index / stride;
+        if self.group_index != Some(group_index) {
+            if let Err(error) = self
+                .directory
+                .decode_group_into(group_index, &mut self.group)
+            {
+                self.finished = true;
+                return Some(Err(error));
+            }
+            let checkpoint = self.directory.checkpoints[group_index as usize];
+            self.group_index = Some(group_index);
+            self.decoded_group_count += 1;
+            self.next_local = 0;
+            self.object_ends = checkpoint.object_ends;
+            self.signature_prefix = checkpoint.signature_prefix;
+        }
+
+        let target_local = (tx_index % stride) as usize;
+        if self.next_local > target_local {
+            self.finished = true;
+            return Some(Err(DirectoryError::new(
+                "cursor transaction order decreases within checkpoint group",
+            )));
+        }
+        while self.next_local <= target_local {
+            let local = self.next_local;
+            let record = self.group.records[local];
+            let reward_len = self.group.rewards[local];
+            let raw_fallback_len = self.group.raw_fallbacks[local];
+            let starts = self.object_ends;
+            for (index, length) in record.lengths.into_iter().enumerate() {
+                match checked_add_u32(self.object_ends[index], length, "cursor object end") {
+                    Ok(end) => self.object_ends[index] = end,
+                    Err(error) => {
+                        self.finished = true;
+                        return Some(Err(error));
+                    }
+                }
+            }
+            if let Some(length) = reward_len {
+                match checked_add_u32(self.object_ends[7], length, "cursor reward object end") {
+                    Ok(end) => self.object_ends[7] = end,
+                    Err(error) => {
+                        self.finished = true;
+                        return Some(Err(error));
+                    }
+                }
+            }
+            if let Some(length) = raw_fallback_len {
+                match checked_add_u32(self.object_ends[8], length, "cursor raw object end") {
+                    Ok(end) => self.object_ends[8] = end,
+                    Err(error) => {
+                        self.finished = true;
+                        return Some(Err(error));
+                    }
+                }
+            }
+            let relative_signature_start = self.signature_prefix;
+            let Some(relative_signature_end) = self
+                .signature_prefix
+                .checked_add(u64::from(record.signature_count))
+            else {
+                self.finished = true;
+                return Some(Err(DirectoryError::new("cursor signature prefix overflow")));
+            };
+            self.signature_prefix = relative_signature_end;
+            self.next_local += 1;
+
+            if local == target_local {
+                let selected = selected_transaction(
+                    tx_index,
+                    local,
+                    record,
+                    reward_len,
+                    raw_fallback_len,
+                    starts,
+                    self.object_ends,
+                    relative_signature_start,
+                    relative_signature_end,
+                    self.first_signature_ordinal,
+                    self.group.reward_record_count,
+                    self.group.raw_record_count,
+                );
+                if selected.is_err() {
+                    self.finished = true;
+                }
+                return Some(selected);
+            }
+        }
+        self.finished = true;
+        Some(Err(DirectoryError::new(
+            "cursor did not reach selected transaction",
+        )))
+    }
+
+    fn size_hint(&self) -> (usize, Option<usize>) {
+        let remaining = match self.selected_indexes {
+            Some(indexes) => indexes.len().saturating_sub(self.next_selection),
+            None => (self.directory.header.tx_count as usize).saturating_sub(self.next_selection),
+        };
+        (remaining, Some(remaining))
+    }
+}
+
+impl std::iter::FusedIterator for DirectoryCursor<'_, '_, '_> {}
 
 #[cfg(test)]
 mod tests {
@@ -1975,6 +2227,87 @@ mod tests {
                 .verify_external_totals(wrong, decoded.signature_count())
                 .is_err()
         );
+    }
+
+    #[test]
+    fn ordered_cursors_match_point_lookup_for_all_strides_and_sparse_lanes() {
+        let layouts = (0..259)
+            .map(|index| match index % 5 {
+                0 => missing(1 + index as u64 % 7, 1),
+                1 => raw(2 + index as u64 % 5, 2, 1 + index as u64 % 3),
+                2 => decoded(3 + index as u64 % 4, 1, None),
+                3 => decoded(4 + index as u64 % 3, 3, Some(2 + index as u64 % 6)),
+                _ => {
+                    let mut layout = decoded(5 + index as u64 % 2, 2, None);
+                    layout.reward = TransactionReward::NoncanonicalEmptyStored(2);
+                    layout
+                }
+            })
+            .collect::<Vec<_>>();
+
+        for stride in SUPPORTED_STRIDES {
+            let encoded = encode_with_stride(&layouts, stride).unwrap();
+            let decoded = DecodedDirectory::decode_production(&encoded.bytes).unwrap();
+            let expected = (0..layouts.len() as u32)
+                .map(|tx_index| decoded.lookup(tx_index, 17).unwrap())
+                .collect::<Vec<_>>();
+            let mut cursor = decoded.cursor(17);
+            let actual = cursor
+                .by_ref()
+                .collect::<DirectoryResult<Vec<_>>>()
+                .unwrap();
+            assert_eq!(actual, expected, "stride {stride}");
+            assert_eq!(cursor.decoded_group_count(), decoded.header.group_count);
+
+            let stride = u32::from(stride);
+            let selected_indexes = [
+                0,
+                1,
+                stride - 1,
+                stride,
+                stride + 1,
+                stride * 2 - 1,
+                stride * 2,
+                258,
+            ];
+            let selected_indexes = selected_indexes
+                .into_iter()
+                .filter(|index| *index < layouts.len() as u32)
+                .collect::<Vec<_>>();
+            let expected = selected_indexes
+                .iter()
+                .map(|&tx_index| decoded.lookup(tx_index, 17).unwrap())
+                .collect::<Vec<_>>();
+            let mut cursor = decoded.selected_cursor(17, &selected_indexes).unwrap();
+            let actual = cursor
+                .by_ref()
+                .collect::<DirectoryResult<Vec<_>>>()
+                .unwrap();
+            assert_eq!(actual, expected, "selected stride {stride}");
+            let expected_groups = selected_indexes
+                .iter()
+                .map(|tx_index| tx_index / stride)
+                .collect::<std::collections::BTreeSet<_>>()
+                .len() as u32;
+            assert_eq!(cursor.decoded_group_count(), expected_groups);
+        }
+    }
+
+    #[test]
+    fn selected_cursor_validates_order_bounds_and_empty_selection() {
+        let encoded = encode_with_stride(&vec![missing(1, 1); 3], 32).unwrap();
+        let decoded = DecodedDirectory::decode_production(&encoded.bytes).unwrap();
+        assert_eq!(
+            decoded
+                .selected_cursor(0, &[])
+                .unwrap()
+                .collect::<DirectoryResult<Vec<_>>>()
+                .unwrap(),
+            []
+        );
+        assert!(decoded.selected_cursor(0, &[1, 1]).is_err());
+        assert!(decoded.selected_cursor(0, &[2, 1]).is_err());
+        assert!(decoded.selected_cursor(0, &[3]).is_err());
     }
 
     #[test]

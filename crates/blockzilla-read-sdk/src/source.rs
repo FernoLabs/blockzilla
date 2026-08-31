@@ -4,10 +4,14 @@ use std::{
     io::{self, Read},
     os::unix::fs::{FileExt, MetadataExt},
     path::{Path, PathBuf},
-    sync::{Arc, Mutex},
+    sync::{
+        Arc, Mutex,
+        atomic::{AtomicU64, Ordering},
+    },
 };
 
 use rustix::fs::{Mode, OFlags};
+use serde::Serialize;
 
 use crate::{SourceError, manifest::validate_object_name};
 
@@ -39,6 +43,30 @@ pub trait RangeSource: Send + Sync {
         destination: &mut Vec<u8>,
     ) -> SourceResult<()> {
         *destination = self.read_range(object, offset, length)?;
+        Ok(())
+    }
+
+    /// Read an exact range into an already initialized destination slice.
+    ///
+    /// The default keeps custom sources compatible, but it allocates one
+    /// temporary response. Local, cached, and HTTP sources override this method
+    /// so callers can fill their final storage directly.
+    fn read_range_into_slice(
+        &self,
+        object: &str,
+        offset: u64,
+        destination: &mut [u8],
+    ) -> SourceResult<()> {
+        let expected = destination.len();
+        let bytes = self.read_range(object, offset, expected)?;
+        if bytes.len() != expected {
+            return Err(SourceError::ShortRead {
+                object: object.to_owned(),
+                expected,
+                actual: bytes.len(),
+            });
+        }
+        destination.copy_from_slice(&bytes);
         Ok(())
     }
 
@@ -75,6 +103,15 @@ impl<T: RangeSource + ?Sized> RangeSource for Arc<T> {
         destination: &mut Vec<u8>,
     ) -> SourceResult<()> {
         (**self).read_range_into(object, offset, length, destination)
+    }
+
+    fn read_range_into_slice(
+        &self,
+        object: &str,
+        offset: u64,
+        destination: &mut [u8],
+    ) -> SourceResult<()> {
+        (**self).read_range_into_slice(object, offset, destination)
     }
 }
 
@@ -132,6 +169,23 @@ impl RangeSource for LocalRangeSource {
         length: usize,
         bytes: &mut Vec<u8>,
     ) -> SourceResult<()> {
+        // Preserve initialized storage across sequential range reads. Clearing
+        // before resizing would zero the entire reused batch even though the
+        // following `read_at` loop overwrites every requested byte.
+        if bytes.len() < length {
+            bytes.resize(length, 0);
+        } else {
+            bytes.truncate(length);
+        }
+        self.read_range_into_slice(object, offset, bytes)
+    }
+
+    fn read_range_into_slice(
+        &self,
+        object: &str,
+        offset: u64,
+        bytes: &mut [u8],
+    ) -> SourceResult<()> {
         let path = self.path(object)?;
         let file = File::open(&path).map_err(|source| {
             if source.kind() == io::ErrorKind::NotFound {
@@ -150,6 +204,7 @@ impl RangeSource for LocalRangeSource {
                 source,
             })?
             .len();
+        let length = bytes.len();
         let length_u64 = u64::try_from(length).map_err(|_| SourceError::OutOfBounds {
             object: object.to_owned(),
             offset,
@@ -173,14 +228,6 @@ impl RangeSource for LocalRangeSource {
             });
         }
 
-        // Preserve initialized storage across sequential range reads. Clearing
-        // before resizing would zero the entire reused batch even though the
-        // following `read_at` loop overwrites every requested byte.
-        if bytes.len() < length {
-            bytes.resize(length, 0);
-        } else {
-            bytes.truncate(length);
-        }
         let mut read = 0usize;
         while read < length {
             let read_offset = offset + read as u64;
@@ -214,6 +261,23 @@ struct UnixFileIdentity {
     changed_nanoseconds: i64,
 }
 
+/// Stable local-file identity captured when an anchored source opens an object.
+///
+/// This is metadata, not a content hash. A durable consumer can store these
+/// values and refuse resume after a pathname is replaced, even when the new
+/// file has the same length.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+pub struct PinnedLocalObjectIdentity {
+    pub object: String,
+    pub device: u64,
+    pub inode: u64,
+    pub size: u64,
+    pub modified_seconds: i64,
+    pub modified_nanoseconds: i64,
+    pub changed_seconds: i64,
+    pub changed_nanoseconds: i64,
+}
+
 impl UnixFileIdentity {
     fn from_metadata(metadata: &std::fs::Metadata) -> Self {
         Self {
@@ -234,6 +298,19 @@ struct PinnedFile {
     identity: UnixFileIdentity,
 }
 
+/// Successful local range reads performed through a pinned source.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct PinnedLocalRangeSourceStats {
+    pub read_calls: u64,
+    pub read_bytes: u64,
+}
+
+#[derive(Debug, Default)]
+struct PinnedLocalRangeSourceCounters {
+    read_calls: AtomicU64,
+    read_bytes: AtomicU64,
+}
+
 /// Random-access source that pins every opened object to one file descriptor.
 ///
 /// This is intended for long-running local archive scans. The first lookup of
@@ -246,6 +323,7 @@ pub struct PinnedLocalRangeSource {
     root_directory: Option<Arc<File>>,
     allowed_objects: Option<Arc<HashMap<String, ()>>>,
     files: Arc<Mutex<HashMap<String, Option<PinnedFile>>>>,
+    counters: Arc<PinnedLocalRangeSourceCounters>,
 }
 
 impl PinnedLocalRangeSource {
@@ -255,6 +333,7 @@ impl PinnedLocalRangeSource {
             root_directory: None,
             allowed_objects: None,
             files: Arc::new(Mutex::new(HashMap::new())),
+            counters: Arc::new(PinnedLocalRangeSourceCounters::default()),
         }
     }
 
@@ -306,11 +385,20 @@ impl PinnedLocalRangeSource {
             root_directory: Some(Arc::new(directory)),
             allowed_objects: Some(Arc::new(allowed)),
             files: Arc::new(Mutex::new(HashMap::new())),
+            counters: Arc::new(PinnedLocalRangeSourceCounters::default()),
         })
     }
 
     pub fn root(&self) -> &Path {
         &self.root
+    }
+
+    /// Return successful range-read counters shared by all source clones.
+    pub fn stats(&self) -> PinnedLocalRangeSourceStats {
+        PinnedLocalRangeSourceStats {
+            read_calls: self.counters.read_calls.load(Ordering::Relaxed),
+            read_bytes: self.counters.read_bytes.load(Ordering::Relaxed),
+        }
     }
 
     /// Clone the pinned source-directory descriptor, when this source was
@@ -341,6 +429,31 @@ impl PinnedLocalRangeSource {
                 })
             })
             .transpose()
+    }
+
+    /// Return the sorted identities of every present object admitted so far.
+    pub fn pinned_object_identities(&self) -> SourceResult<Vec<PinnedLocalObjectIdentity>> {
+        let files = self.files.lock().map_err(|_| {
+            SourceError::Protocol("pinned local source file cache is poisoned".to_owned())
+        })?;
+        let mut identities = files
+            .iter()
+            .filter_map(|(object, file)| {
+                let identity = file.as_ref()?.identity;
+                Some(PinnedLocalObjectIdentity {
+                    object: object.clone(),
+                    device: identity.device,
+                    inode: identity.inode,
+                    size: identity.size,
+                    modified_seconds: identity.modified_seconds,
+                    modified_nanoseconds: identity.modified_nanoseconds,
+                    changed_seconds: identity.changed_seconds,
+                    changed_nanoseconds: identity.changed_nanoseconds,
+                })
+            })
+            .collect::<Vec<_>>();
+        identities.sort_unstable_by(|left, right| left.object.cmp(&right.object));
+        Ok(identities)
     }
 
     fn path(&self, object: &str) -> SourceResult<PathBuf> {
@@ -478,10 +591,25 @@ impl RangeSource for PinnedLocalRangeSource {
         length: usize,
         bytes: &mut Vec<u8>,
     ) -> SourceResult<()> {
+        if bytes.len() < length {
+            bytes.resize(length, 0);
+        } else {
+            bytes.truncate(length);
+        }
+        self.read_range_into_slice(object, offset, bytes)
+    }
+
+    fn read_range_into_slice(
+        &self,
+        object: &str,
+        offset: u64,
+        bytes: &mut [u8],
+    ) -> SourceResult<()> {
         let pinned = self
             .pinned_file(object)?
             .ok_or_else(|| SourceError::NotFound(object.to_owned()))?;
         let size = pinned.identity.size;
+        let length = bytes.len();
         let length_u64 = u64::try_from(length).map_err(|_| SourceError::OutOfBounds {
             object: object.to_owned(),
             offset,
@@ -505,11 +633,6 @@ impl RangeSource for PinnedLocalRangeSource {
             });
         }
 
-        if bytes.len() < length {
-            bytes.resize(length, 0);
-        } else {
-            bytes.truncate(length);
-        }
         let mut read = 0usize;
         while read < length {
             let read_offset = offset + read as u64;
@@ -529,6 +652,10 @@ impl RangeSource for PinnedLocalRangeSource {
             }
             read += count;
         }
+        self.counters.read_calls.fetch_add(1, Ordering::Relaxed);
+        self.counters
+            .read_bytes
+            .fetch_add(length as u64, Ordering::Relaxed);
         Ok(())
     }
 }
@@ -587,6 +714,21 @@ impl<P: RangeSource, F: RangeSource> RangeSource for OverlayRangeSource<P, F> {
         } else {
             self.fallback
                 .read_range_into(object, offset, length, destination)
+        }
+    }
+
+    fn read_range_into_slice(
+        &self,
+        object: &str,
+        offset: u64,
+        destination: &mut [u8],
+    ) -> SourceResult<()> {
+        if self.primary.size(object)?.is_some() {
+            self.primary
+                .read_range_into_slice(object, offset, destination)
+        } else {
+            self.fallback
+                .read_range_into_slice(object, offset, destination)
         }
     }
 }
@@ -682,6 +824,11 @@ mod tests {
             .unwrap();
         assert_eq!(reusable.as_ptr(), allocation);
         assert_eq!(reusable, b"789");
+        let mut direct = [0_u8; 4];
+        source
+            .read_range_into_slice("object.bin", 2, &mut direct)
+            .unwrap();
+        assert_eq!(&direct, b"2345");
         assert!(source.read_range("../object.bin", 0, 1).is_err());
         assert!(source.read_range("object.bin", 9, 2).is_err());
     }
@@ -699,6 +846,13 @@ mod tests {
 
         assert_eq!(source.size("object.bin").unwrap(), Some(8));
         assert_eq!(source.read_range("object.bin", 0, 8).unwrap(), b"original");
+        assert_eq!(
+            source.stats(),
+            PinnedLocalRangeSourceStats {
+                read_calls: 2,
+                read_bytes: 16,
+            }
+        );
     }
 
     #[test]

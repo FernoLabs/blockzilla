@@ -56,6 +56,8 @@ fn fixture() -> PublicFixture {
                 primary_signature: Some([1; 64]),
                 required_signers: vec![[2; 32]],
                 instructions: Vec::new(),
+                token_balance_coverage: blockzilla_query_sdk::TokenBalanceCoverage::NotRequested,
+                token_balances: Vec::new(),
             }],
         },
     }
@@ -88,4 +90,19 @@ fn runtime_selected_source_uses_the_short_api() {
         })
         .unwrap();
     assert_eq!(receipt.blocks, 1);
+}
+
+#[test]
+fn external_reader_can_fingerprint_the_callback_universe() {
+    let mut source = fixture();
+    let (receipt, fingerprint) = source
+        .for_each_block_fingerprinted(&ScanRequest::all(), |_| Ok(()))
+        .unwrap();
+
+    assert_eq!(receipt.blocks, 1);
+    assert_eq!(fingerprint.records(), 1);
+    assert_eq!(
+        fingerprint.sha256_hex(),
+        "741939ccb979df0dbf391a6548f88fd9d1873aa3fb996f1df39abc6a66df7025"
+    );
 }

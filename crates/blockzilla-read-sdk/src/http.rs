@@ -27,15 +27,19 @@ use crate::{
 };
 
 const DEFAULT_MAX_MANIFEST_BYTES: usize = 4 * 1024 * 1024;
+const MAX_INCOMPLETE_RANGE_BODY_RETRIES: usize = 2;
 
 /// Exact HTTP work completed by one source and all its clones.
 ///
-/// `returned_body_bytes` counts only response-body bytes that passed the
-/// source's exact-length and range validation. HEAD responses have no body.
+/// `returned_body_bytes` counts all response-body bytes consumed by the
+/// source, including partial bytes from an incomplete range attempt. Response
+/// headers are excluded. HEAD responses have no body.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
 pub struct HttpRangeSourceStats {
     pub head_requests: u64,
     pub get_requests: u64,
+    /// New full-range GET attempts made after an incomplete response body.
+    pub incomplete_body_retries: u64,
     pub returned_body_bytes: u64,
 }
 
@@ -48,6 +52,9 @@ impl HttpRangeSourceStats {
         Self {
             head_requests: self.head_requests.saturating_sub(earlier.head_requests),
             get_requests: self.get_requests.saturating_sub(earlier.get_requests),
+            incomplete_body_retries: self
+                .incomplete_body_retries
+                .saturating_sub(earlier.incomplete_body_retries),
             returned_body_bytes: self
                 .returned_body_bytes
                 .saturating_sub(earlier.returned_body_bytes),
@@ -59,6 +66,7 @@ impl HttpRangeSourceStats {
 struct HttpRangeSourceCounters {
     head_requests: AtomicU64,
     get_requests: AtomicU64,
+    incomplete_body_retries: AtomicU64,
     returned_body_bytes: AtomicU64,
 }
 
@@ -86,6 +94,18 @@ pub struct HttpRangeSourceOptions {
     /// Bearer tokens must not travel over cleartext. This escape hatch is only
     /// for a trusted local development server.
     pub allow_insecure_http: bool,
+    /// Path contract used to find one archive object below `base_url`.
+    pub object_path_layout: HttpObjectPathLayout,
+}
+
+/// URL path contract for archive objects.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub enum HttpObjectPathLayout {
+    /// Existing gateway route: `v1/epochs/<epoch>/files/<object>`.
+    #[default]
+    GatewayV1,
+    /// Simple sample route: `<epoch>/<object>`.
+    FlatEpoch,
 }
 
 impl Default for HttpRangeSourceOptions {
@@ -95,6 +115,7 @@ impl Default for HttpRangeSourceOptions {
             request_timeout: Duration::from_secs(120),
             max_manifest_bytes: DEFAULT_MAX_MANIFEST_BYTES,
             allow_insecure_http: false,
+            object_path_layout: HttpObjectPathLayout::default(),
         }
     }
 }
@@ -111,6 +132,7 @@ pub struct HttpRangeSource {
     epoch: u64,
     authorization: Option<HeaderValue>,
     max_manifest_bytes: usize,
+    object_path_layout: HttpObjectPathLayout,
     counters: Arc<HttpRangeSourceCounters>,
     observed_objects: Arc<Mutex<HashMap<String, ObservedObjectIdentity>>>,
 }
@@ -121,6 +143,7 @@ impl fmt::Debug for HttpRangeSource {
             .debug_struct("HttpRangeSource")
             .field("base_url", &self.base_url)
             .field("epoch", &self.epoch)
+            .field("object_path_layout", &self.object_path_layout)
             .field(
                 "authorization",
                 &self.authorization.as_ref().map(|_| "<redacted>"),
@@ -224,6 +247,7 @@ impl HttpRangeSource {
             epoch,
             authorization,
             max_manifest_bytes: options.max_manifest_bytes,
+            object_path_layout: options.object_path_layout,
             counters: Arc::new(HttpRangeSourceCounters::default()),
             observed_objects: Arc::new(Mutex::new(HashMap::new())),
         })
@@ -242,6 +266,10 @@ impl HttpRangeSource {
         HttpRangeSourceStats {
             head_requests: self.counters.head_requests.load(Ordering::Relaxed),
             get_requests: self.counters.get_requests.load(Ordering::Relaxed),
+            incomplete_body_retries: self
+                .counters
+                .incomplete_body_retries
+                .load(Ordering::Relaxed),
             returned_body_bytes: self.counters.returned_body_bytes.load(Ordering::Relaxed),
         }
     }
@@ -258,6 +286,12 @@ impl HttpRangeSource {
 
     fn record_get_request(&self) {
         self.counters.get_requests.fetch_add(1, Ordering::Relaxed);
+    }
+
+    fn record_incomplete_body_retry(&self) {
+        self.counters
+            .incomplete_body_retries
+            .fetch_add(1, Ordering::Relaxed);
     }
 
     fn record_returned_body(&self, length: usize) {
@@ -392,14 +426,22 @@ impl HttpRangeSource {
                 SourceError::Protocol("gateway URL cannot accept path segments".into())
             })?;
             path.pop_if_empty();
-            path.push("v1");
-            path.push("epochs");
-            path.push(&self.epoch.to_string());
-            if object == GENERATION_MANIFEST_FILE {
-                path.push("manifest");
-            } else {
-                path.push("files");
-                path.push(object);
+            match self.object_path_layout {
+                HttpObjectPathLayout::GatewayV1 => {
+                    path.push("v1");
+                    path.push("epochs");
+                    path.push(&self.epoch.to_string());
+                    if object == GENERATION_MANIFEST_FILE {
+                        path.push("manifest");
+                    } else {
+                        path.push("files");
+                        path.push(object);
+                    }
+                }
+                HttpObjectPathLayout::FlatEpoch => {
+                    path.push(&self.epoch.to_string());
+                    path.push(object);
+                }
             }
         }
         Ok(url)
@@ -456,43 +498,21 @@ impl HttpRangeSource {
             response_etag.as_deref(),
         )?;
         enforce_content_length(&response, expected_length)?;
-        let bytes = read_bounded(&mut response, expected_length, GENERATION_MANIFEST_FILE)?;
+        let mut bytes = Vec::new();
+        let result = read_bounded_into(
+            &mut response,
+            expected_length,
+            GENERATION_MANIFEST_FILE,
+            &mut bytes,
+        );
         self.record_returned_body(bytes.len());
+        result?;
         Ok(bytes)
     }
-}
 
-impl RangeSource for HttpRangeSource {
-    fn size(&self, object: &str) -> SourceResult<Option<u64>> {
-        Ok(self
-            .head_identity(object, false)?
-            .map(|identity| identity.length))
-    }
-
-    fn read_range(&self, object: &str, offset: u64, length: usize) -> SourceResult<Vec<u8>> {
-        if length == 0 {
-            let size = self
-                .size(object)?
-                .ok_or_else(|| SourceError::NotFound(object.to_owned()))?;
-            if offset > size {
-                return Err(SourceError::OutOfBounds {
-                    object: object.to_owned(),
-                    offset,
-                    length,
-                    size,
-                });
-            }
-            return Ok(Vec::new());
-        }
-        if object == GENERATION_MANIFEST_FILE {
-            if offset != 0 {
-                return Err(SourceError::Protocol(
-                    "manifest only supports a complete bounded GET".into(),
-                ));
-            }
-            return self.full_manifest(length);
-        }
-
+    fn range_response(&self, object: &str, offset: u64, length: usize) -> SourceResult<Response> {
+        debug_assert!(length != 0);
+        debug_assert!(object != GENERATION_MANIFEST_FILE);
         let length_u64 = u64::try_from(length).map_err(|_| {
             SourceError::Protocol("requested HTTP range length does not fit u64".into())
         })?;
@@ -502,7 +522,7 @@ impl RangeSource for HttpRangeSource {
         let end_inclusive = end_exclusive - 1;
         let url = self.object_url(object)?;
         self.record_get_request();
-        let mut response = self
+        let response = self
             .authorize(
                 self.client
                     .get(url)
@@ -542,9 +562,124 @@ impl RangeSource for HttpRangeSource {
                 "range GET for {object} returned an unexpected Content-Range"
             )));
         }
-        let bytes = read_bounded(&mut response, length, object)?;
-        self.record_returned_body(bytes.len());
+        Ok(response)
+    }
+}
+
+impl RangeSource for HttpRangeSource {
+    fn size(&self, object: &str) -> SourceResult<Option<u64>> {
+        Ok(self
+            .head_identity(object, false)?
+            .map(|identity| identity.length))
+    }
+
+    fn read_range(&self, object: &str, offset: u64, length: usize) -> SourceResult<Vec<u8>> {
+        let mut bytes = Vec::new();
+        self.read_range_into(object, offset, length, &mut bytes)?;
         Ok(bytes)
+    }
+
+    fn read_range_into(
+        &self,
+        object: &str,
+        offset: u64,
+        length: usize,
+        destination: &mut Vec<u8>,
+    ) -> SourceResult<()> {
+        if length == 0 {
+            let size = self
+                .size(object)?
+                .ok_or_else(|| SourceError::NotFound(object.to_owned()))?;
+            if offset > size {
+                return Err(SourceError::OutOfBounds {
+                    object: object.to_owned(),
+                    offset,
+                    length,
+                    size,
+                });
+            }
+            destination.clear();
+            return Ok(());
+        }
+        if object == GENERATION_MANIFEST_FILE {
+            if offset != 0 {
+                return Err(SourceError::Protocol(
+                    "manifest only supports a complete bounded GET".into(),
+                ));
+            }
+            *destination = self.full_manifest(length)?;
+            return Ok(());
+        }
+        for attempt in 0..=MAX_INCOMPLETE_RANGE_BODY_RETRIES {
+            let mut response = self.range_response(object, offset, length)?;
+            let result = read_bounded_into(&mut response, length, object, destination);
+            self.record_returned_body(destination.len());
+            match result {
+                Ok(()) => return Ok(()),
+                Err(error)
+                    if attempt < MAX_INCOMPLETE_RANGE_BODY_RETRIES
+                        && is_incomplete_range_body(&error, length) =>
+                {
+                    // Start over at the original offset. A partial body never
+                    // enters a cache, and the next response repeats all range
+                    // and object-identity validation in `range_response`.
+                    self.record_incomplete_body_retry();
+                }
+                Err(error) => return Err(error),
+            }
+        }
+        unreachable!("the bounded range retry loop always returns")
+    }
+
+    fn read_range_into_slice(
+        &self,
+        object: &str,
+        offset: u64,
+        destination: &mut [u8],
+    ) -> SourceResult<()> {
+        let length = destination.len();
+        if length == 0 {
+            let size = self
+                .size(object)?
+                .ok_or_else(|| SourceError::NotFound(object.to_owned()))?;
+            if offset > size {
+                return Err(SourceError::OutOfBounds {
+                    object: object.to_owned(),
+                    offset,
+                    length,
+                    size,
+                });
+            }
+            return Ok(());
+        }
+        if object == GENERATION_MANIFEST_FILE {
+            if offset != 0 {
+                return Err(SourceError::Protocol(
+                    "manifest only supports a complete bounded GET".into(),
+                ));
+            }
+            let bytes = self.full_manifest(length)?;
+            destination.copy_from_slice(&bytes);
+            return Ok(());
+        }
+        for attempt in 0..=MAX_INCOMPLETE_RANGE_BODY_RETRIES {
+            let mut response = self.range_response(object, offset, length)?;
+            let mut body_bytes = 0_usize;
+            let result =
+                read_bounded_into_slice(&mut response, destination, object, &mut body_bytes);
+            self.record_returned_body(body_bytes);
+            match result {
+                Ok(()) => return Ok(()),
+                Err(error)
+                    if attempt < MAX_INCOMPLETE_RANGE_BODY_RETRIES
+                        && is_incomplete_range_body(&error, length) =>
+                {
+                    self.record_incomplete_body_retry();
+                }
+                Err(error) => return Err(error),
+            }
+        }
+        unreachable!("the bounded range retry loop always returns")
     }
 }
 
@@ -596,34 +731,100 @@ fn enforce_content_length(response: &Response, expected: usize) -> SourceResult<
     Ok(())
 }
 
-fn read_bounded(response: &mut Response, expected: usize, object: &str) -> SourceResult<Vec<u8>> {
-    let bound = u64::try_from(expected)
-        .unwrap_or(u64::MAX)
-        .saturating_add(1);
+fn is_incomplete_range_body(error: &SourceError, expected: usize) -> bool {
+    match error {
+        // This branch only receives errors produced while reading an already
+        // validated response body. It includes transport timeouts, resets, and
+        // reqwest's IncompleteBody/UnexpectedEof error.
+        SourceError::Io { .. } => true,
+        SourceError::ShortRead {
+            expected: actual_expected,
+            actual,
+            ..
+        } => *actual_expected == expected && *actual < expected,
+        _ => false,
+    }
+}
+
+fn read_bounded_into(
+    response: &mut Response,
+    expected: usize,
+    object: &str,
+    destination: &mut Vec<u8>,
+) -> SourceResult<()> {
     let allocation = expected.checked_add(1).ok_or_else(|| {
         SourceError::Protocol(format!("response allocation bound overflows for {object}"))
     })?;
-    let mut bytes = Vec::new();
-    bytes.try_reserve_exact(allocation).map_err(|error| {
-        SourceError::Protocol(format!(
-            "cannot reserve {allocation} bounded response bytes for {object}: {error}"
-        ))
-    })?;
+    destination.clear();
+    if destination.capacity() < allocation {
+        destination.try_reserve_exact(allocation).map_err(|error| {
+            SourceError::Protocol(format!(
+                "cannot reserve {allocation} bounded response bytes for {object}: {error}"
+            ))
+        })?;
+    }
+    let bound = u64::try_from(expected)
+        .unwrap_or(u64::MAX)
+        .saturating_add(1);
     response
         .take(bound)
-        .read_to_end(&mut bytes)
+        .read_to_end(destination)
         .map_err(|source| SourceError::Io {
             object: object.to_owned(),
             source,
         })?;
-    if bytes.len() != expected {
+    if destination.len() != expected {
         return Err(SourceError::ShortRead {
             object: object.to_owned(),
             expected,
-            actual: bytes.len(),
+            actual: destination.len(),
         });
     }
-    Ok(bytes)
+    Ok(())
+}
+
+fn read_bounded_into_slice(
+    response: &mut Response,
+    destination: &mut [u8],
+    object: &str,
+    body_bytes: &mut usize,
+) -> SourceResult<()> {
+    let expected = destination.len();
+    let mut read = 0_usize;
+    *body_bytes = 0;
+    while read < expected {
+        let count = response
+            .read(&mut destination[read..])
+            .map_err(|source| SourceError::Io {
+                object: object.to_owned(),
+                source,
+            })?;
+        if count == 0 {
+            return Err(SourceError::ShortRead {
+                object: object.to_owned(),
+                expected,
+                actual: read,
+            });
+        }
+        read += count;
+        *body_bytes = read;
+    }
+    let mut extra = [0_u8; 1];
+    let extra = response
+        .read(&mut extra)
+        .map_err(|source| SourceError::Io {
+            object: object.to_owned(),
+            source,
+        })?;
+    *body_bytes = read.saturating_add(extra);
+    if extra != 0 {
+        return Err(SourceError::ShortRead {
+            object: object.to_owned(),
+            expected,
+            actual: expected.saturating_add(extra),
+        });
+    }
+    Ok(())
 }
 
 fn parse_content_range(value: &str) -> Option<(u64, u64, u64)> {
@@ -708,7 +909,7 @@ mod tests {
     }
 
     #[test]
-    fn shared_stats_count_exact_head_get_and_validated_body_bytes() {
+    fn shared_stats_count_exact_head_get_and_consumed_body_bytes() {
         let (base_url, server) = serve_once(
             vec![
                 "HEAD /gateway/v1/epochs/7/files/thing.bin HTTP/1.1",
@@ -737,6 +938,7 @@ mod tests {
             HttpRangeSourceStats {
                 head_requests: 1,
                 get_requests: 1,
+                incomplete_body_retries: 0,
                 returned_body_bytes: 2,
             }
         );
@@ -745,7 +947,222 @@ mod tests {
     }
 
     #[test]
-    fn invalid_content_range_is_not_counted_as_validated_body_bytes() {
+    fn flat_epoch_layout_uses_the_simple_sample_path() {
+        let (base_url, server) = serve_once(
+            vec!["HEAD /gateway/7/thing.bin HTTP/1.1"],
+            vec![b"HTTP/1.1 200 OK\r\nContent-Length: 4\r\nConnection: close\r\n\r\n"],
+        );
+        let source = HttpRangeSource::with_options(
+            base_url,
+            7,
+            None,
+            HttpRangeSourceOptions {
+                allow_insecure_http: true,
+                object_path_layout: HttpObjectPathLayout::FlatEpoch,
+                ..HttpRangeSourceOptions::default()
+            },
+        )
+        .unwrap();
+
+        assert_eq!(source.size("thing.bin").unwrap(), Some(4));
+        server.join().unwrap();
+    }
+
+    #[test]
+    fn exact_range_reads_reuse_vectors_and_fill_final_slices() {
+        let (base_url, server) = serve_once(
+            vec![
+                "GET /gateway/v1/epochs/7/files/thing.bin HTTP/1.1",
+                "GET /gateway/v1/epochs/7/files/thing.bin HTTP/1.1",
+                "GET /gateway/v1/epochs/7/files/thing.bin HTTP/1.1",
+            ],
+            vec![
+                b"HTTP/1.1 206 Partial Content\r\nContent-Length: 2\r\nContent-Range: bytes 0-1/6\r\nConnection: close\r\n\r\nab",
+                b"HTTP/1.1 206 Partial Content\r\nContent-Length: 2\r\nContent-Range: bytes 2-3/6\r\nConnection: close\r\n\r\ncd",
+                b"HTTP/1.1 206 Partial Content\r\nContent-Length: 2\r\nContent-Range: bytes 4-5/6\r\nConnection: close\r\n\r\nef",
+            ],
+        );
+        let source = HttpRangeSource::with_options(
+            base_url,
+            7,
+            None,
+            HttpRangeSourceOptions {
+                allow_insecure_http: true,
+                ..HttpRangeSourceOptions::default()
+            },
+        )
+        .unwrap();
+
+        let mut reusable = Vec::with_capacity(8);
+        source
+            .read_range_into("thing.bin", 0, 2, &mut reusable)
+            .unwrap();
+        let allocation = reusable.as_ptr();
+        assert_eq!(reusable, b"ab");
+        source
+            .read_range_into("thing.bin", 2, 2, &mut reusable)
+            .unwrap();
+        assert_eq!(reusable.as_ptr(), allocation);
+        assert_eq!(reusable, b"cd");
+
+        let mut direct = [0_u8; 2];
+        source
+            .read_range_into_slice("thing.bin", 4, &mut direct)
+            .unwrap();
+        assert_eq!(&direct, b"ef");
+        assert_eq!(source.stats().get_requests, 3);
+        assert_eq!(source.stats().returned_body_bytes, 6);
+        server.join().unwrap();
+    }
+
+    #[test]
+    fn direct_slice_read_rejects_overlong_http_body_without_retry() {
+        let (base_url, server) = serve_once(
+            vec!["GET /gateway/v1/epochs/7/files/thing.bin HTTP/1.1"],
+            vec![
+                b"HTTP/1.1 206 Partial Content\r\nTransfer-Encoding: chunked\r\nContent-Range: bytes 0-1/4\r\nConnection: close\r\n\r\n3\r\nabc\r\n0\r\n\r\n",
+            ],
+        );
+        let source = HttpRangeSource::with_options(
+            base_url,
+            7,
+            None,
+            HttpRangeSourceOptions {
+                allow_insecure_http: true,
+                ..HttpRangeSourceOptions::default()
+            },
+        )
+        .unwrap();
+        let mut direct = [0_u8; 2];
+        let overlong = source
+            .read_range_into_slice("thing.bin", 0, &mut direct)
+            .unwrap_err();
+        assert!(matches!(
+            overlong,
+            SourceError::ShortRead {
+                expected: 2,
+                actual: 3,
+                ..
+            }
+        ));
+        assert_eq!(source.stats().get_requests, 1);
+        assert_eq!(source.stats().incomplete_body_retries, 0);
+        assert_eq!(source.stats().returned_body_bytes, 3);
+        server.join().unwrap();
+    }
+
+    #[test]
+    fn incomplete_range_body_retries_the_same_bound_range_and_counts_all_bytes() {
+        let (base_url, server) = serve_once(
+            vec![
+                "HEAD /gateway/v1/epochs/7/files/thing.bin HTTP/1.1",
+                "GET /gateway/v1/epochs/7/files/thing.bin HTTP/1.1",
+                "GET /gateway/v1/epochs/7/files/thing.bin HTTP/1.1",
+            ],
+            vec![
+                b"HTTP/1.1 200 OK\r\nContent-Length: 4\r\nETag: \"v1\"\r\nConnection: close\r\n\r\n",
+                b"HTTP/1.1 206 Partial Content\r\nContent-Length: 2\r\nContent-Range: bytes 1-2/4\r\nETag: \"v1\"\r\nConnection: close\r\n\r\nb",
+                b"HTTP/1.1 206 Partial Content\r\nContent-Length: 2\r\nContent-Range: bytes 1-2/4\r\nETag: \"v1\"\r\nConnection: close\r\n\r\nbc",
+            ],
+        );
+        let source = HttpRangeSource::with_options(
+            base_url,
+            7,
+            None,
+            HttpRangeSourceOptions {
+                allow_insecure_http: true,
+                ..HttpRangeSourceOptions::default()
+            },
+        )
+        .unwrap();
+
+        assert_eq!(source.strong_identity("thing.bin").unwrap().length, 4);
+        assert_eq!(source.read_range("thing.bin", 1, 2).unwrap(), b"bc");
+        assert_eq!(
+            source.stats(),
+            HttpRangeSourceStats {
+                head_requests: 1,
+                get_requests: 2,
+                incomplete_body_retries: 1,
+                returned_body_bytes: 3,
+            }
+        );
+        server.join().unwrap();
+    }
+
+    #[test]
+    fn incomplete_range_body_retry_keeps_the_pinned_etag() {
+        let (base_url, server) = serve_once(
+            vec![
+                "HEAD /gateway/v1/epochs/7/files/thing.bin HTTP/1.1",
+                "GET /gateway/v1/epochs/7/files/thing.bin HTTP/1.1",
+                "GET /gateway/v1/epochs/7/files/thing.bin HTTP/1.1",
+            ],
+            vec![
+                b"HTTP/1.1 200 OK\r\nContent-Length: 4\r\nETag: \"v1\"\r\nConnection: close\r\n\r\n",
+                b"HTTP/1.1 206 Partial Content\r\nContent-Length: 2\r\nContent-Range: bytes 1-2/4\r\nETag: \"v1\"\r\nConnection: close\r\n\r\nb",
+                b"HTTP/1.1 206 Partial Content\r\nContent-Length: 2\r\nContent-Range: bytes 1-2/4\r\nETag: \"v2\"\r\nConnection: close\r\n\r\nbc",
+            ],
+        );
+        let source = HttpRangeSource::with_options(
+            base_url,
+            7,
+            None,
+            HttpRangeSourceOptions {
+                allow_insecure_http: true,
+                ..HttpRangeSourceOptions::default()
+            },
+        )
+        .unwrap();
+
+        assert_eq!(source.strong_identity("thing.bin").unwrap().length, 4);
+        let error = source.read_range("thing.bin", 1, 2).unwrap_err();
+        assert!(error.to_string().contains("changed strong ETag"));
+        assert_eq!(source.stats().get_requests, 2);
+        assert_eq!(source.stats().incomplete_body_retries, 1);
+        assert_eq!(source.stats().returned_body_bytes, 1);
+        server.join().unwrap();
+    }
+
+    #[test]
+    fn incomplete_range_body_retry_is_bounded_for_direct_slices() {
+        let (base_url, server) = serve_once(
+            vec![
+                "GET /gateway/v1/epochs/7/files/thing.bin HTTP/1.1",
+                "GET /gateway/v1/epochs/7/files/thing.bin HTTP/1.1",
+                "GET /gateway/v1/epochs/7/files/thing.bin HTTP/1.1",
+            ],
+            vec![
+                b"HTTP/1.1 206 Partial Content\r\nContent-Length: 2\r\nContent-Range: bytes 0-1/4\r\nETag: \"v1\"\r\nConnection: close\r\n\r\na",
+                b"HTTP/1.1 206 Partial Content\r\nContent-Length: 2\r\nContent-Range: bytes 0-1/4\r\nETag: \"v1\"\r\nConnection: close\r\n\r\na",
+                b"HTTP/1.1 206 Partial Content\r\nContent-Length: 2\r\nContent-Range: bytes 0-1/4\r\nETag: \"v1\"\r\nConnection: close\r\n\r\na",
+            ],
+        );
+        let source = HttpRangeSource::with_options(
+            base_url,
+            7,
+            None,
+            HttpRangeSourceOptions {
+                allow_insecure_http: true,
+                ..HttpRangeSourceOptions::default()
+            },
+        )
+        .unwrap();
+        let mut direct = [0_u8; 2];
+
+        assert!(
+            source
+                .read_range_into_slice("thing.bin", 0, &mut direct)
+                .is_err()
+        );
+        assert_eq!(source.stats().get_requests, 3);
+        assert_eq!(source.stats().incomplete_body_retries, 2);
+        assert_eq!(source.stats().returned_body_bytes, 3);
+        server.join().unwrap();
+    }
+
+    #[test]
+    fn invalid_content_range_is_not_counted_as_body_bytes() {
         let (base_url, server) = serve_once(
             vec!["GET /gateway/v1/epochs/7/files/thing.bin HTTP/1.1"],
             vec![
@@ -768,6 +1185,7 @@ mod tests {
             HttpRangeSourceStats {
                 head_requests: 0,
                 get_requests: 1,
+                incomplete_body_retries: 0,
                 returned_body_bytes: 0,
             }
         );
@@ -975,6 +1393,7 @@ mod tests {
             HttpRangeSourceStats {
                 head_requests: 1,
                 get_requests: 1,
+                incomplete_body_retries: 0,
                 returned_body_bytes: 4,
             }
         );

@@ -4,13 +4,17 @@
 //! [`ArchiveInstructionSource`]. This module owns the one common scan request
 //! and resumes the bound SQLite sink from its durable block checkpoint.
 
-use std::num::NonZeroU32;
+use std::{
+    num::NonZeroU32,
+    time::{Duration, Instant},
+};
 
 use blockzilla_query_sdk::{
     ArchiveInstructionSource, ScanRange, ScanReceipt, ScanRequest, SourceIdentity,
 };
 use thiserror::Error;
 
+use crate::token_event_database::TokenEventDatabaseMetrics;
 use crate::{TokenEventDatabase, TokenEventRunSpec};
 
 /// Policy for source verification during one token-event scan.
@@ -31,6 +35,27 @@ pub struct TokenEventScanResult {
     pub already_complete: bool,
     /// Work done by this call. An already-complete call returns a zero receipt.
     pub receipt: ScanReceipt,
+    /// Exclusive timing at the source-to-sink boundary for this call.
+    pub timing: TokenEventScanTiming,
+}
+
+/// Source and durable-sink timing for one ordered token-event scan.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct TokenEventScanTiming {
+    /// Wall time inside `ArchiveInstructionSource::scan_ordered`.
+    pub scan_elapsed: Duration,
+    /// Time in token-event block callbacks during this scan.
+    pub database_block_elapsed: Duration,
+    /// Coordinator wall time outside the database callbacks.
+    ///
+    /// A parallel source can continue work during a database callback. Thus,
+    /// this residual is not source CPU time or storage-I/O time and must not be
+    /// added to the callback phases as exclusive process work.
+    pub coordinator_outside_database_elapsed: Duration,
+    /// Number of block callbacks made during this scan.
+    pub block_callbacks: u64,
+    /// Detailed database work measured during this scan.
+    pub database: TokenEventDatabaseMetrics,
 }
 
 #[derive(Debug, Error)]
@@ -75,6 +100,7 @@ pub fn scan_remaining_token_events(
         return Ok(TokenEventScanResult {
             already_complete: true,
             receipt: ScanReceipt::default(),
+            timing: TokenEventScanTiming::default(),
         });
     }
 
@@ -97,16 +123,49 @@ pub fn scan_remaining_token_events(
         request = request.allow_unverified_source();
     }
 
-    let receipt = source.scan_ordered(&request, database)?;
+    let metrics_before = database.metrics();
+    let scan_started = Instant::now();
+    let receipt = source.scan_ordered(&request, database);
+    let scan_elapsed = scan_started.elapsed();
+    let database_metrics = database.metrics().delta_since(metrics_before);
+    let receipt = receipt?;
     if database.next_block_ordinal() != end {
         return Err(TokenEventScanError::InvalidCheckpoint(format!(
             "source returned success at block {}, expected {end}",
             database.next_block_ordinal()
         )));
     }
+    let expected_blocks = u64::from(remaining);
+    if receipt.blocks != expected_blocks
+        || database_metrics.block_operations != expected_blocks
+        || database_metrics.committed_blocks != expected_blocks
+        || database_metrics.validated_replay_blocks != 0
+    {
+        return Err(TokenEventScanError::InvalidCheckpoint(format!(
+            "successful scan count mismatch: expected {expected_blocks} blocks, source reported {}, database callbacks {}, commits {}, replays {}",
+            receipt.blocks,
+            database_metrics.block_operations,
+            database_metrics.committed_blocks,
+            database_metrics.validated_replay_blocks,
+        )));
+    }
+    if receipt.transactions != database_metrics.visited_transactions {
+        return Err(TokenEventScanError::InvalidCheckpoint(format!(
+            "successful scan transaction mismatch: source reported {}, database visited {}",
+            receipt.transactions, database_metrics.visited_transactions,
+        )));
+    }
     Ok(TokenEventScanResult {
         already_complete: false,
         receipt,
+        timing: TokenEventScanTiming {
+            scan_elapsed,
+            database_block_elapsed: database_metrics.block_operation_elapsed,
+            coordinator_outside_database_elapsed: scan_elapsed
+                .saturating_sub(database_metrics.block_operation_elapsed),
+            block_callbacks: database_metrics.block_operations,
+            database: database_metrics,
+        },
     })
 }
 
@@ -252,6 +311,9 @@ mod tests {
                             ),
                             data: Vec::new(),
                         }],
+                        token_balance_coverage:
+                            blockzilla_query_sdk::TokenBalanceCoverage::NotRequested,
+                        token_balances: Vec::new(),
                     }],
                 },
             ],
@@ -276,7 +338,7 @@ mod tests {
     #[test]
     fn one_common_request_records_gaps_and_resumes_without_rescanning() {
         let directory = PrivateTempDir::new();
-        let mut source = fixture(SourceVerification::PublishedManifest);
+        let mut source = fixture(SourceVerification::ObjectSetBound);
         let mut event_database = database(&directory, source.identity.clone());
 
         let first = scan_remaining_token_events(
@@ -289,6 +351,21 @@ mod tests {
         assert_eq!(first.receipt.blocks, 2);
         assert_eq!(first.receipt.transactions_with_incomplete_cpi, 1);
         assert_eq!(first.receipt.instructions_with_unknown_data, 1);
+        assert_eq!(first.timing.block_callbacks, 2);
+        assert_eq!(first.timing.database.block_operations, 2);
+        assert_eq!(first.timing.database.committed_blocks, 2);
+        assert_eq!(first.timing.database.validated_replay_blocks, 0);
+        assert_eq!(first.timing.database.visited_transactions, 1);
+        assert_eq!(first.timing.database.tracker_state_updates, 1);
+        assert_eq!(first.timing.database.tracker_state_noop_writes_skipped, 0);
+        assert_eq!(
+            first.timing.database_block_elapsed,
+            first.timing.database.block_operation_elapsed
+        );
+        assert_eq!(
+            first.timing.coordinator_outside_database_elapsed + first.timing.database_block_elapsed,
+            first.timing.scan_elapsed
+        );
         assert_eq!(source.scans, 1);
         assert_eq!(event_database.next_block_ordinal(), 2);
         assert_eq!(
@@ -304,6 +381,7 @@ mod tests {
         .unwrap();
         assert!(second.already_complete);
         assert_eq!(second.receipt, ScanReceipt::default());
+        assert_eq!(second.timing, TokenEventScanTiming::default());
         assert_eq!(source.scans, 1);
     }
 
@@ -336,7 +414,7 @@ mod tests {
         let other_directory = PrivateTempDir::new();
         let mut other_database = database(
             &other_directory,
-            identity(SourceVerification::PublishedManifest),
+            identity(SourceVerification::ObjectSetBound),
         );
         assert!(matches!(
             scan_remaining_token_events(

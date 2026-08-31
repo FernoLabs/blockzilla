@@ -75,8 +75,9 @@ use blockzilla_query_sdk::{
     CanonicalTransaction, CoverageReason, CpiCoverage, Error as QueryError, ExecutionStatus,
     InstructionCoordinate, InstructionCoverage, InstructionDataCoverage,
     InstructionDataRequirement, MAX_CANONICAL_SHORT_VEC_ITEMS, OrderedBlockPublisher,
-    ResolvedInstruction, ScanIoReceipt, ScanReceipt, ScanRequest, SourceIdentity,
-    SourceVerification, TransactionHeader,
+    RecordedTokenBalance, ResolvedInstruction, ScanIoReceipt, ScanReceipt, ScanRequest,
+    SourceIdentity, SourceVerification, TokenBalanceCoverage, TokenBalanceRequirement,
+    TokenBalanceSide, TransactionHeader,
 };
 use sha2::{Digest, Sha256};
 
@@ -346,6 +347,12 @@ pub struct CarInstructionSource<R: Read> {
     scratch: ProjectionScratch,
 }
 
+#[derive(Debug, Clone, Copy)]
+enum CarBindingKind {
+    StrongObject,
+    OperatorTrustedDescriptor,
+}
+
 impl<R: Read> CarInstructionSource<R> {
     /// Bind one sequential decoded-CAR stream to a trusted source identity and
     /// canonical dense block plan.
@@ -354,16 +361,46 @@ impl<R: Read> CarInstructionSource<R> {
     /// identity adds the canonical-plan digest to that binding.
     pub fn new(
         reader: R,
-        mut identity: SourceIdentity,
+        identity: SourceIdentity,
         plan: CanonicalBlockPlan,
         limits: CarQueryLimits,
     ) -> CarQueryResult<Self> {
+        Self::new_with_binding_kind(reader, identity, plan, limits, CarBindingKind::StrongObject)
+    }
+
+    /// Bind an operator-trusted URL and length descriptor to a canonical plan.
+    ///
+    /// The input binding must identify only the accepted descriptor. It must
+    /// not claim a strong object validator, content hash, or object identity.
+    /// The stored binding keeps that label and adds the canonical-plan digest.
+    pub fn new_operator_trusted_descriptor(
+        reader: R,
+        identity: SourceIdentity,
+        plan: CanonicalBlockPlan,
+        limits: CarQueryLimits,
+    ) -> CarQueryResult<Self> {
+        Self::new_with_binding_kind(
+            reader,
+            identity,
+            plan,
+            limits,
+            CarBindingKind::OperatorTrustedDescriptor,
+        )
+    }
+
+    fn new_with_binding_kind(
+        reader: R,
+        mut identity: SourceIdentity,
+        plan: CanonicalBlockPlan,
+        limits: CarQueryLimits,
+        binding_kind: CarBindingKind,
+    ) -> CarQueryResult<Self> {
         validate_identity(&identity, &plan)?;
-        let object_binding = identity
+        let input_binding = identity
             .binding
             .take()
-            .expect("identity validation required a CAR object binding");
-        identity.binding = Some(effective_binding(&object_binding, &plan));
+            .expect("identity validation required a CAR input binding");
+        identity.binding = Some(effective_binding(input_binding, &plan, binding_kind));
         let limits = limits.validate()?;
         let mut reader =
             CarBlockReader::with_capacity(CountingRead::new(reader), limits.io_buffer_bytes);
@@ -536,7 +573,7 @@ fn validate_identity(identity: &SourceIdentity, plan: &CanonicalBlockPlan) -> Ca
         .is_none_or(|binding| binding.trim().is_empty())
     {
         return Err(CarQueryError::InvalidIdentity(
-            "CAR object binding is absent or empty".into(),
+            "CAR input binding is absent or empty".into(),
         ));
     }
     if identity.slots_per_epoch == 0 {
@@ -575,9 +612,17 @@ fn validate_identity(identity: &SourceIdentity, plan: &CanonicalBlockPlan) -> Ca
     Ok(())
 }
 
-fn effective_binding(object_binding: &str, plan: &CanonicalBlockPlan) -> String {
+fn effective_binding(
+    input_binding: String,
+    plan: &CanonicalBlockPlan,
+    binding_kind: CarBindingKind,
+) -> String {
+    let label = match binding_kind {
+        CarBindingKind::StrongObject => "car-object-binding",
+        CarBindingKind::OperatorTrustedDescriptor => "operator-trusted-input-descriptor",
+    };
     format!(
-        "car-object-binding={object_binding};canonical-slot-plan-sha256={}",
+        "{label}={input_binding};canonical-slot-plan-sha256={}",
         canonical_plan_digest_hex(plan)
     )
 }
@@ -751,12 +796,21 @@ fn project_transaction(
         Some(&*metadata)
     };
 
-    let primary_signature = transaction.signatures.first().map(|signature| **signature);
-    let required = usize::from(message.header.num_required_signatures);
-    let mut required_signers = reserved_vec(required, "required signer keys")?;
-    required_signers.extend_from_slice(&message.static_keys[..required]);
+    let primary_signature = if request.include_primary_signatures {
+        transaction.signatures.first().map(|signature| **signature)
+    } else {
+        None
+    };
+    let required_signers = if request.include_required_signers {
+        let required = usize::from(message.header.num_required_signatures);
+        let mut required_signers = reserved_vec(required, "required signer keys")?;
+        required_signers.extend_from_slice(&message.static_keys[..required]);
+        required_signers
+    } else {
+        Vec::new()
+    };
 
-    let (status, failed_outer_instruction_index, cpi_coverage) = match metadata {
+    let (recorded_status, recorded_failed_outer, recorded_cpi) = match metadata {
         None => (
             ExecutionStatus::Unknown(CoverageReason::MetadataAbsent),
             None,
@@ -778,37 +832,75 @@ fn project_transaction(
             (status, failed, cpi)
         }
     };
-
-    let loaded_keys = match metadata {
-        Some(metadata) => Some(resolve_loaded_keys(&message, metadata, limits)?),
-        None if message.expected_loaded == (0, 0) => Some(Vec::new()),
-        None => None,
+    let (status, failed_outer_instruction_index) = if request.include_execution_status {
+        (recorded_status, recorded_failed_outer)
+    } else {
+        (
+            ExecutionStatus::Unknown(CoverageReason::ProjectionNotRequested),
+            None,
+        )
     };
-    let (instruction_coverage, instructions) = match loaded_keys {
-        Some(loaded) => {
-            let capacity = message
-                .static_keys
-                .len()
-                .checked_add(loaded.len())
-                .ok_or_else(|| {
-                    CarQueryError::InvalidArchive("resolved account count overflow".into())
-                })?;
-            let mut account_keys = reserved_vec(capacity, "resolved account keys")?;
-            account_keys.extend_from_slice(&message.static_keys);
-            account_keys.extend(loaded);
-            let instructions = project_instructions(
-                &message,
-                metadata,
-                &account_keys,
-                &request.instruction_data,
-                limits,
-            )?;
-            (InstructionCoverage::Complete, instructions)
+    let cpi_coverage = if request.include_instructions {
+        recorded_cpi
+    } else {
+        CpiCoverage::Unknown(CoverageReason::ProjectionNotRequested)
+    };
+
+    let loaded_keys = if !request.include_instructions {
+        None
+    } else {
+        match metadata {
+            Some(metadata) => Some(resolve_loaded_keys(&message, metadata, limits)?),
+            None if message.expected_loaded == (0, 0) => Some(Vec::new()),
+            None => None,
         }
-        None => (
-            InstructionCoverage::Unknown(CoverageReason::MetadataAbsent),
+    };
+    let (instruction_coverage, instructions) = if !request.include_instructions {
+        (
+            InstructionCoverage::Unknown(CoverageReason::ProjectionNotRequested),
             Vec::new(),
-        ),
+        )
+    } else {
+        match loaded_keys {
+            Some(loaded) => {
+                let capacity = message
+                    .static_keys
+                    .len()
+                    .checked_add(loaded.len())
+                    .ok_or_else(|| {
+                        CarQueryError::InvalidArchive("resolved account count overflow".into())
+                    })?;
+                let mut account_keys = reserved_vec(capacity, "resolved account keys")?;
+                account_keys.extend_from_slice(&message.static_keys);
+                account_keys.extend(loaded);
+                let instructions = project_instructions(
+                    &message,
+                    metadata,
+                    &account_keys,
+                    &request.instruction_data,
+                    limits,
+                )?;
+                (InstructionCoverage::Complete, instructions)
+            }
+            None => (
+                InstructionCoverage::Unknown(CoverageReason::MetadataAbsent),
+                Vec::new(),
+            ),
+        }
+    };
+
+    let (token_balance_coverage, token_balances) = match &request.token_balances {
+        TokenBalanceRequirement::None => (TokenBalanceCoverage::NotRequested, Vec::new()),
+        requirement => match metadata {
+            Some(metadata) => (
+                TokenBalanceCoverage::Complete,
+                project_token_balances(metadata, requirement)?,
+            ),
+            None => (
+                TokenBalanceCoverage::Unknown(CoverageReason::MetadataAbsent),
+                Vec::new(),
+            ),
+        },
     };
 
     Ok(CanonicalTransaction {
@@ -822,7 +914,65 @@ fn project_transaction(
         primary_signature,
         required_signers,
         instructions,
+        token_balance_coverage,
+        token_balances,
     })
+}
+
+fn project_token_balances(
+    metadata: &TransactionStatusMeta,
+    requirement: &TokenBalanceRequirement,
+) -> CarQueryResult<Vec<RecordedTokenBalance>> {
+    let capacity = metadata
+        .pre_token_balances
+        .len()
+        .checked_add(metadata.post_token_balances.len())
+        .ok_or_else(|| CarQueryError::InvalidArchive("token-balance count overflow".into()))?;
+    let mut output = reserved_vec(capacity, "recorded token balances")?;
+    for (side, balances) in [
+        (TokenBalanceSide::Pre, &metadata.pre_token_balances),
+        (TokenBalanceSide::Post, &metadata.post_token_balances),
+    ] {
+        for (balance_index, balance) in balances.iter().enumerate() {
+            let mint = parse_optional_pubkey(&balance.mint);
+            if !requirement.selects(mint.as_ref()) {
+                continue;
+            }
+            let (amount, decimals) = match &balance.ui_token_amount {
+                Some(amount) => (
+                    amount.amount.parse::<u64>().map_err(|error| {
+                        CarQueryError::InvalidArchive(format!(
+                            "token amount {:?} is not u64: {error}",
+                            amount.amount
+                        ))
+                    })?,
+                    amount.decimals as u8,
+                ),
+                None => (0, 0),
+            };
+            output.push(RecordedTokenBalance {
+                side,
+                balance_index: u32::try_from(balance_index).map_err(|_| {
+                    CarQueryError::InvalidArchive("token-balance index exceeds u32".into())
+                })?,
+                account_index: balance.account_index,
+                mint,
+                owner: parse_optional_pubkey(&balance.owner),
+                token_program: parse_optional_pubkey(&balance.program_id),
+                amount,
+                decimals,
+            });
+        }
+    }
+    Ok(output)
+}
+
+fn parse_optional_pubkey(value: &str) -> Option<[u8; 32]> {
+    if value.is_empty() {
+        return None;
+    }
+    let decoded = bs58::decode(value).into_vec().ok()?;
+    decoded.as_slice().try_into().ok()
 }
 
 struct MessageView<'a> {
@@ -1016,16 +1166,40 @@ fn decode_failed_outer_index(metadata: &TransactionStatusMeta) -> CarQueryResult
     let Some(error) = &metadata.err else {
         return Ok(None);
     };
-    let decoded =
-        wincode::deserialize_exact::<StoredTransactionError>(&error.err).map_err(|err| {
-            CarQueryError::InvalidArchive(format!(
+    let decoded = match wincode::deserialize_exact::<StoredTransactionError>(&error.err) {
+        Ok(decoded) => decoded,
+        Err(err) => {
+            if let Some(index) = decode_legacy_unit_borsh_io_error_index(&error.err) {
+                return Ok(Some(index));
+            }
+            return Err(CarQueryError::InvalidArchive(format!(
                 "transaction error payload is not exact stored-error bytes: {err}"
-            ))
-        })?;
+            )));
+        }
+    };
     Ok(match decoded {
         StoredTransactionError::InstructionError(index, _) => Some(u32::from(index)),
         _ => None,
     })
+}
+
+/// Decode the exact old nine-byte form where `BorshIoError` was a unit variant.
+/// Newer stored errors encode its string payload and use the normal decoder.
+fn decode_legacy_unit_borsh_io_error_index(bytes: &[u8]) -> Option<u32> {
+    const TRANSACTION_ERROR_INSTRUCTION_ERROR: u32 = 8;
+    const INSTRUCTION_ERROR_BORSH_IO_ERROR: u32 = 44;
+
+    if bytes.len() != 9 {
+        return None;
+    }
+    let transaction_error_tag = u32::from_le_bytes(bytes[0..4].try_into().ok()?);
+    let instruction_error_tag = u32::from_le_bytes(bytes[5..9].try_into().ok()?);
+    if transaction_error_tag != TRANSACTION_ERROR_INSTRUCTION_ERROR
+        || instruction_error_tag != INSTRUCTION_ERROR_BORSH_IO_ERROR
+    {
+        return None;
+    }
+    Some(u32::from(bytes[4]))
 }
 
 fn project_instructions(
@@ -1207,7 +1381,8 @@ mod tests {
     use super::*;
     use crate::{
         confirmed_block::{
-            InnerInstruction, InnerInstructions, TransactionError, TransactionStatusMeta,
+            InnerInstruction, InnerInstructions, TokenBalance, TransactionError,
+            TransactionStatusMeta, UiTokenAmount,
         },
         stored_transaction::InstructionError as StoredInstructionError,
     };
@@ -1531,6 +1706,27 @@ mod tests {
         legacy_transaction([fill; 64], &keys, &[(1, &[0], &[fill])])
     }
 
+    fn token_balance(
+        account_index: u32,
+        mint: String,
+        owner: String,
+        program_id: String,
+        amount: u64,
+    ) -> TokenBalance {
+        TokenBalance {
+            account_index,
+            mint,
+            ui_token_amount: Some(UiTokenAmount {
+                ui_amount: 0.0,
+                decimals: 6,
+                amount: amount.to_string(),
+                ui_amount_string: String::new(),
+            }),
+            owner,
+            program_id,
+        }
+    }
+
     #[test]
     fn source_identity_and_plan_are_explicit_and_warmup_safe() {
         let plan = vec![FIRST_SLOT, FIRST_SLOT + 3];
@@ -1552,6 +1748,21 @@ mod tests {
                 "car-object-binding=fixture-root-cid;canonical-slot-plan-sha256=1d1fddb024f89915be1a602e7dee07d0d81fd1f8c5f4276e0e5bf6622a8db32c"
             )
         );
+
+        let mut descriptor_identity = identity(&plan);
+        descriptor_identity.binding = Some("url-length-descriptor-v1".into());
+        let descriptor = CarInstructionSource::new_operator_trusted_descriptor(
+            Cursor::new(car_header()),
+            descriptor_identity,
+            CanonicalBlockPlan::new(plan.clone()),
+            CarQueryLimits::default(),
+        )
+        .unwrap();
+        let descriptor_binding = descriptor.identity().binding.as_deref().unwrap();
+        assert!(descriptor_binding.starts_with(
+            "operator-trusted-input-descriptor=url-length-descriptor-v1;canonical-slot-plan-sha256="
+        ));
+        assert!(!descriptor_binding.contains("car-object-binding"));
 
         let mut no_binding = identity(&plan);
         no_binding.binding = None;
@@ -1679,6 +1890,126 @@ mod tests {
     }
 
     #[test]
+    fn omitted_primary_signature_keeps_the_same_car_reads() {
+        let plan = vec![FIRST_SLOT];
+        let transaction = FixtureTransaction {
+            cid: cid(0x42),
+            transaction: simple_transaction(9),
+            metadata: empty_exact_metadata(),
+            index: Some(0),
+        };
+        let mut car = car_header();
+        append_block(&mut car, FIRST_SLOT, &[transaction], &[0], &[0], 0x43);
+        let car_len = car.len() as u64;
+
+        let mut default_source = source(car.clone(), plan.clone());
+        let (default_receipt, default_blocks) =
+            collect(&mut default_source, &ScanRequest::all()).unwrap();
+        assert_eq!(
+            default_blocks[0].transactions[0].primary_signature,
+            Some([9; 64])
+        );
+
+        let mut omitted_source = source(car, plan);
+        let (omitted_receipt, omitted_blocks) = collect(
+            &mut omitted_source,
+            &ScanRequest::all().without_primary_signatures(),
+        )
+        .unwrap();
+        assert_eq!(omitted_blocks[0].transactions[0].primary_signature, None);
+        assert_eq!(default_receipt.io.source_read_bytes, Some(car_len));
+        assert_eq!(omitted_receipt.io.source_read_bytes, Some(car_len));
+    }
+
+    #[test]
+    fn token_balance_only_scan_filters_exact_mints_and_keeps_unknown_mints() {
+        let target_mint = [0x71; 32];
+        let other_mint = [0x72; 32];
+        let owner = [0x73; 32];
+        let token_program = [0x74; 32];
+        let fixture = FixtureTransaction {
+            cid: cid(0x4d),
+            transaction: simple_transaction(7),
+            metadata: metadata(TransactionStatusMeta {
+                fee: 1,
+                pre_token_balances: vec![
+                    token_balance(
+                        0,
+                        String::new(),
+                        bs58::encode(owner).into_string(),
+                        bs58::encode(token_program).into_string(),
+                        11,
+                    ),
+                    token_balance(
+                        1,
+                        bs58::encode(target_mint).into_string(),
+                        bs58::encode(owner).into_string(),
+                        bs58::encode(token_program).into_string(),
+                        22,
+                    ),
+                    token_balance(
+                        2,
+                        bs58::encode(other_mint).into_string(),
+                        String::new(),
+                        String::new(),
+                        44,
+                    ),
+                ],
+                post_token_balances: vec![token_balance(
+                    1,
+                    bs58::encode(target_mint).into_string(),
+                    bs58::encode(owner).into_string(),
+                    bs58::encode(token_program).into_string(),
+                    33,
+                )],
+                inner_instructions_none: true,
+                ..TransactionStatusMeta::default()
+            }),
+            index: Some(0),
+        };
+        let mut car = car_header();
+        append_block(&mut car, FIRST_SLOT, &[fixture], &[0], &[0], 0x4e);
+        let request = ScanRequest::all()
+            .without_instructions()
+            .without_required_signers()
+            .without_execution_status()
+            .without_primary_signatures()
+            .with_token_balances_for([target_mint]);
+        let (receipt, blocks) = collect(&mut source(car, vec![FIRST_SLOT]), &request).unwrap();
+        let transaction = &blocks[0].transactions[0];
+
+        assert_eq!(transaction.primary_signature, None);
+        assert!(transaction.required_signers.is_empty());
+        assert_eq!(
+            transaction.header.status,
+            ExecutionStatus::Unknown(CoverageReason::ProjectionNotRequested)
+        );
+        assert!(transaction.instructions.is_empty());
+        assert_eq!(
+            transaction.token_balance_coverage,
+            TokenBalanceCoverage::Complete
+        );
+        assert_eq!(transaction.token_balances.len(), 3);
+        assert_eq!(transaction.token_balances[0].side, TokenBalanceSide::Pre);
+        assert_eq!(transaction.token_balances[0].balance_index, 0);
+        assert_eq!(transaction.token_balances[0].mint, None);
+        assert_eq!(transaction.token_balances[1].side, TokenBalanceSide::Pre);
+        assert_eq!(transaction.token_balances[1].balance_index, 1);
+        assert_eq!(transaction.token_balances[1].mint, Some(target_mint));
+        assert_eq!(transaction.token_balances[1].owner, Some(owner));
+        assert_eq!(
+            transaction.token_balances[1].token_program,
+            Some(token_program)
+        );
+        assert_eq!(transaction.token_balances[1].amount, 22);
+        assert_eq!(transaction.token_balances[2].side, TokenBalanceSide::Post);
+        assert_eq!(transaction.token_balances[2].balance_index, 0);
+        assert_eq!(transaction.token_balances[2].amount, 33);
+        assert_eq!(receipt.instructions, 0);
+        assert_eq!(receipt.transactions_with_incomplete_token_balances, 0);
+    }
+
+    #[test]
     fn v0_loaded_keys_cpi_stack_and_selected_data_are_exact() {
         let signer = [1; 32];
         let unselected_program = [2; 32];
@@ -1798,6 +2129,47 @@ mod tests {
         assert_eq!(transaction.instructions[0].program_id, program);
         assert_eq!(transaction.instructions[0].accounts, vec![signer]);
         assert_eq!(transaction.instructions[0].data, vec![44]);
+    }
+
+    #[test]
+    fn failed_outer_index_accepts_exact_legacy_unit_borsh_io_error() {
+        let metadata = TransactionStatusMeta {
+            err: Some(TransactionError {
+                err: vec![
+                    8, 0, 0, 0, // StoredTransactionError::InstructionError
+                    7, // failed outer instruction index
+                    44, 0, 0, 0, // old unit StoredInstructionError::BorshIoError
+                ],
+            }),
+            ..TransactionStatusMeta::default()
+        };
+
+        assert_eq!(decode_failed_outer_index(&metadata).unwrap(), Some(7));
+    }
+
+    #[test]
+    fn failed_outer_index_rejects_near_legacy_malformed_bytes() {
+        let malformed = [
+            vec![8, 0, 0, 0, 7, 44, 0, 0],
+            vec![8, 0, 0, 0, 7, 44, 0, 0, 0, 0],
+            vec![0xff, 0xff, 0xff, 0xff, 7, 44, 0, 0, 0],
+            vec![8, 0, 0, 0, 7, 0xff, 0xff, 0xff, 0xff],
+        ];
+
+        for bytes in malformed {
+            let metadata = TransactionStatusMeta {
+                err: Some(TransactionError { err: bytes }),
+                ..TransactionStatusMeta::default()
+            };
+            assert!(
+                matches!(
+                    decode_failed_outer_index(&metadata),
+                    Err(CarQueryError::InvalidArchive(message))
+                        if message.contains("not exact stored-error bytes")
+                ),
+                "accepted malformed legacy transaction error"
+            );
+        }
     }
 
     #[test]

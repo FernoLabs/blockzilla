@@ -24,6 +24,13 @@ const KEY_INDEX_VERSION: u16 = 2;
 const KEY_INDEX_HEADER_LEN: usize = 8 + 2 + 2 + 8;
 const REGISTRY_IO_BUFFER_SIZE: usize = 8 << 20;
 
+/// Maximum serialized MPHF tail retained by a range-backed registry lookup.
+///
+/// The epoch-900 tail is about 7.5 MB. This larger fixed guard keeps a remote
+/// object from causing an unbounded allocation before its MPHF is decoded.
+#[cfg(not(target_arch = "wasm32"))]
+pub const MAX_RANGE_KEY_INDEX_MPHF_BYTES: u64 = 128 << 20;
+
 pub struct KeyIndex {
     /// Minimal perfect hash over all pubkeys
     #[cfg(not(target_arch = "wasm32"))]
@@ -49,6 +56,32 @@ pub struct KeyIndex {
 #[cfg(not(target_arch = "wasm32"))]
 pub struct FileBackedKeyIndex {
     file: File,
+    mphf: fmph::GOFunction,
+    len: usize,
+    values_offset: u64,
+    tags_offset: u64,
+}
+
+/// Minimal immutable byte source used by [`RangeBackedKeyIndex`].
+///
+/// The archive SDK can implement this trait over an authenticated HTTP range
+/// source without making `blockzilla-format` depend on one transport crate.
+#[cfg(not(target_arch = "wasm32"))]
+pub trait KeyIndexRangeSource {
+    /// Exact byte length of the bound `registry.mphf` object.
+    fn object_len(&self) -> Result<u64>;
+
+    /// Read exactly one bounded byte range from the same bound object.
+    fn read_exact_range(&self, offset: u64, length: usize) -> Result<Vec<u8>>;
+}
+
+/// Read-only registry lookup over an immutable range source.
+///
+/// Only the compact MPHF tail is retained in memory. A member lookup reads one
+/// eight-byte tag and one four-byte registry ID from the source.
+#[cfg(not(target_arch = "wasm32"))]
+pub struct RangeBackedKeyIndex<S> {
+    source: S,
     mphf: fmph::GOFunction,
     len: usize,
     values_offset: u64,
@@ -409,6 +442,139 @@ impl FileBackedKeyIndex {
 }
 
 #[cfg(not(target_arch = "wasm32"))]
+impl<S: KeyIndexRangeSource> RangeBackedKeyIndex<S> {
+    /// Open and validate one immutable `registry.mphf` object.
+    pub fn load(source: S) -> Result<Self> {
+        let file_len = source.object_len().context("read registry index length")?;
+        anyhow::ensure!(
+            file_len >= KEY_INDEX_HEADER_LEN as u64,
+            "registry index is shorter than its header"
+        );
+        let header = source
+            .read_exact_range(0, KEY_INDEX_HEADER_LEN)
+            .context("read registry index header")?;
+        anyhow::ensure!(
+            header.len() == KEY_INDEX_HEADER_LEN,
+            "registry index header source returned {} bytes; expected {KEY_INDEX_HEADER_LEN}",
+            header.len()
+        );
+        let layout = decode_key_index_layout(file_len, &header, "range source")?;
+        let tail_len_u64 = file_len
+            .checked_sub(layout.mphf_offset)
+            .context("registry index MPHF offset exceeds object length")?;
+        anyhow::ensure!(
+            tail_len_u64 <= MAX_RANGE_KEY_INDEX_MPHF_BYTES,
+            "registry index MPHF tail has {tail_len_u64} bytes; range-reader limit is {MAX_RANGE_KEY_INDEX_MPHF_BYTES}"
+        );
+        let tail_len = usize::try_from(tail_len_u64)
+            .context("registry index MPHF tail length exceeds usize")?;
+        let tail = source
+            .read_exact_range(layout.mphf_offset, tail_len)
+            .context("read registry index MPHF tail")?;
+        anyhow::ensure!(
+            tail.len() == tail_len,
+            "registry index MPHF source returned {} bytes; expected {tail_len}",
+            tail.len()
+        );
+
+        let expected = preflight_go_function(tail.as_slice(), tail_len_u64, layout.len)
+            .context("preflight registry MPHF")?;
+        let mut cursor = Cursor::new(tail.as_slice());
+        let mphf = fmph::GOFunction::read(&mut cursor).context("read registry MPHF")?;
+        anyhow::ensure!(
+            cursor.position() == tail_len_u64,
+            "registry MPHF decoder did not consume the exact tail"
+        );
+        let decoded_group_count = mphf.level_sizes().iter().try_fold(0usize, |sum, groups| {
+            sum.checked_add(*groups)
+                .context("decoded registry MPHF group count overflow")
+        })?;
+        anyhow::ensure!(
+            mphf.level_sizes().len() == expected.level_count
+                && decoded_group_count == expected.group_count,
+            "decoded registry MPHF geometry differs from its preflight"
+        );
+
+        Ok(Self {
+            source,
+            mphf,
+            len: layout.len,
+            values_offset: layout.values_offset,
+            tags_offset: layout.tags_offset,
+        })
+    }
+
+    #[inline]
+    pub fn len(&self) -> usize {
+        self.len
+    }
+
+    #[inline]
+    pub fn is_empty(&self) -> bool {
+        self.len == 0
+    }
+
+    /// Checked lookup. A missing membership tag returns `None`.
+    pub fn lookup(&self, key: &[u8; 32]) -> Result<Option<u32>> {
+        let Some(index) = self
+            .mphf
+            .get(key)
+            .and_then(|index| usize::try_from(index).ok())
+        else {
+            return Ok(None);
+        };
+        if index >= self.len {
+            return Ok(None);
+        }
+        let tag_offset = self
+            .tags_offset
+            .checked_add(
+                (index as u64)
+                    .checked_mul(8)
+                    .context("registry tag offset overflow")?,
+            )
+            .context("registry tag offset overflow")?;
+        let tag = self
+            .source
+            .read_exact_range(tag_offset, 8)
+            .context("read registry index tag")?;
+        anyhow::ensure!(
+            tag.len() == 8,
+            "registry tag source returned {} bytes; expected 8",
+            tag.len()
+        );
+        if u64::from_le_bytes(tag.as_slice().try_into().unwrap()) != key_tag(key) {
+            return Ok(None);
+        }
+
+        let value_offset = self
+            .values_offset
+            .checked_add(
+                (index as u64)
+                    .checked_mul(4)
+                    .context("registry value offset overflow")?,
+            )
+            .context("registry value offset overflow")?;
+        let value = self
+            .source
+            .read_exact_range(value_offset, 4)
+            .context("read registry index value")?;
+        anyhow::ensure!(
+            value.len() == 4,
+            "registry value source returned {} bytes; expected 4",
+            value.len()
+        );
+        let id = u32::from_le_bytes(value.as_slice().try_into().unwrap());
+        anyhow::ensure!(
+            id != 0 && id as usize <= self.len,
+            "registry index id {id} is outside 1..={}",
+            self.len
+        );
+        Ok(Some(id))
+    }
+}
+
+#[cfg(not(target_arch = "wasm32"))]
 fn key_index_layout(file: &File, path: &Path) -> Result<KeyIndexLayout> {
     let file_len = file
         .metadata()
@@ -423,23 +589,34 @@ fn key_index_layout(file: &File, path: &Path) -> Result<KeyIndexLayout> {
     let mut header = [0u8; KEY_INDEX_HEADER_LEN];
     read_exact_at(file, &mut header, 0)
         .with_context(|| format!("read registry index header in {}", path.display()))?;
+    decode_key_index_layout(file_len, &header, &path.display().to_string())
+}
+
+#[cfg(not(target_arch = "wasm32"))]
+fn decode_key_index_layout(
+    file_len: u64,
+    header: &[u8],
+    source_label: &str,
+) -> Result<KeyIndexLayout> {
+    anyhow::ensure!(
+        header.len() == KEY_INDEX_HEADER_LEN,
+        "registry index header has {} bytes; expected {KEY_INDEX_HEADER_LEN} in {source_label}",
+        header.len()
+    );
     anyhow::ensure!(
         &header[..KEY_INDEX_MAGIC.len()] == KEY_INDEX_MAGIC,
-        "invalid registry index magic in {}",
-        path.display()
+        "invalid registry index magic in {source_label}"
     );
 
     let version = u16::from_le_bytes(header[8..10].try_into().unwrap());
     anyhow::ensure!(
         version == KEY_INDEX_VERSION,
-        "unsupported registry index version {version} in {}",
-        path.display()
+        "unsupported registry index version {version} in {source_label}"
     );
     let header_len = u16::from_le_bytes(header[10..12].try_into().unwrap()) as usize;
     anyhow::ensure!(
         header_len == KEY_INDEX_HEADER_LEN,
-        "unsupported registry index header length {header_len} in {}",
-        path.display()
+        "unsupported registry index header length {header_len} in {source_label}"
     );
 
     let len_u64 = u64::from_le_bytes(header[12..20].try_into().unwrap());
@@ -463,8 +640,7 @@ fn key_index_layout(file: &File, path: &Path) -> Result<KeyIndexLayout> {
         .context("registry index MPHF offset overflow")?;
     anyhow::ensure!(
         mphf_offset <= file_len,
-        "registry index tables exceed file length in {}",
-        path.display()
+        "registry index tables exceed file length in {source_label}"
     );
 
     Ok(KeyIndexLayout {
@@ -789,6 +965,15 @@ impl KeyStore {
     /// Sequential load, no extra buffers.
     pub fn load(path: &Path) -> Result<Self> {
         let f = File::open(path).with_context(|| format!("Failed to open {}", path.display()))?;
+        Self::load_file(f)
+    }
+
+    /// Sequential load from an already-open registry file.
+    ///
+    /// Callers that pin an archive object before decoding must use this entry
+    /// point. It keeps the registry read on that same file identity instead of
+    /// reopening its path after the archive reader has been admitted.
+    pub fn load_file(f: File) -> Result<Self> {
         let len_bytes = f.metadata().context("stat registry")?.len() as usize;
 
         anyhow::ensure!(
@@ -842,7 +1027,49 @@ where
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[cfg(not(target_arch = "wasm32"))]
+    use std::sync::Arc;
     use std::time::{SystemTime, UNIX_EPOCH};
+
+    #[cfg(not(target_arch = "wasm32"))]
+    #[derive(Clone)]
+    struct MemoryRangeSource {
+        bytes: Arc<Vec<u8>>,
+        shorten_reads: bool,
+    }
+
+    #[cfg(not(target_arch = "wasm32"))]
+    impl MemoryRangeSource {
+        fn exact(bytes: Vec<u8>) -> Self {
+            Self {
+                bytes: Arc::new(bytes),
+                shorten_reads: false,
+            }
+        }
+    }
+
+    #[cfg(not(target_arch = "wasm32"))]
+    impl KeyIndexRangeSource for MemoryRangeSource {
+        fn object_len(&self) -> Result<u64> {
+            Ok(self.bytes.len() as u64)
+        }
+
+        fn read_exact_range(&self, offset: u64, length: usize) -> Result<Vec<u8>> {
+            let start = usize::try_from(offset).context("test range offset exceeds usize")?;
+            let end = start
+                .checked_add(length)
+                .context("test range end overflow")?;
+            let mut bytes = self
+                .bytes
+                .get(start..end)
+                .context("test range is outside source")?
+                .to_vec();
+            if self.shorten_reads && !bytes.is_empty() {
+                bytes.pop();
+            }
+            Ok(bytes)
+        }
+    }
 
     #[cfg(not(target_arch = "wasm32"))]
     fn temporary_index_path(label: &str) -> std::path::PathBuf {
@@ -902,6 +1129,44 @@ mod tests {
         assert_eq!(file_backed.lookup(&missing).unwrap(), None);
         drop(file_backed);
         std::fs::remove_file(&path).unwrap();
+    }
+
+    #[test]
+    #[cfg(not(target_arch = "wasm32"))]
+    fn range_backed_key_index_reads_only_the_mphf_tail_and_lookup_rows() {
+        let first = [4u8; 32];
+        let second = [5u8; 32];
+        let third = [6u8; 32];
+        let missing = [7u8; 32];
+        let path = temporary_index_path("range-backed");
+        KeyIndex::build(vec![first, second, third])
+            .write(&path)
+            .unwrap();
+        let bytes = std::fs::read(&path).unwrap();
+        let range_backed = RangeBackedKeyIndex::load(MemoryRangeSource::exact(bytes)).unwrap();
+
+        assert_eq!(range_backed.len(), 3);
+        assert_eq!(range_backed.lookup(&first).unwrap(), Some(1));
+        assert_eq!(range_backed.lookup(&second).unwrap(), Some(2));
+        assert_eq!(range_backed.lookup(&third).unwrap(), Some(3));
+        assert_eq!(range_backed.lookup(&missing).unwrap(), None);
+
+        std::fs::remove_file(path).unwrap();
+    }
+
+    #[test]
+    #[cfg(not(target_arch = "wasm32"))]
+    fn range_backed_key_index_rejects_short_source_reads() {
+        let path = temporary_index_path("range-short-read");
+        KeyIndex::build(vec![[9u8; 32]]).write(&path).unwrap();
+        let bytes = std::fs::read(&path).unwrap();
+        let source = MemoryRangeSource {
+            bytes: Arc::new(bytes),
+            shorten_reads: true,
+        };
+
+        assert!(RangeBackedKeyIndex::load(source).is_err());
+        std::fs::remove_file(path).unwrap();
     }
 
     #[test]

@@ -3,11 +3,12 @@ use std::{fmt, num::NonZeroU32};
 use serde::{Deserialize, Serialize};
 
 use crate::{
-    BlockView, CanonicalBlock, CpiCoverage, Error, ExecutionStatus, InstructionCoverage,
-    InstructionDataCoverage, Result, TransactionView,
+    BlockUniverseFingerprint, BlockView, CanonicalBlock, CpiCoverage, Error, ExecutionStatus,
+    InstructionCoverage, InstructionDataCoverage, Result, TokenBalanceCoverage, TransactionView,
 };
 
 pub const MAX_INSTRUCTION_DATA_PROGRAMS: usize = 256;
+pub const MAX_TOKEN_BALANCE_MINTS: usize = 256;
 
 /// Archive format used by one source adapter.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -32,12 +33,25 @@ impl fmt::Display for ArchiveFormat {
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "kebab-case")]
 pub enum SourceVerification {
-    PublishedManifest,
-    /// The operator accepted this input without a published manifest.
-    /// The input can be local or remote.
+    /// The reader pins its required object set by URL, exact length, and
+    /// strong validator.
+    ObjectSetBound,
+    /// The operator accepted this pinned input. The input can be local or
+    /// remote.
     OperatorTrusted,
     InternalBindingOnly,
     Unverified,
+}
+
+impl fmt::Display for SourceVerification {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::ObjectSetBound => formatter.write_str("object-set-bound"),
+            Self::OperatorTrusted => formatter.write_str("operator-trusted"),
+            Self::InternalBindingOnly => formatter.write_str("internal-binding-only"),
+            Self::Unverified => formatter.write_str("unverified"),
+        }
+    }
 }
 
 /// Source identity available to every application before a scan.
@@ -54,9 +68,9 @@ pub struct SourceIdentity {
     /// Exact number of block rows in this source.
     pub block_count: u32,
     pub verification: SourceVerification,
-    /// Format-specific manifest digest, root CID, strong ETag, or internal
-    /// candidate identity. This value is not present when the source has no
-    /// stable binding.
+    /// Format-specific root CID, strong ETag set, operator archive ID, or
+    /// internal candidate identity. This value is absent when the source has
+    /// no stable binding.
     pub binding: Option<String>,
 }
 
@@ -86,6 +100,33 @@ impl InstructionDataRequirement {
     }
 }
 
+/// Recorded token-balance rows required by one scan.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "kebab-case", tag = "scope", content = "mints")]
+pub enum TokenBalanceRequirement {
+    All,
+    /// Select exact matching mints and rows whose mint identity is unavailable.
+    /// The latter keeps a filtered application result sound and lets it record
+    /// explicit coverage instead of silently treating an unknown row as a
+    /// confirmed non-match.
+    Mints(Vec<[u8; 32]>),
+    None,
+}
+
+impl TokenBalanceRequirement {
+    pub fn selects(&self, mint: Option<&[u8; 32]>) -> bool {
+        match self {
+            Self::All => true,
+            Self::Mints(mints) => mint.is_none_or(|mint| mints.contains(mint)),
+            Self::None => false,
+        }
+    }
+
+    pub const fn is_requested(&self) -> bool {
+        !matches!(self, Self::None)
+    }
+}
+
 /// One source-neutral ordered scan request.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct ScanRequest {
@@ -94,14 +135,45 @@ pub struct ScanRequest {
     pub require_complete_instructions: bool,
     pub require_complete_cpi: bool,
     pub require_known_execution: bool,
+    /// Include each transaction's first signature in canonical output.
+    #[serde(default = "default_true")]
+    pub include_primary_signatures: bool,
     /// Stop when selected instruction data is not exact.
     #[serde(default = "default_true")]
     pub require_complete_instruction_data: bool,
     pub instruction_data: InstructionDataRequirement,
+    /// Include the resolved outer and recorded CPI instruction stream.
+    #[serde(default = "default_true")]
+    pub include_instructions: bool,
+    /// Resolve and include each instruction's account list.
+    ///
+    /// Program identities and instruction coordinates remain available when
+    /// this projection is disabled. Compact V2 and Indexer V3 leave
+    /// `ResolvedInstruction::accounts` empty in that case. The default is
+    /// `true` for compatibility.
+    #[serde(default = "default_true")]
+    pub include_instruction_accounts: bool,
+    /// Include required signer public keys in message order.
+    #[serde(default = "default_true")]
+    pub include_required_signers: bool,
+    /// Include the recorded transaction execution state.
+    #[serde(default = "default_true")]
+    pub include_execution_status: bool,
+    /// Stop when requested pre/post token balances are unavailable.
+    #[serde(default = "default_true")]
+    pub require_complete_token_balances: bool,
+    /// Token balances are disabled by default so instruction scans do not read
+    /// or allocate their metadata plane.
+    #[serde(default = "default_token_balance_requirement")]
+    pub token_balances: TokenBalanceRequirement,
 }
 
 const fn default_true() -> bool {
     true
+}
+
+const fn default_token_balance_requirement() -> TokenBalanceRequirement {
+    TokenBalanceRequirement::None
 }
 
 impl ScanRequest {
@@ -112,8 +184,15 @@ impl ScanRequest {
             require_complete_instructions: true,
             require_complete_cpi: true,
             require_known_execution: true,
+            include_primary_signatures: true,
             require_complete_instruction_data: true,
             instruction_data: InstructionDataRequirement::All,
+            include_instructions: true,
+            include_instruction_accounts: true,
+            include_required_signers: true,
+            include_execution_status: true,
+            require_complete_token_balances: true,
+            token_balances: TokenBalanceRequirement::None,
         }
     }
 
@@ -124,8 +203,15 @@ impl ScanRequest {
             require_complete_instructions: true,
             require_complete_cpi: true,
             require_known_execution: true,
+            include_primary_signatures: true,
             require_complete_instruction_data: true,
             instruction_data: InstructionDataRequirement::All,
+            include_instructions: true,
+            include_instruction_accounts: true,
+            include_required_signers: true,
+            include_execution_status: true,
+            require_complete_token_balances: true,
+            token_balances: TokenBalanceRequirement::None,
         }
     }
 
@@ -146,6 +232,12 @@ impl ScanRequest {
 
     pub const fn allow_unknown_execution(mut self) -> Self {
         self.require_known_execution = false;
+        self
+    }
+
+    /// Do not include primary signatures in canonical output.
+    pub const fn without_primary_signatures(mut self) -> Self {
+        self.include_primary_signatures = false;
         self
     }
 
@@ -174,6 +266,63 @@ impl ScanRequest {
         self.instruction_data = InstructionDataRequirement::None;
         self
     }
+
+    /// Omit the complete instruction stream from canonical output.
+    ///
+    /// This is useful for token-balance-only jobs. It also disables the
+    /// instruction and CPI completeness gates.
+    pub fn without_instructions(mut self) -> Self {
+        self.include_instructions = false;
+        self.include_instruction_accounts = false;
+        self.require_complete_instructions = false;
+        self.require_complete_cpi = false;
+        self.require_complete_instruction_data = false;
+        self.instruction_data = InstructionDataRequirement::None;
+        self
+    }
+
+    /// Keep instruction program identities and coordinates, but omit their
+    /// resolved account lists.
+    ///
+    /// Compact V2 and Indexer V3 then avoid instruction-account-list public-key
+    /// resolution and heap allocation. Other adapters can still publish full
+    /// account lists. Applications such as Pump.fun and FireWatch do not use
+    /// those lists.
+    pub const fn without_instruction_accounts(mut self) -> Self {
+        self.include_instruction_accounts = false;
+        self
+    }
+
+    /// Omit required signer public keys from canonical output.
+    pub const fn without_required_signers(mut self) -> Self {
+        self.include_required_signers = false;
+        self
+    }
+
+    /// Omit execution status from canonical output.
+    pub const fn without_execution_status(mut self) -> Self {
+        self.include_execution_status = false;
+        self.require_known_execution = false;
+        self
+    }
+
+    /// Include all recorded pre- and post-token balances.
+    pub fn with_token_balances(mut self) -> Self {
+        self.token_balances = TokenBalanceRequirement::All;
+        self
+    }
+
+    /// Include recorded token balances only for the selected mints.
+    pub fn with_token_balances_for(mut self, mints: impl IntoIterator<Item = [u8; 32]>) -> Self {
+        self.token_balances = TokenBalanceRequirement::Mints(mints.into_iter().collect());
+        self
+    }
+
+    /// Deliver explicit unknown coverage when requested balances are absent.
+    pub const fn allow_incomplete_token_balances(mut self) -> Self {
+        self.require_complete_token_balances = false;
+        self
+    }
 }
 
 /// Exact I/O counters when a format adapter can measure them.
@@ -190,6 +339,49 @@ pub struct ScanIoReceipt {
     pub cache_read_bytes: Option<u64>,
 }
 
+/// Normalized transport and persistent-cache counters for a network reader.
+///
+/// Dedicated format SDKs use the same counter names, so applications can
+/// report HTTP and cache work without importing a format-specific transport.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ArchiveIoSnapshot {
+    pub head_requests: u64,
+    pub get_requests: u64,
+    /// Full closed-range GET retries after incomplete response bodies.
+    #[serde(default)]
+    pub incomplete_body_retries: u64,
+    /// Response-body bytes consumed across successful and failed attempts.
+    pub network_body_bytes: u64,
+    pub cache_hits: u64,
+    pub cache_downloads: u64,
+    pub cache_read_calls: u64,
+    pub cache_read_bytes: u64,
+}
+
+impl ArchiveIoSnapshot {
+    /// Return a monotonic interval without allowing a counter underflow.
+    pub const fn saturating_sub(self, earlier: Self) -> Self {
+        Self {
+            head_requests: self.head_requests.saturating_sub(earlier.head_requests),
+            get_requests: self.get_requests.saturating_sub(earlier.get_requests),
+            incomplete_body_retries: self
+                .incomplete_body_retries
+                .saturating_sub(earlier.incomplete_body_retries),
+            network_body_bytes: self
+                .network_body_bytes
+                .saturating_sub(earlier.network_body_bytes),
+            cache_hits: self.cache_hits.saturating_sub(earlier.cache_hits),
+            cache_downloads: self.cache_downloads.saturating_sub(earlier.cache_downloads),
+            cache_read_calls: self
+                .cache_read_calls
+                .saturating_sub(earlier.cache_read_calls),
+            cache_read_bytes: self
+                .cache_read_bytes
+                .saturating_sub(earlier.cache_read_bytes),
+        }
+    }
+}
+
 /// Exact source work and coverage counts returned after a scan.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub struct ScanReceipt {
@@ -203,6 +395,7 @@ pub struct ScanReceipt {
     pub transactions_with_incomplete_instructions: u64,
     pub transactions_with_incomplete_cpi: u64,
     pub transactions_with_unknown_execution: u64,
+    pub transactions_with_incomplete_token_balances: u64,
     pub io: ScanIoReceipt,
 }
 
@@ -264,6 +457,26 @@ pub trait ArchiveInstructionSourceExt: ArchiveInstructionSource {
             }
             Ok(())
         })
+    }
+
+    /// Visit canonical blocks and fingerprint their ordered block universe.
+    ///
+    /// The fingerprint uses the block ordinal, slot, and transaction count.
+    /// It does not include instruction projections, signatures, or timing.
+    fn for_each_block_fingerprinted<F>(
+        &mut self,
+        request: &ScanRequest,
+        mut visitor: F,
+    ) -> Result<(ScanReceipt, BlockUniverseFingerprint)>
+    where
+        F: for<'a> FnMut(BlockView<'a>) -> Result<()>,
+    {
+        let mut fingerprint = BlockUniverseFingerprint::new();
+        let receipt = self.for_each_block(request, |block| {
+            fingerprint.update(block)?;
+            visitor(block)
+        })?;
+        Ok((receipt, fingerprint))
     }
 }
 
@@ -421,6 +634,24 @@ impl<'a> OrderedBlockPublisher<'a> {
                     )));
                 }
             }
+            if self.request.token_balances.is_requested()
+                && !matches!(
+                    transaction.token_balance_coverage,
+                    TokenBalanceCoverage::Complete
+                )
+            {
+                increment(
+                    &mut self.receipt.transactions_with_incomplete_token_balances,
+                    1,
+                    "incomplete-token-balance transaction count",
+                )?;
+                if self.request.require_complete_token_balances {
+                    return Err(Error::InvalidTransaction(format!(
+                        "transaction {} in block {} has incomplete token-balance coverage",
+                        transaction.header.tx_index, block.header.block_ordinal
+                    )));
+                }
+            }
             increment(
                 &mut self.receipt.instructions,
                 u64::try_from(transaction.instructions.len()).map_err(|_| {
@@ -486,11 +717,9 @@ pub fn validate_request(identity: &SourceIdentity, request: &ScanRequest) -> Res
         .first_slot
         .checked_add(identity.slots_per_epoch - 1)
         .ok_or_else(|| Error::InvalidRequest("source epoch slot range overflows u64".into()))?;
-    if matches!(identity.verification, SourceVerification::PublishedManifest)
-        && identity.binding.is_none()
-    {
+    if identity.verification == SourceVerification::ObjectSetBound && identity.binding.is_none() {
         return Err(Error::InvalidRequest(
-            "published source has no manifest binding".into(),
+            "verified source has no stable binding".into(),
         ));
     }
     if request.require_verified_source
@@ -500,7 +729,7 @@ pub fn validate_request(identity: &SourceIdentity, request: &ScanRequest) -> Res
         )
     {
         return Err(Error::InvalidRequest(format!(
-            "{} source {} is not publication-verified",
+            "{} source {} does not have an accepted stable binding",
             identity.format, identity.label
         )));
     }
@@ -516,6 +745,36 @@ pub fn validate_request(identity: &SourceIdentity, request: &ScanRequest) -> Res
         if sorted.windows(2).any(|pair| pair[0] == pair[1]) {
             return Err(Error::InvalidRequest(
                 "instruction-data program list has duplicates".into(),
+            ));
+        }
+    }
+    if !request.include_instructions
+        && (!matches!(request.instruction_data, InstructionDataRequirement::None)
+            || request.require_complete_instructions
+            || request.require_complete_cpi
+            || request.require_complete_instruction_data)
+    {
+        return Err(Error::InvalidRequest(
+            "an instruction-free request also requires instruction output or coverage".into(),
+        ));
+    }
+    if !request.include_execution_status && request.require_known_execution {
+        return Err(Error::InvalidRequest(
+            "an execution-free request requires known execution status".into(),
+        ));
+    }
+    if let TokenBalanceRequirement::Mints(mints) = &request.token_balances {
+        if mints.is_empty() || mints.len() > MAX_TOKEN_BALANCE_MINTS {
+            return Err(Error::InvalidRequest(format!(
+                "token-balance mint list length {} is outside 1..={MAX_TOKEN_BALANCE_MINTS}",
+                mints.len()
+            )));
+        }
+        let mut sorted = mints.clone();
+        sorted.sort_unstable();
+        if sorted.windows(2).any(|pair| pair[0] == pair[1]) {
+            return Err(Error::InvalidRequest(
+                "token-balance mint list has duplicates".into(),
             ));
         }
     }
@@ -631,6 +890,8 @@ mod tests {
                             data_coverage: InstructionDataCoverage::Exact,
                             data: vec![3],
                         }],
+                        token_balance_coverage: TokenBalanceCoverage::NotRequested,
+                        token_balances: Vec::new(),
                     }],
                 },
             ],
@@ -639,7 +900,7 @@ mod tests {
 
     #[test]
     fn short_transaction_api_keeps_canonical_order_and_empty_blocks() {
-        let mut source = fixture(SourceVerification::PublishedManifest);
+        let mut source = fixture(SourceVerification::ObjectSetBound);
         let mut coordinates = Vec::new();
         let receipt = source
             .for_each_transaction(&ScanRequest::all(), |transaction| {
@@ -655,7 +916,7 @@ mod tests {
 
     #[test]
     fn block_api_publishes_empty_blocks_for_checkpoints() {
-        let mut source = fixture(SourceVerification::PublishedManifest);
+        let mut source = fixture(SourceVerification::ObjectSetBound);
         let mut blocks = Vec::new();
         source
             .for_each_block(&ScanRequest::all(), |block| {
@@ -668,7 +929,7 @@ mod tests {
 
     #[test]
     fn sink_error_stops_delivery_once() {
-        let mut source = fixture(SourceVerification::PublishedManifest);
+        let mut source = fixture(SourceVerification::ObjectSetBound);
         let mut calls = 0;
         let error = source
             .for_each_block(&ScanRequest::all(), |_| {
@@ -683,7 +944,7 @@ mod tests {
     #[test]
     fn closure_api_works_on_runtime_selected_source() {
         let mut source: Box<dyn ArchiveInstructionSource> =
-            Box::new(fixture(SourceVerification::PublishedManifest));
+            Box::new(fixture(SourceVerification::ObjectSetBound));
         let mut transactions = 0;
         source
             .for_each_transaction(&ScanRequest::all(), |_| {
@@ -708,8 +969,23 @@ mod tests {
     }
 
     #[test]
+    fn verified_gate_accepts_an_object_set_binding() {
+        let mut source = fixture(SourceVerification::ObjectSetBound);
+        source
+            .for_each_block(&ScanRequest::all(), |_| Ok(()))
+            .unwrap();
+
+        source.identity.binding = None;
+        assert!(
+            source
+                .for_each_block(&ScanRequest::all(), |_| Ok(()))
+                .is_err()
+        );
+    }
+
+    #[test]
     fn source_geometry_is_validated_before_output() {
-        let mut source = fixture(SourceVerification::PublishedManifest);
+        let mut source = fixture(SourceVerification::ObjectSetBound);
         source.identity.slots_per_epoch = 0;
         assert!(
             source
@@ -736,7 +1012,7 @@ mod tests {
 
     #[test]
     fn bounded_scan_checks_range_and_publishes_exact_rows() {
-        let mut source = fixture(SourceVerification::PublishedManifest);
+        let mut source = fixture(SourceVerification::ObjectSetBound);
         let request = ScanRequest::bounded(ScanRange {
             first_block: 1,
             block_count: NonZeroU32::new(1).unwrap(),
@@ -760,7 +1036,7 @@ mod tests {
 
     #[test]
     fn coverage_gates_are_checked_before_the_sink() {
-        let mut source = fixture(SourceVerification::PublishedManifest);
+        let mut source = fixture(SourceVerification::ObjectSetBound);
         source.blocks[1].transactions[0].header.cpi_coverage = CpiCoverage::NotRecorded;
         let mut sink_calls = 0;
         assert!(
@@ -810,7 +1086,7 @@ mod tests {
 
     #[test]
     fn instruction_data_gate_can_select_one_program() {
-        let mut source = fixture(SourceVerification::PublishedManifest);
+        let mut source = fixture(SourceVerification::ObjectSetBound);
         let instruction = &mut source.blocks[1].transactions[0].instructions[0];
         instruction.data.clear();
         instruction.data_coverage = InstructionDataCoverage::NotRequested;
@@ -865,15 +1141,81 @@ mod tests {
     }
 
     #[test]
+    fn token_balance_gate_is_explicit_and_validates_mint_selection() {
+        let mut source = fixture(SourceVerification::ObjectSetBound);
+        let transaction = &mut source.blocks[1].transactions[0];
+        transaction.token_balance_coverage =
+            TokenBalanceCoverage::Unknown(crate::CoverageReason::MetadataAbsent);
+
+        let request = ScanRequest::all().with_token_balances_for([[4; 32]]);
+        assert!(request.token_balances.selects(None));
+        assert!(request.token_balances.selects(Some(&[4; 32])));
+        assert!(!request.token_balances.selects(Some(&[5; 32])));
+        assert!(source.for_each_block(&request, |_| Ok(())).is_err());
+
+        let receipt = source
+            .for_each_block(&request.allow_incomplete_token_balances(), |_| Ok(()))
+            .unwrap();
+        assert_eq!(receipt.transactions_with_incomplete_token_balances, 1);
+
+        let duplicate = ScanRequest::all().with_token_balances_for([[4; 32], [4; 32]]);
+        assert!(source.for_each_block(&duplicate, |_| Ok(())).is_err());
+        let empty = ScanRequest::all().with_token_balances_for([]);
+        assert!(source.for_each_block(&empty, |_| Ok(())).is_err());
+    }
+
+    #[test]
     fn older_json_requests_keep_strict_instruction_data_default() {
         let request = ScanRequest::all().with_instruction_data_for([[1; 32]]);
         let mut value = serde_json::to_value(&request).unwrap();
-        value
-            .as_object_mut()
-            .unwrap()
-            .remove("require_complete_instruction_data");
+        let object = value.as_object_mut().unwrap();
+        object.remove("require_complete_instruction_data");
+        object.remove("include_primary_signatures");
+        object.remove("include_instruction_accounts");
+        object.remove("require_complete_token_balances");
+        object.remove("token_balances");
         let decoded: ScanRequest = serde_json::from_value(value).unwrap();
         assert!(decoded.require_complete_instruction_data);
+        assert!(decoded.include_primary_signatures);
+        assert!(decoded.include_instruction_accounts);
+        assert!(decoded.require_complete_token_balances);
+        assert!(matches!(
+            decoded.token_balances,
+            TokenBalanceRequirement::None
+        ));
+    }
+
+    #[test]
+    fn scan_request_constructors_include_signatures_until_disabled() {
+        let range = ScanRange {
+            first_block: 1,
+            block_count: NonZeroU32::new(1).unwrap(),
+        };
+        assert!(ScanRequest::all().include_primary_signatures);
+        assert!(ScanRequest::bounded(range).include_primary_signatures);
+        assert!(
+            !ScanRequest::all()
+                .without_primary_signatures()
+                .include_primary_signatures
+        );
+    }
+
+    #[test]
+    fn instruction_accounts_are_included_until_disabled() {
+        let range = ScanRange {
+            first_block: 1,
+            block_count: NonZeroU32::new(1).unwrap(),
+        };
+        assert!(ScanRequest::all().include_instruction_accounts);
+        assert!(ScanRequest::bounded(range).include_instruction_accounts);
+        let request = ScanRequest::all().without_instruction_accounts();
+        assert!(request.include_instructions);
+        assert!(!request.include_instruction_accounts);
+        assert!(
+            !ScanRequest::all()
+                .without_instructions()
+                .include_instruction_accounts
+        );
     }
 
     #[test]
@@ -885,7 +1227,7 @@ mod tests {
             }
         }
 
-        let identity = fixture(SourceVerification::PublishedManifest).identity;
+        let identity = fixture(SourceVerification::ObjectSetBound).identity;
         let request = ScanRequest::all();
         let mut sink = NoopSink;
         let mut publisher = OrderedBlockPublisher::new(&identity, &request, &mut sink).unwrap();
@@ -910,7 +1252,7 @@ mod tests {
 
     #[test]
     fn publisher_rejects_decreasing_slots_before_the_sink() {
-        let source = fixture(SourceVerification::PublishedManifest);
+        let source = fixture(SourceVerification::ObjectSetBound);
         let request = ScanRequest::all();
         let mut calls = 0;
         let mut sink = FnBlockSink::new(|_: BlockView<'_>| {

@@ -1,9 +1,12 @@
 use std::{
-    collections::{HashMap, VecDeque},
+    collections::{BTreeMap, HashMap, VecDeque},
     fs::{self, File, OpenOptions as FsOpenOptions},
     io::Write,
     path::{Path, PathBuf},
-    sync::atomic::{AtomicU64, Ordering},
+    sync::{
+        Arc,
+        atomic::{AtomicU64, Ordering},
+    },
 };
 
 use anyhow::{Context, Result, anyhow, bail, ensure};
@@ -14,15 +17,13 @@ use blockzilla_format::{
     CompactMessageHeader, CompactMetaV1, CompactPubkey,
 };
 use blockzilla_read_sdk::{
-    ArchiveReader, BorrowedDecodedBlock, CompactV2MessageSchema, CompactV2MetadataSchema,
-    CompiledPubkeyFilter, HashVerification, HttpRangeSource, HttpRangeSourceOptions,
-    MAX_ORDERED_PARALLEL_RETAINED_DECOMPRESSED_BYTES, OpenOptions, OrderedParallelBlockConfig,
-    OverlayRangeSource, PinnedLocalRangeSource, RangeSource, SelectorIndeterminateReason,
-    SelectorOutcome, SignatureReference, SourceResult,
-    manifest::{
-        BLOCK_INDEX_FILE, GENERATION_MANIFEST_FILE, GenerationFile, GenerationManifest, META_FILE,
-        REGISTRY_FILE,
-    },
+    ArchiveIdentity, ArchiveReader, ArchiveSourceBinding, BorrowedDecodedBlock,
+    COMPACT_V2_OPTIONAL_OBJECTS, COMPACT_V2_REQUIRED_OBJECTS, CompactV2MessageSchema,
+    CompactV2MetadataSchema, CompiledPubkeyFilter, HashVerification, HttpObjectIdentity,
+    HttpRangeSource, HttpRangeSourceOptions, MAX_ORDERED_PARALLEL_RETAINED_DECOMPRESSED_BYTES,
+    OpenOptions, OrderedParallelBlockConfig, OverlayRangeSource, PinnedLocalRangeSource,
+    RangeSource, SelectorIndeterminateReason, SelectorOutcome, SignatureReference, SourceError,
+    SourceResult,
 };
 use sha2::{Digest, Sha256};
 
@@ -32,16 +33,110 @@ use crate::database::{
     TransactionAccountRecord, TransactionAccountSource,
 };
 
-const MAX_MANIFEST_BYTES: usize = 4 * 1024 * 1024;
 const CACHE_DOWNLOAD_CHUNK: usize = 8 * 1024 * 1024;
 const REGISTRY_RESOLVER_ENTRIES: usize = 16_384;
 const MAX_THREADS: usize = blockzilla_read_sdk::MAX_ORDERED_PARALLEL_DECODE_WORKERS;
+const OBJECT_SET_ID_DOMAIN: &[u8] = b"blockzilla/dump/compact-v2-etag-set/v1\0";
+pub(crate) const LOCAL_OBJECT_SET: [&str; 19] = [
+    blockzilla_format::ARCHIVE_V2_BLOCKS_FILE,
+    blockzilla_format::ARCHIVE_V2_BLOCK_INDEX_FILE,
+    blockzilla_format::ARCHIVE_V2_META_FILE,
+    blockzilla_format::ARCHIVE_V2_PUBKEY_REGISTRY_FILE,
+    blockzilla_format::ARCHIVE_V2_SIGNATURES_FILE,
+    blockzilla_format::ARCHIVE_V2_GENESIS_BIN_FILE,
+    blockzilla_format::ARCHIVE_V2_BLOCKHASH_REGISTRY_FILE,
+    blockzilla_format::ARCHIVE_V2_BLOCKHASH_INDEX_V3_FILE,
+    blockzilla_format::ARCHIVE_V2_PREV_BLOCKHASH_TAIL_FILE,
+    blockzilla_format::ARCHIVE_V2_VOTE_HASH_REGISTRY_FILE,
+    blockzilla_format::ARCHIVE_V2_POH_FILE,
+    blockzilla_format::ARCHIVE_V2_SHREDDING_FILE,
+    blockzilla_format::ARCHIVE_V2_PUBKEY_REGISTRY_COUNTS_FILE,
+    blockzilla_format::ARCHIVE_V2_PUBKEY_REGISTRY_INDEX_FILE,
+    blockzilla_format::ARCHIVE_V2_FIRST_SEEN_REGISTRY_MANIFEST_FILE,
+    blockzilla_format::ARCHIVE_V2_PUBKEY_HOT_SEED_FILE,
+    blockzilla_format::ARCHIVE_V2_BLOCK_ACCESS_FILE,
+    blockzilla_format::ARCHIVE_V2_BLOCK_ACCESS_INDEX_FILE,
+    blockzilla_format::ARCHIVE_V2_GET_BLOCK_INDEX_FILE,
+];
 static CACHE_TEMP_SEQUENCE: AtomicU64 = AtomicU64::new(0);
+
+#[derive(Clone)]
+pub struct GatewayDumpSource {
+    source: OverlayRangeSource<PinnedLocalRangeSource, HttpRangeSource>,
+    http: HttpRangeSource,
+    objects: Arc<BTreeMap<String, HttpObjectIdentity>>,
+}
+
+impl GatewayDumpSource {
+    fn require_object(&self, object: &str) -> SourceResult<()> {
+        if self.objects.contains_key(object) {
+            Ok(())
+        } else {
+            Err(SourceError::NotFound(object.to_owned()))
+        }
+    }
+
+    fn verify_unchanged(&self, epoch: u64) -> SourceResult<()> {
+        for name in compact_v2_object_names(epoch) {
+            match (self.objects.get(name), self.http.strong_identity(name)) {
+                (Some(expected), Ok(actual)) if *expected == actual => {}
+                (Some(_), Ok(_)) => {
+                    return Err(SourceError::Protocol(format!(
+                        "object {name} changed after the object set was bound"
+                    )));
+                }
+                (Some(_), Err(error)) => return Err(error),
+                (None, Err(SourceError::NotFound(_))) => {}
+                (None, Ok(_)) => {
+                    return Err(SourceError::Protocol(format!(
+                        "object {name} became present after its absence was bound"
+                    )));
+                }
+                (None, Err(error)) => return Err(error),
+            }
+        }
+        Ok(())
+    }
+}
+
+impl RangeSource for GatewayDumpSource {
+    fn size(&self, object: &str) -> SourceResult<Option<u64>> {
+        Ok(self.objects.get(object).map(|identity| identity.length))
+    }
+
+    fn read_range(&self, object: &str, offset: u64, length: usize) -> SourceResult<Vec<u8>> {
+        self.require_object(object)?;
+        self.source.read_range(object, offset, length)
+    }
+
+    fn read_range_into(
+        &self,
+        object: &str,
+        offset: u64,
+        length: usize,
+        destination: &mut Vec<u8>,
+    ) -> SourceResult<()> {
+        self.require_object(object)?;
+        self.source
+            .read_range_into(object, offset, length, destination)
+    }
+
+    fn read_range_into_slice(
+        &self,
+        object: &str,
+        offset: u64,
+        destination: &mut [u8],
+    ) -> SourceResult<()> {
+        self.require_object(object)?;
+        self.source
+            .read_range_into_slice(object, offset, destination)
+    }
+}
 
 #[derive(Clone)]
 pub enum DumpSource {
     Local(PinnedLocalRangeSource),
-    Gateway(OverlayRangeSource<PinnedLocalRangeSource, HttpRangeSource>),
+    Gateway(GatewayDumpSource),
 }
 
 impl RangeSource for DumpSource {
@@ -81,6 +176,12 @@ pub struct SourceOptions {
     pub bearer_token: Option<String>,
     pub cache: Option<PathBuf>,
     pub allow_insecure_http: bool,
+    pub cluster_id: String,
+    pub local_generation_prefix: Option<String>,
+    pub epoch_zero_first_slot: u64,
+    pub slots_per_epoch: u64,
+    pub message_schema: CompactV2MessageSchema,
+    pub metadata_schema: CompactV2MetadataSchema,
 }
 
 impl SourceOptions {
@@ -92,15 +193,35 @@ impl SourceOptions {
                     "a bearer token is valid only with --gateway"
                 );
                 ensure!(self.cache.is_none(), "a cache is valid only with --gateway");
-                Ok(())
+                ensure!(
+                    self.local_generation_prefix
+                        .as_ref()
+                        .is_some_and(|value| !value.is_empty()),
+                    "--source-generation-prefix is required with --archive"
+                );
             }
             (None, Some(_)) => {
                 ensure!(self.cache.is_some(), "--cache is required with --gateway");
-                Ok(())
+                ensure!(
+                    self.local_generation_prefix.is_none(),
+                    "--source-generation-prefix is valid only with --archive"
+                );
             }
             (Some(_), Some(_)) => bail!("use exactly one of --archive or --gateway"),
             (None, None) => bail!("use exactly one of --archive or --gateway"),
         }
+        ensure!(
+            !self.cluster_id.is_empty(),
+            "--cluster-id must not be empty"
+        );
+        ensure!(
+            self.slots_per_epoch > 0,
+            "--slots-per-epoch must be positive"
+        );
+        self.epoch_zero_first_slot
+            .checked_add(self.slots_per_epoch - 1)
+            .context("source slot geometry overflows u64")?;
+        Ok(())
     }
 
     pub fn identity(&self) -> Result<String> {
@@ -114,6 +235,20 @@ impl SourceOptions {
             (None, Some(gateway)) => Ok(format!("gateway:{gateway}")),
             _ => unreachable!("validate accepted exactly one source"),
         }
+    }
+
+    fn identity_for(&self, epoch: u64, generation_id: String) -> Result<ArchiveIdentity> {
+        let first_slot = epoch
+            .checked_mul(self.slots_per_epoch)
+            .and_then(|offset| self.epoch_zero_first_slot.checked_add(offset))
+            .context("epoch first slot overflows u64")?;
+        Ok(ArchiveIdentity {
+            cluster_id: self.cluster_id.clone(),
+            epoch,
+            generation_id,
+            first_slot,
+            slots_per_epoch: self.slots_per_epoch,
+        })
     }
 }
 
@@ -136,7 +271,19 @@ pub struct PreparedEpoch {
     pub archive: DumpArchive,
     pub source_root: PathBuf,
     pub source_identity: String,
-    pub manifest_json: String,
+    pub identity: ArchiveIdentity,
+    pub source_descriptor_json: String,
+}
+
+impl PreparedEpoch {
+    pub fn verify_source_unchanged(&self) -> Result<()> {
+        match self.archive.source() {
+            DumpSource::Local(source) => source.verify_unchanged().map_err(anyhow::Error::from),
+            DumpSource::Gateway(source) => source
+                .verify_unchanged(self.identity.epoch)
+                .map_err(anyhow::Error::from),
+        }
+    }
 }
 
 pub fn run_dump(config: &DumpRunConfig) -> Result<DumpRunResult> {
@@ -182,30 +329,37 @@ pub fn prepare_epoch(source_options: &SourceOptions, epoch: u64) -> Result<Prepa
     source_options.validate()?;
     if let Some(archive_root) = &source_options.archive {
         let resolved_root = resolve_local_epoch_root(archive_root, epoch)?;
-        let source = PinnedLocalRangeSource::new(&resolved_root);
-        let manifest_bytes = source
-            .read_all_bounded(GENERATION_MANIFEST_FILE, MAX_MANIFEST_BYTES)
-            .context("read local generation manifest")?;
-        let manifest = GenerationManifest::parse(&manifest_bytes)
-            .context("validate local generation manifest")?;
-        ensure!(
-            manifest.epoch == epoch,
-            "local archive is epoch {}, expected {epoch}",
-            manifest.epoch
-        );
-        let manifest_json =
-            String::from_utf8(manifest_bytes).context("generation manifest is not valid UTF-8")?;
+        let prefix = source_options
+            .local_generation_prefix
+            .as_deref()
+            .expect("local source validation requires a generation prefix");
+        let identity = source_options.identity_for(epoch, format!("{prefix}-epoch-{epoch}"))?;
+        let source = PinnedLocalRangeSource::new_anchored(&resolved_root, &LOCAL_OBJECT_SET)
+            .context("pin local Compact V2 reader directory")?;
         let options = OpenOptions {
-            hash_verification: HashVerification::ControlFiles,
+            epoch_first_slot: Some(identity.first_slot),
             ..OpenOptions::default()
         };
-        let archive = ArchiveReader::open_with_options(DumpSource::Local(source), options)
-            .with_context(|| format!("open local published epoch {epoch}"))?;
+        let archive = ArchiveReader::open_pinned_with_schemas(
+            DumpSource::Local(source),
+            identity.clone(),
+            options,
+            source_options.message_schema,
+            source_options.metadata_schema,
+        )
+        .with_context(|| format!("open pinned local epoch {epoch}"))?;
+        let source_descriptor_json = source_descriptor_json(&archive, None)?;
         return Ok(PreparedEpoch {
             archive,
             source_root: resolved_root.clone(),
-            source_identity: format!("archive:{}", resolved_root.display()),
-            manifest_json,
+            source_identity: format!(
+                "archive:{}#{}#first-slot={}",
+                resolved_root.display(),
+                identity.generation_id,
+                identity.first_slot
+            ),
+            identity,
+            source_descriptor_json,
         });
     }
 
@@ -230,74 +384,175 @@ pub fn prepare_epoch(source_options: &SourceOptions, epoch: u64) -> Result<Prepa
         http_options,
     )
     .context("create HTTP range source")?;
-    let manifest_bytes = http
-        .read_all_bounded(GENERATION_MANIFEST_FILE, MAX_MANIFEST_BYTES)
-        .context("download generation manifest")?;
-    let manifest =
-        GenerationManifest::parse(&manifest_bytes).context("validate generation manifest")?;
-    ensure!(
-        manifest.epoch == epoch,
-        "gateway returned epoch {}, expected {epoch}",
-        manifest.epoch
-    );
-    let manifest_json = String::from_utf8(manifest_bytes.clone())
-        .context("generation manifest is not valid UTF-8")?;
-    let cache_root = cache
-        .join(format!("epoch-{epoch}"))
-        .join(&manifest.generation_digest);
+    let objects = discover_gateway_objects(&http, epoch)?;
+    let objects = Arc::new(objects);
+    let object_set_id = gateway_object_set_id(epoch, &objects);
+    let identity = source_options.identity_for(epoch, object_set_id.clone())?;
+    let cache_root = cache.join(format!("epoch-{epoch}")).join(&object_set_id);
     fs::create_dir_all(&cache_root)
-        .with_context(|| format!("create generation cache {}", cache_root.display()))?;
-    publish_cache_bytes(&cache_root.join(GENERATION_MANIFEST_FILE), &manifest_bytes)?;
+        .with_context(|| format!("create object-set cache {}", cache_root.display()))?;
 
     for name in [
-        BLOCK_INDEX_FILE,
-        META_FILE,
-        REGISTRY_FILE,
+        blockzilla_format::ARCHIVE_V2_BLOCK_INDEX_FILE,
+        blockzilla_format::ARCHIVE_V2_META_FILE,
+        blockzilla_format::ARCHIVE_V2_PUBKEY_REGISTRY_FILE,
         ARCHIVE_V2_PUBKEY_REGISTRY_INDEX_FILE,
     ] {
-        let file = manifest
-            .required_file(name)
-            .with_context(|| format!("network publication must bind cache control file {name}"))?;
-        cache_manifest_object(&http, &cache_root, file)?;
-    }
-    for name in [
-        blockzilla_read_sdk::COMPACT_V2_CURRENT_MESSAGE_SCHEMA_MARKER_FILE,
-        blockzilla_read_sdk::COMPACT_V2_MAY24_MESSAGE_SCHEMA_MARKER_FILE,
-        blockzilla_read_sdk::COMPACT_V2_LEGACY_METADATA_SCHEMA_MARKER_FILE,
-    ] {
-        if let Some(file) = manifest.file(name) {
-            cache_manifest_object(&http, &cache_root, file)?;
+        if let Some(binding) = objects.get(name) {
+            cache_etag_object(&http, &cache_root, name, binding)?;
         }
     }
 
-    let source = DumpSource::Gateway(OverlayRangeSource::new(
-        PinnedLocalRangeSource::new(&cache_root),
+    let cache_source = PinnedLocalRangeSource::new_anchored(&cache_root, &LOCAL_OBJECT_SET)
+        .context("pin gateway cache directory")?;
+    let source = DumpSource::Gateway(GatewayDumpSource {
+        source: OverlayRangeSource::new(cache_source, http.clone()),
         http,
-    ));
+        objects: Arc::clone(&objects),
+    });
     let options = OpenOptions {
-        hash_verification: HashVerification::ControlFiles,
+        hash_verification: HashVerification::SizesOnly,
+        epoch_first_slot: Some(identity.first_slot),
         ..OpenOptions::default()
     };
-    let archive = ArchiveReader::open_with_options(source, options)
-        .with_context(|| format!("open published epoch {epoch}"))?;
-    ensure!(
-        archive.manifest().generation_digest == manifest.generation_digest,
-        "opened archive generation differs from the downloaded manifest"
-    );
+    let archive = ArchiveReader::open_object_set_with_schemas(
+        source,
+        identity.clone(),
+        &object_set_id,
+        options,
+        source_options.message_schema,
+        source_options.metadata_schema,
+    )
+    .with_context(|| format!("open strong-ETag object set for epoch {epoch}"))?;
+    let source_descriptor_json = source_descriptor_json(&archive, Some(objects.as_ref()))?;
     Ok(PreparedEpoch {
         archive,
         source_root: cache_root,
         source_identity: format!(
-            "gateway:{gateway}/epoch-{epoch}@{}",
-            manifest.generation_digest
+            "gateway:{gateway}/epoch-{epoch}@{object_set_id}#first-slot={}",
+            identity.first_slot
         ),
-        manifest_json,
+        identity,
+        source_descriptor_json,
     })
 }
 
+fn compact_v2_object_names(epoch: u64) -> Vec<&'static str> {
+    let mut names = Vec::with_capacity(LOCAL_OBJECT_SET.len());
+    names.extend(COMPACT_V2_REQUIRED_OBJECTS);
+    names.extend(COMPACT_V2_OPTIONAL_OBJECTS);
+    if epoch == 0 {
+        names.push(blockzilla_format::ARCHIVE_V2_GENESIS_BIN_FILE);
+    }
+    names
+}
+
+fn discover_gateway_objects(
+    http: &HttpRangeSource,
+    epoch: u64,
+) -> Result<BTreeMap<String, HttpObjectIdentity>> {
+    let mut objects = BTreeMap::new();
+    for name in COMPACT_V2_REQUIRED_OBJECTS {
+        let identity = http
+            .strong_identity(name)
+            .with_context(|| format!("bind required gateway object {name}"))?;
+        objects.insert(name.to_owned(), identity);
+    }
+    for name in compact_v2_object_names(epoch) {
+        if objects.contains_key(name) {
+            continue;
+        }
+        match http.strong_identity(name) {
+            Ok(identity) => {
+                objects.insert(name.to_owned(), identity);
+            }
+            Err(SourceError::NotFound(_)) => {}
+            Err(error) => {
+                return Err(error).with_context(|| format!("bind optional gateway object {name}"));
+            }
+        }
+    }
+    Ok(objects)
+}
+
+fn gateway_object_set_id(epoch: u64, objects: &BTreeMap<String, HttpObjectIdentity>) -> String {
+    let mut digest = Sha256::new();
+    digest.update(OBJECT_SET_ID_DOMAIN);
+    digest.update(epoch.to_le_bytes());
+    digest.update((objects.len() as u64).to_le_bytes());
+    for (name, identity) in objects {
+        digest.update((name.len() as u64).to_le_bytes());
+        digest.update(name.as_bytes());
+        digest.update(identity.length.to_le_bytes());
+        digest.update((identity.strong_etag.len() as u64).to_le_bytes());
+        digest.update(identity.strong_etag.as_bytes());
+    }
+    format!("etag-set-{}", hex_lower(&digest.finalize()))
+}
+
+fn source_descriptor_json(
+    archive: &DumpArchive,
+    source_objects: Option<&BTreeMap<String, HttpObjectIdentity>>,
+) -> Result<String> {
+    let descriptor = archive
+        .archive_descriptor()
+        .context("object-set reader did not expose its runtime descriptor")?;
+    let source_binding = match &descriptor.source_binding {
+        ArchiveSourceBinding::PinnedLocal => {
+            let DumpSource::Local(source) = archive.source() else {
+                bail!("pinned-local descriptor is not backed by a local pinned source");
+            };
+            serde_json::json!({
+                "kind": "pinned-local",
+                "file_identities": source.pinned_object_identities()?,
+            })
+        }
+        ArchiveSourceBinding::StrongEtags { object_set_id } => serde_json::json!({
+            "kind": "strong-etags",
+            "object_set_id": object_set_id
+        }),
+    };
+    let objects = descriptor
+        .objects
+        .iter()
+        .map(|object| {
+            let mut json = serde_json::json!({
+                "name": object.name.as_str(),
+                "size": object.size,
+            });
+            if let Some(source_objects) = source_objects {
+                let identity = source_objects.get(object.name.as_str()).context(format!(
+                    "missing strong identity for object {}",
+                    object.name
+                ))?;
+                if let serde_json::Value::Object(ref mut fields) = json {
+                    fields.insert(
+                        "strong_etag".into(),
+                        serde_json::json!(identity.strong_etag),
+                    );
+                }
+            }
+            Ok::<_, anyhow::Error>(json)
+        })
+        .collect::<Result<Vec<_>, _>>()?;
+    serde_json::to_string_pretty(&serde_json::json!({
+        "kind": "compact-v2-runtime-source-descriptor-v1",
+        "cluster_id": descriptor.identity.cluster_id.as_str(),
+        "epoch": descriptor.identity.epoch,
+        "generation_id": descriptor.identity.generation_id.as_str(),
+        "first_slot": descriptor.identity.first_slot,
+        "slots_per_epoch": descriptor.identity.slots_per_epoch,
+        "message_schema": message_schema_name(archive.message_schema()),
+        "metadata_schema": metadata_schema_name(archive.metadata_schema()),
+        "source_binding": source_binding,
+        "objects": objects,
+    }))
+    .context("serialize runtime source descriptor")
+}
+
 fn resolve_local_epoch_root(root: &Path, epoch: u64) -> Result<PathBuf> {
-    let direct_manifest = root.join(GENERATION_MANIFEST_FILE);
-    let candidate = if direct_manifest.is_file() {
+    let direct_index = root.join(blockzilla_format::ARCHIVE_V2_BLOCK_INDEX_FILE);
+    let candidate = if direct_index.is_file() {
         root.to_path_buf()
     } else {
         root.join(format!("epoch-{epoch}"))
@@ -329,14 +584,13 @@ fn scan_epoch(database: &mut DumpDatabase, config: &DumpRunConfig, epoch: u64) -
         .context("compile target pubkey filter")?;
     let binding = crate::database::EpochBinding {
         epoch,
-        source_identity: prepared.source_identity,
-        cluster_id: archive.manifest().cluster_id.clone(),
-        generation_id: archive.manifest().generation_id.clone(),
-        generation_digest: archive.binding().generation_digest,
-        slots_per_epoch: archive.manifest().slots_per_epoch,
+        source_identity: prepared.source_identity.clone(),
+        cluster_id: prepared.identity.cluster_id.clone(),
+        generation_id: prepared.identity.generation_id.clone(),
+        slots_per_epoch: prepared.identity.slots_per_epoch,
         message_schema: message_schema_name(archive.message_schema()).into(),
         metadata_schema: metadata_schema_name(archive.metadata_schema()).into(),
-        manifest_json: prepared.manifest_json,
+        source_descriptor_json: prepared.source_descriptor_json.clone(),
         block_rows_total: archive.index().rows.len() as u64,
     };
     let mut checkpoint = database
@@ -393,6 +647,9 @@ fn scan_epoch(database: &mut DumpDatabase, config: &DumpRunConfig, epoch: u64) -
             },
         )?;
     }
+    prepared
+        .verify_source_unchanged()
+        .with_context(|| format!("verify epoch {epoch} source stability"))?;
     database.complete_epoch(epoch).context("complete epoch")?;
     Ok(())
 }
@@ -412,7 +669,11 @@ fn project_block(
     resolver: &mut RegistryResolver,
     block: BorrowedDecodedBlock<'_>,
 ) -> Result<BlockProjection> {
-    let epoch = archive.manifest().epoch;
+    let epoch = archive
+        .archive_descriptor()
+        .expect("dump readers use object-set admission")
+        .identity
+        .epoch;
     let slot = block.header().slot;
     let block_id = block.index_row.block_id;
     let mut first_signature_ordinal = block.index_row.first_signature_ordinal;
@@ -440,7 +701,7 @@ fn project_block(
             row.tx_index,
         )?;
         let signature_reference = SignatureReference {
-            generation_digest: archive.binding().generation_digest,
+            reader_id: archive.reader_id(),
             first_ordinal: first_signature_ordinal,
             count: row.signature_count,
         };
@@ -868,12 +1129,13 @@ impl RegistryResolver {
     }
 }
 
-fn cache_manifest_object(
+fn cache_etag_object(
     source: &HttpRangeSource,
     cache_root: &Path,
-    binding: &GenerationFile,
+    name: &str,
+    binding: &HttpObjectIdentity,
 ) -> Result<()> {
-    let destination = cache_root.join(&binding.name);
+    let destination = cache_root.join(name);
     if cached_object_matches(&destination, binding)? {
         return Ok(());
     }
@@ -889,36 +1151,36 @@ fn cache_manifest_object(
             .create_new(true)
             .open(&temporary)
             .with_context(|| format!("create cache staging file {}", temporary.display()))?;
-        let mut hasher = Sha256::new();
         let mut offset = 0u64;
-        while offset < binding.size {
-            let length = usize::try_from((binding.size - offset).min(CACHE_DOWNLOAD_CHUNK as u64))
-                .context("cache download range exceeds this platform")?;
+        while offset < binding.length {
+            let length =
+                usize::try_from((binding.length - offset).min(CACHE_DOWNLOAD_CHUNK as u64))
+                    .context("cache download range exceeds this platform")?;
             let bytes = source
-                .read_range(&binding.name, offset, length)
-                .with_context(|| format!("download {} at byte {offset}", binding.name))?;
+                .read_range(name, offset, length)
+                .with_context(|| format!("download {name} at byte {offset}"))?;
             ensure!(
                 bytes.len() == length,
                 "gateway returned {} bytes for {}, expected {length}",
                 bytes.len(),
-                binding.name
+                name
             );
             file.write_all(&bytes)
                 .with_context(|| format!("write cache file {}", temporary.display()))?;
-            hasher.update(&bytes);
             offset += length as u64;
         }
-        let digest = hex_lower(&hasher.finalize());
         ensure!(
-            digest == binding.sha256,
-            "downloaded {} SHA-256 is {digest}, expected {}",
-            binding.name,
-            binding.sha256
+            source.strong_identity(name)? == *binding,
+            "gateway object {name} changed while it was cached"
         );
         file.sync_all()
             .with_context(|| format!("sync cache file {}", temporary.display()))?;
         drop(file);
         publish_verified_cache_file(&temporary, &destination, replace_existing, binding)?;
+        publish_cache_bytes(
+            &cache_binding_path(&destination)?,
+            &cache_binding_bytes(binding)?,
+        )?;
         sync_directory(cache_root)
     })();
     if result.is_err() {
@@ -985,7 +1247,23 @@ fn publish_cache_bytes(destination: &Path, bytes: &[u8]) -> Result<()> {
     result
 }
 
-fn cached_object_matches(path: &Path, binding: &GenerationFile) -> Result<bool> {
+fn cache_binding_path(destination: &Path) -> Result<PathBuf> {
+    let name = destination
+        .file_name()
+        .and_then(|value| value.to_str())
+        .context("cache object name is not valid UTF-8")?;
+    Ok(destination.with_file_name(format!(".{name}.etag.json")))
+}
+
+fn cache_binding_bytes(binding: &HttpObjectIdentity) -> Result<Vec<u8>> {
+    serde_json::to_vec(&serde_json::json!({
+        "length": binding.length,
+        "strong_etag": binding.strong_etag.as_str(),
+    }))
+    .context("serialize cache ETag binding")
+}
+
+fn cached_object_matches(path: &Path, binding: &HttpObjectIdentity) -> Result<bool> {
     let metadata = match fs::metadata(path) {
         Ok(metadata) => metadata,
         Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(false),
@@ -993,17 +1271,18 @@ fn cached_object_matches(path: &Path, binding: &GenerationFile) -> Result<bool> 
             return Err(error).with_context(|| format!("stat cache file {}", path.display()));
         }
     };
-    if !metadata.is_file() || metadata.len() != binding.size {
+    if !metadata.is_file() || metadata.len() != binding.length {
         return Ok(false);
     }
-    Ok(sha256_file(path)? == binding.sha256)
+    let binding_path = cache_binding_path(path)?;
+    Ok(fs::read(binding_path).ok().as_deref() == Some(cache_binding_bytes(binding)?.as_slice()))
 }
 
 fn publish_verified_cache_file(
     temporary: &Path,
     destination: &Path,
     replace_existing: bool,
-    binding: &GenerationFile,
+    binding: &HttpObjectIdentity,
 ) -> Result<()> {
     if replace_existing {
         fs::rename(temporary, destination).with_context(|| {
@@ -1029,25 +1308,6 @@ fn publish_verified_cache_file(
         }
         Err(error) => Err(error).context("publish cache file without replacement"),
     }
-}
-
-fn sha256_file(path: &Path) -> Result<String> {
-    use std::io::Read as _;
-
-    let mut file =
-        File::open(path).with_context(|| format!("open cache file {}", path.display()))?;
-    let mut buffer = vec![0u8; CACHE_DOWNLOAD_CHUNK];
-    let mut hasher = Sha256::new();
-    loop {
-        let count = file
-            .read(&mut buffer)
-            .with_context(|| format!("hash cache file {}", path.display()))?;
-        if count == 0 {
-            break;
-        }
-        hasher.update(&buffer[..count]);
-    }
-    Ok(hex_lower(&hasher.finalize()))
 }
 
 struct CacheLock {

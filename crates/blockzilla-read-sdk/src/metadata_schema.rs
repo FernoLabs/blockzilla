@@ -35,6 +35,30 @@ pub enum CompactV2MetadataSchema {
     LegacyRawError,
 }
 
+/// Select the metadata grammar from the fixed marker object without a
+/// publication file. The marker is compared directly; no digest is computed.
+pub fn detect_compact_v2_metadata_schema<S: RangeSource>(
+    source: &S,
+) -> Result<CompactV2MetadataSchema, CompactV2MetadataSchemaError> {
+    let Some(actual_size) = source.size(COMPACT_V2_LEGACY_METADATA_SCHEMA_MARKER_FILE)? else {
+        return Ok(CompactV2MetadataSchema::CurrentTypedError);
+    };
+    if actual_size != COMPACT_V2_LEGACY_METADATA_SCHEMA_MARKER_SIZE {
+        return Err(CompactV2MetadataSchemaError::MarkerObjectSize {
+            expected: COMPACT_V2_LEGACY_METADATA_SCHEMA_MARKER_SIZE,
+            actual: actual_size,
+        });
+    }
+    let bytes = source.read_all_bounded(
+        COMPACT_V2_LEGACY_METADATA_SCHEMA_MARKER_FILE,
+        COMPACT_V2_LEGACY_METADATA_SCHEMA_MARKER_SIZE as usize,
+    )?;
+    if bytes.as_slice() != COMPACT_V2_LEGACY_METADATA_SCHEMA_MARKER_BYTES {
+        return Err(CompactV2MetadataSchemaError::MarkerObjectBytes);
+    }
+    Ok(CompactV2MetadataSchema::LegacyRawError)
+}
+
 #[derive(Debug, Error)]
 pub enum CompactV2MetadataSchemaError {
     #[error("invalid Compact V2 generation manifest: {0}")]

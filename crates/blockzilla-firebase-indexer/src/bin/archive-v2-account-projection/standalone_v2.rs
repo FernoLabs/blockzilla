@@ -1902,9 +1902,10 @@ pub struct OpenReadStats {
 
 /// A borrowed transaction view from one block-batch semantic read.
 ///
-/// Decoded metadata fields retain their exact Compact V2 field encoding.  A
-/// decoded transaction has `Some` values for all four semantic planes.  A raw
-/// fallback has only `raw_metadata`; an absent metadata row has neither.
+/// Decoded metadata fields retain their exact Compact V2 field encoding. A
+/// requested decoded plane is `Some` when decoded metadata is present. The
+/// selection value supplied to the visitor distinguishes an omitted plane
+/// from a missing metadata field.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct SemanticTransaction<'a> {
     pub block_id: u32,
@@ -1917,9 +1918,73 @@ pub struct SemanticTransaction<'a> {
     pub inner_instructions: Option<&'a [u8]>,
     pub token_balances: Option<&'a [u8]>,
     pub outcome: Option<&'a [u8]>,
+    /// True when the directory records a raw metadata fallback, even when its
+    /// payload plane was not selected and `raw_metadata` is `None`.
+    pub raw_metadata_present: bool,
     pub raw_metadata: Option<&'a [u8]>,
     pub signature_ordinals: Range<u64>,
     pub signature_bytes: Range<u64>,
+}
+
+/// Optional V3 semantic planes required by one application scan.
+///
+/// The transaction directory and message planes are always selected. All five
+/// fields below are independent. `FULL` preserves the original visitor
+/// behavior. `INSTRUCTION_QUERY` omits token balances and raw fallback payloads
+/// while retaining the decoded fields used by instruction applications.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
+pub struct SemanticPlaneSelection {
+    pub loaded_addresses: bool,
+    pub inner_instructions: bool,
+    pub token_balances: bool,
+    pub outcomes: bool,
+    pub raw_metadata_fallbacks: bool,
+}
+
+impl SemanticPlaneSelection {
+    pub const REQUIRED_ONLY: Self = Self {
+        loaded_addresses: false,
+        inner_instructions: false,
+        token_balances: false,
+        outcomes: false,
+        raw_metadata_fallbacks: false,
+    };
+
+    pub const FULL: Self = Self {
+        loaded_addresses: true,
+        inner_instructions: true,
+        token_balances: true,
+        outcomes: true,
+        raw_metadata_fallbacks: true,
+    };
+
+    pub const INSTRUCTION_QUERY: Self = Self {
+        loaded_addresses: true,
+        inner_instructions: true,
+        token_balances: false,
+        outcomes: true,
+        raw_metadata_fallbacks: false,
+    };
+
+    pub const fn includes(self, object: Object) -> bool {
+        match object {
+            Object::TransactionDirectory | Object::Messages => true,
+            Object::LoadedAddresses => self.loaded_addresses,
+            Object::InnerInstructions => self.inner_instructions,
+            Object::TokenBalances => self.token_balances,
+            Object::Outcomes => self.outcomes,
+            Object::RawMetadataFallbacks => self.raw_metadata_fallbacks,
+            Object::Logs | Object::Balances | Object::TransactionRewards | Object::BlockRewards => {
+                false
+            }
+        }
+    }
+}
+
+impl Default for SemanticPlaneSelection {
+    fn default() -> Self {
+        Self::FULL
+    }
 }
 
 /// Exact work receipt for one semantic block visit.
@@ -1929,11 +1994,16 @@ pub struct SemanticBlockReadStats {
     pub block_transactions: u32,
     pub requested_transactions: u32,
     pub visited_transactions: u32,
+    pub plane_selection: SemanticPlaneSelection,
     pub object_reads: [ObjectReadStats; OBJECT_COUNT],
     pub peak_decoded_bytes: u64,
-    /// Conservative decoded-plus-stored upper bound. This double-counts raw
-    /// planes, but it never understates the buffers controlled by this API.
-    /// DecodedDirectory heap and allocator/RSS overhead remain outside it.
+    /// Conservative decoded-plus-stored workspace upper bound. This is the
+    /// larger of the logical block bound and the capacities retained by the
+    /// reusable decoded-plane and point-read stored buffers after the visit.
+    /// It can double-count raw planes. An active contiguous stored batch is
+    /// separate; use `ContiguousSemanticScan::current_batch_retained_capacity_bytes`
+    /// for that allocation. DecodedDirectory heap and allocator/RSS overhead
+    /// remain outside this value.
     pub peak_retained_bytes_upper_bound: u64,
     pub selected_semantic_bytes: u64,
 }
@@ -1964,6 +2034,181 @@ struct SemanticStoredPlane {
     bytes: Vec<u8>,
 }
 
+/// Reusable decoded-plane storage for one semantic scan.
+///
+/// Plane capacities and one zstd context are retained between blocks. The
+/// aggregate decoded capacity is kept under the same 1 GiB limit as one live
+/// semantic block. Point reads also reuse `stored` between the selected planes
+/// of one block.
+struct SemanticDecodeWorkspace {
+    decoded: [Vec<u8>; OBJECT_COUNT],
+    stored: Vec<u8>,
+    decompressor: Option<zstd::bulk::Decompressor<'static>>,
+    #[cfg(test)]
+    decompressor_creations: u64,
+}
+
+impl Default for SemanticDecodeWorkspace {
+    fn default() -> Self {
+        Self {
+            decoded: array::from_fn(|_| Vec::new()),
+            stored: Vec::new(),
+            decompressor: None,
+            #[cfg(test)]
+            decompressor_creations: 0,
+        }
+    }
+}
+
+impl SemanticDecodeWorkspace {
+    fn release_buffers(&mut self) {
+        self.decoded = array::from_fn(|_| Vec::new());
+        self.stored = Vec::new();
+    }
+
+    fn prepare_for_block(
+        &mut self,
+        block: &BlockRow,
+        selection: SemanticPlaneSelection,
+    ) -> Result<()> {
+        self.stored.clear();
+        for decoded in &mut self.decoded {
+            decoded.clear();
+        }
+
+        let retained_capacity = self.decoded_capacity()?;
+        let required_growth = SEMANTIC_OBJECTS
+            .iter()
+            .filter(|object| selection.includes(**object))
+            .try_fold(0_usize, |total, object| {
+                let index = object.index();
+                let required = block.locators[index].decoded_len as usize;
+                total
+                    .checked_add(required.saturating_sub(self.decoded[index].capacity()))
+                    .context("semantic decoded workspace growth overflow")
+            })?;
+        if retained_capacity
+            .checked_add(required_growth)
+            .context("semantic decoded workspace capacity overflow")?
+            > MAX_SEMANTIC_BLOCK_DECODED_BYTES
+        {
+            // Capacities from dissimilar earlier blocks must not accumulate
+            // above the live decoded-block limit.
+            self.decoded = array::from_fn(|_| Vec::new());
+        }
+        Ok(())
+    }
+
+    fn decoded_capacity(&self) -> Result<usize> {
+        self.decoded.iter().try_fold(0_usize, |total, bytes| {
+            total
+                .checked_add(bytes.capacity())
+                .context("semantic decoded workspace capacity overflow")
+        })
+    }
+
+    fn retained_capacity(&self) -> Result<usize> {
+        self.decoded_capacity()?
+            .checked_add(self.stored.capacity())
+            .context("semantic retained workspace capacity overflow")
+    }
+
+    fn reserve_decoded(&mut self, object: Object, decoded_len: usize) -> Result<()> {
+        let index = object.index();
+        let current = self.decoded[index].capacity();
+        if current >= decoded_len {
+            return Ok(());
+        }
+        let other_capacity = self
+            .decoded_capacity()?
+            .checked_sub(current)
+            .context("semantic decoded workspace capacity underflow")?;
+        let available = MAX_SEMANTIC_BLOCK_DECODED_BYTES
+            .checked_sub(other_capacity)
+            .context("semantic decoded workspace exceeds cap")?;
+        ensure!(
+            decoded_len <= available,
+            "semantic decoded plane cannot fit workspace cap"
+        );
+        self.decoded[index]
+            .try_reserve_exact(decoded_len)
+            .with_context(|| format!("reserve decoded standalone {}", object.name()))?;
+        if self.decoded_capacity()? > MAX_SEMANTIC_BLOCK_DECODED_BYTES {
+            self.decoded[index] = Vec::new();
+            bail!("semantic decoded workspace allocator capacity exceeds cap");
+        }
+        Ok(())
+    }
+
+    fn decode_stored(&mut self, stored: &[u8], locator: Locator, object: Object) -> Result<()> {
+        ensure!(
+            locator.decoded_len as usize <= MAX_PACKED_BYTES,
+            "decoded object chunk exceeds reader cap"
+        );
+        ensure!(
+            stored.len() == locator.stored_len as usize,
+            "stored object chunk length disagrees with locator"
+        );
+        let decoded_len = locator.decoded_len as usize;
+        self.decoded[object.index()].clear();
+        self.reserve_decoded(object, decoded_len)?;
+        let output = &mut self.decoded[object.index()];
+        if locator.zstd {
+            let frame_len =
+                zstd::zstd_safe::find_frame_compressed_size(stored).map_err(|code| {
+                    anyhow::anyhow!(
+                        "standalone {} has an invalid zstd frame: {}",
+                        object.name(),
+                        zstd::zstd_safe::get_error_name(code)
+                    )
+                })?;
+            ensure!(
+                frame_len == stored.len(),
+                "standalone {} zstd frame has trailing data",
+                object.name()
+            );
+            if self.decompressor.is_none() {
+                let mut decompressor = zstd::bulk::Decompressor::new()
+                    .with_context(|| format!("create standalone {} zstd decoder", object.name()))?;
+                decompressor
+                    .set_parameter(zstd::zstd_safe::DParameter::WindowLogMax(
+                        ZSTD_WINDOW_LOG_MAX,
+                    ))
+                    .with_context(|| {
+                        format!("set standalone {} zstd window limit", object.name())
+                    })?;
+                self.decompressor = Some(decompressor);
+                #[cfg(test)]
+                {
+                    self.decompressor_creations += 1;
+                }
+            }
+            let written = self
+                .decompressor
+                .as_mut()
+                .context("semantic zstd decoder is missing")?
+                .decompress_to_buffer(stored, output)
+                .with_context(|| format!("decompress standalone {}", object.name()))?;
+            ensure!(
+                written == decoded_len && output.len() == decoded_len,
+                "zstd decoded length disagrees with locator"
+            );
+        } else {
+            ensure!(
+                stored.len() == decoded_len,
+                "raw decoded length disagrees with locator"
+            );
+            output.extend_from_slice(stored);
+        }
+        Ok(())
+    }
+
+    #[cfg(test)]
+    fn decompressor_creations(&self) -> u64 {
+        self.decompressor_creations
+    }
+}
+
 /// Exact zero-gap stored bytes for one contiguous block window.
 ///
 /// The normal stored allocation is at most 32 MiB across all semantic planes.
@@ -1975,8 +2220,38 @@ struct SemanticStoredPlane {
 #[derive(Debug)]
 struct SemanticStoredBatch {
     block_range: Range<usize>,
+    selection: SemanticPlaneSelection,
     planes: [SemanticStoredPlane; OBJECT_COUNT],
     stored_bytes: usize,
+}
+
+/// Reusable stored-plane, decoded-plane, and zstd state for discontinuous
+/// caller-managed contiguous scan sessions.
+#[derive(Default)]
+pub(crate) struct ReusableSemanticScanWorkspace {
+    batch: Option<SemanticStoredBatch>,
+    decode: SemanticDecodeWorkspace,
+}
+
+impl ReusableSemanticScanWorkspace {
+    pub(crate) fn shed_buffers_above(&mut self, limit: usize) -> Result<bool> {
+        let batch_capacity = self.batch.as_ref().map_or(Ok(0_usize), |batch| {
+            batch.planes.iter().try_fold(0_usize, |total, plane| {
+                total
+                    .checked_add(plane.bytes.capacity())
+                    .context("semantic stored workspace capacity overflow")
+            })
+        })?;
+        let retained = batch_capacity
+            .checked_add(self.decode.retained_capacity()?)
+            .context("reusable semantic workspace capacity overflow")?;
+        if retained <= limit {
+            return Ok(false);
+        }
+        self.batch = None;
+        self.decode.release_buffers();
+        Ok(true)
+    }
 }
 
 impl SemanticStoredBatch {
@@ -1984,14 +2259,39 @@ impl SemanticStoredBatch {
         self.block_range.contains(&block_ordinal)
     }
 
-    fn read_object_chunk(&self, block: &BlockRow, object: Object) -> Result<Vec<u8>> {
+    fn into_reusable_planes(self) -> Result<[SemanticStoredPlane; OBJECT_COUNT]> {
+        let retained_capacity = self.planes.iter().try_fold(0_usize, |total, plane| {
+            total
+                .checked_add(plane.bytes.capacity())
+                .context("semantic stored workspace capacity overflow")
+        })?;
+        if retained_capacity <= MAX_REMOTE_SEMANTIC_BATCH_STORED_BYTES {
+            Ok(self.planes)
+        } else {
+            // Do not keep an isolated large-block allocation for later normal
+            // batches. Normal batches can retain at most their 32 MiB budget.
+            Ok(array::from_fn(|_| Default::default()))
+        }
+    }
+
+    fn read_object_chunk_into(
+        &self,
+        block: &BlockRow,
+        object: Object,
+        workspace: &mut SemanticDecodeWorkspace,
+    ) -> Result<()> {
         ensure!(
             self.contains(block.block_id as usize),
             "semantic block is outside the loaded contiguous batch"
         );
+        ensure!(
+            self.selection.includes(object),
+            "semantic plane was not selected for this contiguous batch"
+        );
         let locator = block.locators[object.index()];
         if locator.stored_len == 0 {
-            return Ok(Vec::new());
+            workspace.decoded[object.index()].clear();
+            return Ok(());
         }
         let plane = &self.planes[object.index()];
         let relative_start = locator
@@ -2009,7 +2309,7 @@ impl SemanticStoredBatch {
             .bytes
             .get(start..end)
             .context("semantic locator is outside its loaded batch plane")?;
-        decode_object_chunk(stored, locator, object)
+        workspace.decode_stored(stored, locator, object)
     }
 }
 
@@ -2021,9 +2321,82 @@ impl SemanticStoredBatch {
 /// fetches unrelated planes or blocks outside the requested range.
 pub struct ContiguousSemanticScan<'a> {
     reader: &'a Reader,
+    selection: SemanticPlaneSelection,
     requested_range: Range<usize>,
     next_block: usize,
     batch: Option<SemanticStoredBatch>,
+    decode_workspace: SemanticDecodeWorkspace,
+}
+
+/// One contiguous session that borrows persistent worker-local decode state.
+pub(crate) struct ReusableContiguousSemanticScan<'reader, 'workspace> {
+    reader: &'reader Reader,
+    selection: SemanticPlaneSelection,
+    requested_range: Range<usize>,
+    next_block: usize,
+    workspace: &'workspace mut ReusableSemanticScanWorkspace,
+}
+
+impl ReusableContiguousSemanticScan<'_, '_> {
+    pub(crate) fn visit_semantic_transactions(
+        &mut self,
+        block_ordinal: usize,
+        transaction_indexes: Option<&[u32]>,
+        visit: impl FnMut(SemanticTransaction<'_>) -> Result<()>,
+    ) -> Result<SemanticBlockReadStats> {
+        ensure!(
+            block_ordinal == self.next_block,
+            "reusable contiguous semantic scan blocks must be visited once in increasing order"
+        );
+        ensure!(
+            self.requested_range.contains(&block_ordinal),
+            "semantic block is outside the reusable contiguous scan"
+        );
+        if self
+            .workspace
+            .batch
+            .as_ref()
+            .is_none_or(|batch| !batch.contains(block_ordinal))
+        {
+            let end = self.reader.semantic_batch_end(
+                block_ordinal,
+                self.requested_range.end,
+                self.selection,
+            )?;
+            let reusable = self.workspace.batch.take();
+            self.workspace.batch = Some(self.reader.load_semantic_stored_batch(
+                block_ordinal..end,
+                self.selection,
+                reusable,
+            )?);
+        }
+        let batch = self
+            .workspace
+            .batch
+            .as_ref()
+            .context("reusable semantic batch is missing")?;
+        let stats = self.reader.visit_semantic_transactions_with_reader(
+            block_ordinal,
+            transaction_indexes,
+            self.selection,
+            &mut self.workspace.decode,
+            |block, object, workspace| batch.read_object_chunk_into(block, object, workspace),
+            visit,
+        )?;
+        self.next_block = self
+            .next_block
+            .checked_add(1)
+            .context("reusable contiguous semantic scan ordinal overflow")?;
+        Ok(stats)
+    }
+
+    pub(crate) fn finish(self) -> Result<()> {
+        ensure!(
+            self.next_block == self.requested_range.end,
+            "reusable contiguous semantic scan ended before all requested blocks were visited"
+        );
+        Ok(())
+    }
 }
 
 impl ContiguousSemanticScan<'_> {
@@ -2046,19 +2419,26 @@ impl ContiguousSemanticScan<'_> {
             .as_ref()
             .is_none_or(|batch| !batch.contains(block_ordinal))
         {
-            let end = self
-                .reader
-                .semantic_batch_end(block_ordinal, self.requested_range.end)?;
-            // Drop the old allocation before the next remote batch starts.
-            self.batch = None;
-            let batch = self.reader.load_semantic_stored_batch(block_ordinal..end)?;
+            let end = self.reader.semantic_batch_end(
+                block_ordinal,
+                self.requested_range.end,
+                self.selection,
+            )?;
+            let reusable = self.batch.take();
+            let batch = self.reader.load_semantic_stored_batch(
+                block_ordinal..end,
+                self.selection,
+                reusable,
+            )?;
             self.batch = Some(batch);
         }
         let batch = self.batch.as_ref().context("semantic batch is missing")?;
         let stats = self.reader.visit_semantic_transactions_with_reader(
             block_ordinal,
             transaction_indexes,
-            |block, object| batch.read_object_chunk(block, object),
+            self.selection,
+            &mut self.decode_workspace,
+            |block, object, workspace| batch.read_object_chunk_into(block, object, workspace),
             visit,
         )?;
         self.next_block = self
@@ -2068,13 +2448,29 @@ impl ContiguousSemanticScan<'_> {
         Ok(stats)
     }
 
-    /// Stored bytes held by the active zero-gap batch. This lets callers add
-    /// the batch allocation to a decoded-block peak without changing logical
-    /// I/O receipts.
+    /// Logical stored bytes held by the active zero-gap batch.
     pub fn current_batch_stored_bytes(&self) -> u64 {
         self.batch
             .as_ref()
             .map_or(0, |batch| batch.stored_bytes as u64)
+    }
+
+    /// Allocation capacity retained by the active zero-gap batch.
+    ///
+    /// Add this value to a block's semantic workspace bound when reporting a
+    /// contiguous scan's controlled buffer capacity.
+    pub fn current_batch_retained_capacity_bytes(&self) -> u64 {
+        self.batch.as_ref().map_or(0, |batch| {
+            batch
+                .planes
+                .iter()
+                .map(|plane| plane.bytes.capacity() as u64)
+                .sum()
+        })
+    }
+
+    pub const fn plane_selection(&self) -> SemanticPlaneSelection {
+        self.selection
     }
 
     pub fn finish(self) -> Result<()> {
@@ -2387,6 +2783,19 @@ impl Reader {
         &self,
         block_range: Range<usize>,
     ) -> Result<ContiguousSemanticScan<'_>> {
+        self.begin_contiguous_semantic_scan_with_selection(
+            block_range,
+            SemanticPlaneSelection::FULL,
+        )
+    }
+
+    /// Start a contiguous V3 scan that reads only the requested semantic
+    /// planes. Directory and message bytes are always included.
+    pub fn begin_contiguous_semantic_scan_with_selection(
+        &self,
+        block_range: Range<usize>,
+        selection: SemanticPlaneSelection,
+    ) -> Result<ContiguousSemanticScan<'_>> {
         ensure!(
             self.header.format == StandaloneFormat::V3,
             "contiguous semantic scan requires standalone V3"
@@ -2397,27 +2806,63 @@ impl Reader {
         );
         Ok(ContiguousSemanticScan {
             reader: self,
+            selection,
             next_block: block_range.start,
             requested_range: block_range,
             batch: None,
+            decode_workspace: SemanticDecodeWorkspace::default(),
         })
     }
 
-    fn semantic_block_memory_bounds(&self, block: &BlockRow) -> Result<(usize, usize)> {
-        let decoded = SEMANTIC_OBJECTS.iter().try_fold(0_usize, |total, object| {
-            total
-                .checked_add(block.locators[object.index()].decoded_len as usize)
-                .context("semantic block decoded-byte total overflow")
-        })?;
+    pub(crate) fn begin_reusable_contiguous_semantic_scan_with_selection<'reader, 'workspace>(
+        &'reader self,
+        block_range: Range<usize>,
+        selection: SemanticPlaneSelection,
+        workspace: &'workspace mut ReusableSemanticScanWorkspace,
+    ) -> Result<ReusableContiguousSemanticScan<'reader, 'workspace>> {
+        ensure!(
+            self.header.format == StandaloneFormat::V3,
+            "reusable contiguous semantic scan requires standalone V3"
+        );
+        ensure!(
+            block_range.start <= block_range.end && block_range.end <= self.rows.len(),
+            "reusable contiguous semantic scan range is outside archive"
+        );
+        let next_block = block_range.start;
+        Ok(ReusableContiguousSemanticScan {
+            reader: self,
+            selection,
+            requested_range: block_range,
+            next_block,
+            workspace,
+        })
+    }
+
+    fn semantic_block_memory_bounds(
+        &self,
+        block: &BlockRow,
+        selection: SemanticPlaneSelection,
+    ) -> Result<(usize, usize)> {
+        let decoded = SEMANTIC_OBJECTS
+            .iter()
+            .filter(|object| selection.includes(**object))
+            .try_fold(0_usize, |total, object| {
+                total
+                    .checked_add(block.locators[object.index()].decoded_len as usize)
+                    .context("semantic block decoded-byte total overflow")
+            })?;
         ensure!(
             decoded <= MAX_SEMANTIC_BLOCK_DECODED_BYTES,
             "semantic block decoded bytes exceed {MAX_SEMANTIC_BLOCK_DECODED_BYTES}"
         );
-        let stored = SEMANTIC_OBJECTS.iter().try_fold(0_usize, |total, object| {
-            total
-                .checked_add(block.locators[object.index()].stored_len as usize)
-                .context("semantic block stored-byte total overflow")
-        })?;
+        let stored = SEMANTIC_OBJECTS
+            .iter()
+            .filter(|object| selection.includes(**object))
+            .try_fold(0_usize, |total, object| {
+                total
+                    .checked_add(block.locators[object.index()].stored_len as usize)
+                    .context("semantic block stored-byte total overflow")
+            })?;
         let retained = decoded
             .checked_add(stored)
             .context("semantic retained-byte upper bound overflow")?;
@@ -2428,7 +2873,12 @@ impl Reader {
         Ok((decoded, stored))
     }
 
-    fn semantic_batch_end(&self, start: usize, requested_end: usize) -> Result<usize> {
+    fn semantic_batch_end(
+        &self,
+        start: usize,
+        requested_end: usize,
+        selection: SemanticPlaneSelection,
+    ) -> Result<usize> {
         ensure!(start < requested_end, "semantic batch cannot be empty");
         let mut end = start;
         let mut stored = 0_usize;
@@ -2437,7 +2887,7 @@ impl Reader {
                 .rows
                 .get(end)
                 .context("semantic batch block is missing")?;
-            let (_, block_stored) = self.semantic_block_memory_bounds(block)?;
+            let (_, block_stored) = self.semantic_block_memory_bounds(block, selection)?;
             let candidate = stored
                 .checked_add(block_stored)
                 .context("semantic batch stored-byte total overflow")?;
@@ -2455,17 +2905,31 @@ impl Reader {
         Ok(end)
     }
 
-    fn load_semantic_stored_batch(&self, block_range: Range<usize>) -> Result<SemanticStoredBatch> {
+    fn load_semantic_stored_batch(
+        &self,
+        block_range: Range<usize>,
+        selection: SemanticPlaneSelection,
+        reusable: Option<SemanticStoredBatch>,
+    ) -> Result<SemanticStoredBatch> {
         ensure!(
             block_range.start < block_range.end && block_range.end <= self.rows.len(),
             "semantic stored batch range is outside archive"
         );
         let first = &self.rows[block_range.start];
         let last = &self.rows[block_range.end - 1];
-        let mut planes: [SemanticStoredPlane; OBJECT_COUNT] =
-            array::from_fn(|_| Default::default());
+        let mut planes = match reusable {
+            Some(batch) => batch.into_reusable_planes()?,
+            None => array::from_fn(|_| Default::default()),
+        };
+        for plane in &mut planes {
+            plane.offset = 0;
+            plane.bytes.clear();
+        }
         let mut aggregate_stored = 0_usize;
-        for object in SEMANTIC_OBJECTS {
+        for object in SEMANTIC_OBJECTS
+            .into_iter()
+            .filter(|object| selection.includes(*object))
+        {
             let offset = first.locators[object.index()].offset;
             let end = last.locators[object.index()]
                 .offset
@@ -2490,15 +2954,17 @@ impl Reader {
             aggregate_stored = aggregate_stored
                 .checked_add(length)
                 .context("semantic batch aggregate stored-byte overflow")?;
-            let bytes = read_source_exact_bounded(
+            let plane = &mut planes[object.index()];
+            read_source_exact_bounded_into(
                 self.source.as_ref(),
                 object.file_name(),
                 offset,
                 length,
                 MAX_REMOTE_SEMANTIC_RANGE_BYTES,
                 "contiguous semantic batch plane",
+                &mut plane.bytes,
             )?;
-            planes[object.index()] = SemanticStoredPlane { offset, bytes };
+            plane.offset = offset;
         }
         ensure!(
             block_range.len() == 1 || aggregate_stored <= MAX_REMOTE_SEMANTIC_BATCH_STORED_BYTES,
@@ -2510,6 +2976,7 @@ impl Reader {
         );
         Ok(SemanticStoredBatch {
             block_range,
+            selection,
             planes,
             stored_bytes: aggregate_stored,
         })
@@ -2528,10 +2995,32 @@ impl Reader {
         transaction_indexes: Option<&[u32]>,
         visit: impl FnMut(SemanticTransaction<'_>) -> Result<()>,
     ) -> Result<SemanticBlockReadStats> {
+        self.visit_semantic_transactions_with_selection(
+            block_ordinal,
+            transaction_indexes,
+            SemanticPlaneSelection::FULL,
+            visit,
+        )
+    }
+
+    /// Visit transactions while reading and decoding only selected V3 planes.
+    /// The directory and message planes are always included.
+    pub fn visit_semantic_transactions_with_selection(
+        &self,
+        block_ordinal: usize,
+        transaction_indexes: Option<&[u32]>,
+        selection: SemanticPlaneSelection,
+        visit: impl FnMut(SemanticTransaction<'_>) -> Result<()>,
+    ) -> Result<SemanticBlockReadStats> {
+        let mut workspace = SemanticDecodeWorkspace::default();
         self.visit_semantic_transactions_with_reader(
             block_ordinal,
             transaction_indexes,
-            |block, object| self.read_object_chunk(block, object),
+            selection,
+            &mut workspace,
+            |block, object, workspace| {
+                self.read_semantic_object_chunk_into(block, object, workspace)
+            },
             visit,
         )
     }
@@ -2540,7 +3029,9 @@ impl Reader {
         &self,
         block_ordinal: usize,
         transaction_indexes: Option<&[u32]>,
-        mut read_object: impl FnMut(&BlockRow, Object) -> Result<Vec<u8>>,
+        selection: SemanticPlaneSelection,
+        workspace: &mut SemanticDecodeWorkspace,
+        mut read_object: impl FnMut(&BlockRow, Object, &mut SemanticDecodeWorkspace) -> Result<()>,
         mut visit: impl FnMut(SemanticTransaction<'_>) -> Result<()>,
     ) -> Result<SemanticBlockReadStats> {
         ensure!(
@@ -2567,8 +3058,8 @@ impl Reader {
         }
 
         let (peak_decoded_bytes, selected_stored_bytes) =
-            self.semantic_block_memory_bounds(block)?;
-        let peak_retained_bytes_upper_bound = peak_decoded_bytes
+            self.semantic_block_memory_bounds(block, selection)?;
+        let logical_retained_bytes_upper_bound = peak_decoded_bytes
             .checked_add(selected_stored_bytes)
             .context("semantic retained-byte upper bound overflow")?;
 
@@ -2578,25 +3069,33 @@ impl Reader {
             requested_transactions: transaction_indexes
                 .map_or(block.tx_count, |indexes| indexes.len() as u32),
             visited_transactions: 0,
+            plane_selection: selection,
             object_reads: [ObjectReadStats::default(); OBJECT_COUNT],
             peak_decoded_bytes: peak_decoded_bytes as u64,
-            peak_retained_bytes_upper_bound: peak_retained_bytes_upper_bound as u64,
+            peak_retained_bytes_upper_bound: 0,
             selected_semantic_bytes: 0,
         };
-        let mut read = |object: Object| -> Result<Vec<u8>> {
-            let bytes = read_object(block, object)?;
+        workspace.prepare_for_block(block, selection)?;
+        for object in SEMANTIC_OBJECTS
+            .into_iter()
+            .filter(|object| selection.includes(*object))
+        {
+            read_object(block, object, workspace)?;
             stats.object_reads[object.index()].record(block.locators[object.index()])?;
-            Ok(bytes)
-        };
-        let directory_bytes = read(Object::TransactionDirectory)?;
-        let messages = read(Object::Messages)?;
-        let loaded_addresses = read(Object::LoadedAddresses)?;
-        let inner_instructions = read(Object::InnerInstructions)?;
-        let token_balances = read(Object::TokenBalances)?;
-        let outcomes = read(Object::Outcomes)?;
-        let raw_metadata = read(Object::RawMetadataFallbacks)?;
+        }
+        let retained_workspace_capacity = workspace.retained_capacity()?;
+        stats.peak_retained_bytes_upper_bound =
+            u64::try_from(logical_retained_bytes_upper_bound.max(retained_workspace_capacity))
+                .context("semantic retained workspace capacity exceeds u64")?;
+        let directory_bytes = &workspace.decoded[Object::TransactionDirectory.index()];
+        let messages = &workspace.decoded[Object::Messages.index()];
+        let loaded_addresses = &workspace.decoded[Object::LoadedAddresses.index()];
+        let inner_instructions = &workspace.decoded[Object::InnerInstructions.index()];
+        let token_balances = &workspace.decoded[Object::TokenBalances.index()];
+        let outcomes = &workspace.decoded[Object::Outcomes.index()];
+        let raw_metadata = &workspace.decoded[Object::RawMetadataFallbacks.index()];
 
-        let directory = DecodedDirectory::decode_production(&directory_bytes)
+        let directory = DecodedDirectory::decode_production(directory_bytes)
             .map_err(|error| anyhow::anyhow!("decode standalone v3 directory: {error}"))?;
         ensure!(
             directory.header.tx_count == block.tx_count,
@@ -2608,15 +3107,13 @@ impl Reader {
             .verify_external_totals(object_lengths, u64::from(block.signature_count))
             .map_err(|error| anyhow::anyhow!("bind standalone v3 directory totals: {error}"))?;
 
-        let visit_one = |tx_index: u32,
+        let visit_one = |selected: directory_v3::SelectedTransaction,
                          stats: &mut SemanticBlockReadStats,
                          visit: &mut dyn FnMut(SemanticTransaction<'_>) -> Result<()>|
          -> Result<()> {
-            let selected = directory
-                .lookup(tx_index, block.first_signature_ordinal)
-                .map_err(|error| anyhow::anyhow!("lookup standalone v3 transaction: {error}"))?;
+            let tx_index = selected.tx_index;
             let message_range = stored_object_range(&selected.objects[0], "message")?;
-            let message = slice_ref(&messages, message_range.start, message_range.end, "message")?;
+            let message = slice_ref(messages, message_range.start, message_range.end, "message")?;
             ensure!(!message.is_empty(), "standalone message range is empty");
             validate_message(
                 self.message_schema,
@@ -2628,7 +3125,7 @@ impl Reader {
             let flags = u32::from(selected.source_flags);
             let has_metadata = flags & ARCHIVE_V2_TX_FLAG_HAS_METADATA != 0;
             let raw_fallback = flags & ARCHIVE_V2_TX_FLAG_METADATA_RAW_FALLBACK != 0;
-            let (loaded, inner, token, outcome, raw) = if !has_metadata {
+            let (loaded, inner, token, outcome, raw, raw_metadata_present) = if !has_metadata {
                 ensure!(
                     selected.effect_state == 0
                         && selected.objects[1..]
@@ -2636,7 +3133,7 @@ impl Reader {
                             .all(|slice| matches!(slice, ObjectSlice::Absent)),
                     "missing metadata transaction has effect ranges"
                 );
-                (None, None, None, None, None)
+                (None, None, None, None, None, false)
             } else if raw_fallback {
                 ensure!(
                     selected.effect_state == 0
@@ -2646,9 +3143,18 @@ impl Reader {
                     "raw metadata transaction has decoded effect ranges"
                 );
                 let range = stored_object_range(&selected.objects[8], "raw metadata")?;
-                let raw = slice_ref(&raw_metadata, range.start, range.end, "raw metadata")?;
-                ensure!(!raw.is_empty(), "raw metadata range is empty");
-                (None, None, None, None, Some(raw))
+                ensure!(range.start < range.end, "raw metadata range is empty");
+                let raw = if selection.raw_metadata_fallbacks {
+                    Some(slice_ref(
+                        raw_metadata,
+                        range.start,
+                        range.end,
+                        "raw metadata",
+                    )?)
+                } else {
+                    None
+                };
+                (None, None, None, None, raw, true)
             } else {
                 ensure!(
                     matches!(selected.effect_state & 0b111, 1..=3)
@@ -2662,34 +3168,51 @@ impl Reader {
                     stored_object_range(&selected.objects[4], "token balances")?,
                     stored_object_range(&selected.objects[6], "outcome")?,
                 ];
-                let loaded = slice_ref(
-                    &loaded_addresses,
-                    ranges[0].start,
-                    ranges[0].end,
-                    "loaded addresses",
-                )?;
-                let inner = slice_ref(
-                    &inner_instructions,
-                    ranges[1].start,
-                    ranges[1].end,
-                    "inner instructions",
-                )?;
-                let token = slice_ref(
-                    &token_balances,
-                    ranges[2].start,
-                    ranges[2].end,
-                    "token balances",
-                )?;
-                let outcome = slice_ref(&outcomes, ranges[3].start, ranges[3].end, "outcome")?;
-                let mut outcome_cursor = outcome;
-                decode::decode_metadata_error_with_schema(
-                    &mut outcome_cursor,
-                    self.metadata_schema,
-                )
-                .context("decode standalone v3 semantic outcome")?;
-                <u64 as SchemaRead<'_, decode::Cfg>>::get(&mut outcome_cursor)
-                    .context("decode standalone v3 semantic fee")?;
-                (Some(loaded), Some(inner), Some(token), Some(outcome), None)
+                let loaded = if selection.loaded_addresses {
+                    Some(slice_ref(
+                        loaded_addresses,
+                        ranges[0].start,
+                        ranges[0].end,
+                        "loaded addresses",
+                    )?)
+                } else {
+                    None
+                };
+                let inner = if selection.inner_instructions {
+                    Some(slice_ref(
+                        inner_instructions,
+                        ranges[1].start,
+                        ranges[1].end,
+                        "inner instructions",
+                    )?)
+                } else {
+                    None
+                };
+                let token = if selection.token_balances {
+                    Some(slice_ref(
+                        token_balances,
+                        ranges[2].start,
+                        ranges[2].end,
+                        "token balances",
+                    )?)
+                } else {
+                    None
+                };
+                let outcome = if selection.outcomes {
+                    let outcome = slice_ref(outcomes, ranges[3].start, ranges[3].end, "outcome")?;
+                    let mut outcome_cursor = outcome;
+                    decode::decode_metadata_error_with_schema(
+                        &mut outcome_cursor,
+                        self.metadata_schema,
+                    )
+                    .context("decode standalone v3 semantic outcome")?;
+                    <u64 as SchemaRead<'_, decode::Cfg>>::get(&mut outcome_cursor)
+                        .context("decode standalone v3 semantic fee")?;
+                    Some(outcome)
+                } else {
+                    None
+                };
+                (loaded, inner, token, outcome, None, false)
             };
 
             let semantic_bytes = [Some(message), loaded, inner, token, outcome, raw]
@@ -2715,6 +3238,7 @@ impl Reader {
                 inner_instructions: inner,
                 token_balances: token,
                 outcome,
+                raw_metadata_present,
                 raw_metadata: raw,
                 signature_ordinals: selected.absolute_signature_ordinals,
                 signature_bytes: selected.absolute_signature_bytes,
@@ -2728,13 +3252,24 @@ impl Reader {
 
         match transaction_indexes {
             Some(indexes) => {
-                for &tx_index in indexes {
-                    visit_one(tx_index, &mut stats, &mut visit)?;
+                let cursor = directory
+                    .selected_cursor(block.first_signature_ordinal, indexes)
+                    .map_err(|error| {
+                        anyhow::anyhow!("select standalone v3 transactions: {error}")
+                    })?;
+                for selected in cursor {
+                    let selected = selected.map_err(|error| {
+                        anyhow::anyhow!("scan standalone v3 directory: {error}")
+                    })?;
+                    visit_one(selected, &mut stats, &mut visit)?;
                 }
             }
             None => {
-                for tx_index in 0..block.tx_count {
-                    visit_one(tx_index, &mut stats, &mut visit)?;
+                for selected in directory.cursor(block.first_signature_ordinal) {
+                    let selected = selected.map_err(|error| {
+                        anyhow::anyhow!("scan standalone v3 directory: {error}")
+                    })?;
+                    visit_one(selected, &mut stats, &mut visit)?;
                 }
             }
         }
@@ -3238,6 +3773,59 @@ impl Reader {
         Ok(metadata)
     }
 
+    fn read_semantic_object_chunk_into(
+        &self,
+        block: &BlockRow,
+        object: Object,
+        workspace: &mut SemanticDecodeWorkspace,
+    ) -> Result<()> {
+        let locator = block.locators[object.index()];
+        if locator.stored_len == 0 {
+            workspace.decoded[object.index()].clear();
+            return Ok(());
+        }
+        ensure!(
+            locator.decoded_len as usize <= MAX_PACKED_BYTES,
+            "decoded object chunk exceeds reader cap"
+        );
+
+        // Move the reusable stored buffer out while the decoded fields of the
+        // same workspace are updated. Put it back on every result path.
+        let mut stored = mem::take(&mut workspace.stored);
+        stored.clear();
+        let read_result = self
+            .source
+            .read_range_into(
+                object.file_name(),
+                locator.offset,
+                locator.stored_len as usize,
+                &mut stored,
+            )
+            .with_context(|| format!("read standalone semantic {} chunk", object.name()));
+        let result = match read_result {
+            Ok(()) => {
+                if stored.len() != locator.stored_len as usize {
+                    Err(anyhow::anyhow!(
+                        "short read for standalone semantic {} chunk: got {}, expected {}",
+                        object.name(),
+                        stored.len(),
+                        locator.stored_len
+                    ))
+                } else if stored.capacity() > MAX_PACKED_BYTES {
+                    stored = Vec::new();
+                    Err(anyhow::anyhow!(
+                        "standalone semantic stored workspace exceeds reader cap"
+                    ))
+                } else {
+                    workspace.decode_stored(&stored, locator, object)
+                }
+            }
+            Err(error) => Err(error),
+        };
+        workspace.stored = stored;
+        result
+    }
+
     fn read_object_chunk(&self, block: &BlockRow, object: Object) -> Result<Vec<u8>> {
         let locator = block.locators[object.index()];
         if locator.stored_len == 0 {
@@ -3401,35 +3989,44 @@ fn read_source_exact(
     Ok(bytes)
 }
 
-fn read_source_exact_bounded(
+fn read_source_exact_bounded_into(
     source: &dyn RangeSource,
     object: &str,
     offset: u64,
     length: usize,
     max_request_bytes: usize,
     label: &str,
-) -> Result<Vec<u8>> {
+    bytes: &mut Vec<u8>,
+) -> Result<()> {
     ensure!(max_request_bytes != 0, "bounded source read cap is zero");
     if length == 0 {
-        return Ok(Vec::new());
+        bytes.clear();
+        return Ok(());
     }
-    let mut bytes = Vec::new();
+    bytes.clear();
     bytes
         .try_reserve_exact(length)
         .with_context(|| format!("reserve bounded {label}"))?;
-    while bytes.len() < length {
-        let request_length = (length - bytes.len()).min(max_request_bytes);
+    bytes.resize(length, 0);
+    let mut read = 0_usize;
+    while read < length {
+        let request_length = (length - read).min(max_request_bytes);
         let request_offset = offset
-            .checked_add(bytes.len() as u64)
+            .checked_add(read as u64)
             .context("bounded source read offset overflow")?;
-        let part = read_source_exact(source, object, request_offset, request_length, label)?;
-        bytes.extend_from_slice(&part);
+        let request_end = read
+            .checked_add(request_length)
+            .context("bounded source read length overflow")?;
+        source
+            .read_range_into_slice(object, request_offset, &mut bytes[read..request_end])
+            .with_context(|| format!("read bounded {label}"))?;
+        read = request_end;
     }
     ensure!(
         bytes.len() == length,
         "bounded source read returned a different byte count"
     );
-    Ok(bytes)
+    Ok(())
 }
 
 fn slice_ref<'a>(bytes: &'a [u8], start: u32, end: u32, label: &str) -> Result<&'a [u8]> {
@@ -4111,6 +4708,7 @@ mod tests {
             inner: Option<Vec<u8>>,
             token: Option<Vec<u8>>,
             outcome: Option<Vec<u8>>,
+            raw_present: bool,
             raw: Option<Vec<u8>>,
         }
         let mut seen = Vec::new();
@@ -4123,6 +4721,7 @@ mod tests {
                     inner: transaction.inner_instructions.map(<[u8]>::to_vec),
                     token: transaction.token_balances.map(<[u8]>::to_vec),
                     outcome: transaction.outcome.map(<[u8]>::to_vec),
+                    raw_present: transaction.raw_metadata_present,
                     raw: transaction.raw_metadata.map(<[u8]>::to_vec),
                 });
                 Ok(())
@@ -4133,6 +4732,8 @@ mod tests {
         assert_eq!(stats.visited_transactions, 3);
         assert_eq!(seen.len(), 3);
         assert_eq!(seen[2].raw.as_deref(), Some(raw_metadata.as_slice()));
+        assert!(seen[2].raw_present);
+        assert!(!seen[0].raw_present);
         assert!(seen[2].loaded.is_none());
         for object in [
             Object::TransactionDirectory,
@@ -4218,6 +4819,158 @@ mod tests {
                 .visit_semantic_transactions(0, Some(&[1, 1]), |_| Ok(()))
                 .is_err()
         );
+    }
+
+    #[test]
+    fn semantic_decode_workspace_reuses_capacity_and_one_zstd_context() {
+        let first = vec![0x5a; 16 << 10];
+        let second = vec![0x33; 4 << 10];
+        let third = vec![0x77; 2 << 10];
+        let first_stored = zstd::bulk::compress(&first, 3).unwrap();
+        let second_stored = zstd::bulk::compress(&second, 3).unwrap();
+        let third_stored = zstd::bulk::compress(&third, 3).unwrap();
+        let locator = |stored: &[u8], decoded: &[u8]| Locator {
+            offset: 0,
+            stored_len: u32::try_from(stored.len()).unwrap(),
+            decoded_len: u32::try_from(decoded.len()).unwrap(),
+            zstd: true,
+        };
+
+        let mut workspace = SemanticDecodeWorkspace::default();
+        workspace
+            .decode_stored(
+                &first_stored,
+                locator(&first_stored, &first),
+                Object::Messages,
+            )
+            .unwrap();
+        assert_eq!(workspace.decoded[Object::Messages.index()], first);
+        let first_pointer = workspace.decoded[Object::Messages.index()].as_ptr();
+        let first_capacity = workspace.decoded[Object::Messages.index()].capacity();
+        assert_eq!(workspace.decompressor_creations(), 1);
+
+        workspace
+            .decode_stored(
+                &second_stored,
+                locator(&second_stored, &second),
+                Object::Messages,
+            )
+            .unwrap();
+        assert_eq!(workspace.decoded[Object::Messages.index()], second);
+        assert_eq!(
+            workspace.decoded[Object::Messages.index()].as_ptr(),
+            first_pointer
+        );
+        assert_eq!(
+            workspace.decoded[Object::Messages.index()].capacity(),
+            first_capacity
+        );
+
+        workspace
+            .decode_stored(
+                &third_stored,
+                locator(&third_stored, &third),
+                Object::Outcomes,
+            )
+            .unwrap();
+        assert_eq!(workspace.decoded[Object::Outcomes.index()], third);
+        assert_eq!(workspace.decompressor_creations(), 1);
+        assert!(workspace.decoded_capacity().unwrap() <= MAX_SEMANTIC_BLOCK_DECODED_BYTES);
+        assert!(
+            workspace.retained_capacity().unwrap()
+                >= first_capacity + workspace.decoded[Object::Outcomes.index()].capacity()
+        );
+    }
+
+    #[test]
+    fn contiguous_semantic_scan_reuses_plane_storage_between_blocks() {
+        let root = tempdir().unwrap();
+        write_http_semantic_candidate(root.path(), 2);
+        let reader = Reader::open(root.path()).unwrap();
+        let mut scan = reader.begin_contiguous_semantic_scan(0..2).unwrap();
+
+        scan.visit_semantic_transactions(0, None, |_| Ok(()))
+            .unwrap();
+        let directory_pointer =
+            scan.decode_workspace.decoded[Object::TransactionDirectory.index()].as_ptr();
+        let directory_capacity =
+            scan.decode_workspace.decoded[Object::TransactionDirectory.index()].capacity();
+        let message_pointer = scan.decode_workspace.decoded[Object::Messages.index()].as_ptr();
+        let message_capacity = scan.decode_workspace.decoded[Object::Messages.index()].capacity();
+        assert!(directory_capacity > 0);
+        assert!(message_capacity > 0);
+
+        scan.visit_semantic_transactions(1, None, |_| Ok(()))
+            .unwrap();
+        assert_eq!(
+            scan.decode_workspace.decoded[Object::TransactionDirectory.index()].as_ptr(),
+            directory_pointer
+        );
+        assert_eq!(
+            scan.decode_workspace.decoded[Object::TransactionDirectory.index()].capacity(),
+            directory_capacity
+        );
+        assert_eq!(
+            scan.decode_workspace.decoded[Object::Messages.index()].as_ptr(),
+            message_pointer
+        );
+        assert_eq!(
+            scan.decode_workspace.decoded[Object::Messages.index()].capacity(),
+            message_capacity
+        );
+        scan.finish().unwrap();
+    }
+
+    #[test]
+    fn contiguous_semantic_batches_reuse_bounded_stored_plane_allocations() {
+        let root = tempdir().unwrap();
+        write_http_semantic_candidate(root.path(), 2);
+        let reader = Reader::open(root.path()).unwrap();
+        let first = reader
+            .load_semantic_stored_batch(0..1, SemanticPlaneSelection::FULL, None)
+            .unwrap();
+        let directory_index = Object::TransactionDirectory.index();
+        let messages_index = Object::Messages.index();
+        let directory_pointer = first.planes[directory_index].bytes.as_ptr();
+        let directory_capacity = first.planes[directory_index].bytes.capacity();
+        let messages_pointer = first.planes[messages_index].bytes.as_ptr();
+        let messages_capacity = first.planes[messages_index].bytes.capacity();
+        assert!(directory_capacity > 0);
+        assert!(messages_capacity > 0);
+
+        let second = reader
+            .load_semantic_stored_batch(1..2, SemanticPlaneSelection::FULL, Some(first))
+            .unwrap();
+        assert_eq!(
+            second.planes[directory_index].bytes.as_ptr(),
+            directory_pointer
+        );
+        assert_eq!(
+            second.planes[directory_index].bytes.capacity(),
+            directory_capacity
+        );
+        assert_eq!(
+            second.planes[messages_index].bytes.as_ptr(),
+            messages_pointer
+        );
+        assert_eq!(
+            second.planes[messages_index].bytes.capacity(),
+            messages_capacity
+        );
+    }
+
+    #[test]
+    fn reusable_semantic_workspace_sheds_buffers_above_its_worker_limit() {
+        let mut workspace = ReusableSemanticScanWorkspace::default();
+        workspace.decode.decoded[Object::Messages.index()]
+            .try_reserve_exact(4_096)
+            .unwrap();
+        assert!(workspace.decode.retained_capacity().unwrap() >= 4_096);
+
+        assert!(workspace.shed_buffers_above(1_024).unwrap());
+        assert_eq!(workspace.decode.retained_capacity().unwrap(), 0);
+        assert!(workspace.batch.is_none());
+        assert!(!workspace.shed_buffers_above(1_024).unwrap());
     }
 
     fn write_http_semantic_candidate(root: &Path, block_count: usize) {
@@ -4409,6 +5162,7 @@ mod tests {
         inner_instructions: Option<Vec<u8>>,
         token_balances: Option<Vec<u8>>,
         outcome: Option<Vec<u8>>,
+        raw_metadata_present: bool,
         raw_metadata: Option<Vec<u8>>,
         signature_ordinals: Range<u64>,
         signature_bytes: Range<u64>,
@@ -4427,11 +5181,142 @@ mod tests {
                 inner_instructions: transaction.inner_instructions.map(<[u8]>::to_vec),
                 token_balances: transaction.token_balances.map(<[u8]>::to_vec),
                 outcome: transaction.outcome.map(<[u8]>::to_vec),
+                raw_metadata_present: transaction.raw_metadata_present,
                 raw_metadata: transaction.raw_metadata.map(<[u8]>::to_vec),
                 signature_ordinals: transaction.signature_ordinals,
                 signature_bytes: transaction.signature_bytes,
             }
         }
+    }
+
+    #[test]
+    fn semantic_plane_selection_skips_payloads_and_keeps_default_parity() {
+        let root = tempdir().unwrap();
+        write_semantic_candidate(root.path(), StandaloneFormat::V3);
+        let reader = Reader::open(root.path()).unwrap();
+
+        let mut default_transactions = Vec::new();
+        let default_stats = reader
+            .visit_semantic_transactions(0, None, |transaction| {
+                default_transactions.push(OwnedSemanticTransaction::from(transaction));
+                Ok(())
+            })
+            .unwrap();
+        let mut explicit_full_transactions = Vec::new();
+        let explicit_full_stats = reader
+            .visit_semantic_transactions_with_selection(
+                0,
+                None,
+                SemanticPlaneSelection::FULL,
+                |transaction| {
+                    explicit_full_transactions.push(OwnedSemanticTransaction::from(transaction));
+                    Ok(())
+                },
+            )
+            .unwrap();
+        assert_eq!(explicit_full_transactions, default_transactions);
+        assert_eq!(explicit_full_stats, default_stats);
+        assert!(default_stats.object_reads[Object::TokenBalances.index()].stored_bytes > 0);
+        assert!(default_stats.object_reads[Object::RawMetadataFallbacks.index()].stored_bytes > 0);
+
+        let selection = SemanticPlaneSelection::INSTRUCTION_QUERY;
+        assert!(selection.includes(Object::TransactionDirectory));
+        assert!(selection.includes(Object::Messages));
+        assert!(selection.includes(Object::LoadedAddresses));
+        assert!(selection.includes(Object::InnerInstructions));
+        assert!(selection.includes(Object::Outcomes));
+        assert!(!selection.includes(Object::TokenBalances));
+        assert!(!selection.includes(Object::RawMetadataFallbacks));
+
+        let mut instruction_transactions = Vec::new();
+        let instruction_stats = reader
+            .visit_semantic_transactions_with_selection(0, None, selection, |transaction| {
+                instruction_transactions.push(OwnedSemanticTransaction::from(transaction));
+                Ok(())
+            })
+            .unwrap();
+        for object in [Object::TokenBalances, Object::RawMetadataFallbacks] {
+            assert_eq!(
+                instruction_stats.object_reads[object.index()],
+                ObjectReadStats::default(),
+                "{} payload was read",
+                object.name()
+            );
+        }
+        assert!(instruction_stats.peak_decoded_bytes < default_stats.peak_decoded_bytes);
+        assert_eq!(instruction_transactions.len(), default_transactions.len());
+        for (selected, full) in instruction_transactions.iter().zip(&default_transactions) {
+            assert_eq!(selected.message, full.message);
+            assert_eq!(selected.loaded_addresses, full.loaded_addresses);
+            assert_eq!(selected.inner_instructions, full.inner_instructions);
+            assert_eq!(selected.outcome, full.outcome);
+            assert!(selected.token_balances.is_none());
+            assert!(selected.raw_metadata.is_none());
+            assert_eq!(selected.raw_metadata_present, full.raw_metadata_present);
+        }
+        assert!(instruction_transactions[2].raw_metadata_present);
+
+        let mut required_only_transactions = Vec::new();
+        let required_only_stats = reader
+            .visit_semantic_transactions_with_selection(
+                0,
+                None,
+                SemanticPlaneSelection::REQUIRED_ONLY,
+                |transaction| {
+                    required_only_transactions.push(OwnedSemanticTransaction::from(transaction));
+                    Ok(())
+                },
+            )
+            .unwrap();
+        for object in SEMANTIC_OBJECTS.into_iter().skip(2) {
+            assert_eq!(
+                required_only_stats.object_reads[object.index()],
+                ObjectReadStats::default()
+            );
+        }
+        assert!(required_only_transactions.iter().all(|transaction| {
+            transaction.loaded_addresses.is_none()
+                && transaction.inner_instructions.is_none()
+                && transaction.token_balances.is_none()
+                && transaction.outcome.is_none()
+                && transaction.raw_metadata.is_none()
+        }));
+        assert!(required_only_transactions[2].raw_metadata_present);
+
+        let mut contiguous_transactions = Vec::new();
+        let mut scan = reader
+            .begin_contiguous_semantic_scan_with_selection(0..1, selection)
+            .unwrap();
+        assert_eq!(scan.plane_selection(), selection);
+        let contiguous_stats = scan
+            .visit_semantic_transactions(0, None, |transaction| {
+                contiguous_transactions.push(OwnedSemanticTransaction::from(transaction));
+                Ok(())
+            })
+            .unwrap();
+        assert_eq!(
+            scan.current_batch_stored_bytes(),
+            contiguous_stats.total_stored_bytes()
+        );
+        assert!(scan.current_batch_retained_capacity_bytes() >= scan.current_batch_stored_bytes());
+        assert!(
+            contiguous_stats.peak_retained_bytes_upper_bound
+                >= scan.decode_workspace.retained_capacity().unwrap() as u64
+        );
+        scan.finish().unwrap();
+        assert_eq!(contiguous_transactions, instruction_transactions);
+        assert_eq!(contiguous_stats, instruction_stats);
+
+        assert!(
+            reader
+                .visit_semantic_transactions_with_selection(
+                    0,
+                    Some(&[1, 1]),
+                    selection,
+                    |_| Ok(()),
+                )
+                .is_err()
+        );
     }
 
     #[test]

@@ -19,9 +19,12 @@
 //! can coordinate changes to rows and their in-database digests.
 
 use std::{
-    collections::BTreeMap,
+    cell::{Cell, RefCell},
+    collections::{BTreeMap, HashMap},
     fs::{self, File, OpenOptions},
+    ops::Deref,
     path::{Path, PathBuf},
+    time::{Duration, Instant},
 };
 
 #[cfg(unix)]
@@ -53,7 +56,11 @@ use thiserror::Error;
 /// SQLite application ID for an instruction-only Token event database.
 pub const TOKEN_EVENT_APPLICATION_ID: i64 = 0x425a_5445; // "BZTE"
 /// Current instruction-only Token event schema version.
-pub const TOKEN_EVENT_SCHEMA_VERSION: i64 = 1;
+///
+/// Version 2 adds the `object-set-bound` source-verification value. An
+/// existing version-1 database keeps its exact schema and is rejected before
+/// resume instead of being accepted under a changed version-1 contract.
+pub const TOKEN_EVENT_SCHEMA_VERSION: i64 = 2;
 
 const MAX_EVENTS_PER_TRANSACTION: usize = MAX_EXPANDED_TOKEN_LEAVES;
 const MAX_ACCOUNT_UPDATES_PER_TRANSACTION: usize = MAX_TOKEN_ACCOUNT_UPDATES_PER_TRANSACTION;
@@ -74,7 +81,7 @@ CREATE TABLE pubkeys (
 
 CREATE TABLE run_identity (
     singleton                 INTEGER PRIMARY KEY CHECK (singleton = 1),
-    schema_version            INTEGER NOT NULL CHECK (schema_version = 1),
+    schema_version            INTEGER NOT NULL CHECK (schema_version = 2),
     source_format             TEXT NOT NULL CHECK (source_format IN ('car', 'compact-v2', 'indexer-v3')),
     source_label              TEXT NOT NULL,
     source_cluster_id         TEXT,
@@ -85,7 +92,7 @@ CREATE TABLE run_identity (
     source_slots_per_epoch_le BLOB NOT NULL CHECK (length(source_slots_per_epoch_le) = 8),
     source_slots_per_epoch_text TEXT NOT NULL CHECK (source_slots_per_epoch_text = '0' OR (length(source_slots_per_epoch_text) BETWEEN 1 AND 20 AND substr(source_slots_per_epoch_text, 1, 1) BETWEEN '1' AND '9' AND source_slots_per_epoch_text NOT GLOB '*[^0-9]*')),
     source_block_count        INTEGER NOT NULL CHECK (source_block_count BETWEEN 0 AND 4294967295),
-    source_verification       TEXT NOT NULL CHECK (source_verification IN ('published-manifest', 'operator-trusted', 'internal-binding-only', 'unverified')),
+    source_verification       TEXT NOT NULL CHECK (source_verification IN ('object-set-bound', 'operator-trusted', 'internal-binding-only', 'unverified')),
     source_binding            TEXT,
     target_mint_pubkey_id     INTEGER NOT NULL REFERENCES pubkeys(pubkey_id) ON DELETE RESTRICT,
     token_program_pubkey_id   INTEGER NOT NULL REFERENCES pubkeys(pubkey_id) ON DELETE RESTRICT,
@@ -481,6 +488,169 @@ pub enum BlockCommitOutcome {
     AlreadyCommitted,
 }
 
+/// In-process phase measurements for one token-event database writer.
+///
+/// These counters are diagnostic data only. They are not stored in SQLite and
+/// do not take part in the durable digest chain. Durations are exclusive to
+/// the named phase unless the field documentation says otherwise.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct TokenEventDatabaseMetrics {
+    /// Calls to [`TokenEventDatabase::track_and_commit_block`].
+    pub block_operations: u64,
+    /// New blocks whose SQLite transaction committed successfully.
+    pub committed_blocks: u64,
+    /// Previously committed blocks that were validated successfully.
+    pub validated_replay_blocks: u64,
+    /// Source transactions passed to the token tracker.
+    pub visited_transactions: u64,
+    /// Transactions that changed and wrote the singleton tracker state.
+    pub tracker_state_updates: u64,
+    /// Transactions whose unchanged singleton tracker-state write was skipped.
+    pub tracker_state_noop_writes_skipped: u64,
+    /// Public-key ID lookups served from the committed or transaction cache.
+    pub pubkey_cache_hits: u64,
+    /// Cache hits served by an ID first allocated in the current transaction.
+    pub pubkey_pending_hits: u64,
+    /// Public-key ID lookups that required SQLite insertion and selection.
+    pub pubkey_sql_misses: u64,
+    /// Wall time inside all block operations, including error recovery.
+    pub block_operation_elapsed: Duration,
+    /// Source-shape validation and canonical source-block hashing.
+    pub source_validation_and_digest_elapsed: Duration,
+    /// SQLite transaction creation and cached-checkpoint validation.
+    pub sqlite_transaction_setup_elapsed: Duration,
+    /// Token decoding and tracker state transitions.
+    pub token_tracking_elapsed: Duration,
+    /// Validation and SQLite row writes for tracked transactions.
+    pub tracked_row_write_elapsed: Duration,
+    /// Block-row writes before per-transaction processing.
+    pub block_header_write_elapsed: Duration,
+    /// Durable-row hashing, tracker hashing, and checkpoint-row updates.
+    pub durable_digest_and_checkpoint_elapsed: Duration,
+    /// SQLite transaction commit time for new and replayed blocks.
+    pub sqlite_commit_elapsed: Duration,
+    /// Durable reload and audit work after failed new-block operations.
+    pub error_recovery_elapsed: Duration,
+    /// Calls to [`TokenEventDatabase::checkpoint_wal`].
+    pub wal_checkpoint_calls: u64,
+    /// Successful calls to [`TokenEventDatabase::checkpoint_wal`].
+    pub wal_checkpoint_successes: u64,
+    /// Wall time in all WAL checkpoint attempts, including failed attempts.
+    pub wal_checkpoint_elapsed: Duration,
+}
+
+impl TokenEventDatabaseMetrics {
+    pub(crate) fn delta_since(self, earlier: Self) -> Self {
+        Self {
+            block_operations: self
+                .block_operations
+                .saturating_sub(earlier.block_operations),
+            committed_blocks: self
+                .committed_blocks
+                .saturating_sub(earlier.committed_blocks),
+            validated_replay_blocks: self
+                .validated_replay_blocks
+                .saturating_sub(earlier.validated_replay_blocks),
+            visited_transactions: self
+                .visited_transactions
+                .saturating_sub(earlier.visited_transactions),
+            tracker_state_updates: self
+                .tracker_state_updates
+                .saturating_sub(earlier.tracker_state_updates),
+            tracker_state_noop_writes_skipped: self
+                .tracker_state_noop_writes_skipped
+                .saturating_sub(earlier.tracker_state_noop_writes_skipped),
+            pubkey_cache_hits: self
+                .pubkey_cache_hits
+                .saturating_sub(earlier.pubkey_cache_hits),
+            pubkey_pending_hits: self
+                .pubkey_pending_hits
+                .saturating_sub(earlier.pubkey_pending_hits),
+            pubkey_sql_misses: self
+                .pubkey_sql_misses
+                .saturating_sub(earlier.pubkey_sql_misses),
+            block_operation_elapsed: self
+                .block_operation_elapsed
+                .saturating_sub(earlier.block_operation_elapsed),
+            source_validation_and_digest_elapsed: self
+                .source_validation_and_digest_elapsed
+                .saturating_sub(earlier.source_validation_and_digest_elapsed),
+            sqlite_transaction_setup_elapsed: self
+                .sqlite_transaction_setup_elapsed
+                .saturating_sub(earlier.sqlite_transaction_setup_elapsed),
+            token_tracking_elapsed: self
+                .token_tracking_elapsed
+                .saturating_sub(earlier.token_tracking_elapsed),
+            tracked_row_write_elapsed: self
+                .tracked_row_write_elapsed
+                .saturating_sub(earlier.tracked_row_write_elapsed),
+            block_header_write_elapsed: self
+                .block_header_write_elapsed
+                .saturating_sub(earlier.block_header_write_elapsed),
+            durable_digest_and_checkpoint_elapsed: self
+                .durable_digest_and_checkpoint_elapsed
+                .saturating_sub(earlier.durable_digest_and_checkpoint_elapsed),
+            sqlite_commit_elapsed: self
+                .sqlite_commit_elapsed
+                .saturating_sub(earlier.sqlite_commit_elapsed),
+            error_recovery_elapsed: self
+                .error_recovery_elapsed
+                .saturating_sub(earlier.error_recovery_elapsed),
+            wal_checkpoint_calls: self
+                .wal_checkpoint_calls
+                .saturating_sub(earlier.wal_checkpoint_calls),
+            wal_checkpoint_successes: self
+                .wal_checkpoint_successes
+                .saturating_sub(earlier.wal_checkpoint_successes),
+            wal_checkpoint_elapsed: self
+                .wal_checkpoint_elapsed
+                .saturating_sub(earlier.wal_checkpoint_elapsed),
+        }
+    }
+
+    fn add_assign(&mut self, other: Self) {
+        self.block_operations = self.block_operations.saturating_add(other.block_operations);
+        self.committed_blocks = self.committed_blocks.saturating_add(other.committed_blocks);
+        self.validated_replay_blocks = self
+            .validated_replay_blocks
+            .saturating_add(other.validated_replay_blocks);
+        self.visited_transactions = self
+            .visited_transactions
+            .saturating_add(other.visited_transactions);
+        self.tracker_state_updates = self
+            .tracker_state_updates
+            .saturating_add(other.tracker_state_updates);
+        self.tracker_state_noop_writes_skipped = self
+            .tracker_state_noop_writes_skipped
+            .saturating_add(other.tracker_state_noop_writes_skipped);
+        self.pubkey_cache_hits = self
+            .pubkey_cache_hits
+            .saturating_add(other.pubkey_cache_hits);
+        self.pubkey_pending_hits = self
+            .pubkey_pending_hits
+            .saturating_add(other.pubkey_pending_hits);
+        self.pubkey_sql_misses = self
+            .pubkey_sql_misses
+            .saturating_add(other.pubkey_sql_misses);
+        self.block_operation_elapsed += other.block_operation_elapsed;
+        self.source_validation_and_digest_elapsed += other.source_validation_and_digest_elapsed;
+        self.sqlite_transaction_setup_elapsed += other.sqlite_transaction_setup_elapsed;
+        self.token_tracking_elapsed += other.token_tracking_elapsed;
+        self.tracked_row_write_elapsed += other.tracked_row_write_elapsed;
+        self.block_header_write_elapsed += other.block_header_write_elapsed;
+        self.durable_digest_and_checkpoint_elapsed += other.durable_digest_and_checkpoint_elapsed;
+        self.sqlite_commit_elapsed += other.sqlite_commit_elapsed;
+        self.error_recovery_elapsed += other.error_recovery_elapsed;
+        self.wal_checkpoint_calls = self
+            .wal_checkpoint_calls
+            .saturating_add(other.wal_checkpoint_calls);
+        self.wal_checkpoint_successes = self
+            .wal_checkpoint_successes
+            .saturating_add(other.wal_checkpoint_successes);
+        self.wal_checkpoint_elapsed += other.wal_checkpoint_elapsed;
+    }
+}
+
 #[derive(Debug, Error)]
 pub enum TokenEventDatabaseError {
     #[error("token event database already exists: {0}")]
@@ -519,6 +689,7 @@ pub type Result<T> = std::result::Result<T, TokenEventDatabaseError>;
 /// One deterministic SQLite writer for a bound token event run.
 pub struct TokenEventDatabase {
     connection: Connection,
+    pubkey_ids: HashMap<PubkeyBytes, i64>,
     spec: TokenEventRunSpec,
     tracker: TargetMintTracker,
     next_block_ordinal: u32,
@@ -527,6 +698,70 @@ pub struct TokenEventDatabase {
     digest_head: [u8; DIGEST_BYTES],
     tracker_digest: [u8; DIGEST_BYTES],
     poisoned: Option<String>,
+    metrics: Cell<TokenEventDatabaseMetrics>,
+}
+
+/// One SQLite transaction with a rollback-safe public-key ID write buffer.
+///
+/// IDs loaded from committed rows are shared read-only. IDs allocated by this
+/// transaction stay in `pending` until SQLite accepts the commit. Thus, a
+/// failed block cannot leave an in-memory ID for a row that was rolled back.
+struct PubkeyCachingTransaction<'connection, 'cache> {
+    transaction: Transaction<'connection>,
+    committed: &'cache HashMap<PubkeyBytes, i64>,
+    pending: RefCell<HashMap<PubkeyBytes, i64>>,
+    cache_hits: Cell<u64>,
+    pending_hits: Cell<u64>,
+    sql_misses: Cell<u64>,
+}
+
+struct PubkeyTransactionCommit {
+    pending: HashMap<PubkeyBytes, i64>,
+    cache_hits: u64,
+    pending_hits: u64,
+    sql_misses: u64,
+}
+
+impl<'connection, 'cache> PubkeyCachingTransaction<'connection, 'cache> {
+    fn new(
+        transaction: Transaction<'connection>,
+        committed: &'cache HashMap<PubkeyBytes, i64>,
+    ) -> Self {
+        Self {
+            transaction,
+            committed,
+            pending: RefCell::new(HashMap::new()),
+            cache_hits: Cell::new(0),
+            pending_hits: Cell::new(0),
+            sql_misses: Cell::new(0),
+        }
+    }
+
+    fn commit(self) -> Result<PubkeyTransactionCommit> {
+        let Self {
+            transaction,
+            pending,
+            cache_hits,
+            pending_hits,
+            sql_misses,
+            ..
+        } = self;
+        transaction.commit()?;
+        Ok(PubkeyTransactionCommit {
+            pending: pending.into_inner(),
+            cache_hits: cache_hits.get(),
+            pending_hits: pending_hits.get(),
+            sql_misses: sql_misses.get(),
+        })
+    }
+}
+
+impl<'connection> Deref for PubkeyCachingTransaction<'connection, '_> {
+    type Target = Transaction<'connection>;
+
+    fn deref(&self) -> &Self::Target {
+        &self.transaction
+    }
 }
 
 #[derive(Debug)]
@@ -1112,7 +1347,7 @@ fn digest_sql_query(
     block_ordinal: u32,
 ) -> Result<()> {
     digest.bytes(domain);
-    let mut statement = connection.prepare(sql)?;
+    let mut statement = connection.prepare_cached(sql)?;
     let column_count = statement.column_count();
     let mut rows = statement.query([i64::from(block_ordinal)])?;
     let mut row_count = 0u64;
@@ -1528,13 +1763,16 @@ impl TokenEventDatabase {
         connection.pragma_update(None, "application_id", TOKEN_EVENT_APPLICATION_ID)?;
 
         let tracker_digest = {
+            let committed_pubkey_ids = HashMap::new();
             let transaction =
                 connection.transaction_with_behavior(TransactionBehavior::Immediate)?;
+            let transaction = PubkeyCachingTransaction::new(transaction, &committed_pubkey_ids);
             transaction.execute_batch(SCHEMA)?;
             let tracker_digest = insert_run(&transaction, &spec)?;
             transaction.commit()?;
             tracker_digest
         };
+        let pubkey_ids = load_pubkey_ids(&connection)?;
 
         let next_block_ordinal = spec.range.first_block;
         let tracker_history = spec.opening_tracker.history_coverage();
@@ -1542,6 +1780,7 @@ impl TokenEventDatabase {
         let tracker = TargetMintTracker::from_snapshot(spec.opening_tracker.clone());
         Ok(Self {
             connection,
+            pubkey_ids,
             spec,
             tracker,
             next_block_ordinal,
@@ -1550,6 +1789,7 @@ impl TokenEventDatabase {
             digest_head: EMPTY_DIGEST_HEAD,
             tracker_digest,
             poisoned: None,
+            metrics: Cell::new(TokenEventDatabaseMetrics::default()),
         })
     }
 
@@ -1566,6 +1806,7 @@ impl TokenEventDatabase {
         configure_safety(&connection)?;
         configure_writer(&connection)?;
         let audit = audit_connection(&connection, Some(&spec))?;
+        let pubkey_ids = load_pubkey_ids(&connection)?;
         let TokenEventAudit {
             spec,
             resume,
@@ -1576,6 +1817,7 @@ impl TokenEventDatabase {
         let tracker_revision = resume.tracker.certainty_revision();
         Ok(Self {
             connection,
+            pubkey_ids,
             spec,
             tracker: TargetMintTracker::from_snapshot(resume.tracker),
             next_block_ordinal: resume.next_block_ordinal,
@@ -1584,6 +1826,7 @@ impl TokenEventDatabase {
             digest_head,
             tracker_digest,
             poisoned: None,
+            metrics: Cell::new(TokenEventDatabaseMetrics::default()),
         })
     }
 
@@ -1651,14 +1894,38 @@ impl TokenEventDatabase {
         &self.spec
     }
 
+    /// Return a snapshot of the writer's in-process performance counters.
+    ///
+    /// A reopened writer starts with zero counters. The values describe work
+    /// done by this process, not the complete durable history in the file.
+    pub fn metrics(&self) -> TokenEventDatabaseMetrics {
+        self.metrics.get()
+    }
+
+    /// Number of committed public-key rows held by the writer ID cache.
+    pub fn committed_pubkey_cache_entries(&self) -> usize {
+        self.pubkey_ids.len()
+    }
+
+    fn record_metrics(&self, delta: TokenEventDatabaseMetrics) {
+        let mut total = self.metrics.get();
+        total.add_assign(delta);
+        self.metrics.set(total);
+    }
+
     /// Track and commit one complete source block as one atomic state change.
     ///
     /// This method derives all events from `block`. It never accepts
     /// caller-made event, effect, or account-update rows.
     pub fn track_and_commit_block(&mut self, block: BlockView<'_>) -> Result<BlockCommitOutcome> {
         self.ensure_not_poisoned()?;
+        let operation_started = Instant::now();
+        let mut delta = TokenEventDatabaseMetrics {
+            block_operations: 1,
+            ..TokenEventDatabaseMetrics::default()
+        };
         let replay = block.header.block_ordinal < self.next_block_ordinal;
-        match self.try_track_and_commit_block(block) {
+        let result = match self.try_track_and_commit_block(block, &mut delta) {
             Ok(outcome) => Ok(outcome),
             Err(error) if replay && matches!(&error, TokenEventDatabaseError::InvalidBlock(_)) => {
                 Err(error)
@@ -1668,24 +1935,47 @@ impl TokenEventDatabase {
                 self.poisoned = Some(reason.clone());
                 Err(TokenEventDatabaseError::Poisoned(reason))
             }
-            Err(error) => match self.reload_after_error() {
-                Ok(()) => Err(error),
-                Err(recovery) => {
-                    let reason = format!(
-                        "block operation failed ({error}); durable recovery failed ({recovery})"
-                    );
-                    self.poisoned = Some(reason.clone());
-                    Err(TokenEventDatabaseError::Poisoned(reason))
+            Err(error) => {
+                let recovery_started = Instant::now();
+                let recovery = self.reload_after_error();
+                delta.error_recovery_elapsed += recovery_started.elapsed();
+                match recovery {
+                    Ok(()) => Err(error),
+                    Err(recovery) => {
+                        let reason = format!(
+                            "block operation failed ({error}); durable recovery failed ({recovery})"
+                        );
+                        self.poisoned = Some(reason.clone());
+                        Err(TokenEventDatabaseError::Poisoned(reason))
+                    }
                 }
-            },
+            }
+        };
+        match &result {
+            Ok(BlockCommitOutcome::Committed) => delta.committed_blocks = 1,
+            Ok(BlockCommitOutcome::AlreadyCommitted) => delta.validated_replay_blocks = 1,
+            Err(_) => {}
         }
+        delta.block_operation_elapsed = operation_started.elapsed();
+        self.record_metrics(delta);
+        result
     }
 
-    fn try_track_and_commit_block(&mut self, block: BlockView<'_>) -> Result<BlockCommitOutcome> {
-        validate_source_block(&self.spec, block)?;
-        let source_digest = source_block_digest(block)?;
+    fn try_track_and_commit_block(
+        &mut self,
+        block: BlockView<'_>,
+        timing: &mut TokenEventDatabaseMetrics,
+    ) -> Result<BlockCommitOutcome> {
+        let source_started = Instant::now();
+        let source_digest = (|| {
+            validate_source_block(&self.spec, block)?;
+            source_block_digest(block)
+        })();
+        timing.source_validation_and_digest_elapsed += source_started.elapsed();
+        let source_digest = source_digest?;
         let Self {
             connection,
+            pubkey_ids,
             spec,
             tracker,
             next_block_ordinal,
@@ -1696,18 +1986,29 @@ impl TokenEventDatabase {
             ..
         } = self;
         let next = *next_block_ordinal;
-        let transaction = connection.transaction_with_behavior(TransactionBehavior::Immediate)?;
-        validate_cached_checkpoint(
+        let setup_started = Instant::now();
+        let transaction = connection.transaction_with_behavior(TransactionBehavior::Immediate);
+        let transaction = match transaction {
+            Ok(transaction) => PubkeyCachingTransaction::new(transaction, pubkey_ids),
+            Err(error) => {
+                timing.sqlite_transaction_setup_elapsed += setup_started.elapsed();
+                return Err(error.into());
+            }
+        };
+        let checkpoint_validation = validate_cached_checkpoint(
             &transaction,
             next,
             *tracker_history,
             *tracker_revision,
             digest_head,
             tracker_digest,
-        )?;
+        );
+        timing.sqlite_transaction_setup_elapsed += setup_started.elapsed();
+        checkpoint_validation?;
 
         if block.header.block_ordinal < next {
-            validate_already_committed(
+            let replay_started = Instant::now();
+            let replay_validation = validate_already_committed(
                 &transaction,
                 spec,
                 block,
@@ -1715,8 +2016,23 @@ impl TokenEventDatabase {
                 next,
                 digest_head,
                 tracker_digest,
-            )?;
-            transaction.commit()?;
+            );
+            timing.durable_digest_and_checkpoint_elapsed += replay_started.elapsed();
+            replay_validation?;
+            let commit_started = Instant::now();
+            let commit = transaction.commit();
+            timing.sqlite_commit_elapsed += commit_started.elapsed();
+            let pubkey_commit = commit?;
+            timing.pubkey_cache_hits = timing
+                .pubkey_cache_hits
+                .saturating_add(pubkey_commit.cache_hits);
+            timing.pubkey_pending_hits = timing
+                .pubkey_pending_hits
+                .saturating_add(pubkey_commit.pending_hits);
+            timing.pubkey_sql_misses = timing
+                .pubkey_sql_misses
+                .saturating_add(pubkey_commit.sql_misses);
+            pubkey_ids.extend(pubkey_commit.pending);
             return Ok(BlockCommitOutcome::AlreadyCommitted);
         }
         if block.header.block_ordinal != next {
@@ -1730,82 +2046,138 @@ impl TokenEventDatabase {
                 "the bound scan range is already complete".into(),
             ));
         }
-        validate_previous_slot(&transaction, spec, next, block.header.slot)?;
-
-        insert_block_header(
-            &transaction,
-            block,
-            *tracker_history,
-            *tracker_revision,
-            tracker_digest,
-            &source_digest,
-        )?;
-        for source in block.transaction_views() {
-            let tracked = tracker.process_transaction(source)?;
-            validate_tracked_transaction(source, &tracked)?;
-            let tracker_after = validate_tracker_transition(
+        let block_header_started = Instant::now();
+        let block_header_write = (|| {
+            validate_previous_slot(&transaction, spec, next, block.header.slot)?;
+            insert_block_header(
                 &transaction,
-                spec.target_mint,
-                std::slice::from_ref(&tracked),
-            )?;
-            insert_transaction(&transaction, source, &tracked)?;
-            apply_current_checkpoint(&transaction, std::slice::from_ref(&tracked), tracker_after)?;
+                block,
+                *tracker_history,
+                *tracker_revision,
+                tracker_digest,
+                &source_digest,
+            )
+        })();
+        timing.block_header_write_elapsed += block_header_started.elapsed();
+        block_header_write?;
+        for source in block.transaction_views() {
+            timing.visited_transactions = timing.visited_transactions.saturating_add(1);
+            let tracking_started = Instant::now();
+            let tracked = tracker.process_transaction(source);
+            timing.token_tracking_elapsed += tracking_started.elapsed();
+            let tracked = tracked?;
+
+            let row_write_started = Instant::now();
+            let row_write: Result<(TrackerStateAfter, bool)> = (|| {
+                validate_tracked_transaction(source, &tracked)?;
+                // The block transaction validated this cached state before it
+                // processed any source transaction. Each successful loop
+                // iteration advances both the row and these two scalars.
+                let tracker_before = TrackerStateAfter {
+                    history: *tracker_history,
+                    certainty_revision: *tracker_revision,
+                };
+                let tracker_after = validate_tracker_transition(
+                    &transaction,
+                    spec.target_mint,
+                    tracker_before,
+                    std::slice::from_ref(&tracked),
+                )?;
+                let tracker_state_changed = tracker_after != tracker_before;
+                insert_transaction(&transaction, source, &tracked)?;
+                apply_current_checkpoint(
+                    &transaction,
+                    std::slice::from_ref(&tracked),
+                    tracker_before,
+                    tracker_after,
+                )?;
+                Ok((tracker_after, tracker_state_changed))
+            })();
+            timing.tracked_row_write_elapsed += row_write_started.elapsed();
+            let (tracker_after, tracker_state_changed) = row_write?;
+            if tracker_state_changed {
+                timing.tracker_state_updates = timing.tracker_state_updates.saturating_add(1);
+            } else {
+                timing.tracker_state_noop_writes_skipped =
+                    timing.tracker_state_noop_writes_skipped.saturating_add(1);
+            }
             *tracker_history = tracker_after.history;
             *tracker_revision = tracker_after.certainty_revision;
         }
-        let tracker_digest_after = tracker_after_digest(
-            &transaction,
-            block.header.block_ordinal,
-            tracker_digest,
-            *tracker_history,
-            *tracker_revision,
-        )?;
-        finalize_block_header(
-            &transaction,
-            block.header.block_ordinal,
-            *tracker_history,
-            *tracker_revision,
-            &tracker_digest_after,
-        )?;
-        let durable_digest = durable_block_digest(&transaction, block.header.block_ordinal)?;
-        let chain_digest = chained_block_digest(digest_head, &source_digest, &durable_digest);
-        let finalized = transaction.execute(
-            "UPDATE blocks SET durable_rows_digest = ?1, chain_digest = ?2
-              WHERE block_ordinal = ?3",
-            params![
-                durable_digest.as_slice(),
-                chain_digest.as_slice(),
-                i64::from(block.header.block_ordinal),
-            ],
-        )?;
-        if finalized != 1 {
-            return Err(TokenEventDatabaseError::InvalidCheckpoint(
-                "the pending block disappeared during digest finalization".into(),
-            ));
-        }
-        let next_after = next.checked_add(1).ok_or_else(|| {
-            TokenEventDatabaseError::InvalidBlock("next block ordinal exceeds u32".into())
-        })?;
-        let advanced = transaction.execute(
-            "UPDATE checkpoint
-                SET next_block_ordinal = ?1, digest_head = ?2, tracker_digest = ?3
-              WHERE singleton = 1 AND next_block_ordinal = ?4
-                AND digest_head = ?5 AND tracker_digest = ?6",
-            params![
-                i64::from(next_after),
-                chain_digest.as_slice(),
-                tracker_digest_after.as_slice(),
-                i64::from(next),
-                digest_head.as_slice(),
-                tracker_digest.as_slice(),
-            ],
-        )?;
-        if advanced != 1 {
-            return Err(TokenEventDatabaseError::InvalidCheckpoint(
-                "the next-block checkpoint changed during the block commit".into(),
-            ));
-        }
-        transaction.commit()?;
+        let finalization_started = Instant::now();
+        let finalization = (|| {
+            let tracker_digest_after = tracker_after_digest(
+                &transaction,
+                block.header.block_ordinal,
+                tracker_digest,
+                *tracker_history,
+                *tracker_revision,
+            )?;
+            finalize_block_header(
+                &transaction,
+                block.header.block_ordinal,
+                *tracker_history,
+                *tracker_revision,
+                &tracker_digest_after,
+            )?;
+            let durable_digest = durable_block_digest(&transaction, block.header.block_ordinal)?;
+            let chain_digest = chained_block_digest(digest_head, &source_digest, &durable_digest);
+            let finalized = execute_cached(
+                &transaction,
+                "UPDATE blocks SET durable_rows_digest = ?1, chain_digest = ?2
+                  WHERE block_ordinal = ?3",
+                params![
+                    durable_digest.as_slice(),
+                    chain_digest.as_slice(),
+                    i64::from(block.header.block_ordinal),
+                ],
+            )?;
+            if finalized != 1 {
+                return Err(TokenEventDatabaseError::InvalidCheckpoint(
+                    "the pending block disappeared during digest finalization".into(),
+                ));
+            }
+            let next_after = next.checked_add(1).ok_or_else(|| {
+                TokenEventDatabaseError::InvalidBlock("next block ordinal exceeds u32".into())
+            })?;
+            let advanced = execute_cached(
+                &transaction,
+                "UPDATE checkpoint
+                    SET next_block_ordinal = ?1, digest_head = ?2, tracker_digest = ?3
+                  WHERE singleton = 1 AND next_block_ordinal = ?4
+                    AND digest_head = ?5 AND tracker_digest = ?6",
+                params![
+                    i64::from(next_after),
+                    chain_digest.as_slice(),
+                    tracker_digest_after.as_slice(),
+                    i64::from(next),
+                    digest_head.as_slice(),
+                    tracker_digest.as_slice(),
+                ],
+            )?;
+            if advanced != 1 {
+                return Err(TokenEventDatabaseError::InvalidCheckpoint(
+                    "the next-block checkpoint changed during the block commit".into(),
+                ));
+            }
+            Ok((next_after, tracker_digest_after, chain_digest))
+        })();
+        timing.durable_digest_and_checkpoint_elapsed += finalization_started.elapsed();
+        let (next_after, tracker_digest_after, chain_digest) = finalization?;
+        let commit_started = Instant::now();
+        let commit = transaction.commit();
+        timing.sqlite_commit_elapsed += commit_started.elapsed();
+        let pubkey_commit = commit?;
+        timing.pubkey_cache_hits = timing
+            .pubkey_cache_hits
+            .saturating_add(pubkey_commit.cache_hits);
+        timing.pubkey_pending_hits = timing
+            .pubkey_pending_hits
+            .saturating_add(pubkey_commit.pending_hits);
+        timing.pubkey_sql_misses = timing
+            .pubkey_sql_misses
+            .saturating_add(pubkey_commit.sql_misses);
+        pubkey_ids.extend(pubkey_commit.pending);
         *next_block_ordinal = next_after;
         *digest_head = chain_digest;
         *tracker_digest = tracker_digest_after;
@@ -1818,12 +2190,14 @@ impl TokenEventDatabase {
         let resume = load_resume_state(&self.connection, &self.spec)?;
         let digest_head = load_digest_head(&self.connection)?;
         let tracker_digest = load_checkpoint_tracker_digest(&self.connection)?;
+        let pubkey_ids = load_pubkey_ids(&self.connection)?;
         self.next_block_ordinal = resume.next_block_ordinal;
         self.tracker_history = resume.tracker.history_coverage();
         self.tracker_revision = resume.tracker.certainty_revision();
         self.tracker = TargetMintTracker::from_snapshot(resume.tracker);
         self.digest_head = digest_head;
         self.tracker_digest = tracker_digest;
+        self.pubkey_ids = pubkey_ids;
         Ok(())
     }
 
@@ -1836,19 +2210,32 @@ impl TokenEventDatabase {
 
     /// Flush all committed WAL pages into the main database file.
     pub fn checkpoint_wal(&self) -> Result<()> {
-        self.ensure_not_poisoned()?;
-        verify_writer_configuration(&self.connection)?;
-        let (busy, log_frames, checkpointed_frames): (i64, i64, i64) =
-            self.connection
+        let started = Instant::now();
+        let result = (|| {
+            self.ensure_not_poisoned()?;
+            verify_writer_configuration(&self.connection)?;
+            let (busy, log_frames, checkpointed_frames): (i64, i64, i64) = self
+                .connection
                 .query_row("PRAGMA wal_checkpoint(TRUNCATE)", [], |row| {
                     Ok((row.get(0)?, row.get(1)?, row.get(2)?))
                 })?;
-        if busy != 0 || log_frames != checkpointed_frames {
-            return Err(TokenEventDatabaseError::InvalidCheckpoint(format!(
-                "WAL checkpoint is incomplete (busy={busy}, log={log_frames}, checkpointed={checkpointed_frames})"
-            )));
+            if busy != 0 || log_frames != checkpointed_frames {
+                return Err(TokenEventDatabaseError::InvalidCheckpoint(format!(
+                    "WAL checkpoint is incomplete (busy={busy}, log={log_frames}, checkpointed={checkpointed_frames})"
+                )));
+            }
+            Ok(())
+        })();
+        let mut delta = TokenEventDatabaseMetrics {
+            wal_checkpoint_calls: 1,
+            wal_checkpoint_elapsed: started.elapsed(),
+            ..TokenEventDatabaseMetrics::default()
+        };
+        if result.is_ok() {
+            delta.wal_checkpoint_successes = 1;
         }
-        Ok(())
+        self.record_metrics(delta);
+        result
     }
 }
 
@@ -1928,13 +2315,13 @@ fn validate_cached_checkpoint(
     expected_digest_head: &[u8; DIGEST_BYTES],
     expected_tracker_digest: &[u8; DIGEST_BYTES],
 ) -> Result<()> {
-    let (stored_next, stored_digest, stored_tracker_digest): (i64, Vec<u8>, Vec<u8>) = connection
-        .query_row(
-        "SELECT next_block_ordinal, digest_head, tracker_digest
+    let (stored_next, stored_digest, stored_tracker_digest): (i64, Vec<u8>, Vec<u8>) = {
+        let mut statement = connection.prepare_cached(
+            "SELECT next_block_ordinal, digest_head, tracker_digest
                FROM checkpoint WHERE singleton = 1",
-        [],
-        |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
-    )?;
+        )?;
+        statement.query_row([], |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)))?
+    };
     let stored_next = u32_from_i64(stored_next, "next block ordinal")?;
     let stored_digest = digest_from_blob(stored_digest, "checkpoint digest head")?;
     let stored_tracker_digest =
@@ -2314,6 +2701,7 @@ fn is_coverage_reason(value: &str) -> bool {
         "metadata-absent"
             | "raw-transaction"
             | "raw-metadata"
+            | "projection-not-requested"
             | "invalid-reference"
             | "ambiguous-instruction-data"
             | "instruction-data-unavailable"
@@ -3018,9 +3406,29 @@ fn validate_historical_tracker(connection: &Connection, spec: &TokenEventRunSpec
           ORDER BY update_row.block_ordinal, update_row.tx_index,
                    update_row.update_index",
     )?;
+    let mut lifecycle_statement = connection.prepare(
+        "SELECT event.block_ordinal, event.tx_index, event.event_index,
+                effect.effect_index, account.address,
+                effect.before_generation_le, effect.before_generation_text,
+                effect.before_state, before_mint.address,
+                effect.after_generation_le, effect.after_generation_text,
+                effect.after_state, after_mint.address, effect.cause
+           FROM lifecycle_effects effect
+           JOIN events event ON event.event_id = effect.event_id
+           JOIN pubkeys account
+             ON account.pubkey_id = effect.account_pubkey_id
+           LEFT JOIN pubkeys before_mint
+             ON before_mint.pubkey_id = effect.before_state_mint_pubkey_id
+           LEFT JOIN pubkeys after_mint
+             ON after_mint.pubkey_id = effect.after_state_mint_pubkey_id
+          ORDER BY event.block_ordinal, event.tx_index, event.event_index,
+                   effect.effect_index",
+    )?;
     let mut transaction_rows = transaction_statement.query([])?;
     let mut update_rows = update_statement.query([])?;
+    let mut lifecycle_rows = lifecycle_statement.query([])?;
     let mut next_update = next_historical_tracker_update(&mut update_rows)?;
+    let mut next_lifecycle = next_historical_lifecycle_effect(&mut lifecycle_rows)?;
     while let Some(row) = transaction_rows.next()? {
         let block = row.get::<_, i64>(0)?;
         let transaction = row.get::<_, i64>(1)?;
@@ -3048,6 +3456,45 @@ fn validate_historical_tracker(connection: &Connection, spec: &TokenEventRunSpec
             return Err(invalid_historical_row(
                 "a tracker update precedes its ordered transaction row",
             ));
+        }
+        if next_lifecycle
+            .as_ref()
+            .is_some_and(|effect| (effect.block, effect.transaction) < (block, transaction))
+        {
+            return Err(invalid_historical_row(
+                "a lifecycle effect precedes its ordered transaction row",
+            ));
+        }
+        let mut lifecycle_overlay = BTreeMap::new();
+        while next_lifecycle
+            .as_ref()
+            .is_some_and(|effect| (effect.block, effect.transaction) == (block, transaction))
+        {
+            let effect = next_lifecycle
+                .take()
+                .ok_or_else(|| invalid_historical_row("lifecycle effect lookahead disappeared"))?;
+            let current = lifecycle_overlay
+                .get(&effect.change.account)
+                .copied()
+                .or_else(|| {
+                    accounts
+                        .get(&effect.change.account)
+                        .map(|state| state.lifecycle)
+                });
+            if effect.change.before != current {
+                return Err(invalid_historical_row(format!(
+                    "transaction {block}:{transaction} lifecycle effect {}:{} does not continue the reconstructed account state",
+                    effect.event, effect.effect
+                )));
+            }
+            validate_lifecycle_change(&effect.change, spec.target_mint).map_err(|error| {
+                invalid_historical_row(format!(
+                    "transaction {block}:{transaction} lifecycle effect {}:{} is invalid: {error}",
+                    effect.event, effect.effect
+                ))
+            })?;
+            lifecycle_overlay.insert(effect.change.account, effect.change.after);
+            next_lifecycle = next_historical_lifecycle_effect(&mut lifecycle_rows)?;
         }
         let mut expected_index = 0u32;
         let mut previous_account = None;
@@ -3082,9 +3529,30 @@ fn validate_historical_tracker(connection: &Connection, spec: &TokenEventRunSpec
                     "transaction {block}:{transaction} has an invalid tracker account update"
                 )));
             }
-            validate_stored_generation_transition(accounts.get(&account).copied(), state)?;
+            let expected_lifecycle = match (
+                lifecycle_overlay.remove(&account),
+                accounts.get(&account).copied(),
+            ) {
+                (Some(lifecycle), _) => lifecycle,
+                (None, Some(current)) => current.lifecycle,
+                (None, None) => {
+                    return Err(invalid_historical_row(format!(
+                        "transaction {block}:{transaction} has a new tracker account update without a lifecycle effect"
+                    )));
+                }
+            };
+            if state.lifecycle != expected_lifecycle {
+                return Err(invalid_historical_row(format!(
+                    "transaction {block}:{transaction} tracker account update does not match its lifecycle effects"
+                )));
+            }
             accounts.insert(account, state);
             next_update = next_historical_tracker_update(&mut update_rows)?;
+        }
+        if !lifecycle_overlay.is_empty() {
+            return Err(invalid_historical_row(format!(
+                "transaction {block}:{transaction} has a lifecycle effect without a final tracker account update"
+            )));
         }
         history = next_history;
         certainty_revision = next_revision;
@@ -3092,6 +3560,11 @@ fn validate_historical_tracker(connection: &Connection, spec: &TokenEventRunSpec
     if next_update.is_some() {
         return Err(invalid_historical_row(
             "a tracker update has no ordered transaction row",
+        ));
+    }
+    if next_lifecycle.is_some() {
+        return Err(invalid_historical_row(
+            "a lifecycle effect has no ordered transaction row",
         ));
     }
 
@@ -3111,6 +3584,91 @@ fn validate_historical_tracker(connection: &Connection, spec: &TokenEventRunSpec
         ));
     }
     Ok(())
+}
+
+struct HistoricalLifecycleEffect {
+    block: i64,
+    transaction: i64,
+    event: i64,
+    effect: i64,
+    change: AccountLifecycleChange,
+}
+
+fn next_historical_lifecycle_effect(
+    rows: &mut rusqlite::Rows<'_>,
+) -> Result<Option<HistoricalLifecycleEffect>> {
+    let Some(row) = rows.next()? else {
+        return Ok(None);
+    };
+    let account = pubkey_from_blob(&row.get::<_, Vec<u8>>(4)?, "lifecycle account")?;
+    let before_generation_le = row.get::<_, Option<Vec<u8>>>(5)?;
+    let before_generation_text = row.get::<_, Option<String>>(6)?;
+    let before_state = row.get::<_, Option<String>>(7)?;
+    let before_mint = row
+        .get::<_, Option<Vec<u8>>>(8)?
+        .as_deref()
+        .map(|bytes| pubkey_from_blob(bytes, "lifecycle before-state mint"))
+        .transpose()?;
+    let before = match (
+        before_generation_le.as_deref(),
+        before_generation_text.as_deref(),
+        before_state.as_deref(),
+    ) {
+        (None, None, None) => None,
+        (Some(generation_le), Some(generation_text), Some(state)) => Some(TokenAccountLifecycle {
+            generation: parse_u64_pair(
+                generation_le,
+                generation_text,
+                "lifecycle before generation",
+            )?,
+            state: parse_account_state(state, before_mint)?,
+        }),
+        _ => {
+            return Err(invalid_historical_row(
+                "a lifecycle effect has an incomplete before-state",
+            ));
+        }
+    };
+    let after_generation_le = row.get::<_, Vec<u8>>(9)?;
+    let after_generation_text = row.get::<_, String>(10)?;
+    let after_state = row.get::<_, String>(11)?;
+    let after_mint = row
+        .get::<_, Option<Vec<u8>>>(12)?
+        .as_deref()
+        .map(|bytes| pubkey_from_blob(bytes, "lifecycle after-state mint"))
+        .transpose()?;
+    let after = TokenAccountLifecycle {
+        generation: parse_u64_pair(
+            &after_generation_le,
+            &after_generation_text,
+            "lifecycle after generation",
+        )?,
+        state: parse_account_state(&after_state, after_mint)?,
+    };
+    let cause = match row.get::<_, String>(13)?.as_str() {
+        "initialize-account" => LifecycleCause::InitializeAccount,
+        "explicit-mint-instruction" => LifecycleCause::ExplicitMintInstruction,
+        "checked-transfer" => LifecycleCause::CheckedTransfer,
+        "unchecked-transfer" => LifecycleCause::UncheckedTransfer,
+        "close-account" => LifecycleCause::CloseAccount,
+        cause => {
+            return Err(invalid_historical_row(format!(
+                "unknown lifecycle cause {cause:?}"
+            )));
+        }
+    };
+    Ok(Some(HistoricalLifecycleEffect {
+        block: row.get(0)?,
+        transaction: row.get(1)?,
+        event: row.get(2)?,
+        effect: row.get(3)?,
+        change: AccountLifecycleChange {
+            account,
+            before,
+            after,
+            cause,
+        },
+    }))
 }
 
 struct HistoricalTrackerUpdate {
@@ -3194,11 +3752,52 @@ fn next_opening_lifetime(rows: &mut rusqlite::Rows<'_>) -> Result<Option<Expecte
     read_lifetime_row(row, 0, 1, 3, 4, 5, "opening lifetime").map(Some)
 }
 
-fn next_update_lifetime(rows: &mut rusqlite::Rows<'_>) -> Result<Option<ExpectedLifetimeRow>> {
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
+struct LifetimeWriteOrder {
+    block: i64,
+    transaction: i64,
+    phase: u8,
+    first_index: i64,
+    second_index: i64,
+}
+
+struct HistoricalLifetimeWrite {
+    row: ExpectedLifetimeRow,
+    order: LifetimeWriteOrder,
+}
+
+fn next_update_lifetime(rows: &mut rusqlite::Rows<'_>) -> Result<Option<HistoricalLifetimeWrite>> {
     let Some(row) = rows.next()? else {
         return Ok(None);
     };
-    read_lifetime_row(row, 0, 1, 6, 7, 8, "tracker update lifetime").map(Some)
+    Ok(Some(HistoricalLifetimeWrite {
+        row: read_lifetime_row(row, 0, 1, 6, 7, 8, "tracker update lifetime")?,
+        order: LifetimeWriteOrder {
+            block: row.get(3)?,
+            transaction: row.get(4)?,
+            phase: 1,
+            first_index: row.get(5)?,
+            second_index: 0,
+        },
+    }))
+}
+
+fn next_lifecycle_lifetime(
+    rows: &mut rusqlite::Rows<'_>,
+) -> Result<Option<HistoricalLifetimeWrite>> {
+    let Some(row) = rows.next()? else {
+        return Ok(None);
+    };
+    Ok(Some(HistoricalLifetimeWrite {
+        row: read_lifetime_row(row, 0, 1, 7, 8, 9, "lifecycle after-state lifetime")?,
+        order: LifetimeWriteOrder {
+            block: row.get(3)?,
+            transaction: row.get(4)?,
+            phase: 0,
+            first_index: row.get(5)?,
+            second_index: row.get(6)?,
+        },
+    }))
 }
 
 fn next_materialized_lifetime(
@@ -3226,6 +3825,23 @@ fn validate_exact_lifetime_materialization(connection: &Connection) -> Result<()
           ORDER BY pubkey_id, length(generation_text), generation_text,
                    block_ordinal, tx_index, update_index",
     )?;
+    let mut lifecycle_statement = connection.prepare(
+        "SELECT effect.account_pubkey_id, effect.after_generation_le,
+                effect.after_generation_text, event.block_ordinal,
+                event.tx_index, event.event_index, effect.effect_index,
+                effect.after_state, effect.after_state_mint_pubkey_id,
+                tx.tracker_revision_after_le,
+                tx.tracker_revision_after_text
+           FROM lifecycle_effects effect
+           JOIN events event ON event.event_id = effect.event_id
+           JOIN transactions tx
+             ON tx.block_ordinal = event.block_ordinal
+            AND tx.tx_index = event.tx_index
+          ORDER BY effect.account_pubkey_id,
+                   length(effect.after_generation_text),
+                   effect.after_generation_text, event.block_ordinal,
+                   event.tx_index, event.event_index, effect.effect_index",
+    )?;
     let mut lifetime_statement = connection.prepare(
         "SELECT pubkey_id, generation_le, generation_text, account_state,
                 state_mint_pubkey_id, confirmed_revision_le,
@@ -3235,18 +3851,23 @@ fn validate_exact_lifetime_materialization(connection: &Connection) -> Result<()
     )?;
     let mut opening_rows = opening_statement.query([])?;
     let mut update_rows = update_statement.query([])?;
+    let mut lifecycle_rows = lifecycle_statement.query([])?;
     let mut lifetime_rows = lifetime_statement.query([])?;
     let mut opening = next_opening_lifetime(&mut opening_rows)?;
     let mut update = next_update_lifetime(&mut update_rows)?;
+    let mut lifecycle = next_lifecycle_lifetime(&mut lifecycle_rows)?;
     let mut lifetime = next_materialized_lifetime(&mut lifetime_rows)?;
 
-    while opening.is_some() || update.is_some() {
-        let key = match (opening.as_ref(), update.as_ref()) {
-            (Some(opening), Some(update)) => opening.key().min(update.key()),
-            (Some(opening), None) => opening.key(),
-            (None, Some(update)) => update.key(),
-            (None, None) => unreachable!("the loop condition requires one expected lifetime"),
-        };
+    while opening.is_some() || update.is_some() || lifecycle.is_some() {
+        let key = [
+            opening.as_ref().map(ExpectedLifetimeRow::key),
+            update.as_ref().map(|write| write.row.key()),
+            lifecycle.as_ref().map(|write| write.row.key()),
+        ]
+        .into_iter()
+        .flatten()
+        .min()
+        .ok_or_else(|| invalid_historical_row("expected lifetime streams disappeared"))?;
         let mut expected = if opening.as_ref().is_some_and(|row| row.key() == key) {
             let row = opening
                 .take()
@@ -3256,9 +3877,33 @@ fn validate_exact_lifetime_materialization(connection: &Connection) -> Result<()
         } else {
             None
         };
-        while update.as_ref().is_some_and(|row| row.key() == key) {
-            expected = update.take();
-            update = next_update_lifetime(&mut update_rows)?;
+        while update.as_ref().is_some_and(|write| write.row.key() == key)
+            || lifecycle
+                .as_ref()
+                .is_some_and(|write| write.row.key() == key)
+        {
+            let take_lifecycle = match (lifecycle.as_ref(), update.as_ref()) {
+                (Some(lifecycle), Some(update))
+                    if lifecycle.row.key() == key && update.row.key() == key =>
+                {
+                    lifecycle.order < update.order
+                }
+                (Some(lifecycle), _) if lifecycle.row.key() == key => true,
+                _ => false,
+            };
+            if take_lifecycle {
+                let write = lifecycle.take().ok_or_else(|| {
+                    invalid_historical_row("lifecycle lifetime lookahead disappeared")
+                })?;
+                expected = Some(write.row);
+                lifecycle = next_lifecycle_lifetime(&mut lifecycle_rows)?;
+            } else {
+                let write = update.take().ok_or_else(|| {
+                    invalid_historical_row("tracker update lifetime lookahead disappeared")
+                })?;
+                expected = Some(write.row);
+                update = next_update_lifetime(&mut update_rows)?;
+            }
         }
         let expected = expected.ok_or_else(|| {
             invalid_historical_row("expected lifetime reconstruction lost its row")
@@ -3285,7 +3930,7 @@ fn validate_exact_lifetime_materialization(connection: &Connection) -> Result<()
     }
     if let Some(extra) = lifetime {
         return Err(invalid_historical_row(format!(
-            "materialized lifetime {}:{} has no opening row or tracker update",
+            "materialized lifetime {}:{} has no opening row, lifecycle effect, or tracker update",
             extra.pubkey_id, extra.generation
         )));
     }
@@ -3363,33 +4008,6 @@ fn parse_stored_account_row(
             confirmed_revision,
         },
     ))
-}
-
-fn validate_stored_generation_transition(
-    current: Option<TargetAccountSnapshot>,
-    next: TargetAccountSnapshot,
-) -> Result<()> {
-    match current {
-        None if next.lifecycle.generation != 1 => Err(invalid_historical_row(
-            "a historical tracker account does not start at generation one",
-        )),
-        Some(current) if next.lifecycle.generation != current.lifecycle.generation => {
-            let expected = current.lifecycle.generation.checked_add(1).ok_or_else(|| {
-                invalid_historical_row("a historical account generation is exhausted")
-            })?;
-            if next.lifecycle.generation != expected
-                || !matches!(current.lifecycle.state, TokenAccountState::Closed { .. })
-                || matches!(next.lifecycle.state, TokenAccountState::Closed { .. })
-            {
-                Err(invalid_historical_row(
-                    "a historical account has an invalid generation transition",
-                ))
-            } else {
-                Ok(())
-            }
-        }
-        _ => Ok(()),
-    }
 }
 
 fn validate_committed_universe(
@@ -3507,13 +4125,15 @@ fn validate_previous_slot(
         return Ok(());
     }
     let previous_ordinal = next_block_ordinal - 1;
-    let stored: Option<(Vec<u8>, String)> = connection
-        .query_row(
-            "SELECT slot_le, slot_text FROM blocks WHERE block_ordinal = ?1",
-            params![i64::from(previous_ordinal)],
-            |row| Ok((row.get(0)?, row.get(1)?)),
-        )
-        .optional()?;
+    let stored: Option<(Vec<u8>, String)> = {
+        let mut statement = connection
+            .prepare_cached("SELECT slot_le, slot_text FROM blocks WHERE block_ordinal = ?1")?;
+        statement
+            .query_row(params![i64::from(previous_ordinal)], |row| {
+                Ok((row.get(0)?, row.get(1)?))
+            })
+            .optional()?
+    };
     let Some((slot_le, slot_text)) = stored else {
         return Err(TokenEventDatabaseError::InvalidCheckpoint(format!(
             "previous block {previous_ordinal} is absent"
@@ -3536,6 +4156,10 @@ fn configure_safety(connection: &Connection) -> Result<()> {
 }
 
 fn configure_writer(connection: &Connection) -> Result<()> {
+    // The block path uses more statements than rusqlite's small default
+    // cache. Keep parsed statements across block transactions without changing
+    // any SQLite durability or transaction boundary.
+    connection.set_prepared_statement_cache_capacity(64);
     connection.pragma_update(None, "journal_mode", "WAL")?;
     connection.pragma_update(None, "synchronous", "FULL")?;
     verify_writer_configuration(connection)?;
@@ -3738,8 +4362,17 @@ fn validate_application(connection: &Connection) -> Result<()> {
     Ok(())
 }
 
-fn insert_run(
+fn execute_cached<P: rusqlite::Params>(
     transaction: &Transaction<'_>,
+    sql: &str,
+    params: P,
+) -> Result<usize> {
+    let mut statement = transaction.prepare_cached(sql)?;
+    Ok(statement.execute(params)?)
+}
+
+fn insert_run(
+    transaction: &PubkeyCachingTransaction<'_, '_>,
     spec: &TokenEventRunSpec,
 ) -> Result<[u8; DIGEST_BYTES]> {
     let target_id = intern_pubkey(transaction, &spec.target_mint)?;
@@ -4014,7 +4647,7 @@ fn parse_archive_format(value: &str) -> Result<ArchiveFormat> {
 
 fn source_verification_text(value: SourceVerification) -> &'static str {
     match value {
-        SourceVerification::PublishedManifest => "published-manifest",
+        SourceVerification::ObjectSetBound => "object-set-bound",
         SourceVerification::OperatorTrusted => "operator-trusted",
         SourceVerification::InternalBindingOnly => "internal-binding-only",
         SourceVerification::Unverified => "unverified",
@@ -4023,7 +4656,7 @@ fn source_verification_text(value: SourceVerification) -> &'static str {
 
 fn parse_source_verification(value: &str) -> Result<SourceVerification> {
     match value {
-        "published-manifest" => Ok(SourceVerification::PublishedManifest),
+        "object-set-bound" => Ok(SourceVerification::ObjectSetBound),
         "operator-trusted" => Ok(SourceVerification::OperatorTrusted),
         "internal-binding-only" => Ok(SourceVerification::InternalBindingOnly),
         "unverified" => Ok(SourceVerification::Unverified),
@@ -4033,7 +4666,59 @@ fn parse_source_verification(value: &str) -> Result<SourceVerification> {
     }
 }
 
-fn intern_pubkey(transaction: &Transaction<'_>, pubkey: &PubkeyBytes) -> Result<i64> {
+fn load_pubkey_ids(connection: &Connection) -> Result<HashMap<PubkeyBytes, i64>> {
+    let row_count: i64 =
+        connection.query_row("SELECT count(*) FROM pubkeys", [], |row| row.get(0))?;
+    let row_count = usize::try_from(row_count).map_err(|_| {
+        TokenEventDatabaseError::InvalidCheckpoint(
+            "the pubkey table row count exceeds the address space".into(),
+        )
+    })?;
+    let mut statement =
+        connection.prepare("SELECT pubkey_id, address FROM pubkeys ORDER BY pubkey_id")?;
+    let rows = statement.query_map([], |row| {
+        Ok((row.get::<_, i64>(0)?, row.get::<_, Vec<u8>>(1)?))
+    })?;
+    let mut pubkey_ids = HashMap::with_capacity(row_count);
+    for row in rows {
+        let (pubkey_id, address) = row?;
+        let address: PubkeyBytes = address.try_into().map_err(|address: Vec<u8>| {
+            TokenEventDatabaseError::InvalidCheckpoint(format!(
+                "pubkey {pubkey_id} has {} address bytes instead of 32",
+                address.len()
+            ))
+        })?;
+        if pubkey_ids.insert(address, pubkey_id).is_some() {
+            return Err(TokenEventDatabaseError::InvalidCheckpoint(
+                "the pubkey table contains a duplicate address".into(),
+            ));
+        }
+    }
+    Ok(pubkey_ids)
+}
+
+fn intern_pubkey(
+    transaction: &PubkeyCachingTransaction<'_, '_>,
+    pubkey: &PubkeyBytes,
+) -> Result<i64> {
+    if let Some(pubkey_id) = transaction.committed.get(pubkey) {
+        transaction
+            .cache_hits
+            .set(transaction.cache_hits.get().saturating_add(1));
+        return Ok(*pubkey_id);
+    }
+    if let Some(pubkey_id) = transaction.pending.borrow().get(pubkey) {
+        transaction
+            .cache_hits
+            .set(transaction.cache_hits.get().saturating_add(1));
+        transaction
+            .pending_hits
+            .set(transaction.pending_hits.get().saturating_add(1));
+        return Ok(*pubkey_id);
+    }
+    transaction
+        .sql_misses
+        .set(transaction.sql_misses.get().saturating_add(1));
     {
         let mut insert = transaction.prepare_cached(
             "INSERT INTO pubkeys (address) VALUES (?1) ON CONFLICT(address) DO NOTHING",
@@ -4042,15 +4727,18 @@ fn intern_pubkey(transaction: &Transaction<'_>, pubkey: &PubkeyBytes) -> Result<
     }
     let mut select =
         transaction.prepare_cached("SELECT pubkey_id FROM pubkeys WHERE address = ?1")?;
-    Ok(select.query_row(params![pubkey.as_slice()], |row| row.get(0))?)
+    let pubkey_id = select.query_row(params![pubkey.as_slice()], |row| row.get(0))?;
+    transaction.pending.borrow_mut().insert(*pubkey, pubkey_id);
+    Ok(pubkey_id)
 }
 
 fn insert_opening_snapshot(
-    transaction: &Transaction<'_>,
+    transaction: &PubkeyCachingTransaction<'_, '_>,
     snapshot: &TargetMintTrackerSnapshot,
 ) -> Result<()> {
     let revision = U64Sql::new(snapshot.certainty_revision());
-    transaction.execute(
+    execute_cached(
+        transaction,
         "INSERT INTO opening_tracker_state (
             singleton, history_coverage, certainty_revision_le, certainty_revision_text
          ) VALUES (1, ?1, ?2, ?3)",
@@ -4065,7 +4753,8 @@ fn insert_opening_snapshot(
         let generation = U64Sql::new(state.lifecycle.generation);
         let confirmed_revision = U64Sql::new(state.confirmed_revision);
         let (account_state, state_mint) = state_sql(transaction, state.lifecycle.state)?;
-        transaction.execute(
+        execute_cached(
+            transaction,
             "INSERT INTO opening_tracker_accounts (
                 pubkey_id, generation_le, generation_text, account_state,
                 state_mint_pubkey_id, confirmed_revision_le, confirmed_revision_text
@@ -4085,11 +4774,12 @@ fn insert_opening_snapshot(
 }
 
 fn insert_current_snapshot(
-    transaction: &Transaction<'_>,
+    transaction: &PubkeyCachingTransaction<'_, '_>,
     snapshot: &TargetMintTrackerSnapshot,
 ) -> Result<()> {
     let revision = U64Sql::new(snapshot.certainty_revision());
-    transaction.execute(
+    execute_cached(
+        transaction,
         "INSERT INTO tracker_state (
             singleton, history_coverage, certainty_revision_le, certainty_revision_text
          ) VALUES (1, ?1, ?2, ?3)",
@@ -4103,7 +4793,8 @@ fn insert_current_snapshot(
         upsert_lifetime(transaction, *account, *state)?;
         let account_id = intern_pubkey(transaction, account)?;
         let generation = U64Sql::new(state.lifecycle.generation);
-        transaction.execute(
+        execute_cached(
+            transaction,
             "INSERT INTO tracker_accounts (pubkey_id, generation_le) VALUES (?1, ?2)",
             params![account_id, generation.bytes.as_slice()],
         )?;
@@ -4112,15 +4803,17 @@ fn insert_current_snapshot(
 }
 
 fn apply_current_checkpoint(
-    transaction: &Transaction<'_>,
+    transaction: &PubkeyCachingTransaction<'_, '_>,
     tracked_transactions: &[TrackedTokenTransaction],
+    tracker_before: TrackerStateAfter,
     tracker_after: TrackerStateAfter,
 ) -> Result<()> {
     for tracked in tracked_transactions {
         for update in &tracked.account_updates {
             let account_id = intern_pubkey(transaction, &update.account)?;
             let generation = U64Sql::new(update.state.lifecycle.generation);
-            transaction.execute(
+            execute_cached(
+                transaction,
                 "INSERT INTO tracker_accounts (pubkey_id, generation_le)
                  VALUES (?1, ?2)
                  ON CONFLICT(pubkey_id) DO UPDATE SET
@@ -4129,29 +4822,42 @@ fn apply_current_checkpoint(
             )?;
         }
     }
-    let revision = U64Sql::new(tracker_after.certainty_revision);
-    let updated = transaction.execute(
+    if tracker_after == tracker_before {
+        return Ok(());
+    }
+    // Keep the block-start validation fail-closed without a SELECT for every
+    // transaction. A changed row must still have the exact prior state.
+    let before_revision = U64Sql::new(tracker_before.certainty_revision);
+    let after_revision = U64Sql::new(tracker_after.certainty_revision);
+    let updated = execute_cached(
+        transaction,
         "UPDATE tracker_state
             SET history_coverage = ?1,
                 certainty_revision_le = ?2,
                 certainty_revision_text = ?3
-          WHERE singleton = 1",
+          WHERE singleton = 1
+            AND history_coverage = ?4
+            AND certainty_revision_le = ?5
+            AND certainty_revision_text = ?6",
         params![
             history_text(tracker_after.history),
-            revision.bytes.as_slice(),
-            revision.text,
+            after_revision.bytes.as_slice(),
+            after_revision.text,
+            history_text(tracker_before.history),
+            before_revision.bytes.as_slice(),
+            before_revision.text,
         ],
     )?;
     if updated != 1 {
         return Err(TokenEventDatabaseError::InvalidCheckpoint(
-            "tracker state singleton is absent".into(),
+            "tracker state differs from the validated in-memory transition base".into(),
         ));
     }
     Ok(())
 }
 
 fn upsert_lifetime(
-    transaction: &Transaction<'_>,
+    transaction: &PubkeyCachingTransaction<'_, '_>,
     account: PubkeyBytes,
     state: TargetAccountSnapshot,
 ) -> Result<()> {
@@ -4159,7 +4865,8 @@ fn upsert_lifetime(
     let generation = U64Sql::new(state.lifecycle.generation);
     let revision = U64Sql::new(state.confirmed_revision);
     let (account_state, state_mint) = state_sql(transaction, state.lifecycle.state)?;
-    transaction.execute(
+    execute_cached(
+        transaction,
         "INSERT INTO account_lifetimes (
             pubkey_id, generation_le, generation_text, account_state,
             state_mint_pubkey_id, confirmed_revision_le, confirmed_revision_text
@@ -4184,7 +4891,7 @@ fn upsert_lifetime(
 }
 
 fn state_sql(
-    transaction: &Transaction<'_>,
+    transaction: &PubkeyCachingTransaction<'_, '_>,
     state: TokenAccountState,
 ) -> Result<(&'static str, Option<i64>)> {
     match state {
@@ -4744,7 +5451,7 @@ fn validate_effect(effect: &TargetMintEffect) -> Result<()> {
     Ok(())
 }
 
-#[derive(Debug, Clone, Copy)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
 struct TrackerStateAfter {
     history: HistoryCoverage,
     certainty_revision: u64,
@@ -4753,10 +5460,14 @@ struct TrackerStateAfter {
 fn validate_tracker_transition(
     connection: &Connection,
     target_mint: PubkeyBytes,
+    tracker_before: TrackerStateAfter,
     tracked_transactions: &[TrackedTokenTransaction],
 ) -> Result<TrackerStateAfter> {
-    let (mut history, mut certainty_revision) = load_tracker_state(connection)?;
-    let mut account_overlay = BTreeMap::new();
+    let TrackerStateAfter {
+        mut history,
+        mut certainty_revision,
+    } = tracker_before;
+    let mut account_overlay: BTreeMap<PubkeyBytes, TargetAccountSnapshot> = BTreeMap::new();
     for tracked in tracked_transactions {
         if history == HistoryCoverage::Partial && tracked.history_after == HistoryCoverage::Complete
         {
@@ -4780,6 +5491,30 @@ fn validate_tracker_transition(
                 tracked.tx_index
             )));
         }
+        let mut lifecycle_overlay = BTreeMap::new();
+        for event in &tracked.events {
+            for effect in &event.effects {
+                let TargetMintEffect::Lifecycle(change) = effect else {
+                    continue;
+                };
+                let current = match lifecycle_overlay.get(&change.account).copied() {
+                    Some(current) => Some(current),
+                    None => match account_overlay.get(&change.account).copied() {
+                        Some(current) => Some(current.lifecycle),
+                        None => load_current_account(connection, change.account, target_mint)?
+                            .map(|current| current.lifecycle),
+                    },
+                };
+                if change.before != current {
+                    return Err(TokenEventDatabaseError::InvalidBlock(format!(
+                        "transaction {} has a lifecycle effect that does not continue the account state",
+                        tracked.tx_index
+                    )));
+                }
+                validate_lifecycle_change(change, target_mint)?;
+                lifecycle_overlay.insert(change.account, change.after);
+            }
+        }
         let mut previous_update_account = None;
         for update in &tracked.account_updates {
             if previous_update_account.is_some_and(|previous| update.account <= previous) {
@@ -4793,15 +5528,23 @@ fn validate_tracker_transition(
                 Some(current) => Some(current),
                 None => load_current_account(connection, update.account, target_mint)?,
             };
+            let lifecycle_after_effects = lifecycle_overlay.remove(&update.account);
             validate_account_update(
                 update.account,
                 current,
                 update.state,
+                lifecycle_after_effects,
                 target_mint,
                 tracked.history_after,
                 tracked.certainty_revision_after,
             )?;
             account_overlay.insert(update.account, update.state);
+        }
+        if !lifecycle_overlay.is_empty() {
+            return Err(TokenEventDatabaseError::InvalidBlock(format!(
+                "transaction {} has a lifecycle effect without a final account update",
+                tracked.tx_index
+            )));
         }
         history = tracked.history_after;
         certainty_revision = tracked.certainty_revision_after;
@@ -4812,13 +5555,73 @@ fn validate_tracker_transition(
     })
 }
 
+fn validate_lifecycle_change(
+    change: &AccountLifecycleChange,
+    target_mint: PubkeyBytes,
+) -> Result<()> {
+    let after_is_closed = matches!(change.after.state, TokenAccountState::Closed { .. });
+    if matches!(change.after.state, TokenAccountState::ActiveOther { mint } if mint == target_mint)
+        || change.before.is_some_and(
+            |before| matches!(before.state, TokenAccountState::ActiveOther { mint } if mint == target_mint),
+        )
+    {
+        return Err(TokenEventDatabaseError::InvalidBlock(
+            "a lifecycle effect stores the target mint as another mint".into(),
+        ));
+    }
+    match (change.before, change.cause) {
+        (None, LifecycleCause::CloseAccount) => Err(TokenEventDatabaseError::InvalidBlock(
+            "a close lifecycle effect has no prior account lifetime".into(),
+        )),
+        (None, _)
+            if change.after.generation != 1
+                || change.after.state != TokenAccountState::ActiveTarget =>
+        {
+            Err(TokenEventDatabaseError::InvalidBlock(
+                "a new lifecycle effect has invalid generation or state".into(),
+            ))
+        }
+        (None, _) => Ok(()),
+        (Some(before), LifecycleCause::CloseAccount) => {
+            let expected = TokenAccountLifecycle {
+                generation: before.generation,
+                state: TokenAccountState::Closed {
+                    last_mint: before.state.active_mint(target_mint),
+                },
+            };
+            if matches!(before.state, TokenAccountState::Closed { .. }) || change.after != expected
+            {
+                return Err(TokenEventDatabaseError::InvalidBlock(
+                    "a close lifecycle effect has an invalid transition".into(),
+                ));
+            }
+            Ok(())
+        }
+        (Some(before), _) => {
+            let next_generation = before.generation.checked_add(1).ok_or_else(|| {
+                TokenEventDatabaseError::InvalidBlock(format!(
+                    "account {:?} lifecycle generation is exhausted",
+                    change.account
+                ))
+            })?;
+            if change.after.generation != next_generation || after_is_closed {
+                return Err(TokenEventDatabaseError::InvalidBlock(
+                    "an active lifecycle effect has an invalid transition".into(),
+                ));
+            }
+            Ok(())
+        }
+    }
+}
+
 fn load_tracker_state(connection: &Connection) -> Result<(HistoryCoverage, u64)> {
-    let (history, revision_le, revision_text): (String, Vec<u8>, String) = connection.query_row(
-        "SELECT history_coverage, certainty_revision_le, certainty_revision_text
+    let (history, revision_le, revision_text): (String, Vec<u8>, String) = {
+        let mut statement = connection.prepare_cached(
+            "SELECT history_coverage, certainty_revision_le, certainty_revision_text
                FROM tracker_state WHERE singleton = 1",
-        [],
-        |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
-    )?;
+        )?;
+        statement.query_row([], |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)))?
+    };
     Ok((
         parse_history(&history)?,
         parse_u64_pair(&revision_le, &revision_text, "tracker certainty revision")?,
@@ -4831,8 +5634,8 @@ fn load_current_account(
     target_mint: PubkeyBytes,
 ) -> Result<Option<TargetAccountSnapshot>> {
     type StoredCurrentAccount = (Vec<u8>, String, String, Option<Vec<u8>>, Vec<u8>, String);
-    let stored: Option<StoredCurrentAccount> = connection
-        .query_row(
+    let stored: Option<StoredCurrentAccount> = {
+        let mut statement = connection.prepare_cached(
             "SELECT lifetime.generation_le, lifetime.generation_text,
                     lifetime.account_state, mint.address,
                     lifetime.confirmed_revision_le, lifetime.confirmed_revision_text
@@ -4841,10 +5644,11 @@ fn load_current_account(
                JOIN account_lifetimes lifetime
                  ON lifetime.pubkey_id = current.pubkey_id
                 AND lifetime.generation_le = current.generation_le
-               LEFT JOIN pubkeys mint ON mint.pubkey_id = lifetime.state_mint_pubkey_id
+              LEFT JOIN pubkeys mint ON mint.pubkey_id = lifetime.state_mint_pubkey_id
               WHERE account.address = ?1",
-            params![account.as_slice()],
-            |row| {
+        )?;
+        statement
+            .query_row(params![account.as_slice()], |row| {
                 Ok((
                     row.get(0)?,
                     row.get(1)?,
@@ -4853,9 +5657,9 @@ fn load_current_account(
                     row.get(4)?,
                     row.get(5)?,
                 ))
-            },
-        )
-        .optional()?;
+            })
+            .optional()?
+    };
     stored
         .map(
             |(generation_le, generation_text, state, state_mint, revision_le, revision_text)| {
@@ -4892,6 +5696,7 @@ fn validate_account_update(
     account: PubkeyBytes,
     current: Option<TargetAccountSnapshot>,
     update: TargetAccountSnapshot,
+    lifecycle_after_effects: Option<TokenAccountLifecycle>,
     target_mint: PubkeyBytes,
     history_after: HistoryCoverage,
     certainty_revision_after: u64,
@@ -4919,28 +5724,19 @@ fn validate_account_update(
             "an account update stores the target mint as another mint".into(),
         ));
     }
-    match current {
-        None if update.lifecycle.generation != 1 => {
-            return Err(TokenEventDatabaseError::InvalidBlock(
-                "a new account update does not start at generation one".into(),
-            ));
+    let expected_lifecycle = match (lifecycle_after_effects, current) {
+        (Some(lifecycle), _) => lifecycle,
+        (None, Some(current)) => current.lifecycle,
+        (None, None) => {
+            return Err(TokenEventDatabaseError::InvalidBlock(format!(
+                "new account {account:?} has an update without a lifecycle effect"
+            )));
         }
-        Some(current) if update.lifecycle.generation != current.lifecycle.generation => {
-            let next_generation = current.lifecycle.generation.checked_add(1).ok_or_else(|| {
-                TokenEventDatabaseError::InvalidBlock(format!(
-                    "account {account:?} lifecycle generation is exhausted"
-                ))
-            })?;
-            if update.lifecycle.generation != next_generation
-                || !matches!(current.lifecycle.state, TokenAccountState::Closed { .. })
-                || matches!(update.lifecycle.state, TokenAccountState::Closed { .. })
-            {
-                return Err(TokenEventDatabaseError::InvalidBlock(
-                    "an account update has an invalid lifecycle generation transition".into(),
-                ));
-            }
-        }
-        _ => {}
+    };
+    if update.lifecycle != expected_lifecycle {
+        return Err(TokenEventDatabaseError::InvalidBlock(
+            "an account update does not match its proven lifecycle effects".into(),
+        ));
     }
     Ok(())
 }
@@ -5094,7 +5890,8 @@ fn insert_block_header(
     let transaction_count = u32::try_from(block.transactions.len()).map_err(|_| {
         TokenEventDatabaseError::InvalidBlock("block transaction count exceeds u32".into())
     })?;
-    transaction.execute(
+    execute_cached(
+        transaction,
         "INSERT INTO blocks (
             block_ordinal, epoch_le, epoch_text, slot_le, slot_text, transaction_count,
             tracker_history_after, tracker_revision_after_le,
@@ -5129,7 +5926,8 @@ fn finalize_block_header(
     tracker_digest: &[u8; DIGEST_BYTES],
 ) -> Result<()> {
     let revision = U64Sql::new(tracker_revision);
-    let changed = transaction.execute(
+    let changed = execute_cached(
+        transaction,
         "UPDATE blocks
             SET tracker_history_after = ?1,
                 tracker_revision_after_le = ?2,
@@ -5153,14 +5951,15 @@ fn finalize_block_header(
 }
 
 fn insert_transaction(
-    transaction: &Transaction<'_>,
+    transaction: &PubkeyCachingTransaction<'_, '_>,
     source: TransactionView<'_>,
     tracked: &TrackedTokenTransaction,
 ) -> Result<()> {
     let (execution_status, status_reason) = execution_status_sql(source.header.status);
     let tracker_revision = U64Sql::new(tracked.certainty_revision_after);
     let signature = source.primary_signature.map(|value| value.as_slice());
-    transaction.execute(
+    execute_cached(
+        transaction,
         "INSERT INTO transactions (
             block_ordinal, tx_index, execution_status, status_reason,
             failed_outer_index, primary_signature, tracker_history_after,
@@ -5196,7 +5995,7 @@ fn insert_transaction(
 }
 
 fn stage_transaction_lifetimes(
-    transaction: &Transaction<'_>,
+    transaction: &PubkeyCachingTransaction<'_, '_>,
     tracked: &TrackedTokenTransaction,
 ) -> Result<()> {
     let final_updates = tracked
@@ -5266,21 +6065,24 @@ fn stage_transaction_lifetimes(
 }
 
 fn ensure_lifetime_exists(
-    transaction: &Transaction<'_>,
+    transaction: &PubkeyCachingTransaction<'_, '_>,
     account: PubkeyBytes,
     generation: u64,
     context: &str,
 ) -> Result<()> {
     let account_id = intern_pubkey(transaction, &account)?;
     let generation = U64Sql::new(generation);
-    let exists: bool = transaction.query_row(
-        "SELECT EXISTS(
+    let exists: bool = {
+        let mut statement = transaction.prepare_cached(
+            "SELECT EXISTS(
             SELECT 1 FROM account_lifetimes
              WHERE pubkey_id = ?1 AND generation_le = ?2
          )",
-        params![account_id, generation.bytes.as_slice()],
-        |row| row.get(0),
-    )?;
+        )?;
+        statement.query_row(params![account_id, generation.bytes.as_slice()], |row| {
+            row.get(0)
+        })?
+    };
     if !exists {
         return Err(TokenEventDatabaseError::InvalidBlock(format!(
             "{context} refers to an unknown account generation"
@@ -5290,7 +6092,7 @@ fn ensure_lifetime_exists(
 }
 
 fn insert_account_updates(
-    transaction: &Transaction<'_>,
+    transaction: &PubkeyCachingTransaction<'_, '_>,
     tracked: &TrackedTokenTransaction,
 ) -> Result<()> {
     for (update_index, update) in tracked.account_updates.iter().enumerate() {
@@ -5301,7 +6103,8 @@ fn insert_account_updates(
         let generation = U64Sql::new(update.state.lifecycle.generation);
         let revision = U64Sql::new(update.state.confirmed_revision);
         let (account_state, state_mint) = state_sql(transaction, update.state.lifecycle.state)?;
-        transaction.execute(
+        execute_cached(
+            transaction,
             "INSERT INTO tracker_account_updates (
                 block_ordinal, tx_index, update_index, pubkey_id,
                 generation_le, generation_text, account_state,
@@ -5325,7 +6128,7 @@ fn insert_account_updates(
 }
 
 fn insert_event(
-    transaction: &Transaction<'_>,
+    transaction: &PubkeyCachingTransaction<'_, '_>,
     source: TransactionView<'_>,
     event_index: u32,
     event: &TrackedTokenEvent,
@@ -5343,7 +6146,8 @@ fn insert_event(
     let amount = encoded.amount.map(U64Sql::new);
     let amount_bytes = amount.as_ref().map(|value| value.bytes.as_slice());
     let amount_text = amount.as_ref().map(|value| value.text.as_str());
-    transaction.execute(
+    execute_cached(
+        transaction,
         "INSERT INTO events (
             block_ordinal, tx_index, event_index, instruction_order,
             outer_index, inner_index, stack_height, batch_index,
@@ -5506,7 +6310,7 @@ impl EncodedEvent {
 }
 
 fn insert_event_accounts(
-    transaction: &Transaction<'_>,
+    transaction: &PubkeyCachingTransaction<'_, '_>,
     event_id: i64,
     raw: &ObservedTokenInstruction,
 ) -> Result<()> {
@@ -5519,7 +6323,8 @@ fn insert_event_accounts(
                     )
                 })?;
                 let pubkey_id = intern_pubkey(transaction, &binding.address)?;
-                transaction.execute(
+                execute_cached(
+                    transaction,
                     "INSERT INTO event_accounts (
                         event_id, binding_index, account_index, pubkey_id, semantic_role
                      ) VALUES (?1, ?2, ?3, ?4, ?5)",
@@ -5541,7 +6346,8 @@ fn insert_event_accounts(
                     )
                 })?;
                 let pubkey_id = intern_pubkey(transaction, account)?;
-                transaction.execute(
+                execute_cached(
+                    transaction,
                     "INSERT INTO event_accounts (
                         event_id, binding_index, account_index, pubkey_id, semantic_role
                      ) VALUES (?1, ?2, ?3, ?4, NULL)",
@@ -5559,14 +6365,15 @@ fn insert_event_accounts(
 }
 
 fn insert_effect(
-    transaction: &Transaction<'_>,
+    transaction: &PubkeyCachingTransaction<'_, '_>,
     event_id: i64,
     effect_index: u32,
     effect: &TargetMintEffect,
 ) -> Result<()> {
     match effect {
         TargetMintEffect::Lifecycle(change) => {
-            transaction.execute(
+            execute_cached(
+                transaction,
                 "INSERT INTO event_effects (
                     event_id, effect_index, effect_kind,
                     amount_le, amount_text, decimals, checked
@@ -5673,7 +6480,8 @@ fn insert_amount_effect(
     checked: Option<bool>,
 ) -> Result<()> {
     let amount = U64Sql::new(amount);
-    transaction.execute(
+    execute_cached(
+        transaction,
         "INSERT INTO event_effects (
             event_id, effect_index, effect_kind,
             amount_le, amount_text, decimals, checked
@@ -5692,7 +6500,7 @@ fn insert_amount_effect(
 }
 
 fn insert_lifecycle_effect(
-    transaction: &Transaction<'_>,
+    transaction: &PubkeyCachingTransaction<'_, '_>,
     event_id: i64,
     effect_index: u32,
     change: &AccountLifecycleChange,
@@ -5708,7 +6516,8 @@ fn insert_lifecycle_effect(
     };
     let after_generation = U64Sql::new(change.after.generation);
     let (after_state, after_mint) = state_sql(transaction, change.after.state)?;
-    transaction.execute(
+    execute_cached(
+        transaction,
         "INSERT INTO lifecycle_effects (
             event_id, effect_index, account_pubkey_id,
             before_generation_le, before_generation_text, before_state,
@@ -5736,7 +6545,7 @@ fn insert_lifecycle_effect(
 }
 
 fn insert_delta_leg(
-    transaction: &Transaction<'_>,
+    transaction: &PubkeyCachingTransaction<'_, '_>,
     event_id: i64,
     effect_index: u32,
     leg_index: u32,
@@ -5746,7 +6555,8 @@ fn insert_delta_leg(
     let account_id = intern_pubkey(transaction, &leg.account)?;
     let generation = U64Sql::new(leg.generation);
     let amount = U64Sql::new(leg.amount);
-    transaction.execute(
+    execute_cached(
+        transaction,
         "INSERT INTO delta_legs (
             event_id, effect_index, leg_index, account_pubkey_id,
             generation_le, generation_text, direction, transfer_role,
@@ -5769,14 +6579,15 @@ fn insert_delta_leg(
 }
 
 fn insert_coverage_issue(
-    transaction: &Transaction<'_>,
+    transaction: &PubkeyCachingTransaction<'_, '_>,
     source: TransactionView<'_>,
     issue_index: u32,
     issue: &TokenCoverageIssue,
 ) -> Result<()> {
     let fields = CoverageIssueFields::new(transaction, &issue.kind)?;
     let coordinate = issue.coordinate;
-    transaction.execute(
+    execute_cached(
+        transaction,
         "INSERT INTO coverage_issues (
             block_ordinal, tx_index, issue_index, instruction_order,
             outer_index, inner_index, stack_height, issue_kind, detail,
@@ -5841,7 +6652,10 @@ impl CoverageIssueFields {
         }
     }
 
-    fn new(transaction: &Transaction<'_>, issue: &TokenCoverageIssueKind) -> Result<Self> {
+    fn new(
+        transaction: &PubkeyCachingTransaction<'_, '_>,
+        issue: &TokenCoverageIssueKind,
+    ) -> Result<Self> {
         Ok(match issue {
             TokenCoverageIssueKind::Decode(error) => {
                 let mut fields = Self::empty("decode");
@@ -5931,6 +6745,7 @@ fn coverage_reason_text(reason: CoverageReason) -> &'static str {
         CoverageReason::MetadataAbsent => "metadata-absent",
         CoverageReason::RawTransaction => "raw-transaction",
         CoverageReason::RawMetadata => "raw-metadata",
+        CoverageReason::ProjectionNotRequested => "projection-not-requested",
         CoverageReason::InvalidReference => "invalid-reference",
         CoverageReason::AmbiguousInstructionData => "ambiguous-instruction-data",
         CoverageReason::InstructionDataUnavailable => "instruction-data-unavailable",
@@ -6006,5 +6821,181 @@ fn transfer_leg_role_text(value: TransferLegRole) -> &'static str {
     match value {
         TransferLegRole::Source => "source",
         TransferLegRole::Destination => "destination",
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn tracker_state_connection(state: TrackerStateAfter) -> Connection {
+        let connection = Connection::open_in_memory().unwrap();
+        connection
+            .execute_batch(
+                "CREATE TABLE tracker_state (
+                    singleton INTEGER PRIMARY KEY CHECK (singleton = 1),
+                    history_coverage TEXT NOT NULL,
+                    certainty_revision_le BLOB NOT NULL,
+                    certainty_revision_text TEXT NOT NULL
+                ) STRICT;",
+            )
+            .unwrap();
+        let revision = U64Sql::new(state.certainty_revision);
+        connection
+            .execute(
+                "INSERT INTO tracker_state (
+                    singleton, history_coverage,
+                    certainty_revision_le, certainty_revision_text
+                 ) VALUES (1, ?1, ?2, ?3)",
+                params![
+                    history_text(state.history),
+                    revision.bytes.as_slice(),
+                    revision.text,
+                ],
+            )
+            .unwrap();
+        connection
+    }
+
+    #[test]
+    fn tracker_state_compare_and_swap_rejects_stale_state_and_rolls_back() {
+        let before = TrackerStateAfter {
+            history: HistoryCoverage::Complete,
+            certainty_revision: 0,
+        };
+        let after = TrackerStateAfter {
+            history: HistoryCoverage::Partial,
+            certainty_revision: 1,
+        };
+        let stale = TrackerStateAfter {
+            history: HistoryCoverage::Partial,
+            certainty_revision: 99,
+        };
+        let mut connection = tracker_state_connection(before);
+        let committed = HashMap::new();
+        let transaction = connection
+            .transaction_with_behavior(TransactionBehavior::Immediate)
+            .unwrap();
+        let transaction = PubkeyCachingTransaction::new(transaction, &committed);
+        let stale_revision = U64Sql::new(stale.certainty_revision);
+        transaction
+            .execute(
+                "UPDATE tracker_state
+                    SET history_coverage = ?1,
+                        certainty_revision_le = ?2,
+                        certainty_revision_text = ?3
+                  WHERE singleton = 1",
+                params![
+                    history_text(stale.history),
+                    stale_revision.bytes.as_slice(),
+                    stale_revision.text,
+                ],
+            )
+            .unwrap();
+
+        let error = apply_current_checkpoint(&transaction, &[], before, after).unwrap_err();
+        assert!(matches!(
+            error,
+            TokenEventDatabaseError::InvalidCheckpoint(reason)
+                if reason.contains("validated in-memory transition base")
+        ));
+        drop(transaction);
+
+        assert_eq!(
+            load_tracker_state(&connection).unwrap(),
+            (before.history, 0)
+        );
+    }
+
+    #[test]
+    fn no_op_tracker_state_transition_does_not_execute_an_update() {
+        let state = TrackerStateAfter {
+            history: HistoryCoverage::Complete,
+            certainty_revision: 7,
+        };
+        let mut connection = tracker_state_connection(state);
+        connection
+            .execute_batch(
+                "CREATE TRIGGER reject_tracker_state_update
+                 BEFORE UPDATE ON tracker_state
+                 BEGIN
+                     SELECT RAISE(ABORT, 'tracker_state update was not a no-op');
+                 END;",
+            )
+            .unwrap();
+        let committed = HashMap::new();
+        let transaction = connection
+            .transaction_with_behavior(TransactionBehavior::Immediate)
+            .unwrap();
+        let transaction = PubkeyCachingTransaction::new(transaction, &committed);
+
+        apply_current_checkpoint(&transaction, &[], state, state).unwrap();
+        transaction.commit().unwrap();
+
+        assert_eq!(load_tracker_state(&connection).unwrap(), (state.history, 7));
+    }
+
+    #[test]
+    fn changed_tracker_state_transition_updates_the_validated_base() {
+        let before = TrackerStateAfter {
+            history: HistoryCoverage::Complete,
+            certainty_revision: 0,
+        };
+        let after = TrackerStateAfter {
+            history: HistoryCoverage::Partial,
+            certainty_revision: 1,
+        };
+        let mut connection = tracker_state_connection(before);
+        let committed = HashMap::new();
+        let transaction = connection
+            .transaction_with_behavior(TransactionBehavior::Immediate)
+            .unwrap();
+        let transaction = PubkeyCachingTransaction::new(transaction, &committed);
+
+        apply_current_checkpoint(&transaction, &[], before, after).unwrap();
+        transaction.commit().unwrap();
+
+        assert_eq!(load_tracker_state(&connection).unwrap(), (after.history, 1));
+    }
+
+    #[test]
+    fn pubkey_cache_serves_committed_and_pending_hits_and_drops_rollback_state() {
+        let mut connection = Connection::open_in_memory().unwrap();
+        connection
+            .execute_batch(
+                "CREATE TABLE pubkeys (
+                    pubkey_id INTEGER PRIMARY KEY,
+                    address BLOB NOT NULL UNIQUE CHECK (length(address) = 32)
+                ) STRICT;",
+            )
+            .unwrap();
+        let existing = [1; 32];
+        connection
+            .execute("INSERT INTO pubkeys (address) VALUES (?1)", [existing])
+            .unwrap();
+        let mut committed = load_pubkey_ids(&connection).unwrap();
+        assert_eq!(committed.get(&existing), Some(&1));
+
+        let rolled_back = [2; 32];
+        {
+            let transaction = connection.transaction().unwrap();
+            let transaction = PubkeyCachingTransaction::new(transaction, &committed);
+            assert_eq!(intern_pubkey(&transaction, &existing).unwrap(), 1);
+            assert_eq!(intern_pubkey(&transaction, &rolled_back).unwrap(), 2);
+            assert_eq!(intern_pubkey(&transaction, &rolled_back).unwrap(), 2);
+            assert_eq!(transaction.cache_hits.get(), 2);
+            assert_eq!(transaction.pending_hits.get(), 1);
+            assert_eq!(transaction.sql_misses.get(), 1);
+        }
+        assert!(!committed.contains_key(&rolled_back));
+        assert_eq!(load_pubkey_ids(&connection).unwrap(), committed);
+
+        let transaction = connection.transaction().unwrap();
+        let transaction = PubkeyCachingTransaction::new(transaction, &committed);
+        assert_eq!(intern_pubkey(&transaction, &rolled_back).unwrap(), 2);
+        let committed_transaction = transaction.commit().unwrap();
+        assert_eq!(committed_transaction.sql_misses, 1);
+        committed.extend(committed_transaction.pending);
+        assert_eq!(load_pubkey_ids(&connection).unwrap(), committed);
     }
 }

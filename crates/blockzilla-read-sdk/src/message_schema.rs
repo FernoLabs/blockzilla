@@ -53,6 +53,66 @@ pub enum CompactV2MessageSchema {
     May24PreUnknownFallbacks,
 }
 
+/// Select a grammar from the fixed marker objects without a publication file.
+///
+/// A present marker is read once and compared directly with the repository
+/// asset. No digest is computed.
+pub fn detect_compact_v2_message_schema<S: RangeSource>(
+    source: &S,
+    epoch: u64,
+    cluster_id: &str,
+) -> Result<CompactV2MessageSchema, CompactV2MessageSchemaError> {
+    let may24_size = source.size(COMPACT_V2_MAY24_MESSAGE_SCHEMA_MARKER_FILE)?;
+    let current_size = source.size(COMPACT_V2_CURRENT_MESSAGE_SCHEMA_MARKER_FILE)?;
+    if may24_size.is_some() && current_size.is_some() {
+        return Err(CompactV2MessageSchemaError::MessageSchemaMarkerConflict);
+    }
+    if let Some(actual) = may24_size {
+        validate_marker_bytes(
+            source,
+            COMPACT_V2_MAY24_MESSAGE_SCHEMA_MARKER_FILE,
+            actual,
+            COMPACT_V2_MAY24_MESSAGE_SCHEMA_MARKER_SIZE,
+            COMPACT_V2_MAY24_MESSAGE_SCHEMA_MARKER_BYTES,
+        )?;
+        return Ok(CompactV2MessageSchema::May24PreUnknownFallbacks);
+    }
+    if let Some(actual) = current_size {
+        validate_marker_bytes(
+            source,
+            COMPACT_V2_CURRENT_MESSAGE_SCHEMA_MARKER_FILE,
+            actual,
+            COMPACT_V2_CURRENT_MESSAGE_SCHEMA_MARKER_SIZE,
+            COMPACT_V2_CURRENT_MESSAGE_SCHEMA_MARKER_BYTES,
+        )?;
+        return Ok(CompactV2MessageSchema::Current);
+    }
+    if cluster_id == "mainnet-beta" && MAY24_MAINNET_EPOCHS.contains(&epoch) {
+        return Err(CompactV2MessageSchemaError::HistoricalMainnetMarkerMissing { epoch });
+    }
+    Ok(CompactV2MessageSchema::Current)
+}
+
+fn validate_marker_bytes<S: RangeSource>(
+    source: &S,
+    file: &'static str,
+    actual_size: u64,
+    expected_size: u64,
+    expected_bytes: &'static [u8],
+) -> Result<(), CompactV2MessageSchemaError> {
+    if actual_size != expected_size {
+        return Err(CompactV2MessageSchemaError::MarkerObjectSize {
+            expected: expected_size,
+            actual: actual_size,
+        });
+    }
+    let bytes = source.read_all_bounded(file, expected_size as usize)?;
+    if bytes.as_slice() != expected_bytes {
+        return Err(CompactV2MessageSchemaError::MarkerObjectBytes);
+    }
+    Ok(())
+}
+
 #[derive(Debug, Error)]
 pub enum CompactV2MessageSchemaError {
     #[error("invalid Compact V2 generation manifest: {0}")]

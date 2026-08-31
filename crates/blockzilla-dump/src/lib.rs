@@ -15,12 +15,13 @@ pub use token_event_database::{
     TokenEventResume, TokenEventRunSpec,
 };
 pub use token_event_scan::{
-    TokenEventScanError, TokenEventScanOptions, TokenEventScanResult, scan_remaining_token_events,
+    TokenEventScanError, TokenEventScanOptions, TokenEventScanResult, TokenEventScanTiming,
+    scan_remaining_token_events,
 };
 
 pub use database::{
     Checkpoint, CheckpointBatch, CoverageIssue, DumpDatabase, DumpError, DumpKind, DumpSpec,
     DumpState, DumpStatus, EpochBinding, EpochState, EpochStatus, MatchRecord, MessageState,
-    MetadataState, OnIndeterminate, ProgramMatch, TokenBalanceRecord, TokenBalanceSide, TokenMatch,
-    TransactionAccountRecord, TransactionAccountSource,
+    MetadataState, OnIndeterminate, ProgramMatch, SCHEMA_VERSION, TokenBalanceRecord,
+    TokenBalanceSide, TokenMatch, TransactionAccountRecord, TransactionAccountSource,
 };
