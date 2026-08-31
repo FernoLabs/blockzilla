@@ -678,6 +678,10 @@ dependencies = [
 ]
 
 [[package]]
+name = "blockzilla-dex-parser"
+version = "0.1.0"
+
+[[package]]
 name = "blockzilla-firebase-indexer"
 version = "0.1.0"
 dependencies = [
@@ -787,6 +791,7 @@ name = "blockzilla-read-sdk"
 version = "0.1.0"
 dependencies = [
  "blockzilla-format",
+ "rayon",
  "reqwest 0.13.4",
  "rustix",
  "serde",
@@ -857,6 +862,36 @@ dependencies = [
  "tokio",
  "tracing",
  "tracing-subscriber",
+ "wincode 0.5.5",
+ "zstd",
+]
+
+[[package]]
+name = "blockzilla-token-balance-audit"
+version = "0.1.0"
+dependencies = [
+ "serde",
+ "serde_json",
+]
+
+[[package]]
+name = "blockzilla-token-transaction-dump"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "blockzilla-dex-parser",
+ "blockzilla-format",
+ "blockzilla-read-sdk",
+ "blockzilla-token-balance-audit",
+ "bs58",
+ "clap 4.6.5",
+ "mimalloc",
+ "pprof",
+ "serde",
+ "serde_json",
+ "sha2 0.11.0",
+ "solana-pubkey 4.3.0",
+ "tempfile",
  "wincode 0.5.5",
  "zstd",
 ]
@@ -3241,6 +3276,15 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "b6d2cec3eae94f9f509c767b45932f1ada8350c4bdb85af2fcab4a3c14807981"
 
 [[package]]
+name = "libmimalloc-sys"
+version = "0.1.49"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "6a45a52f43e1c16f667ccfe4dd8c85b7f7c204fd5e3bf46c5b0db9a5c3c0b8e9"
+dependencies = [
+ "cc",
+]
+
+[[package]]
 name = "linux-raw-sys"
 version = "0.12.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -3371,6 +3415,15 @@ dependencies = [
  "keccak",
  "rand_core 0.6.4",
  "zeroize",
+]
+
+[[package]]
+name = "mimalloc"
+version = "0.1.52"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "2d4139bb28d14ad1facf21d5eb8825051b326e172d216b39f6d31df53cc97862"
+dependencies = [
+ "libmimalloc-sys",
 ]
 
 [[package]]

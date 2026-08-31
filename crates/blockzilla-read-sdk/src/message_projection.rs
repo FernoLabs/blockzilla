@@ -2,8 +2,8 @@
 //!
 //! This module is the shared wire decoder for readers and indexers that need
 //! message structure but do not need to own instruction payloads. Raw byte
-//! payloads and instruction account lists are skipped or borrowed directly
-//! from the input. The only variable allocation in a full projection is the
+//! payloads and instruction account lists are borrowed directly from the
+//! input. The only variable allocation in a full projection is the
 //! decoded static-account-key vector; signer-only projection uses inline
 //! storage for the common case.
 //!
@@ -78,6 +78,89 @@ impl ArchiveV2MessageProjector {
             }
             ArchiveV2WireProfile::PreUnknownInstructionFallbacksV1 => {
                 decode_message::<true>(&mut cursor, &mut on_instruction)?
+            }
+        };
+        if !cursor.is_empty() {
+            return Err(MessageProjectionError::TrailingBytes(cursor.len()));
+        }
+        Ok(projected)
+    }
+
+    /// Visit each static transaction account and validate the complete message.
+    ///
+    /// Instructions and address-table lookups are structurally validated and
+    /// skipped without an instruction callback or a materialized vector. Lookup
+    /// table descriptor keys are not transaction accounts and are not sent to
+    /// `on_static_account`. All static and lookup-table descriptor pubkey IDs
+    /// are checked against `registry_entries`.
+    ///
+    /// Callback calls can occur before a later field proves malformed. A caller
+    /// must not publish callback side effects unless this method returns `Ok`.
+    pub fn visit_static_accounts_exact(
+        self,
+        bytes: &[u8],
+        registry_entries: u32,
+        mut on_static_account: impl FnMut(usize, CompactPubkey),
+    ) -> MessageProjectionResult<ProjectedArchiveV2MessageAccountSummary> {
+        let mut cursor = bytes;
+        let mut ignore_instruction = |_: BorrowedArchiveV2Instruction<'_>| {};
+        let projected = match self.profile {
+            ArchiveV2WireProfile::PostUnknownInstructionFallbacksV1 => {
+                visit_message_accounts::<false>(
+                    &mut cursor,
+                    registry_entries,
+                    &mut on_static_account,
+                    &mut ignore_instruction,
+                )?
+            }
+            ArchiveV2WireProfile::PreUnknownInstructionFallbacksV1 => {
+                visit_message_accounts::<true>(
+                    &mut cursor,
+                    registry_entries,
+                    &mut on_static_account,
+                    &mut ignore_instruction,
+                )?
+            }
+        };
+        if !cursor.is_empty() {
+            return Err(MessageProjectionError::TrailingBytes(cursor.len()));
+        }
+        Ok(projected)
+    }
+
+    /// Visit each static account and top-level instruction, then validate the
+    /// complete message without materializing account, lookup, or vote vectors.
+    ///
+    /// Lookup-table descriptor keys are validated against `registry_entries`,
+    /// but they are not sent to `on_static_account`. Vote-hash references are
+    /// structurally validated and discarded.
+    ///
+    /// Callback calls can occur before a later field proves malformed. A caller
+    /// must not publish callback side effects unless this method returns `Ok`.
+    pub fn visit_static_accounts_and_instructions_exact<'de>(
+        self,
+        bytes: &'de [u8],
+        registry_entries: u32,
+        mut on_static_account: impl FnMut(usize, CompactPubkey),
+        mut on_instruction: impl FnMut(BorrowedArchiveV2Instruction<'de>),
+    ) -> MessageProjectionResult<ProjectedArchiveV2MessageAccountSummary> {
+        let mut cursor = bytes;
+        let projected = match self.profile {
+            ArchiveV2WireProfile::PostUnknownInstructionFallbacksV1 => {
+                visit_message_accounts::<false>(
+                    &mut cursor,
+                    registry_entries,
+                    &mut on_static_account,
+                    &mut on_instruction,
+                )?
+            }
+            ArchiveV2WireProfile::PreUnknownInstructionFallbacksV1 => {
+                visit_message_accounts::<true>(
+                    &mut cursor,
+                    registry_entries,
+                    &mut on_static_account,
+                    &mut on_instruction,
+                )?
             }
         };
         if !cursor.is_empty() {
@@ -334,12 +417,16 @@ impl From<HistoricalInstructionData> for ArchiveV2HotInstructionData {
 /// common case with no allocation.
 pub type SignerKeys = SmallVec<[CompactPubkey; 2]>;
 
-/// One top-level instruction. Its account-index slice borrows the message;
-/// its data payload was validated and skipped without allocation.
+/// One top-level instruction. Its account-index slice and optional raw data
+/// payload borrow the message. Structured payloads are validated and skipped
+/// without allocation.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct BorrowedArchiveV2Instruction<'de> {
     pub program_id_index: u8,
     pub accounts: &'de [u8],
+    /// Present only for the profile-neutral `Raw` variant (wire tag 0).
+    /// `UnknownSystem` and `UnknownVote` fallback bytes are not raw payloads.
+    pub raw_data: Option<&'de [u8]>,
     pub is_compact_vote: bool,
     pub program_semantics: ArchiveV2InstructionProgramSemantics,
 }
@@ -384,9 +471,34 @@ pub struct ProjectedArchiveV2Message {
     pub expected_loaded_readonly: usize,
 }
 
+/// Allocation-free account-list summary from one exact message projection.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct ProjectedArchiveV2MessageAccountSummary {
+    pub is_v0: bool,
+    pub num_required_signatures: u8,
+    pub static_account_count: usize,
+    pub instruction_count: usize,
+    pub has_compact_vote_instruction: bool,
+    pub minimum_balance_accounts: usize,
+    pub expected_loaded_writable: usize,
+    pub expected_loaded_readonly: usize,
+}
+
 #[inline]
 fn get<'de, T: SchemaRead<'de, Cfg>>(cursor: &mut &'de [u8]) -> ReadResult<T::Dst> {
     T::get(&mut *cursor)
+}
+
+#[inline]
+fn validate_pubkey(value: CompactPubkey, registry_entries: u32) -> ReadResult<CompactPubkey> {
+    if let CompactPubkey::Id(id) = value
+        && (id == 0 || id > registry_entries)
+    {
+        return Err(wincode::error::invalid_value(
+            "pubkey registry ID is outside the admitted registry",
+        ));
+    }
+    Ok(value)
 }
 
 #[inline]
@@ -410,9 +522,14 @@ fn read_len_bounded_by_remaining(cursor: &mut &[u8], error: &'static str) -> Rea
 }
 
 #[inline]
-fn skip_bytes(cursor: &mut &[u8]) -> ReadResult<()> {
+fn read_bytes<'de>(cursor: &mut &'de [u8]) -> ReadResult<&'de [u8]> {
     let len = read_len_bounded_by_remaining(cursor, "byte string length exceeds remaining input")?;
-    cursor.take_borrowed(len)?;
+    Ok(cursor.take_borrowed(len)?)
+}
+
+#[inline]
+fn skip_bytes(cursor: &mut &[u8]) -> ReadResult<()> {
+    read_bytes(cursor)?;
     Ok(())
 }
 
@@ -514,13 +631,18 @@ fn skip_vote_tower_sync(
     Ok(())
 }
 
-fn skip_instruction_data<const PRE_UNKNOWN_FALLBACKS: bool>(
-    cursor: &mut &[u8],
+fn skip_instruction_data<'de, const PRE_UNKNOWN_FALLBACKS: bool>(
+    cursor: &mut &'de [u8],
     on_reference: &mut impl FnMut(ArchiveV2VoteHashReference),
-) -> ReadResult<(bool, ArchiveV2InstructionProgramSemantics)> {
+) -> ReadResult<(
+    bool,
+    ArchiveV2InstructionProgramSemantics,
+    Option<&'de [u8]>,
+)> {
     let tag = get::<u32>(cursor)?;
     let is_compact_vote;
     let program_semantics;
+    let mut raw_data = None;
     if PRE_UNKNOWN_FALLBACKS {
         is_compact_vote = matches!(tag, 3..=6);
         program_semantics = match tag {
@@ -531,7 +653,7 @@ fn skip_instruction_data<const PRE_UNKNOWN_FALLBACKS: bool>(
             _ => ArchiveV2InstructionProgramSemantics::Raw,
         };
         match tag {
-            0 => skip_bytes(cursor)?,
+            0 => raw_data = Some(read_bytes(cursor)?),
             1 => {
                 get::<ArchiveV2ComputeBudgetInstructionData>(cursor)?;
             }
@@ -558,7 +680,8 @@ fn skip_instruction_data<const PRE_UNKNOWN_FALLBACKS: bool>(
             _ => ArchiveV2InstructionProgramSemantics::Raw,
         };
         match tag {
-            0..=2 => skip_bytes(cursor)?,
+            0 => raw_data = Some(read_bytes(cursor)?),
+            1 | 2 => skip_bytes(cursor)?,
             3 => {
                 get::<ArchiveV2ComputeBudgetInstructionData>(cursor)?;
             }
@@ -576,7 +699,7 @@ fn skip_instruction_data<const PRE_UNKNOWN_FALLBACKS: bool>(
             other => return Err(invalid_tag_encoding(other as usize)),
         }
     }
-    Ok((is_compact_vote, program_semantics))
+    Ok((is_compact_vote, program_semantics, raw_data))
 }
 
 fn read_instruction<'de, const PRE_UNKNOWN_FALLBACKS: bool>(
@@ -589,11 +712,12 @@ fn read_instruction<'de, const PRE_UNKNOWN_FALLBACKS: bool>(
         "instruction account-index count exceeds remaining input",
     )?;
     let accounts = cursor.take_borrowed(accounts_len)?;
-    let (is_compact_vote, program_semantics) =
+    let (is_compact_vote, program_semantics, raw_data) =
         skip_instruction_data::<PRE_UNKNOWN_FALLBACKS>(cursor, on_reference)?;
     Ok(BorrowedArchiveV2Instruction {
         program_id_index,
         accounts,
+        raw_data,
         is_compact_vote,
         program_semantics,
     })
@@ -762,6 +886,145 @@ fn decode_message<'de, const PRE_UNKNOWN_FALLBACKS: bool>(
         vote_hash_references,
         is_v0,
         num_required_signatures: header.num_required_signatures,
+        instruction_count,
+        has_compact_vote_instruction,
+        minimum_balance_accounts,
+        expected_loaded_writable,
+        expected_loaded_readonly,
+    })
+}
+
+fn visit_message_accounts<'de, const PRE_UNKNOWN_FALLBACKS: bool>(
+    cursor: &mut &'de [u8],
+    registry_entries: u32,
+    on_static_account: &mut impl FnMut(usize, CompactPubkey),
+    on_instruction: &mut impl FnMut(BorrowedArchiveV2Instruction<'de>),
+) -> ReadResult<ProjectedArchiveV2MessageAccountSummary> {
+    let is_v0 = match get::<u32>(cursor)? {
+        0 => false,
+        1 => true,
+        other => return Err(invalid_tag_encoding(other as usize)),
+    };
+    let header = get::<CompactMessageHeader>(cursor)?;
+    let account_key_count = read_bounded_len(
+        cursor,
+        MAX_MESSAGE_ACCOUNTS,
+        "static account key count exceeds message account cap",
+    )?;
+    let required = usize::from(header.num_required_signatures);
+    let readonly_signed = usize::from(header.num_readonly_signed_accounts);
+    let readonly_unsigned = usize::from(header.num_readonly_unsigned_accounts);
+    if required == 0
+        || required > account_key_count
+        || readonly_signed >= required
+        || readonly_unsigned > account_key_count.saturating_sub(required)
+    {
+        return Err(wincode::error::invalid_value(
+            "message header does not describe a writable fee payer and valid account partitions",
+        ));
+    }
+    for ordinal in 0..account_key_count {
+        let account = validate_pubkey(get::<CompactPubkey>(cursor)?, registry_entries)?;
+        on_static_account(ordinal, account);
+    }
+    get::<OwnedCompactRecentBlockhash>(cursor)?;
+
+    let instruction_count = read_len_bounded_by_remaining(
+        cursor,
+        "top-level instruction count exceeds remaining input",
+    )?;
+    let mut maximum_instruction_account = None::<usize>;
+    let mut has_compact_vote_instruction = false;
+    let mut ignore_vote_reference = |_: ArchiveV2VoteHashReference| {};
+    for _ in 0..instruction_count {
+        let instruction =
+            read_instruction::<PRE_UNKNOWN_FALLBACKS>(cursor, &mut ignore_vote_reference)?;
+        let program_index = usize::from(instruction.program_id_index);
+        if program_index == 0 || program_index >= account_key_count {
+            return Err(wincode::error::invalid_value(
+                "instruction program ID index is not a non-payer static account",
+            ));
+        }
+        for account in instruction.accounts {
+            maximum_instruction_account = Some(
+                maximum_instruction_account
+                    .unwrap_or_default()
+                    .max(usize::from(*account)),
+            );
+        }
+        has_compact_vote_instruction |= instruction.is_compact_vote;
+        on_instruction(instruction);
+    }
+
+    let mut expected_loaded_writable = 0usize;
+    let mut expected_loaded_readonly = 0usize;
+    if is_v0 {
+        let lookup_count = read_bounded_len(
+            cursor,
+            MAX_MESSAGE_ACCOUNTS,
+            "address-table lookup count exceeds message account cap",
+        )?;
+        for _ in 0..lookup_count {
+            // Lookup-table descriptor, not a transaction account.
+            validate_pubkey(get::<CompactPubkey>(cursor)?, registry_entries)?;
+            let writable = read_bounded_len(
+                cursor,
+                MAX_MESSAGE_ACCOUNTS,
+                "writable address-table index count exceeds message account cap",
+            )?;
+            cursor.take_borrowed(writable)?;
+            let readonly = read_bounded_len(
+                cursor,
+                MAX_MESSAGE_ACCOUNTS,
+                "readonly address-table index count exceeds message account cap",
+            )?;
+            cursor.take_borrowed(readonly)?;
+            if writable == 0 && readonly == 0 {
+                return Err(wincode::error::invalid_value(
+                    "address-table lookup has no writable or readonly indexes",
+                ));
+            }
+            expected_loaded_writable = expected_loaded_writable
+                .checked_add(writable)
+                .ok_or_else(|| wincode::error::invalid_value("loaded writable count overflow"))?;
+            expected_loaded_readonly = expected_loaded_readonly
+                .checked_add(readonly)
+                .ok_or_else(|| wincode::error::invalid_value("loaded readonly count overflow"))?;
+            let total_accounts = account_key_count
+                .checked_add(expected_loaded_writable)
+                .and_then(|count| count.checked_add(expected_loaded_readonly))
+                .ok_or_else(|| wincode::error::invalid_value("message account count overflow"))?;
+            if total_accounts > MAX_MESSAGE_ACCOUNTS {
+                return Err(wincode::error::invalid_value(
+                    "static and loaded account count exceeds message account cap",
+                ));
+            }
+        }
+    }
+
+    let total_accounts = account_key_count
+        .checked_add(expected_loaded_writable)
+        .and_then(|count| count.checked_add(expected_loaded_readonly))
+        .ok_or_else(|| wincode::error::invalid_value("message account count overflow"))?;
+    if maximum_instruction_account.is_some_and(|index| index >= total_accounts) {
+        return Err(wincode::error::invalid_value(
+            "instruction account index is outside resolved message accounts",
+        ));
+    }
+    let writable_signed = required - readonly_signed;
+    let writable_unsigned_end = account_key_count - readonly_unsigned;
+    let minimum_balance_accounts = if is_v0 {
+        total_accounts
+    } else if writable_unsigned_end > required {
+        writable_unsigned_end
+    } else {
+        writable_signed
+    };
+
+    Ok(ProjectedArchiveV2MessageAccountSummary {
+        is_v0,
+        num_required_signatures: header.num_required_signatures,
+        static_account_count: account_key_count,
         instruction_count,
         has_compact_vote_instruction,
         minimum_balance_accounts,
@@ -1099,8 +1362,9 @@ mod tests {
     use blockzilla_format::{
         ArchiveV2HotInstruction, ArchiveV2HotInstructionData, ArchiveV2HotLegacyMessage,
         ArchiveV2HotMessagePayload, ArchiveV2HotV0Message, ArchiveV2SystemInstructionData,
-        ArchiveV2VoteStateUpdate, ArchiveV2VoteTowerSync, OwnedCompactAddressTableLookup,
-        wincode_leb128_config,
+        ArchiveV2VoteStateUpdate, ArchiveV2VoteTowerSync, ArchiveV2WireIdentityVisitor,
+        ArchiveV2WireRewriteLimits, OwnedCompactAddressTableLookup,
+        transcode_archive_v2_hot_message_wire_pre_to_post, wincode_leb128_config,
     };
     use wincode::SchemaWrite;
 
@@ -1194,6 +1458,186 @@ mod tests {
         assert!(projected.is_v0);
         assert_eq!(projected.expected_loaded_writable, 1);
         assert_eq!(projected.expected_loaded_readonly, 1);
+    }
+
+    #[test]
+    fn exact_static_account_visitor_skips_alt_descriptors_and_allocates_nothing() {
+        let mut message = ArchiveV2HotMessagePayload::V0(ArchiveV2HotV0Message {
+            header: CompactMessageHeader {
+                num_required_signatures: 1,
+                num_readonly_signed_accounts: 0,
+                num_readonly_unsigned_accounts: 0,
+            },
+            account_keys: vec![CompactPubkey::Id(1), CompactPubkey::Id(2)],
+            recent_blockhash: OwnedCompactRecentBlockhash::Id(0),
+            instructions: vec![ArchiveV2HotInstruction {
+                program_id_index: 1,
+                accounts: vec![0, 2, 3],
+                data: ArchiveV2HotInstructionData::VoteCompactUpdateVoteState(update()),
+            }],
+            address_table_lookups: vec![OwnedCompactAddressTableLookup {
+                account_key: CompactPubkey::Id(99),
+                writable_indexes: vec![0],
+                readonly_indexes: vec![1],
+            }],
+        });
+        let bytes = serialize(&message);
+        let mut static_accounts = Vec::new();
+        let summary = post_projector()
+            .visit_static_accounts_exact(&bytes, 100, |ordinal, account| {
+                static_accounts.push((ordinal, account));
+            })
+            .unwrap();
+
+        assert_eq!(
+            static_accounts,
+            vec![(0, CompactPubkey::Id(1)), (1, CompactPubkey::Id(2))]
+        );
+        assert!(summary.is_v0);
+        assert_eq!(summary.num_required_signatures, 1);
+        assert_eq!(summary.static_account_count, 2);
+        assert_eq!(summary.instruction_count, 1);
+        assert!(summary.has_compact_vote_instruction);
+        assert_eq!(summary.minimum_balance_accounts, 4);
+        assert_eq!(summary.expected_loaded_writable, 1);
+        assert_eq!(summary.expected_loaded_readonly, 1);
+
+        let mut discovery_static_accounts = Vec::new();
+        let mut outer_instructions = Vec::new();
+        let discovery_summary = post_projector()
+            .visit_static_accounts_and_instructions_exact(
+                &bytes,
+                100,
+                |ordinal, account| discovery_static_accounts.push((ordinal, account)),
+                |instruction| {
+                    outer_instructions.push((
+                        instruction.program_id_index,
+                        instruction.accounts.to_vec(),
+                        instruction.raw_data.map(<[u8]>::to_vec),
+                    ));
+                },
+            )
+            .unwrap();
+        assert_eq!(discovery_summary, summary);
+        assert_eq!(discovery_static_accounts, static_accounts);
+        assert_eq!(outer_instructions, vec![(1, vec![0, 2, 3], None)]);
+
+        let ((summary, visited), allocations) =
+            crate::test_allocations::count_current_thread_allocations(|| {
+                let mut visited = 0usize;
+                let summary = post_projector()
+                    .visit_static_accounts_exact(&bytes, 100, |_, _| visited += 1)
+                    .unwrap();
+                (summary, visited)
+            });
+        assert_eq!(visited, 2);
+        assert_eq!(summary.expected_loaded_writable, 1);
+        assert_eq!(summary.expected_loaded_readonly, 1);
+        assert_eq!(allocations, 0);
+
+        let ((summary, static_visited, instructions_visited), allocations) =
+            crate::test_allocations::count_current_thread_allocations(|| {
+                let mut static_visited = 0usize;
+                let mut instructions_visited = 0usize;
+                let summary = post_projector()
+                    .visit_static_accounts_and_instructions_exact(
+                        &bytes,
+                        100,
+                        |_, _| static_visited += 1,
+                        |_| instructions_visited += 1,
+                    )
+                    .unwrap();
+                (summary, static_visited, instructions_visited)
+            });
+        assert_eq!(static_visited, 2);
+        assert_eq!(instructions_visited, 1);
+        assert!(summary.has_compact_vote_instruction);
+        assert_eq!(allocations, 0);
+
+        let mut trailing = bytes;
+        trailing.push(0);
+        assert!(
+            post_projector()
+                .visit_static_accounts_exact(&trailing, 100, |_, _| {})
+                .is_err()
+        );
+
+        let ArchiveV2HotMessagePayload::V0(v0) = &mut message else {
+            unreachable!();
+        };
+        v0.account_keys[0] = CompactPubkey::Id(101);
+        let invalid_static = serialize(&message);
+        assert!(
+            post_projector()
+                .visit_static_accounts_exact(&invalid_static, 100, |_, _| {})
+                .is_err()
+        );
+        let ArchiveV2HotMessagePayload::V0(v0) = &mut message else {
+            unreachable!();
+        };
+        v0.account_keys[0] = CompactPubkey::Id(1);
+        v0.address_table_lookups[0].account_key = CompactPubkey::Id(101);
+        let invalid_descriptor = serialize(&message);
+        assert!(
+            post_projector()
+                .visit_static_accounts_exact(&invalid_descriptor, 100, |_, _| {})
+                .is_err()
+        );
+    }
+
+    #[test]
+    fn current_profile_borrows_only_raw_instruction_payloads() {
+        let message = ArchiveV2HotMessagePayload::Legacy(ArchiveV2HotLegacyMessage {
+            header: CompactMessageHeader {
+                num_required_signatures: 1,
+                num_readonly_signed_accounts: 0,
+                num_readonly_unsigned_accounts: 0,
+            },
+            account_keys: vec![CompactPubkey::Id(1), CompactPubkey::Id(2)],
+            recent_blockhash: OwnedCompactRecentBlockhash::Id(0),
+            instructions: vec![
+                ArchiveV2HotInstruction {
+                    program_id_index: 1,
+                    accounts: vec![0],
+                    data: ArchiveV2HotInstructionData::Raw(vec![1, 2, 3]),
+                },
+                ArchiveV2HotInstruction {
+                    program_id_index: 1,
+                    accounts: vec![0],
+                    data: ArchiveV2HotInstructionData::UnknownSystem(vec![4, 5]),
+                },
+                ArchiveV2HotInstruction {
+                    program_id_index: 1,
+                    accounts: vec![0],
+                    data: ArchiveV2HotInstructionData::UnknownVote(vec![6, 7]),
+                },
+            ],
+        });
+        let bytes = serialize(&message);
+        let mut instructions = Vec::new();
+        post_projector()
+            .project(&bytes, |instruction| instructions.push(instruction))
+            .unwrap();
+
+        assert_eq!(instructions.len(), 3);
+        assert_eq!(instructions[0].raw_data, Some([1, 2, 3].as_slice()));
+        assert_eq!(instructions[1].raw_data, None);
+        assert_eq!(instructions[2].raw_data, None);
+        assert_eq!(
+            instructions[1].program_semantics,
+            ArchiveV2InstructionProgramSemantics::System
+        );
+        assert_eq!(
+            instructions[2].program_semantics,
+            ArchiveV2InstructionProgramSemantics::Vote
+        );
+
+        let raw = instructions[0].raw_data.unwrap();
+        let input_start = bytes.as_ptr() as usize;
+        let input_end = input_start + bytes.len();
+        let raw_start = raw.as_ptr() as usize;
+        assert!(raw_start >= input_start);
+        assert!(raw_start + raw.len() <= input_end);
     }
 
     #[derive(SchemaWrite)]
@@ -1301,17 +1745,45 @@ mod tests {
         });
         let bytes = serialize(&message);
         let mut instruction_count = 0;
+        let mut raw_data = Vec::new();
         let projected = pre_projector()
-            .project(&bytes, |_| instruction_count += 1)
+            .project(&bytes, |instruction| {
+                instruction_count += 1;
+                raw_data.push(instruction.raw_data.map(<[u8]>::to_vec));
+            })
             .unwrap();
         assert_eq!(instruction_count, 7);
+        assert_eq!(raw_data[0], Some(vec![1, 2, 3]));
+        assert!(raw_data[1..].iter().all(Option::is_none));
         assert_eq!(projected.instruction_count, 7);
         assert_eq!(
             pre_projector().project_signers(&bytes).unwrap().as_slice(),
             &[CompactPubkey::Id(1)]
         );
-        let owned = pre_projector().decode_owned_message(&bytes).unwrap();
-        let ArchiveV2HotMessagePayload::Legacy(owned) = owned else {
+        let normalized_source = pre_projector().decode_owned_message(&bytes).unwrap();
+        let canonical_expected = serialize(&normalized_source);
+        let mut canonical = Vec::new();
+        transcode_archive_v2_hot_message_wire_pre_to_post(
+            &bytes,
+            &mut canonical,
+            &mut ArchiveV2WireIdentityVisitor,
+            ArchiveV2WireRewriteLimits::default(),
+        )
+        .unwrap();
+        assert_eq!(canonical, canonical_expected);
+        assert_eq!(
+            serialize(&post_projector().decode_owned_message(&canonical).unwrap()),
+            canonical_expected
+        );
+        assert_eq!(
+            post_projector()
+                .audit_alternate_profile(&canonical)
+                .unwrap(),
+            WireProfileAuditOutcome::SelectedOnly
+        );
+        assert!(pre_projector().audit_alternate_profile(&canonical).is_err());
+
+        let ArchiveV2HotMessagePayload::Legacy(owned) = normalized_source else {
             panic!("expected historical legacy message");
         };
         assert_eq!(owned.instructions.len(), 7);

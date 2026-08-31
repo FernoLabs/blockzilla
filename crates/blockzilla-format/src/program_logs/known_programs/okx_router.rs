@@ -3,7 +3,12 @@ use wincode::{SchemaRead, SchemaWrite};
 
 pub const V2_STR_ID: &str = "6m2CDdhRgxpH4WjvdzxAYbGxwdGUz5MziiL5jek2kBma";
 pub const V3_STR_ID: &str = "proVF4pMXVaYqmy4NjniPh4pqKNfMmsihgd4wdkCX3u";
-pub const ROUTE_STR_ID: &str = "routeUGWgWzqBWFcrCfv8tritsqukccJPu3q5GPP3xS";
+/// Raydium AMM routing program. It uses log messages that this compatibility
+/// decoder also handles for the OKX routers.
+pub const RAYDIUM_ROUTE_STR_ID: &str = "routeUGWgWzqBWFcrCfv8tritsqukccJPu3q5GPP3xS";
+/// Compatibility name. The address belongs to Raydium, not OKX.
+#[deprecated(note = "use RAYDIUM_ROUTE_STR_ID")]
+pub const ROUTE_STR_ID: &str = RAYDIUM_ROUTE_STR_ID;
 
 #[derive(Debug, PartialEq, Eq, Serialize, Deserialize, SchemaRead, SchemaWrite)]
 pub enum OkxRouterLog {
@@ -69,7 +74,7 @@ pub enum OkxMarker {
 
 #[inline]
 pub fn is_known_router_id(program: &str) -> bool {
-    matches!(program, V2_STR_ID | V3_STR_ID | ROUTE_STR_ID)
+    matches!(program, V2_STR_ID | V3_STR_ID | RAYDIUM_ROUTE_STR_ID)
 }
 
 impl OkxRouterLog {

@@ -1,7 +1,14 @@
 use std::{
-    collections::{HashMap, HashSet},
+    collections::{BTreeSet, HashMap, HashSet},
     io::Read,
     ops::Range,
+    sync::{
+        Mutex,
+        atomic::{AtomicU64, Ordering},
+        mpsc::{Receiver, SyncSender, sync_channel},
+    },
+    thread,
+    time::{Duration, Instant},
 };
 
 use blockzilla_format::{
@@ -22,18 +29,21 @@ use blockzilla_format::{
     deserialize_archive_v2_hot_block_blob_borrowed_current,
     deserialize_archive_v2_hot_block_blob_borrowed_current_without_rewards,
 };
+use rayon::prelude::*;
 use sha2::{Digest, Sha256};
 
 use crate::{
-    ArchiveV2MessageProjector, ArchiveV2WireProfile, Error,
-    POST_UNKNOWN_INSTRUCTION_FALLBACKS_MARKER_FILE, PRE_UNKNOWN_INSTRUCTION_FALLBACKS_MARKER_FILE,
-    Result,
+    ArchiveV2MessageProjector, ArchiveV2MetadataProfileAdmission,
+    ArchiveV2MetadataProjectionLimits, ArchiveV2MetadataWireProfile, ArchiveV2WireProfile,
+    CURRENT_TYPED_ERRORS_MARKER_FILE, Error, POST_UNKNOWN_INSTRUCTION_FALLBACKS_MARKER_FILE,
+    PRE_UNKNOWN_INSTRUCTION_FALLBACKS_MARKER_FILE, ProjectedArchiveV2MetadataPrefix, Result,
     manifest::{
         BLOCK_INDEX_FILE, BLOCKS_FILE, GENERATION_MANIFEST_FILE, GENESIS_BIN_FILE,
-        GenerationManifest, META_FILE, REGISTRY_FILE, REQUIRED_GENERATION_FILES, SIGNATURES_FILE,
-        decode_sha256, hex_lower,
+        GenerationManifest, META_FILE, REGISTRY_FILE, REGISTRY_INDEX_FILE,
+        REQUIRED_GENERATION_FILES, SIGNATURES_FILE, decode_sha256, hex_lower,
     },
     source::{RangeSource, RangeSourceReader},
+    validate_archive_v2_current_metadata_exact, validate_archive_v2_metadata_exact,
 };
 
 const DEFAULT_IO_CHUNK_SIZE: usize = 8 * 1024 * 1024;
@@ -49,13 +59,143 @@ const KNOWN_HOT_TX_FLAGS: u32 = (1 << 11) - 1;
 const ARCHIVE_V2_HOT_META_GENESIS_TAG: u8 = 1;
 const HISTORICAL_EPOCH0_HOT_META_GENESIS_TAG: u8 = 4;
 
+pub const MAX_ORDERED_PARALLEL_DECODE_WORKERS: usize = 64;
+pub const MAX_ORDERED_PARALLEL_COMPRESSED_BUFFERS: usize = 16;
+pub const MAX_ORDERED_PARALLEL_BLOCKS_PER_BATCH: usize = 65_536;
+pub const MAX_ORDERED_PARALLEL_UNCOMPRESSED_BATCH_BYTES: usize = 1024 * 1024 * 1024;
+pub const MAX_ORDERED_PARALLEL_RETAINED_DECOMPRESSED_BYTES: usize = 1024 * 1024 * 1024;
+
+static NEXT_READER_ID: AtomicU64 = AtomicU64::new(1);
+
+/// Bounded resources for ordered block I/O with parallel borrowed decoding.
+///
+/// The reader performs one increasing range read at a time. It overlaps those
+/// reads with a fixed local decode pool, but it publishes callback results in
+/// exact block-index order.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct OrderedParallelBlockConfig {
+    /// Target compressed bytes in one frame-aligned read. The effective target
+    /// is capped by the reader's admitted `prefetch_bytes` option. One frame is
+    /// always admitted even when it is larger than this target.
+    pub compressed_batch_target_bytes: usize,
+    /// Maximum declared uncompressed bytes in one parallel batch. One admitted
+    /// block is always allowed when it alone is larger than this budget. The
+    /// public hard maximum is 1 GiB.
+    pub uncompressed_batch_budget_bytes: usize,
+    /// Maximum blocks in one parallel batch. This also bounds the number of
+    /// caller-owned projection results retained before ordered consumption.
+    pub max_blocks_per_batch: usize,
+    /// Exact number of compressed `Vec` tokens shared by the producer and the
+    /// coordinator. Three permits one fill, one decode, and one queued batch.
+    /// The public hard maximum is 16.
+    pub compressed_buffer_count: usize,
+    /// Number of threads in the private decode pool. The public hard maximum
+    /// is 64.
+    pub decode_workers: usize,
+    /// Maximum decompression-buffer capacity retained by each worker between
+    /// blocks. A larger buffer is dropped after its block callback completes.
+    /// The configured per-worker total has a public hard maximum of 1 GiB.
+    pub retained_decompressed_bytes_per_worker: usize,
+    /// Decode and validate current-schema rewards without retaining them.
+    /// Historical schemas keep the existing owned compatibility fallback.
+    pub discard_rewards: bool,
+}
+
+impl Default for OrderedParallelBlockConfig {
+    fn default() -> Self {
+        Self {
+            compressed_batch_target_bytes: DEFAULT_PREFETCH_BYTES,
+            uncompressed_batch_budget_bytes: DEFAULT_MAX_BLOCK_BYTES,
+            max_blocks_per_batch: 8_192,
+            compressed_buffer_count: 3,
+            decode_workers: 4,
+            retained_decompressed_bytes_per_worker: 32 * 1024 * 1024,
+            discard_rewards: false,
+        }
+    }
+}
+
+/// Coarse measurements from one ordered parallel block pass.
+///
+/// Durations are accumulated once per batch or range read. The reader does not
+/// add timing or synchronization to per-message loops.
+#[derive(Debug, Default, Clone, Copy, PartialEq, Eq)]
+pub struct OrderedParallelBlockStats {
+    pub block_count: u64,
+    /// Blocks decoded through the current-schema borrowed byte view.
+    pub borrowed_storage_blocks: u64,
+    /// Blocks that required the documented owned legacy-schema decoder.
+    pub owned_schema_fallback_blocks: u64,
+    pub batch_count: u64,
+    pub read_call_count: u64,
+    pub compressed_bytes: u64,
+    pub producer_read_wall_time: Duration,
+    pub coordinator_decode_project_wall_time: Duration,
+    pub producer_wait_for_free_buffer_time: Duration,
+    pub coordinator_wait_for_ready_batch_time: Duration,
+    pub max_compressed_batch_bytes: usize,
+    pub max_declared_uncompressed_batch_bytes: u64,
+}
+
+/// Measurements for one ordered parallel pass with an in-memory batch barrier.
+///
+/// Every source block is read and decompressed once. The reader first lends the
+/// retained decompressed bytes to stage A, merges all stage-A outputs for the
+/// batch in row order, and then lends the same bytes to stage B. The explicit
+/// counters make that one-read, one-decompression contract observable.
+#[derive(Debug, Default, Clone, Copy, PartialEq, Eq)]
+pub struct BatchBarrierBlockStats {
+    pub block_count: u64,
+    /// Blocks decoded through the current-schema borrowed byte view.
+    pub borrowed_storage_blocks: u64,
+    /// Blocks that required the documented owned legacy-schema decoder.
+    pub owned_schema_fallback_blocks: u64,
+    pub batch_count: u64,
+    /// Calls to the range source for `blocks.bin`. This is one call per batch.
+    pub read_call_count: u64,
+    /// Compressed source bytes read. Each requested byte is counted once.
+    pub compressed_bytes: u64,
+    /// Zstd frame decompressions. This equals `block_count` on success.
+    pub decompression_count: u64,
+    /// Decompressed frame bytes produced. Each frame is counted once.
+    pub decompressed_bytes: u64,
+    /// Successful stage-A borrowed block visits.
+    pub stage_a_block_count: u64,
+    /// Successful stage-B borrowed block visits.
+    pub stage_b_block_count: u64,
+    pub producer_read_wall_time: Duration,
+    pub coordinator_stage_a_wall_time: Duration,
+    pub coordinator_merge_wall_time: Duration,
+    pub coordinator_stage_b_wall_time: Duration,
+    pub producer_wait_for_free_buffer_time: Duration,
+    pub coordinator_wait_for_ready_batch_time: Duration,
+    pub max_compressed_batch_bytes: usize,
+    pub max_declared_uncompressed_batch_bytes: u64,
+    /// Maximum sum of live decompressed byte lengths for one batch.
+    pub max_live_decompressed_batch_bytes: usize,
+    /// Maximum retained decompressed capacity after a batch is recycled.
+    pub max_retained_decompressed_capacity_bytes: usize,
+    /// Frames whose assigned retained `Vec` already had enough capacity.
+    pub decompressed_buffer_reuse_count: u64,
+    /// Frames that needed a new or larger decompressed allocation.
+    pub decompressed_buffer_growth_count: u64,
+    /// Block state buffers whose active entries fit in retained capacity.
+    pub transaction_state_buffer_reuse_count: u64,
+    /// Block state buffers that increased their retained capacity.
+    pub transaction_state_buffer_growth_count: u64,
+    /// Maximum active transaction-state bytes in one batch.
+    pub max_live_transaction_state_bytes: usize,
+    /// Maximum aggregate retained transaction-state capacity in bytes.
+    pub max_retained_transaction_state_capacity_bytes: usize,
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum HashVerification {
     /// Check object presence and exact lengths, then hash every manifest file.
     AllFiles,
     /// Hash the downloaded/cacheable control plane (`registry.bin`, the block
-    /// index, publication metadata, genesis, and the selected wire-profile
-    /// marker), while size-checking remote blocks and signatures. This is the
+    /// index, publication metadata, genesis, and both selected wire-profile
+    /// markers), while size-checking remote blocks and signatures. This is the
     /// intended HTTP streaming policy. The gateway must serve an immutable
     /// generation over authenticated TLS.
     ControlFiles,
@@ -100,17 +240,32 @@ pub struct GenerationBinding {
     pub wire_profile: ArchiveV2WireProfile,
 }
 
+/// Generation identity plus the metadata grammar selected at admission.
+///
+/// This additive binding keeps [`GenerationBinding`] source compatible while
+/// allowing metadata-sensitive artifacts to bind their decoder authority.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub struct ProfiledGenerationBinding {
+    pub generation: GenerationBinding,
+    pub metadata_wire_profile: ArchiveV2MetadataWireProfile,
+}
+
 #[derive(Debug, Clone)]
 pub struct CompiledPubkeyFilter {
     binding: GenerationBinding,
     registry_ids: HashSet<u32>,
     raw_pubkeys: HashSet<[u8; 32]>,
     resolved_ids: HashMap<[u8; 32], u32>,
+    reader_id: u64,
 }
 
 impl CompiledPubkeyFilter {
     pub fn binding(&self) -> GenerationBinding {
         self.binding
+    }
+
+    pub fn reader_id(&self) -> u64 {
+        self.reader_id
     }
 
     pub fn pubkey_count(&self) -> usize {
@@ -174,6 +329,7 @@ impl MetadataState {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct SignatureReference {
     pub generation_digest: [u8; 32],
+    pub reader_id: u64,
     pub first_ordinal: u64,
     pub count: u8,
 }
@@ -305,6 +461,7 @@ impl TransactionRowOrder {
 pub struct BorrowedDecodedBlock<'a> {
     pub index_row: ArchiveV2HotBlockIndexRow,
     block: BorrowedDecodedBlockPayload<'a>,
+    uncompressed_bytes: &'a [u8],
 }
 
 #[derive(Debug)]
@@ -315,6 +472,15 @@ enum BorrowedDecodedBlockPayload<'a> {
 }
 
 impl BorrowedDecodedBlock<'_> {
+    /// Exact decompressed frame bytes that back this borrowed block.
+    ///
+    /// This lets a length-preserving migration copy the current-schema outer
+    /// encoding verbatim and replace only a validated borrowed byte range.
+    #[inline]
+    pub fn uncompressed_bytes(&self) -> &[u8] {
+        self.uncompressed_bytes
+    }
+
     #[inline]
     pub fn header(&self) -> &ArchiveV2HotBlockHeader {
         match &self.block {
@@ -388,7 +554,62 @@ impl BorrowedDecodedBlock<'_> {
     pub fn transaction_row_order(&self) -> TransactionRowOrder {
         TransactionRowOrder::from_validated_rows(self.tx_rows())
     }
+
+    /// Stream transaction rows in their exact source storage order.
+    ///
+    /// This path does not allocate or sort. Each item keeps the source row's
+    /// storage position and cumulative signature offset. The block decoder has
+    /// already validated every row, the exact `tx_index` permutation, all byte
+    /// regions, and the total signature count before this iterator is exposed.
+    #[inline]
+    pub fn storage_transaction_rows(&self) -> LocatedStorageTransactionRowIter<'_> {
+        LocatedStorageTransactionRowIter {
+            rows: self.tx_rows(),
+            storage_position: 0,
+            first_signature_offset: 0,
+        }
+    }
 }
+
+/// Zero-allocation iterator over located transaction rows in source storage order.
+#[derive(Debug, Clone)]
+pub struct LocatedStorageTransactionRowIter<'a> {
+    rows: BorrowedDecodedTxRowIter<'a>,
+    storage_position: u32,
+    first_signature_offset: u32,
+}
+
+impl Iterator for LocatedStorageTransactionRowIter<'_> {
+    type Item = LocatedTransactionRow;
+
+    #[inline]
+    fn next(&mut self) -> Option<Self::Item> {
+        let row = self.rows.next()?;
+        let located = LocatedTransactionRow {
+            storage_position: self.storage_position,
+            first_signature_offset: self.first_signature_offset,
+            row,
+        };
+        self.storage_position = self
+            .storage_position
+            .checked_add(1)
+            .expect("validated transaction row count fits u32");
+        self.first_signature_offset = self
+            .first_signature_offset
+            .checked_add(u32::from(row.signature_count))
+            .expect("validated block signature count fits u32");
+        Some(located)
+    }
+
+    #[inline]
+    fn size_hint(&self) -> (usize, Option<usize>) {
+        self.rows.size_hint()
+    }
+}
+
+impl ExactSizeIterator for LocatedStorageTransactionRowIter<'_> {}
+
+impl std::iter::FusedIterator for LocatedStorageTransactionRowIter<'_> {}
 
 /// Exact transaction-row iterator for either a current borrowed block or a historical fallback.
 #[derive(Debug, Clone)]
@@ -436,6 +657,9 @@ impl std::iter::FusedIterator for BorrowedDecodedTxRowIter<'_> {}
 /// The helper validates the candidate manifest, required object sizes/hashes,
 /// registry layout, hot index, optional signature length, and the metadata
 /// footer. It does not require the manifest JSON itself to have been published.
+/// Metadata-marker admission here verifies authority bindings and selects a
+/// decoder. A producer must run the complete exact metadata audit before it
+/// publishes that marker.
 #[derive(Debug)]
 pub struct ValidatedGeneration {
     pub index: ArchiveV2HotBlockIndex,
@@ -462,34 +686,97 @@ pub struct ArchiveReader<S> {
     total_signatures: u64,
     signatures_available: bool,
     wire_profile: ArchiveV2WireProfile,
+    metadata_wire_profile: ArchiveV2MetadataWireProfile,
     options: OpenOptions,
+    reader_id: u64,
 }
 
 impl<S: RangeSource> ArchiveReader<S> {
+    /// Open a published generation with strict current metadata admission.
+    /// An unmarked historical generation needs an explicit additive
+    /// compatibility API.
     pub fn open(source: S) -> Result<Self> {
         Self::open_with_options(source, OpenOptions::default())
     }
 
     pub fn open_with_options(source: S, options: OpenOptions) -> Result<Self> {
+        Self::open_with_options_and_metadata_admission(
+            source,
+            options,
+            ArchiveV2MetadataProfileAdmission::RequireCurrentTypedErrors,
+        )
+    }
+
+    /// Open an archive with an explicit metadata authority policy and default
+    /// reader limits. Use this only for an intentional historical cutover.
+    pub fn open_with_metadata_admission(
+        source: S,
+        metadata_admission: ArchiveV2MetadataProfileAdmission,
+    ) -> Result<Self> {
+        Self::open_with_options_and_metadata_admission(
+            source,
+            OpenOptions::default(),
+            metadata_admission,
+        )
+    }
+
+    /// Open an archive with explicit reader limits and metadata authority.
+    pub fn open_with_options_and_metadata_admission(
+        source: S,
+        options: OpenOptions,
+        metadata_admission: ArchiveV2MetadataProfileAdmission,
+    ) -> Result<Self> {
+        let reader_id = NEXT_READER_ID.fetch_add(1, Ordering::SeqCst);
         let manifest_bytes =
             source.read_all_bounded(GENERATION_MANIFEST_FILE, MAX_MANIFEST_BYTES)?;
         let manifest = GenerationManifest::parse(&manifest_bytes)?;
-        Self::open_candidate(source, manifest, options)
+        Self::open_candidate_with_metadata_admission(
+            source,
+            manifest,
+            options,
+            metadata_admission,
+            reader_id,
+        )
     }
 
-    /// Open and validate an unpublished candidate manifest supplied by the
-    /// caller. This is the publication path used before `manifest.json` exists.
+    /// Structurally validate an unpublished current-profile candidate.
+    ///
+    /// This authenticates the fixed marker binding and selects the strict
+    /// current-only decoder. A producer must also call the complete semantic
+    /// metadata audit before it publishes the marker or manifest.
     pub fn open_candidate(
         source: S,
         manifest: GenerationManifest,
         options: OpenOptions,
     ) -> Result<Self> {
+        let reader_id = NEXT_READER_ID.fetch_add(1, Ordering::SeqCst);
+        Self::open_candidate_with_metadata_admission(
+            source,
+            manifest,
+            options,
+            ArchiveV2MetadataProfileAdmission::RequireCurrentTypedErrors,
+            reader_id,
+        )
+    }
+
+    /// Structurally validate a candidate with an explicit metadata authority
+    /// policy. This is the compatibility path for old unmarked generations.
+    pub fn open_candidate_with_metadata_admission(
+        source: S,
+        manifest: GenerationManifest,
+        options: OpenOptions,
+        metadata_admission: ArchiveV2MetadataProfileAdmission,
+        reader_id: u64,
+    ) -> Result<Self> {
         let wire_profile = ArchiveV2WireProfile::for_published_manifest(&manifest)?;
-        let validated = validate_generation_structure_with_wire_profile(
+        let metadata_wire_profile =
+            ArchiveV2MetadataWireProfile::for_manifest(&manifest, metadata_admission)?;
+        let validated = validate_generation_structure_with_profiles(
             &source,
             &manifest,
             &options,
             wire_profile,
+            metadata_wire_profile,
         )?;
 
         Ok(Self {
@@ -504,7 +791,9 @@ impl<S: RangeSource> ArchiveReader<S> {
             total_signatures: validated.total_signatures,
             signatures_available: validated.signatures_available,
             wire_profile,
+            metadata_wire_profile,
             options,
+            reader_id,
         })
     }
 
@@ -514,46 +803,141 @@ impl<S: RangeSource> ArchiveReader<S> {
     ///
     /// This skips the manifest's cross-service integrity contract entirely:
     /// `identity` is taken as given, not verified against the archive's own
-    /// content, and every declared file gets a placeholder hash. Structural
-    /// validation (index/metadata bounds, registry shape, footer totals) still
+    /// content. Every declared file gets a synthetic name/size/profile hash,
+    /// not a content hash. Structural validation (index/metadata bounds,
+    /// registry shape, footer totals) still
     /// runs in full via [`validate_generation_structure`] — only the
     /// published-manifest and content-hash steps are skipped. Requires
     /// `options.hash_verification == HashVerification::SizesOnly`, since a
-    /// placeholder hash would otherwise fail any real comparison.
+    /// synthetic hash would otherwise fail any real comparison.
     pub fn open_trusted(
         source: S,
         identity: crate::manifest::TrustedGenerationIdentity,
         options: OpenOptions,
     ) -> Result<Self> {
+        Self::open_trusted_with_metadata_profile(
+            source,
+            identity,
+            ArchiveV2MetadataWireProfile::UnmarkedHistoricalCompatibility,
+            options,
+        )
+    }
+
+    /// Open trusted local data with an explicit metadata decoder authority.
+    pub fn open_trusted_with_metadata_profile(
+        source: S,
+        identity: crate::manifest::TrustedGenerationIdentity,
+        metadata_wire_profile: ArchiveV2MetadataWireProfile,
+        options: OpenOptions,
+    ) -> Result<Self> {
+        Self::open_trusted_with_additional_files_and_metadata_profile(
+            source,
+            identity,
+            &[],
+            &[],
+            metadata_wire_profile,
+            options,
+        )
+    }
+
+    /// Open a trusted-local generation and add size bindings for sidecars used
+    /// by a higher-level reader.
+    ///
+    /// The four core generation objects are always required. Signatures and
+    /// epoch-0 genesis are admitted when present, as in [`Self::open_trusted`].
+    /// Names in `required_additional_files` must exist. Names in
+    /// `optional_additional_files` are admitted only when present. Every
+    /// admitted name and size, plus both asserted wire profiles, contributes
+    /// to the synthetic generation digest. File contents are not authenticated.
+    /// This method requires `HashVerification::SizesOnly` and does not change
+    /// the published-manifest admission path.
+    pub fn open_trusted_with_additional_files(
+        source: S,
+        identity: crate::manifest::TrustedGenerationIdentity,
+        required_additional_files: &[&str],
+        optional_additional_files: &[&str],
+        options: OpenOptions,
+    ) -> Result<Self> {
+        Self::open_trusted_with_additional_files_and_metadata_profile(
+            source,
+            identity,
+            required_additional_files,
+            optional_additional_files,
+            ArchiveV2MetadataWireProfile::UnmarkedHistoricalCompatibility,
+            options,
+        )
+    }
+
+    /// Open trusted local data with extra files and an explicit metadata
+    /// decoder authority. The profile is bound into the synthetic identity;
+    /// it is never represented by a synthetic fixed-marker hash.
+    pub fn open_trusted_with_additional_files_and_metadata_profile(
+        source: S,
+        identity: crate::manifest::TrustedGenerationIdentity,
+        required_additional_files: &[&str],
+        optional_additional_files: &[&str],
+        metadata_wire_profile: ArchiveV2MetadataWireProfile,
+        options: OpenOptions,
+    ) -> Result<Self> {
+        let reader_id = NEXT_READER_ID.fetch_add(1, Ordering::SeqCst);
         if options.hash_verification != HashVerification::SizesOnly {
             return Err(Error::InvalidManifest(
-                "open_trusted requires HashVerification::SizesOnly".into(),
+                "trusted-local open requires HashVerification::SizesOnly".into(),
             ));
         }
 
-        let mut files = Vec::with_capacity(REQUIRED_GENERATION_FILES.len() + 2);
-        for name in REQUIRED_GENERATION_FILES {
+        let mut required = REQUIRED_GENERATION_FILES
+            .into_iter()
+            .collect::<BTreeSet<_>>();
+        let mut optional = BTreeSet::from([SIGNATURES_FILE]);
+        if identity.epoch == 0 {
+            optional.insert(GENESIS_BIN_FILE);
+        }
+        for &name in required_additional_files {
+            crate::manifest::validate_object_name(name)
+                .map_err(|message| Error::InvalidManifest(message.to_owned()))?;
+            required.insert(name);
+        }
+        for &name in optional_additional_files {
+            crate::manifest::validate_object_name(name)
+                .map_err(|message| Error::InvalidManifest(message.to_owned()))?;
+            optional.insert(name);
+        }
+        if required.iter().chain(&optional).any(|name| {
+            crate::metadata_wire_profile::is_metadata_schema_marker_name(name)
+                || *name == PRE_UNKNOWN_INSTRUCTION_FALLBACKS_MARKER_FILE
+                || *name == POST_UNKNOWN_INSTRUCTION_FALLBACKS_MARKER_FILE
+        }) {
+            return Err(Error::InvalidManifest(format!(
+                "trusted-local profile authority is explicit; profile marker files such as {CURRENT_TYPED_ERRORS_MARKER_FILE} cannot be admitted through a synthetic file binding"
+            )));
+        }
+        for name in &required {
+            optional.remove(name);
+        }
+
+        let mut files = Vec::with_capacity(required.len() + optional.len());
+        for name in required {
             let size = source
                 .size(name)?
                 .ok_or_else(|| Error::MissingFile(name.to_owned()))?;
             files.push((name.to_owned(), size));
         }
-        if let Some(size) = source.size(SIGNATURES_FILE)? {
-            files.push((SIGNATURES_FILE.to_owned(), size));
-        }
-        if identity.epoch == 0
-            && let Some(size) = source.size(GENESIS_BIN_FILE)?
-        {
-            files.push((GENESIS_BIN_FILE.to_owned(), size));
+        for name in optional {
+            if let Some(size) = source.size(name)? {
+                files.push((name.to_owned(), size));
+            }
         }
 
         let wire_profile = identity.wire_profile;
-        let manifest = crate::manifest::synthesize_trusted_manifest(identity, files)?;
-        let validated = validate_generation_structure_with_wire_profile(
+        let manifest =
+            crate::manifest::synthesize_trusted_manifest(identity, metadata_wire_profile, files)?;
+        let validated = validate_generation_structure_with_profiles(
             &source,
             &manifest,
             &options,
             wire_profile,
+            metadata_wire_profile,
         )?;
 
         Ok(Self {
@@ -568,7 +952,9 @@ impl<S: RangeSource> ArchiveReader<S> {
             total_signatures: validated.total_signatures,
             signatures_available: validated.signatures_available,
             wire_profile,
+            metadata_wire_profile,
             options,
+            reader_id,
         })
     }
 
@@ -578,6 +964,10 @@ impl<S: RangeSource> ArchiveReader<S> {
 
     pub fn manifest(&self) -> &GenerationManifest {
         &self.manifest
+    }
+
+    pub fn reader_id(&self) -> u64 {
+        self.reader_id
     }
 
     pub fn index(&self) -> &ArchiveV2HotBlockIndex {
@@ -605,6 +995,14 @@ impl<S: RangeSource> ArchiveReader<S> {
         self.binding
     }
 
+    /// Return generation identity with the admitted metadata decoder profile.
+    pub fn profiled_binding(&self) -> ProfiledGenerationBinding {
+        ProfiledGenerationBinding {
+            generation: self.binding,
+            metadata_wire_profile: self.metadata_wire_profile,
+        }
+    }
+
     pub fn registry_entries(&self) -> u32 {
         self.registry_entries
     }
@@ -622,6 +1020,28 @@ impl<S: RangeSource> ArchiveReader<S> {
     /// trusted-local readers require an explicit caller assertion.
     pub fn wire_profile(&self) -> ArchiveV2WireProfile {
         self.wire_profile
+    }
+
+    /// The immutable metadata error grammar selected for this generation.
+    pub fn metadata_wire_profile(&self) -> ArchiveV2MetadataWireProfile {
+        self.metadata_wire_profile
+    }
+
+    /// Validate metadata with the grammar fixed at generation admission.
+    /// Current marked generations never run the historical decoder.
+    pub fn validate_metadata_exact(
+        &self,
+        bytes: &[u8],
+        limits: ArchiveV2MetadataProjectionLimits,
+    ) -> wincode::ReadResult<ProjectedArchiveV2MetadataPrefix> {
+        match self.metadata_wire_profile {
+            ArchiveV2MetadataWireProfile::CurrentTypedErrorsV1 => {
+                validate_archive_v2_current_metadata_exact(bytes, limits, self.registry_entries)
+            }
+            ArchiveV2MetadataWireProfile::UnmarkedHistoricalCompatibility => {
+                validate_archive_v2_metadata_exact(bytes, limits, self.registry_entries)
+            }
+        }
     }
 
     /// Return a cheap copyable projector bound to this generation's selected
@@ -680,6 +1100,7 @@ impl<S: RangeSource> ArchiveReader<S> {
             registry_ids,
             raw_pubkeys,
             resolved_ids,
+            reader_id: self.reader_id,
         })
     }
 
@@ -794,6 +1215,992 @@ impl<S: RangeSource> ArchiveReader<S> {
             batch: Vec::new(),
             decompressor: None,
             decompressed: Vec::new(),
+        })
+    }
+
+    /// Read blocks in one monotonic I/O stream, project them in a private
+    /// parallel decode pool, and publish the projection results in exact index
+    /// order.
+    ///
+    /// `make_worker_state` creates one caller state for each decode worker.
+    /// `project` runs in parallel and can use only its worker state plus the
+    /// block that borrows from that worker's reusable decompression buffer.
+    /// The block cannot escape the callback. `Output` should be a small owned
+    /// summary because all outputs for one batch remain live until that batch
+    /// is ordered. `consume_ordered` runs on the coordinator thread, once per
+    /// successful projection and in increasing block-row order.
+    ///
+    /// A projection error is selected by row order, not worker completion
+    /// order. The method stops before it publishes a later result. The current
+    /// lending APIs remain independent and unchanged.
+    pub fn process_borrowed_blocks_parallel_ordered<
+        WorkerState,
+        Output,
+        MakeWorkerState,
+        Project,
+        Consume,
+    >(
+        &self,
+        range: Range<usize>,
+        config: OrderedParallelBlockConfig,
+        mut make_worker_state: MakeWorkerState,
+        project: Project,
+        mut consume_ordered: Consume,
+    ) -> Result<OrderedParallelBlockStats>
+    where
+        WorkerState: Send,
+        Output: Send,
+        MakeWorkerState: FnMut(usize) -> WorkerState,
+        Project: for<'block> Fn(&mut WorkerState, usize, BorrowedDecodedBlock<'block>) -> Result<Output>
+            + Send
+            + Sync,
+        Consume: FnMut(usize, Output) -> Result<()>,
+    {
+        let row_count = self.index.rows.len();
+        if range.start > range.end || range.end > row_count {
+            return Err(Error::InvalidIndex(format!(
+                "block row range {}..{} is outside 0..{row_count}",
+                range.start, range.end,
+            )));
+        }
+        validate_ordered_parallel_config(config)?;
+        if range.is_empty() {
+            return Ok(OrderedParallelBlockStats::default());
+        }
+
+        let compressed_target = config
+            .compressed_batch_target_bytes
+            .min(self.options.prefetch_bytes);
+        let plans = ordered_parallel_batch_plans(
+            &self.index.rows,
+            range,
+            compressed_target,
+            config.uncompressed_batch_budget_bytes,
+            config.max_blocks_per_batch,
+        )?;
+        let decode_pool = rayon::ThreadPoolBuilder::new()
+            .num_threads(config.decode_workers)
+            .thread_name(|index| format!("blockzilla-block-decode-{index}"))
+            .build()
+            .map_err(|error| {
+                Error::InvalidManifest(format!(
+                    "cannot create ordered parallel block decode pool: {error}"
+                ))
+            })?;
+        let workers: Vec<_> = (0..config.decode_workers)
+            .map(|worker| {
+                Mutex::new(Some(OrderedParallelWorker {
+                    decompressor: None,
+                    decompressed: Vec::new(),
+                    caller: make_worker_state(worker),
+                }))
+            })
+            .collect();
+
+        let (free_sender, free_receiver) = sync_channel(config.compressed_buffer_count);
+        for _ in 0..config.compressed_buffer_count {
+            free_sender
+                .send(Vec::new())
+                .expect("the new recycled-buffer channel has a receiver");
+        }
+        let (ready_sender, ready_receiver) = sync_channel(config.compressed_buffer_count);
+
+        thread::scope(|scope| {
+            let producer = scope.spawn(|| {
+                produce_ordered_compressed_batches(
+                    self,
+                    &plans,
+                    compressed_target,
+                    free_receiver,
+                    ready_sender,
+                )
+            });
+            let mut coordinator = OrderedParallelCoordinator::default();
+            let mut projected = Vec::new();
+
+            'batches: for expected in &plans {
+                let wait_started = Instant::now();
+                let ready = match ready_receiver.recv() {
+                    Ok(ready) => ready,
+                    Err(_) => {
+                        coordinator.producer_disconnected = true;
+                        break;
+                    }
+                };
+                coordinator.stats.coordinator_wait_for_ready_batch_time = coordinator
+                    .stats
+                    .coordinator_wait_for_ready_batch_time
+                    .saturating_add(wait_started.elapsed());
+                if ready.plan != *expected {
+                    coordinator.error = Some(Error::InvalidIndex(format!(
+                        "ordered block producer returned rows {}..{}, expected {}..{}",
+                        ready.plan.row_start,
+                        ready.plan.row_end,
+                        expected.row_start,
+                        expected.row_end,
+                    )));
+                    break;
+                }
+
+                let decode_started = Instant::now();
+                decode_pool.install(|| {
+                    self.index.rows[ready.plan.row_start..ready.plan.row_end]
+                        .par_iter()
+                        .enumerate()
+                        .map(|(batch_row, row)| {
+                            let row_number = ready.plan.row_start + batch_row;
+                            let relative_offset = row
+                                .compressed_offset
+                                .checked_sub(ready.plan.compressed_offset)
+                                .ok_or_else(|| {
+                                    Error::InvalidIndex(
+                                        "parallel block frame offset underflow".into(),
+                                    )
+                                })?;
+                            let relative_offset = usize::try_from(relative_offset)
+                                .map_err(|_| Error::Overflow("parallel block frame offset"))?;
+                            let frame_end = relative_offset
+                                .checked_add(row.compressed_len as usize)
+                                .ok_or(Error::Overflow("parallel block frame range"))?;
+                            let compressed =
+                                ready.bytes.get(relative_offset..frame_end).ok_or_else(|| {
+                                    Error::InvalidIndex(
+                                        "parallel block frame is outside its read batch".into(),
+                                    )
+                                })?;
+                            let worker_number = rayon::current_thread_index().ok_or_else(|| {
+                                Error::InvalidIndex(
+                                    "parallel block task ran outside its decode pool".into(),
+                                )
+                            })?;
+                            let mut worker_guard = workers[worker_number].lock().map_err(|_| {
+                                Error::InvalidIndex(
+                                    "parallel block worker state is poisoned".into(),
+                                )
+                            })?;
+                            let mut worker = worker_guard.take().ok_or_else(|| {
+                                Error::InvalidIndex(
+                                    "parallel block worker was re-entered by nested work".into(),
+                                )
+                            })?;
+                            drop(worker_guard);
+                            let result = worker.decode_and_project(
+                                self,
+                                *row,
+                                compressed,
+                                row_number,
+                                config.discard_rewards,
+                                config.retained_decompressed_bytes_per_worker,
+                                &project,
+                            );
+                            let mut worker_guard = workers[worker_number].lock().map_err(|_| {
+                                Error::InvalidIndex(
+                                    "parallel block worker state is poisoned".into(),
+                                )
+                            })?;
+                            *worker_guard = Some(worker);
+                            result
+                        })
+                        .collect_into_vec(&mut projected)
+                });
+                coordinator.stats.coordinator_decode_project_wall_time = coordinator
+                    .stats
+                    .coordinator_decode_project_wall_time
+                    .saturating_add(decode_started.elapsed());
+
+                // No decoded value borrows from the compressed batch. Clear
+                // and return the normal bounded allocation before ordered
+                // result handling. An oversized one-frame batch used a
+                // temporary Vec and kept this normal allocation aside.
+                let _ = free_sender.send(recycle_ordered_compressed_buffer(ready));
+
+                coordinator.stats.batch_count = match coordinator.stats.batch_count.checked_add(1) {
+                    Some(value) => value,
+                    None => {
+                        coordinator.error = Some(Error::Overflow("parallel batch count"));
+                        break;
+                    }
+                };
+                let batch_blocks = match u64::try_from(expected.row_end - expected.row_start) {
+                    Ok(value) => value,
+                    Err(_) => {
+                        coordinator.error = Some(Error::Overflow("parallel block count"));
+                        break;
+                    }
+                };
+                coordinator.stats.block_count =
+                    match coordinator.stats.block_count.checked_add(batch_blocks) {
+                        Some(value) => value,
+                        None => {
+                            coordinator.error = Some(Error::Overflow("parallel block count"));
+                            break;
+                        }
+                    };
+
+                for (batch_row, result) in projected.drain(..).enumerate() {
+                    let row_number = expected.row_start + batch_row;
+                    let projected = match result {
+                        Ok(output) => output,
+                        Err(error) => {
+                            coordinator.error = Some(error);
+                            break 'batches;
+                        }
+                    };
+                    let mode_count = if projected.used_owned_schema_fallback {
+                        &mut coordinator.stats.owned_schema_fallback_blocks
+                    } else {
+                        &mut coordinator.stats.borrowed_storage_blocks
+                    };
+                    *mode_count = match mode_count.checked_add(1) {
+                        Some(value) => value,
+                        None => {
+                            coordinator.error =
+                                Some(Error::Overflow("parallel decoded block mode count"));
+                            break 'batches;
+                        }
+                    };
+                    if let Err(error) = consume_ordered(row_number, projected.output) {
+                        coordinator.error = Some(error);
+                        break 'batches;
+                    }
+                }
+            }
+
+            // Closing both directions wakes a producer that is blocked either
+            // on publishing a ready batch or on waiting for a recycled Vec.
+            drop(ready_receiver);
+            drop(free_sender);
+            let producer_result = producer
+                .join()
+                .map_err(|_| Error::InvalidIndex("ordered block producer thread panicked".into()));
+
+            if let Some(error) = coordinator.error {
+                return Err(error);
+            }
+            let producer_stats = match producer_result {
+                Ok(result) => result?,
+                Err(error) => return Err(error),
+            };
+            if coordinator.producer_disconnected {
+                return Err(Error::InvalidIndex(
+                    "ordered block producer stopped before the requested range was complete".into(),
+                ));
+            }
+            coordinator.stats.read_call_count = producer_stats.read_call_count;
+            coordinator.stats.compressed_bytes = producer_stats.compressed_bytes;
+            coordinator.stats.producer_read_wall_time = producer_stats.read_wall_time;
+            coordinator.stats.producer_wait_for_free_buffer_time =
+                producer_stats.wait_for_free_buffer_time;
+            coordinator.stats.max_compressed_batch_bytes =
+                producer_stats.max_compressed_batch_bytes;
+            coordinator.stats.max_declared_uncompressed_batch_bytes =
+                producer_stats.max_declared_uncompressed_batch_bytes;
+            Ok(coordinator.stats)
+        })
+    }
+
+    /// Process each compressed batch through two parallel borrowed stages with
+    /// one ordered barrier between them.
+    ///
+    /// This compatibility entry point keeps the original callback signatures.
+    /// Use
+    /// [`Self::process_borrowed_blocks_parallel_batch_barrier_with_transaction_state`]
+    /// when both stages need one reusable state item per storage transaction.
+    #[allow(clippy::too_many_arguments)]
+    pub fn process_borrowed_blocks_parallel_batch_barrier<
+        WorkerState,
+        CoordinatorState,
+        StageAOutput,
+        StageBOutput,
+        MakeWorkerState,
+        StageA,
+        MergeStageA,
+        FinishStageA,
+        StageB,
+        ConsumeStageB,
+    >(
+        &self,
+        range: Range<usize>,
+        config: OrderedParallelBlockConfig,
+        coordinator_state: &mut CoordinatorState,
+        make_worker_state: MakeWorkerState,
+        stage_a: StageA,
+        merge_stage_a_ordered: MergeStageA,
+        finish_stage_a_batch: FinishStageA,
+        stage_b: StageB,
+        consume_stage_b_ordered: ConsumeStageB,
+    ) -> Result<BatchBarrierBlockStats>
+    where
+        WorkerState: Send,
+        CoordinatorState: Sync,
+        StageAOutput: Send,
+        StageBOutput: Send,
+        MakeWorkerState: FnMut(usize) -> WorkerState,
+        StageA: for<'block> Fn(
+                &mut WorkerState,
+                usize,
+                BorrowedDecodedBlock<'block>,
+            ) -> Result<StageAOutput>
+            + Send
+            + Sync,
+        MergeStageA: FnMut(&mut CoordinatorState, usize, StageAOutput) -> Result<()>,
+        FinishStageA: FnMut(&mut CoordinatorState, Range<usize>) -> Result<()>,
+        StageB: for<'block> Fn(
+                &mut WorkerState,
+                &CoordinatorState,
+                usize,
+                BorrowedDecodedBlock<'block>,
+            ) -> Result<StageBOutput>
+            + Send
+            + Sync,
+        ConsumeStageB: FnMut(&mut CoordinatorState, usize, StageBOutput) -> Result<()>,
+    {
+        self.process_borrowed_blocks_parallel_batch_barrier_with_transaction_state(
+            range,
+            config,
+            0,
+            coordinator_state,
+            make_worker_state,
+            |worker, _, row_number, block, _: &mut [()]| stage_a(worker, row_number, block),
+            merge_stage_a_ordered,
+            finish_stage_a_batch,
+            |worker, state, row_number, block, _: &[()]| stage_b(worker, state, row_number, block),
+            consume_stage_b_ordered,
+        )
+    }
+
+    /// Process each compressed batch through two parallel borrowed stages with
+    /// one ordered barrier and reusable per-transaction state between them.
+    ///
+    /// Each block frame is read and decompressed exactly once. Stage A runs in
+    /// parallel against batch-owned decompressed buffers. After every stage-A
+    /// projection in the batch succeeds, `merge_stage_a_ordered` receives the
+    /// owned outputs in increasing block-row order. Stage A receives an
+    /// immutable view of the coordinator state before that merge. After
+    /// `finish_stage_a_batch`, stage B receives its post-merge view.
+    ///
+    /// Each stage-A block also receives a mutable transaction-state slice in
+    /// exact storage transaction-row order. Stage B receives the same slice as
+    /// immutable state. Its length equals the block's validated `tx_count`.
+    /// Active entries are reset to `TransactionState::default()` before stage
+    /// A. The per-block state buffers and their checked block-prefix table keep
+    /// capacity across batches. `transaction_state_budget_bytes` bounds total
+    /// active state bytes before either stage runs.
+    ///
+    /// The reader reparses the borrowed block view for stage B, but it does not
+    /// read or decompress the frame again. Both callbacks can use
+    /// [`BorrowedDecodedBlock::uncompressed_bytes`] to observe the same byte
+    /// address. Stage-A callbacks should not make external side effects: if any
+    /// stage-A row fails, no stage-A output is merged and stage B does not run
+    /// for that batch. Stage-B callbacks can make completion-order side effects
+    /// when the caller accepts partial output on error; ordered stage-B
+    /// consumers do not run unless every stage-B row in the batch succeeds.
+    #[allow(clippy::too_many_arguments)]
+    pub fn process_borrowed_blocks_parallel_batch_barrier_with_transaction_state<
+        WorkerState,
+        CoordinatorState,
+        TransactionState,
+        StageAOutput,
+        StageBOutput,
+        MakeWorkerState,
+        StageA,
+        MergeStageA,
+        FinishStageA,
+        StageB,
+        ConsumeStageB,
+    >(
+        &self,
+        range: Range<usize>,
+        config: OrderedParallelBlockConfig,
+        transaction_state_budget_bytes: usize,
+        coordinator_state: &mut CoordinatorState,
+        mut make_worker_state: MakeWorkerState,
+        stage_a: StageA,
+        mut merge_stage_a_ordered: MergeStageA,
+        mut finish_stage_a_batch: FinishStageA,
+        stage_b: StageB,
+        mut consume_stage_b_ordered: ConsumeStageB,
+    ) -> Result<BatchBarrierBlockStats>
+    where
+        WorkerState: Send,
+        CoordinatorState: Sync,
+        TransactionState: Copy + Default + Send + Sync,
+        StageAOutput: Send,
+        StageBOutput: Send,
+        MakeWorkerState: FnMut(usize) -> WorkerState,
+        StageA: for<'block> Fn(
+                &mut WorkerState,
+                &CoordinatorState,
+                usize,
+                BorrowedDecodedBlock<'block>,
+                &mut [TransactionState],
+            ) -> Result<StageAOutput>
+            + Send
+            + Sync,
+        MergeStageA: FnMut(&mut CoordinatorState, usize, StageAOutput) -> Result<()>,
+        FinishStageA: FnMut(&mut CoordinatorState, Range<usize>) -> Result<()>,
+        StageB: for<'block> Fn(
+                &mut WorkerState,
+                &CoordinatorState,
+                usize,
+                BorrowedDecodedBlock<'block>,
+                &[TransactionState],
+            ) -> Result<StageBOutput>
+            + Send
+            + Sync,
+        ConsumeStageB: FnMut(&mut CoordinatorState, usize, StageBOutput) -> Result<()>,
+    {
+        let row_count = self.index.rows.len();
+        if range.start > range.end || range.end > row_count {
+            return Err(Error::InvalidIndex(format!(
+                "block row range {}..{} is outside 0..{row_count}",
+                range.start, range.end,
+            )));
+        }
+        validate_ordered_parallel_config(config)?;
+        if range.is_empty() {
+            return Ok(BatchBarrierBlockStats::default());
+        }
+
+        let compressed_target = config
+            .compressed_batch_target_bytes
+            .min(self.options.prefetch_bytes);
+        let plans = ordered_parallel_batch_plans(
+            &self.index.rows,
+            range,
+            compressed_target,
+            config.uncompressed_batch_budget_bytes,
+            config.max_blocks_per_batch,
+        )?;
+        let decode_pool = rayon::ThreadPoolBuilder::new()
+            .num_threads(config.decode_workers)
+            .thread_name(|index| format!("blockzilla-block-batch-barrier-{index}"))
+            .build()
+            .map_err(|error| {
+                Error::InvalidManifest(format!(
+                    "cannot create batch-barrier block decode pool: {error}"
+                ))
+            })?;
+        let workers: Vec<_> = (0..config.decode_workers)
+            .map(|worker| {
+                Mutex::new(Some(BatchBarrierWorker {
+                    decompressor: None,
+                    caller: make_worker_state(worker),
+                }))
+            })
+            .collect();
+
+        let (free_sender, free_receiver) = sync_channel(config.compressed_buffer_count);
+        for _ in 0..config.compressed_buffer_count {
+            free_sender
+                .send(Vec::new())
+                .expect("the new recycled-buffer channel has a receiver");
+        }
+        let (ready_sender, ready_receiver) = sync_channel(config.compressed_buffer_count);
+
+        thread::scope(|scope| {
+            let producer = scope.spawn(|| {
+                produce_ordered_compressed_batches(
+                    self,
+                    &plans,
+                    compressed_target,
+                    free_receiver,
+                    ready_sender,
+                )
+            });
+            let mut stats = BatchBarrierBlockStats::default();
+            let mut first_error = None;
+            let mut producer_disconnected = false;
+            let mut decompressed = Vec::<BatchBarrierDecodedBuffer>::new();
+            let mut stage_a_results = Vec::new();
+            let mut stage_b_results = Vec::new();
+            let mut stage_a_owned_fallbacks = Vec::new();
+            let mut transaction_state_offsets = Vec::new();
+            let mut transaction_state_buffers =
+                Vec::<BatchBarrierTransactionStateBuffer<TransactionState>>::new();
+
+            'batches: for expected in &plans {
+                let wait_started = Instant::now();
+                let ready = match ready_receiver.recv() {
+                    Ok(ready) => ready,
+                    Err(_) => {
+                        producer_disconnected = true;
+                        break;
+                    }
+                };
+                stats.coordinator_wait_for_ready_batch_time = stats
+                    .coordinator_wait_for_ready_batch_time
+                    .saturating_add(wait_started.elapsed());
+                if ready.plan != *expected {
+                    let observed = ready.plan;
+                    let _ = free_sender.send(recycle_ordered_compressed_buffer(ready));
+                    first_error = Some(Error::InvalidIndex(format!(
+                        "batch-barrier producer returned rows {}..{}, expected {}..{}",
+                        observed.row_start, observed.row_end, expected.row_start, expected.row_end,
+                    )));
+                    break;
+                }
+
+                let batch_block_count = expected.row_end - expected.row_start;
+                let (transaction_state_count, transaction_state_bytes) =
+                    match prepare_batch_transaction_state_offsets(
+                        &self.index.rows[expected.row_start..expected.row_end],
+                        &mut transaction_state_offsets,
+                        std::mem::size_of::<TransactionState>(),
+                        transaction_state_budget_bytes,
+                    ) {
+                        Ok(prepared) => prepared,
+                        Err(error) => {
+                            let _ = free_sender.send(recycle_ordered_compressed_buffer(ready));
+                            first_error = Some(error);
+                            break;
+                        }
+                    };
+                if transaction_state_offsets.last().copied() != Some(transaction_state_count) {
+                    let _ = free_sender.send(recycle_ordered_compressed_buffer(ready));
+                    first_error = Some(Error::InvalidIndex(
+                        "batch-barrier transaction-state prefix has the wrong total".into(),
+                    ));
+                    break;
+                }
+                stats.max_live_transaction_state_bytes = stats
+                    .max_live_transaction_state_bytes
+                    .max(transaction_state_bytes);
+                if transaction_state_buffers.len() < batch_block_count {
+                    transaction_state_buffers.resize_with(batch_block_count, Default::default);
+                }
+                for (batch_row, buffer) in transaction_state_buffers[..batch_block_count]
+                    .iter_mut()
+                    .enumerate()
+                {
+                    let transaction_count = transaction_state_offsets[batch_row + 1]
+                        - transaction_state_offsets[batch_row];
+                    let reused = match buffer.prepare(transaction_count) {
+                        Ok(reused) => reused,
+                        Err(error) => {
+                            first_error = Some(error);
+                            break;
+                        }
+                    };
+                    if transaction_count == 0 || std::mem::size_of::<TransactionState>() == 0 {
+                        continue;
+                    }
+                    let counter = if reused {
+                        &mut stats.transaction_state_buffer_reuse_count
+                    } else {
+                        &mut stats.transaction_state_buffer_growth_count
+                    };
+                    *counter = match counter.checked_add(1) {
+                        Some(value) => value,
+                        None => {
+                            first_error = Some(Error::Overflow(
+                                "batch-barrier transaction-state buffer count",
+                            ));
+                            break;
+                        }
+                    };
+                }
+                if first_error.is_some() {
+                    let _ = free_sender.send(recycle_ordered_compressed_buffer(ready));
+                    break;
+                }
+                if decompressed.len() < batch_block_count {
+                    decompressed.resize_with(batch_block_count, Default::default);
+                }
+                let retention_limit = config.uncompressed_batch_budget_bytes;
+                for (row, buffer) in self.index.rows[expected.row_start..expected.row_end]
+                    .iter()
+                    .zip(&mut decompressed[..batch_block_count])
+                {
+                    if buffer.prepare(row.uncompressed_len as usize, retention_limit) {
+                        stats.decompressed_buffer_reuse_count =
+                            match stats.decompressed_buffer_reuse_count.checked_add(1) {
+                                Some(value) => value,
+                                None => {
+                                    first_error =
+                                        Some(Error::Overflow("decompressed buffer reuse count"));
+                                    break;
+                                }
+                            };
+                    } else {
+                        stats.decompressed_buffer_growth_count =
+                            match stats.decompressed_buffer_growth_count.checked_add(1) {
+                                Some(value) => value,
+                                None => {
+                                    first_error =
+                                        Some(Error::Overflow("decompressed buffer growth count"));
+                                    break;
+                                }
+                            };
+                    }
+                }
+                if first_error.is_some() {
+                    let _ = free_sender.send(recycle_ordered_compressed_buffer(ready));
+                    recycle_batch_barrier_buffers(&mut decompressed, retention_limit);
+                    break;
+                }
+
+                let stage_a_started = Instant::now();
+                let pre_merge_coordinator: &CoordinatorState = &*coordinator_state;
+                decode_pool.install(|| {
+                    self.index.rows[expected.row_start..expected.row_end]
+                        .par_iter()
+                        .zip(decompressed[..batch_block_count].par_iter_mut())
+                        .zip(transaction_state_buffers[..batch_block_count].par_iter_mut())
+                        .enumerate()
+                        .map(|(batch_row, ((row, buffer), transaction_state_buffer))| {
+                            let row_number = expected.row_start + batch_row;
+                            let compressed = ordered_batch_frame(&ready, *row)?;
+                            let worker_number = rayon::current_thread_index().ok_or_else(|| {
+                                Error::InvalidIndex(
+                                    "batch-barrier task ran outside its decode pool".into(),
+                                )
+                            })?;
+                            let mut worker_guard = workers[worker_number].lock().map_err(|_| {
+                                Error::InvalidIndex("batch-barrier worker state is poisoned".into())
+                            })?;
+                            let mut worker = worker_guard.take().ok_or_else(|| {
+                                Error::InvalidIndex(
+                                    "batch-barrier worker was re-entered by nested work".into(),
+                                )
+                            })?;
+                            drop(worker_guard);
+                            let result = worker.decompress_and_project(
+                                self,
+                                *row,
+                                compressed,
+                                &mut buffer.bytes,
+                                row_number,
+                                config.discard_rewards,
+                                pre_merge_coordinator,
+                                &mut transaction_state_buffer.states,
+                                &stage_a,
+                            );
+                            let mut worker_guard = workers[worker_number].lock().map_err(|_| {
+                                Error::InvalidIndex("batch-barrier worker state is poisoned".into())
+                            })?;
+                            *worker_guard = Some(worker);
+                            result
+                        })
+                        .collect_into_vec(&mut stage_a_results)
+                });
+                stats.coordinator_stage_a_wall_time = stats
+                    .coordinator_stage_a_wall_time
+                    .saturating_add(stage_a_started.elapsed());
+
+                // Stage A has finished using the compressed bytes. Returning
+                // this buffer lets the producer overlap the next range read
+                // while the coordinator merges and stage B uses decompressed
+                // bytes only.
+                let _ = free_sender.send(recycle_ordered_compressed_buffer(ready));
+
+                if stage_a_results.iter().any(Result::is_err) {
+                    first_error = std::mem::take(&mut stage_a_results)
+                        .into_iter()
+                        .find_map(Result::err);
+                    recycle_batch_barrier_buffers(&mut decompressed, retention_limit);
+                    break;
+                }
+
+                let live_bytes = match live_batch_barrier_bytes(&decompressed[..batch_block_count])
+                {
+                    Ok(value) => value,
+                    Err(error) => {
+                        first_error = Some(error);
+                        recycle_batch_barrier_buffers(&mut decompressed, retention_limit);
+                        break;
+                    }
+                };
+                let declared_live_bytes =
+                    match usize::try_from(expected.declared_uncompressed_bytes) {
+                        Ok(value) => value,
+                        Err(_) => {
+                            first_error = Some(Error::Overflow(
+                                "batch-barrier declared uncompressed byte count",
+                            ));
+                            recycle_batch_barrier_buffers(&mut decompressed, retention_limit);
+                            break;
+                        }
+                    };
+                if live_bytes != declared_live_bytes {
+                    first_error = Some(Error::InvalidIndex(format!(
+                        "batch-barrier retained {live_bytes} decompressed bytes, expected {declared_live_bytes}",
+                    )));
+                    recycle_batch_barrier_buffers(&mut decompressed, retention_limit);
+                    break;
+                }
+                stats.max_live_decompressed_batch_bytes =
+                    stats.max_live_decompressed_batch_bytes.max(live_bytes);
+
+                let merge_started = Instant::now();
+                stage_a_owned_fallbacks.clear();
+                for (batch_row, result) in stage_a_results.drain(..).enumerate() {
+                    let row_number = expected.row_start + batch_row;
+                    let projected = result.expect("stage-A errors were handled above");
+                    stage_a_owned_fallbacks.push(projected.used_owned_schema_fallback);
+                    if let Err(error) =
+                        merge_stage_a_ordered(coordinator_state, row_number, projected.output)
+                    {
+                        first_error = Some(error);
+                        break;
+                    }
+                }
+                if first_error.is_none()
+                    && let Err(error) = finish_stage_a_batch(
+                        coordinator_state,
+                        expected.row_start..expected.row_end,
+                    )
+                {
+                    first_error = Some(error);
+                }
+                stats.coordinator_merge_wall_time = stats
+                    .coordinator_merge_wall_time
+                    .saturating_add(merge_started.elapsed());
+                if first_error.is_some() {
+                    recycle_batch_barrier_buffers(&mut decompressed, retention_limit);
+                    break;
+                }
+
+                let stage_b_started = Instant::now();
+                let shared_coordinator: &CoordinatorState = &*coordinator_state;
+                decode_pool.install(|| {
+                    self.index.rows[expected.row_start..expected.row_end]
+                        .par_iter()
+                        .zip(decompressed[..batch_block_count].par_iter())
+                        .zip(transaction_state_buffers[..batch_block_count].par_iter())
+                        .enumerate()
+                        .map(|(batch_row, ((row, buffer), transaction_state_buffer))| {
+                            let row_number = expected.row_start + batch_row;
+                            let worker_number = rayon::current_thread_index().ok_or_else(|| {
+                                Error::InvalidIndex(
+                                    "batch-barrier task ran outside its decode pool".into(),
+                                )
+                            })?;
+                            let mut worker_guard = workers[worker_number].lock().map_err(|_| {
+                                Error::InvalidIndex("batch-barrier worker state is poisoned".into())
+                            })?;
+                            let mut worker = worker_guard.take().ok_or_else(|| {
+                                Error::InvalidIndex(
+                                    "batch-barrier worker was re-entered by nested work".into(),
+                                )
+                            })?;
+                            drop(worker_guard);
+                            let result = worker.project_decompressed(
+                                self,
+                                *row,
+                                &buffer.bytes,
+                                row_number,
+                                config.discard_rewards,
+                                shared_coordinator,
+                                &transaction_state_buffer.states,
+                                &stage_b,
+                            );
+                            let mut worker_guard = workers[worker_number].lock().map_err(|_| {
+                                Error::InvalidIndex("batch-barrier worker state is poisoned".into())
+                            })?;
+                            *worker_guard = Some(worker);
+                            result
+                        })
+                        .collect_into_vec(&mut stage_b_results)
+                });
+                stats.coordinator_stage_b_wall_time = stats
+                    .coordinator_stage_b_wall_time
+                    .saturating_add(stage_b_started.elapsed());
+
+                if stage_b_results.iter().any(Result::is_err) {
+                    first_error = std::mem::take(&mut stage_b_results)
+                        .into_iter()
+                        .find_map(Result::err);
+                    recycle_batch_barrier_buffers(&mut decompressed, retention_limit);
+                    break;
+                }
+
+                let mut borrowed_blocks = 0u64;
+                let mut owned_fallback_blocks = 0u64;
+                for (batch_row, result) in stage_b_results.drain(..).enumerate() {
+                    let row_number = expected.row_start + batch_row;
+                    let projected = result.expect("stage-B errors were handled above");
+                    if stage_a_owned_fallbacks.get(batch_row).copied()
+                        != Some(projected.used_owned_schema_fallback)
+                    {
+                        first_error = Some(Error::InvalidIndex(format!(
+                            "batch-barrier block row {row_number} changed decode mode between stages",
+                        )));
+                        break;
+                    }
+                    if projected.used_owned_schema_fallback {
+                        owned_fallback_blocks = match owned_fallback_blocks.checked_add(1) {
+                            Some(value) => value,
+                            None => {
+                                first_error = Some(Error::Overflow(
+                                    "batch-barrier owned fallback block count",
+                                ));
+                                break;
+                            }
+                        };
+                    } else {
+                        borrowed_blocks = match borrowed_blocks.checked_add(1) {
+                            Some(value) => value,
+                            None => {
+                                first_error =
+                                    Some(Error::Overflow("batch-barrier borrowed block count"));
+                                break;
+                            }
+                        };
+                    }
+                    if let Err(error) =
+                        consume_stage_b_ordered(coordinator_state, row_number, projected.output)
+                    {
+                        first_error = Some(error);
+                        break;
+                    }
+                }
+                if first_error.is_some() {
+                    recycle_batch_barrier_buffers(&mut decompressed, retention_limit);
+                    break 'batches;
+                }
+
+                let batch_blocks = match u64::try_from(batch_block_count) {
+                    Ok(value) => value,
+                    Err(_) => {
+                        first_error = Some(Error::Overflow("batch-barrier block count"));
+                        recycle_batch_barrier_buffers(&mut decompressed, retention_limit);
+                        break;
+                    }
+                };
+                let add_counter = |current: u64, increment: u64, label| {
+                    current.checked_add(increment).ok_or(Error::Overflow(label))
+                };
+                stats.batch_count =
+                    match add_counter(stats.batch_count, 1, "batch-barrier batch count") {
+                        Ok(value) => value,
+                        Err(error) => {
+                            first_error = Some(error);
+                            recycle_batch_barrier_buffers(&mut decompressed, retention_limit);
+                            break;
+                        }
+                    };
+                for (field, increment, label) in [
+                    (
+                        &mut stats.block_count,
+                        batch_blocks,
+                        "batch-barrier block count",
+                    ),
+                    (
+                        &mut stats.decompression_count,
+                        batch_blocks,
+                        "batch-barrier decompression count",
+                    ),
+                    (
+                        &mut stats.stage_a_block_count,
+                        batch_blocks,
+                        "batch-barrier stage-A block count",
+                    ),
+                    (
+                        &mut stats.stage_b_block_count,
+                        batch_blocks,
+                        "batch-barrier stage-B block count",
+                    ),
+                    (
+                        &mut stats.borrowed_storage_blocks,
+                        borrowed_blocks,
+                        "batch-barrier borrowed block count",
+                    ),
+                    (
+                        &mut stats.owned_schema_fallback_blocks,
+                        owned_fallback_blocks,
+                        "batch-barrier owned fallback block count",
+                    ),
+                ] {
+                    match add_counter(*field, increment, label) {
+                        Ok(value) => *field = value,
+                        Err(error) => {
+                            first_error = Some(error);
+                            break;
+                        }
+                    }
+                }
+                if first_error.is_some() {
+                    recycle_batch_barrier_buffers(&mut decompressed, retention_limit);
+                    break;
+                }
+                stats.decompressed_bytes = match stats
+                    .decompressed_bytes
+                    .checked_add(expected.declared_uncompressed_bytes)
+                {
+                    Some(value) => value,
+                    None => {
+                        first_error =
+                            Some(Error::Overflow("batch-barrier decompressed byte count"));
+                        recycle_batch_barrier_buffers(&mut decompressed, retention_limit);
+                        break;
+                    }
+                };
+
+                let retained_transaction_state_bytes =
+                    match recycle_batch_barrier_transaction_state_buffers(
+                        &mut transaction_state_buffers,
+                        transaction_state_budget_bytes,
+                    ) {
+                        Ok(value) => value,
+                        Err(error) => {
+                            first_error = Some(error);
+                            recycle_batch_barrier_buffers(&mut decompressed, retention_limit);
+                            break;
+                        }
+                    };
+                stats.max_retained_transaction_state_capacity_bytes = stats
+                    .max_retained_transaction_state_capacity_bytes
+                    .max(retained_transaction_state_bytes);
+
+                let retained = recycle_batch_barrier_buffers(&mut decompressed, retention_limit);
+                stats.max_retained_decompressed_capacity_bytes =
+                    stats.max_retained_decompressed_capacity_bytes.max(retained);
+            }
+
+            // Closing both directions wakes a producer that is blocked either
+            // on publishing a ready batch or on waiting for a recycled Vec.
+            drop(ready_receiver);
+            drop(free_sender);
+            let producer_result = producer.join().map_err(|_| {
+                Error::InvalidIndex("batch-barrier block producer thread panicked".into())
+            });
+
+            if let Some(error) = first_error {
+                return Err(error);
+            }
+            let producer_stats = match producer_result {
+                Ok(result) => result?,
+                Err(error) => return Err(error),
+            };
+            if producer_disconnected {
+                return Err(Error::InvalidIndex(
+                    "batch-barrier block producer stopped before the requested range was complete"
+                        .into(),
+                ));
+            }
+            stats.read_call_count = producer_stats.read_call_count;
+            stats.compressed_bytes = producer_stats.compressed_bytes;
+            stats.producer_read_wall_time = producer_stats.read_wall_time;
+            stats.producer_wait_for_free_buffer_time = producer_stats.wait_for_free_buffer_time;
+            stats.max_compressed_batch_bytes = producer_stats.max_compressed_batch_bytes;
+            stats.max_declared_uncompressed_batch_bytes =
+                producer_stats.max_declared_uncompressed_batch_bytes;
+            if stats.read_call_count != stats.batch_count {
+                return Err(Error::InvalidIndex(format!(
+                    "batch-barrier made {} block range reads for {} batches",
+                    stats.read_call_count, stats.batch_count,
+                )));
+            }
+            if stats.decompression_count != stats.block_count
+                || stats.stage_a_block_count != stats.block_count
+                || stats.stage_b_block_count != stats.block_count
+            {
+                return Err(Error::InvalidIndex(
+                    "batch-barrier block, decompression, and stage counts differ".into(),
+                ));
+            }
+            Ok(stats)
         })
     }
 
@@ -966,6 +2373,7 @@ impl<S: RangeSource> ArchiveReader<S> {
         Ok(BorrowedDecodedBlock {
             index_row: row,
             block,
+            uncompressed_bytes: bytes,
         })
     }
 
@@ -978,9 +2386,16 @@ impl<S: RangeSource> ArchiveReader<S> {
         let DecodedBlock { index_row, block } = decoded;
         let mut first_signature_ordinal = index_row.first_signature_ordinal;
         let mut transactions = Vec::with_capacity(block.tx_rows.len());
+        let scan_context = TransactionScanContext {
+            filter,
+            registry_entries: self.registry_entries,
+            message_projector: self.message_projector(),
+            metadata_wire_profile: self.metadata_wire_profile,
+        };
         for row in block.tx_rows.iter().copied() {
             let signatures = SignatureReference {
                 generation_digest: self.binding.generation_digest,
+                reader_id: self.reader_id,
                 first_ordinal: first_signature_ordinal,
                 count: row.signature_count,
             };
@@ -991,10 +2406,8 @@ impl<S: RangeSource> ArchiveReader<S> {
                 index_row.slot,
                 row,
                 &block,
-                filter,
-                self.registry_entries,
                 signatures,
-                self.message_projector(),
+                &scan_context,
             )?);
         }
         transactions.sort_unstable_by_key(|transaction| transaction.tx_index);
@@ -1034,6 +2447,9 @@ impl<S: RangeSource> ArchiveReader<S> {
         if reference.generation_digest != self.binding.generation_digest {
             return Err(Error::FilterBindingMismatch);
         }
+        if reference.reader_id != self.reader_id {
+            return Err(Error::FilterBindingMismatch);
+        }
         if !self.signatures_available {
             return Err(Error::SignaturesUnavailable);
         }
@@ -1064,6 +2480,9 @@ impl<S: RangeSource> ArchiveReader<S> {
     }
 
     fn ensure_filter_binding(&self, filter: &CompiledPubkeyFilter) -> Result<()> {
+        if filter.reader_id != self.reader_id {
+            return Err(Error::FilterBindingMismatch);
+        }
         if filter.binding != self.binding {
             return Err(Error::FilterBindingMismatch);
         }
@@ -1102,6 +2521,639 @@ fn validate_exact_zstd_frame(row: &ArchiveV2HotBlockIndexRow, compressed: &[u8])
         });
     }
     Ok(())
+}
+
+fn validate_ordered_parallel_config(config: OrderedParallelBlockConfig) -> Result<()> {
+    if config.compressed_batch_target_bytes == 0
+        || config.uncompressed_batch_budget_bytes == 0
+        || config.max_blocks_per_batch == 0
+        || config.compressed_buffer_count == 0
+        || config.decode_workers == 0
+    {
+        return Err(Error::InvalidManifest(
+            "ordered parallel block limits and worker counts must be non-zero".into(),
+        ));
+    }
+    if config.decode_workers > MAX_ORDERED_PARALLEL_DECODE_WORKERS {
+        return Err(Error::InvalidManifest(format!(
+            "ordered parallel decode_workers {} exceeds the {MAX_ORDERED_PARALLEL_DECODE_WORKERS} worker limit",
+            config.decode_workers,
+        )));
+    }
+    if config.compressed_buffer_count > MAX_ORDERED_PARALLEL_COMPRESSED_BUFFERS {
+        return Err(Error::InvalidManifest(format!(
+            "ordered parallel compressed_buffer_count {} exceeds the {MAX_ORDERED_PARALLEL_COMPRESSED_BUFFERS} buffer limit",
+            config.compressed_buffer_count,
+        )));
+    }
+    if config.max_blocks_per_batch > MAX_ORDERED_PARALLEL_BLOCKS_PER_BATCH {
+        return Err(Error::InvalidManifest(format!(
+            "ordered parallel max_blocks_per_batch {} exceeds the {MAX_ORDERED_PARALLEL_BLOCKS_PER_BATCH} block limit",
+            config.max_blocks_per_batch,
+        )));
+    }
+    if config.uncompressed_batch_budget_bytes > MAX_ORDERED_PARALLEL_UNCOMPRESSED_BATCH_BYTES {
+        return Err(Error::InvalidManifest(format!(
+            "ordered parallel uncompressed batch budget {} exceeds the {MAX_ORDERED_PARALLEL_UNCOMPRESSED_BATCH_BYTES} byte limit",
+            config.uncompressed_batch_budget_bytes,
+        )));
+    }
+    let retained_total = config
+        .retained_decompressed_bytes_per_worker
+        .checked_mul(config.decode_workers)
+        .ok_or(Error::Overflow(
+            "ordered parallel retained decompression capacity",
+        ))?;
+    if retained_total > MAX_ORDERED_PARALLEL_RETAINED_DECOMPRESSED_BYTES {
+        return Err(Error::InvalidManifest(format!(
+            "ordered parallel retained decompression capacity {retained_total} exceeds the {MAX_ORDERED_PARALLEL_RETAINED_DECOMPRESSED_BYTES} byte limit",
+        )));
+    }
+    Ok(())
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct OrderedParallelBatchPlan {
+    row_start: usize,
+    row_end: usize,
+    compressed_offset: u64,
+    compressed_len: usize,
+    declared_uncompressed_bytes: u64,
+}
+
+fn ordered_parallel_batch_plans(
+    rows: &[ArchiveV2HotBlockIndexRow],
+    range: Range<usize>,
+    compressed_target: usize,
+    uncompressed_budget: usize,
+    max_blocks_per_batch: usize,
+) -> Result<Vec<OrderedParallelBatchPlan>> {
+    let mut plans = Vec::new();
+    let mut start = range.start;
+    let uncompressed_budget = u64::try_from(uncompressed_budget)
+        .map_err(|_| Error::Overflow("parallel uncompressed batch budget"))?;
+    while start < range.end {
+        let first = rows[start];
+        let mut end = start;
+        let mut compressed_len = 0usize;
+        let mut declared_uncompressed_bytes = 0u64;
+        while end < range.end {
+            let row = rows[end];
+            let expected_offset = first
+                .compressed_offset
+                .checked_add(
+                    u64::try_from(compressed_len)
+                        .map_err(|_| Error::Overflow("parallel compressed batch offset"))?,
+                )
+                .ok_or(Error::Overflow("parallel compressed batch offset"))?;
+            if row.compressed_offset != expected_offset {
+                return Err(Error::InvalidIndex(format!(
+                    "slot {} starts at {}, expected monotonic batch offset {expected_offset}",
+                    row.slot, row.compressed_offset,
+                )));
+            }
+            let next_compressed = compressed_len
+                .checked_add(row.compressed_len as usize)
+                .ok_or(Error::Overflow("parallel compressed batch length"))?;
+            let next_uncompressed = declared_uncompressed_bytes
+                .checked_add(u64::from(row.uncompressed_len))
+                .ok_or(Error::Overflow("parallel uncompressed batch length"))?;
+            if end > start
+                && (end - start >= max_blocks_per_batch
+                    || next_compressed > compressed_target
+                    || next_uncompressed > uncompressed_budget)
+            {
+                break;
+            }
+            compressed_len = next_compressed;
+            declared_uncompressed_bytes = next_uncompressed;
+            end += 1;
+        }
+        plans.push(OrderedParallelBatchPlan {
+            row_start: start,
+            row_end: end,
+            compressed_offset: first.compressed_offset,
+            compressed_len,
+            declared_uncompressed_bytes,
+        });
+        start = end;
+    }
+    Ok(plans)
+}
+
+struct OrderedReadyBatch {
+    plan: OrderedParallelBatchPlan,
+    bytes: Vec<u8>,
+    retained_buffer: Option<Vec<u8>>,
+}
+
+#[derive(Debug, Default)]
+struct OrderedProducerStats {
+    read_call_count: u64,
+    compressed_bytes: u64,
+    read_wall_time: Duration,
+    wait_for_free_buffer_time: Duration,
+    max_compressed_batch_bytes: usize,
+    max_declared_uncompressed_batch_bytes: u64,
+}
+
+fn produce_ordered_compressed_batches<S: RangeSource>(
+    archive: &ArchiveReader<S>,
+    plans: &[OrderedParallelBatchPlan],
+    retained_buffer_bytes: usize,
+    free_receiver: Receiver<Vec<u8>>,
+    ready_sender: SyncSender<OrderedReadyBatch>,
+) -> Result<OrderedProducerStats> {
+    let mut stats = OrderedProducerStats::default();
+    for plan in plans {
+        let wait_started = Instant::now();
+        let Ok(recycled) = free_receiver.recv() else {
+            // The coordinator stopped after an earlier ordered error.
+            return Ok(stats);
+        };
+        stats.wait_for_free_buffer_time = stats
+            .wait_for_free_buffer_time
+            .saturating_add(wait_started.elapsed());
+
+        let (mut bytes, retained_buffer) =
+            ordered_compressed_read_buffer(recycled, plan.compressed_len, retained_buffer_bytes);
+        let read_started = Instant::now();
+        let read_result = archive.source.read_range_into(
+            BLOCKS_FILE,
+            plan.compressed_offset,
+            plan.compressed_len,
+            &mut bytes,
+        );
+        stats.read_wall_time = stats.read_wall_time.saturating_add(read_started.elapsed());
+        read_result?;
+        if bytes.len() != plan.compressed_len {
+            return Err(Error::InvalidIndex(format!(
+                "ordered block range returned {} bytes, expected {}",
+                bytes.len(),
+                plan.compressed_len,
+            )));
+        }
+        stats.read_call_count = stats
+            .read_call_count
+            .checked_add(1)
+            .ok_or(Error::Overflow("parallel range-read count"))?;
+        stats.compressed_bytes = stats
+            .compressed_bytes
+            .checked_add(
+                u64::try_from(bytes.len())
+                    .map_err(|_| Error::Overflow("parallel compressed byte count"))?,
+            )
+            .ok_or(Error::Overflow("parallel compressed byte count"))?;
+        stats.max_compressed_batch_bytes = stats.max_compressed_batch_bytes.max(bytes.len());
+        stats.max_declared_uncompressed_batch_bytes = stats
+            .max_declared_uncompressed_batch_bytes
+            .max(plan.declared_uncompressed_bytes);
+
+        if ready_sender
+            .send(OrderedReadyBatch {
+                plan: *plan,
+                bytes,
+                retained_buffer,
+            })
+            .is_err()
+        {
+            // The coordinator selected an earlier row-order error.
+            return Ok(stats);
+        }
+    }
+    Ok(stats)
+}
+
+fn ordered_compressed_read_buffer(
+    mut recycled: Vec<u8>,
+    requested_bytes: usize,
+    retained_buffer_bytes: usize,
+) -> (Vec<u8>, Option<Vec<u8>>) {
+    recycled.clear();
+    if requested_bytes > retained_buffer_bytes {
+        (Vec::new(), Some(recycled))
+    } else {
+        (recycled, None)
+    }
+}
+
+fn recycle_ordered_compressed_buffer(mut ready: OrderedReadyBatch) -> Vec<u8> {
+    if let Some(mut retained) = ready.retained_buffer.take() {
+        retained.clear();
+        retained
+    } else {
+        ready.bytes.clear();
+        ready.bytes
+    }
+}
+
+fn ordered_batch_frame(ready: &OrderedReadyBatch, row: ArchiveV2HotBlockIndexRow) -> Result<&[u8]> {
+    let relative_offset = row
+        .compressed_offset
+        .checked_sub(ready.plan.compressed_offset)
+        .ok_or_else(|| Error::InvalidIndex("parallel block frame offset underflow".into()))?;
+    let relative_offset = usize::try_from(relative_offset)
+        .map_err(|_| Error::Overflow("parallel block frame offset"))?;
+    let frame_end = relative_offset
+        .checked_add(row.compressed_len as usize)
+        .ok_or(Error::Overflow("parallel block frame range"))?;
+    ready
+        .bytes
+        .get(relative_offset..frame_end)
+        .ok_or_else(|| Error::InvalidIndex("parallel block frame is outside its read batch".into()))
+}
+
+/// One retained row slot in the decompressed batch pool.
+///
+/// A frame larger than the total retention bound gets a temporary `Vec`; the
+/// normal allocation for this row slot stays in `retained_buffer` and returns
+/// after stage B. Normal frames keep their allocation across batches.
+#[derive(Debug, Default)]
+struct BatchBarrierDecodedBuffer {
+    bytes: Vec<u8>,
+    retained_buffer: Option<Vec<u8>>,
+}
+
+impl BatchBarrierDecodedBuffer {
+    /// Prepare this row slot and report whether its retained allocation can
+    /// hold the requested frame without growth.
+    fn prepare(&mut self, requested_bytes: usize, retention_limit: usize) -> bool {
+        debug_assert!(self.retained_buffer.is_none());
+        debug_assert!(self.bytes.is_empty());
+        if requested_bytes > retention_limit {
+            self.retained_buffer = Some(std::mem::take(&mut self.bytes));
+        }
+        self.bytes.capacity() >= requested_bytes
+    }
+
+    fn recycle(&mut self) {
+        self.bytes.clear();
+        if let Some(mut retained) = self.retained_buffer.take() {
+            retained.clear();
+            self.bytes = retained;
+        }
+    }
+}
+
+fn live_batch_barrier_bytes(buffers: &[BatchBarrierDecodedBuffer]) -> Result<usize> {
+    buffers.iter().try_fold(0usize, |total, buffer| {
+        total.checked_add(buffer.bytes.len()).ok_or(Error::Overflow(
+            "batch-barrier live decompressed byte count",
+        ))
+    })
+}
+
+fn prepare_batch_transaction_state_offsets(
+    rows: &[ArchiveV2HotBlockIndexRow],
+    offsets: &mut Vec<usize>,
+    transaction_state_size: usize,
+    transaction_state_budget_bytes: usize,
+) -> Result<(usize, usize)> {
+    let transaction_count = rows.iter().try_fold(0usize, |count, row| {
+        let row_transactions = usize::try_from(row.tx_count)
+            .map_err(|_| Error::Overflow("batch-barrier transaction count"))?;
+        count
+            .checked_add(row_transactions)
+            .ok_or(Error::Overflow("batch-barrier transaction count"))
+    })?;
+    let transaction_state_bytes = transaction_count
+        .checked_mul(transaction_state_size)
+        .ok_or(Error::Overflow(
+            "batch-barrier transaction-state byte count",
+        ))?;
+    if transaction_state_bytes > transaction_state_budget_bytes {
+        return Err(Error::InvalidManifest(format!(
+            "batch-barrier transaction state needs {transaction_state_bytes} bytes, exceeding its {transaction_state_budget_bytes}-byte budget",
+        )));
+    }
+
+    let offset_count = rows.len().checked_add(1).ok_or(Error::Overflow(
+        "batch-barrier transaction-state offset count",
+    ))?;
+    offsets.clear();
+    offsets.try_reserve_exact(offset_count).map_err(|error| {
+        Error::InvalidManifest(format!(
+            "cannot reserve {offset_count} batch-barrier transaction-state offsets: {error}",
+        ))
+    })?;
+    offsets.push(0);
+    let mut prefix = 0usize;
+    for row in rows {
+        prefix = prefix
+            .checked_add(row.tx_count as usize)
+            .ok_or(Error::Overflow("batch-barrier transaction count"))?;
+        offsets.push(prefix);
+    }
+    if prefix != transaction_count {
+        return Err(Error::InvalidIndex(
+            "batch-barrier transaction-state prefix total changed".into(),
+        ));
+    }
+    Ok((transaction_count, transaction_state_bytes))
+}
+
+fn ensure_transaction_state_len(
+    row: ArchiveV2HotBlockIndexRow,
+    block: &BorrowedDecodedBlock<'_>,
+    transaction_state_len: usize,
+) -> Result<()> {
+    let block_transaction_count = usize::try_from(block.tx_count())
+        .map_err(|_| Error::Overflow("batch-barrier block transaction count"))?;
+    if transaction_state_len != block_transaction_count {
+        return Err(Error::InvalidBlock {
+            slot: row.slot,
+            message: format!(
+                "transaction-state slice has {transaction_state_len} entries for {block_transaction_count} storage transactions",
+            ),
+        });
+    }
+    Ok(())
+}
+
+#[derive(Debug, Default)]
+struct BatchBarrierTransactionStateBuffer<T> {
+    states: Vec<T>,
+}
+
+impl<T: Copy + Default> BatchBarrierTransactionStateBuffer<T> {
+    /// Reset this block-row slot and report whether its retained allocation
+    /// can hold the requested storage transaction count without growth.
+    fn prepare(&mut self, transaction_count: usize) -> Result<bool> {
+        self.states.clear();
+        let reused = self.states.capacity() >= transaction_count;
+        if !reused {
+            self.states
+                .try_reserve_exact(transaction_count)
+                .map_err(|error| {
+                    Error::InvalidManifest(format!(
+                        "cannot reserve {transaction_count} batch-barrier transaction states: {error}",
+                    ))
+                })?;
+        }
+        self.states.resize(transaction_count, T::default());
+        Ok(reused)
+    }
+}
+
+fn recycle_batch_barrier_transaction_state_buffers<T>(
+    buffers: &mut [BatchBarrierTransactionStateBuffer<T>],
+    retention_limit_bytes: usize,
+) -> Result<usize> {
+    let state_size = std::mem::size_of::<T>();
+    let mut retained = 0usize;
+    for buffer in buffers {
+        buffer.states.clear();
+        let capacity_bytes =
+            buffer
+                .states
+                .capacity()
+                .checked_mul(state_size)
+                .ok_or(Error::Overflow(
+                    "batch-barrier retained transaction-state bytes",
+                ))?;
+        match retained.checked_add(capacity_bytes) {
+            Some(next) if next <= retention_limit_bytes => retained = next,
+            _ => buffer.states = Vec::new(),
+        }
+    }
+    Ok(retained)
+}
+
+/// Clear active buffers and keep at most `retention_limit` bytes of aggregate
+/// capacity. Iteration order is stable, and no temporary sorting allocation is
+/// needed on the recycling path.
+fn recycle_batch_barrier_buffers(
+    buffers: &mut [BatchBarrierDecodedBuffer],
+    retention_limit: usize,
+) -> usize {
+    for buffer in &mut *buffers {
+        buffer.recycle();
+    }
+    let mut retained = 0usize;
+    for buffer in buffers {
+        let capacity = buffer.bytes.capacity();
+        match retained.checked_add(capacity) {
+            Some(next) if next <= retention_limit => retained = next,
+            _ => buffer.bytes = Vec::new(),
+        }
+    }
+    retained
+}
+
+struct BatchBarrierWorker<T> {
+    decompressor: Option<zstd::bulk::Decompressor<'static>>,
+    caller: T,
+}
+
+impl<T> BatchBarrierWorker<T> {
+    #[allow(clippy::too_many_arguments)]
+    fn decompress_and_project<S, CoordinatorState, TransactionState, Output, Project>(
+        &mut self,
+        archive: &ArchiveReader<S>,
+        row: ArchiveV2HotBlockIndexRow,
+        compressed: &[u8],
+        decompressed: &mut Vec<u8>,
+        row_number: usize,
+        discard_rewards: bool,
+        coordinator_state: &CoordinatorState,
+        transaction_state: &mut [TransactionState],
+        project: &Project,
+    ) -> Result<OrderedParallelProjection<Output>>
+    where
+        S: RangeSource,
+        Project: for<'block> Fn(
+            &mut T,
+            &CoordinatorState,
+            usize,
+            BorrowedDecodedBlock<'block>,
+            &mut [TransactionState],
+        ) -> Result<Output>,
+    {
+        if self.decompressor.is_none() {
+            self.decompressor =
+                Some(
+                    zstd::bulk::Decompressor::new().map_err(|error| Error::DecodeBlock {
+                        slot: row.slot,
+                        message: format!("create zstd decompressor: {error}"),
+                    })?,
+                );
+        }
+        let block = archive.decode_compressed_block_borrowed_reusing(
+            row,
+            compressed,
+            self.decompressor
+                .as_mut()
+                .expect("decompressor was initialized above"),
+            decompressed,
+            discard_rewards,
+        )?;
+        ensure_transaction_state_len(row, &block, transaction_state.len())?;
+        let used_owned_schema_fallback = block.uses_owned_fallback();
+        let output = project(
+            &mut self.caller,
+            coordinator_state,
+            row_number,
+            block,
+            transaction_state,
+        )?;
+        Ok(OrderedParallelProjection {
+            output,
+            used_owned_schema_fallback,
+        })
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn project_decompressed<S, CoordinatorState, TransactionState, Output, Project>(
+        &mut self,
+        archive: &ArchiveReader<S>,
+        row: ArchiveV2HotBlockIndexRow,
+        decompressed: &[u8],
+        row_number: usize,
+        discard_rewards: bool,
+        coordinator_state: &CoordinatorState,
+        transaction_state: &[TransactionState],
+        project: &Project,
+    ) -> Result<OrderedParallelProjection<Output>>
+    where
+        S: RangeSource,
+        Project: for<'block> Fn(
+            &mut T,
+            &CoordinatorState,
+            usize,
+            BorrowedDecodedBlock<'block>,
+            &[TransactionState],
+        ) -> Result<Output>,
+    {
+        let block =
+            archive.decode_uncompressed_block_borrowed(row, decompressed, discard_rewards)?;
+        ensure_transaction_state_len(row, &block, transaction_state.len())?;
+        let used_owned_schema_fallback = block.uses_owned_fallback();
+        let output = project(
+            &mut self.caller,
+            coordinator_state,
+            row_number,
+            block,
+            transaction_state,
+        )?;
+        Ok(OrderedParallelProjection {
+            output,
+            used_owned_schema_fallback,
+        })
+    }
+}
+
+struct OrderedParallelWorker<T> {
+    decompressor: Option<zstd::bulk::Decompressor<'static>>,
+    decompressed: Vec<u8>,
+    caller: T,
+}
+
+struct OrderedParallelProjection<T> {
+    output: T,
+    used_owned_schema_fallback: bool,
+}
+
+impl<T> OrderedParallelWorker<T> {
+    #[allow(clippy::too_many_arguments)]
+    fn decode_and_project<S, Output, Project>(
+        &mut self,
+        archive: &ArchiveReader<S>,
+        row: ArchiveV2HotBlockIndexRow,
+        compressed: &[u8],
+        row_number: usize,
+        discard_rewards: bool,
+        retained_decompressed_bytes: usize,
+        project: &Project,
+    ) -> Result<OrderedParallelProjection<Output>>
+    where
+        S: RangeSource,
+        Project: for<'block> Fn(&mut T, usize, BorrowedDecodedBlock<'block>) -> Result<Output>,
+    {
+        if self.decompressor.is_none() {
+            self.decompressor =
+                Some(
+                    zstd::bulk::Decompressor::new().map_err(|error| Error::DecodeBlock {
+                        slot: row.slot,
+                        message: format!("create zstd decompressor: {error}"),
+                    })?,
+                );
+        }
+        if row.uncompressed_len as usize > retained_decompressed_bytes {
+            // Keep the normal worker allocation intact when one admitted frame
+            // is larger than its bounded retention limit.
+            let mut oversized = Vec::new();
+            Self::decode_and_project_in_buffer(
+                archive,
+                row,
+                compressed,
+                self.decompressor
+                    .as_mut()
+                    .expect("decompressor was initialized above"),
+                &mut oversized,
+                discard_rewards,
+                &mut self.caller,
+                row_number,
+                project,
+            )
+        } else {
+            let result = Self::decode_and_project_in_buffer(
+                archive,
+                row,
+                compressed,
+                self.decompressor
+                    .as_mut()
+                    .expect("decompressor was initialized above"),
+                &mut self.decompressed,
+                discard_rewards,
+                &mut self.caller,
+                row_number,
+                project,
+            );
+            self.decompressed.clear();
+            if self.decompressed.capacity() > retained_decompressed_bytes {
+                self.decompressed.shrink_to(retained_decompressed_bytes);
+            }
+            result
+        }
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn decode_and_project_in_buffer<S, Output, Project>(
+        archive: &ArchiveReader<S>,
+        row: ArchiveV2HotBlockIndexRow,
+        compressed: &[u8],
+        decompressor: &mut zstd::bulk::Decompressor<'static>,
+        decompressed: &mut Vec<u8>,
+        discard_rewards: bool,
+        caller: &mut T,
+        row_number: usize,
+        project: &Project,
+    ) -> Result<OrderedParallelProjection<Output>>
+    where
+        S: RangeSource,
+        Project: for<'block> Fn(&mut T, usize, BorrowedDecodedBlock<'block>) -> Result<Output>,
+    {
+        let block = archive.decode_compressed_block_borrowed_reusing(
+            row,
+            compressed,
+            decompressor,
+            decompressed,
+            discard_rewards,
+        )?;
+        let used_owned_schema_fallback = block.uses_owned_fallback();
+        let output = project(caller, row_number, block)?;
+        Ok(OrderedParallelProjection {
+            output,
+            used_owned_schema_fallback,
+        })
+    }
+}
+
+#[derive(Default)]
+struct OrderedParallelCoordinator {
+    stats: OrderedParallelBlockStats,
+    error: Option<Error>,
+    producer_disconnected: bool,
 }
 
 pub struct BlockIterator<'a, S> {
@@ -1367,15 +3419,40 @@ pub fn validate_generation_structure<S: RangeSource>(
     manifest: &GenerationManifest,
     options: &OpenOptions,
 ) -> Result<ValidatedGeneration> {
-    let wire_profile = ArchiveV2WireProfile::for_published_manifest(manifest)?;
-    validate_generation_structure_with_wire_profile(source, manifest, options, wire_profile)
+    validate_generation_structure_with_metadata_admission(
+        source,
+        manifest,
+        options,
+        ArchiveV2MetadataProfileAdmission::RequireCurrentTypedErrors,
+    )
 }
 
-fn validate_generation_structure_with_wire_profile<S: RangeSource>(
+/// Validate structural bindings with an explicit metadata authority policy.
+/// This does not perform the complete semantic scan required for publication.
+pub fn validate_generation_structure_with_metadata_admission<S: RangeSource>(
+    source: &S,
+    manifest: &GenerationManifest,
+    options: &OpenOptions,
+    metadata_admission: ArchiveV2MetadataProfileAdmission,
+) -> Result<ValidatedGeneration> {
+    let wire_profile = ArchiveV2WireProfile::for_published_manifest(manifest)?;
+    let metadata_wire_profile =
+        ArchiveV2MetadataWireProfile::for_manifest(manifest, metadata_admission)?;
+    validate_generation_structure_with_profiles(
+        source,
+        manifest,
+        options,
+        wire_profile,
+        metadata_wire_profile,
+    )
+}
+
+fn validate_generation_structure_with_profiles<S: RangeSource>(
     source: &S,
     manifest: &GenerationManifest,
     options: &OpenOptions,
     wire_profile: ArchiveV2WireProfile,
+    _metadata_wire_profile: ArchiveV2MetadataWireProfile,
 ) -> Result<ValidatedGeneration> {
     validate_options(options)?;
     manifest.validate()?;
@@ -1512,9 +3589,11 @@ fn validate_manifest_files<S: RangeSource>(
                     BLOCK_INDEX_FILE
                         | META_FILE
                         | REGISTRY_FILE
+                        | REGISTRY_INDEX_FILE
                         | GENESIS_BIN_FILE
                         | PRE_UNKNOWN_INSTRUCTION_FALLBACKS_MARKER_FILE
                         | POST_UNKNOWN_INSTRUCTION_FALLBACKS_MARKER_FILE
+                        | CURRENT_TYPED_ERRORS_MARKER_FILE
                 )
             }
             HashVerification::SizesOnly => false,
@@ -2116,14 +4195,19 @@ fn mark_transaction_index_seen(seen: &mut [u64], tx_index: usize) -> bool {
     was_new
 }
 
+struct TransactionScanContext<'a> {
+    filter: &'a CompiledPubkeyFilter,
+    registry_entries: u32,
+    message_projector: ArchiveV2MessageProjector,
+    metadata_wire_profile: ArchiveV2MetadataWireProfile,
+}
+
 fn scan_transaction(
     slot: u64,
     row: ArchiveV2HotTxRow,
     block: &ArchiveV2HotBlockBlob,
-    filter: &CompiledPubkeyFilter,
-    registry_entries: u32,
     signatures: SignatureReference,
-    message_projector: ArchiveV2MessageProjector,
+    context: &TransactionScanContext<'_>,
 ) -> Result<ScannedTransaction> {
     if row.flags & ARCHIVE_V2_TX_FLAG_TX_RAW_FALLBACK != 0 {
         return Ok(ScannedTransaction {
@@ -2132,7 +4216,7 @@ fn scan_transaction(
             row,
             outcome: TransactionMatch::Indeterminate(IndeterminateReason::RawTransactionFallback),
             message: None,
-            metadata: metadata_state(block, &row, slot, false)?,
+            metadata: metadata_state(block, &row, slot, false, context.metadata_wire_profile)?,
             signatures,
         });
     }
@@ -2144,7 +4228,8 @@ fn scan_transaction(
         row.tx_index,
         slot,
     )?;
-    let message = message_projector
+    let message = context
+        .message_projector
         .decode_owned_message(message_bytes)
         .map_err(|error| Error::InvalidBlock {
             slot,
@@ -2164,10 +4249,16 @@ fn scan_transaction(
         ArchiveV2HotMessagePayload::Legacy(message) => message.account_keys.as_slice(),
         ArchiveV2HotMessagePayload::V0(message) => message.account_keys.as_slice(),
     };
-    let static_result = evaluate_keys(static_keys, filter, registry_entries);
+    let static_result = evaluate_keys(static_keys, context.filter, context.registry_entries);
     let needs_loaded = is_v0 && row.flags & ARCHIVE_V2_TX_FLAG_HAS_LOADED_ADDRESSES != 0;
     let read_metadata = static_result.matched || needs_loaded;
-    let metadata = metadata_state(block, &row, slot, read_metadata)?;
+    let metadata = metadata_state(
+        block,
+        &row,
+        slot,
+        read_metadata,
+        context.metadata_wire_profile,
+    )?;
 
     let mut loaded_result = KeyEvaluation::default();
     let loaded_unavailable = if needs_loaded {
@@ -2178,8 +4269,8 @@ fn scan_transaction(
                         .loaded_writable_addresses
                         .iter()
                         .chain(&metadata.loaded_readonly_addresses),
-                    filter,
-                    registry_entries,
+                    context.filter,
+                    context.registry_entries,
                 );
                 false
             }
@@ -2218,6 +4309,7 @@ fn metadata_state(
     row: &ArchiveV2HotTxRow,
     slot: u64,
     read: bool,
+    metadata_wire_profile: ArchiveV2MetadataWireProfile,
 ) -> Result<MetadataState> {
     if row.flags & ARCHIVE_V2_TX_FLAG_HAS_METADATA == 0 || row.metadata_len == 0 {
         return Ok(MetadataState::Absent);
@@ -2236,17 +4328,21 @@ fn metadata_state(
         row.tx_index,
         slot,
     )?;
-    let canonical = if bytes.first() == Some(&0) {
-        None
-    } else {
-        Some(
+    let canonical = match metadata_wire_profile {
+        ArchiveV2MetadataWireProfile::CurrentTypedErrorsV1 => None,
+        ArchiveV2MetadataWireProfile::UnmarkedHistoricalCompatibility
+            if bytes.first() == Some(&0) =>
+        {
+            None
+        }
+        ArchiveV2MetadataWireProfile::UnmarkedHistoricalCompatibility => Some(
             canonicalize_archive_v2_metadata_owned(bytes)
                 .map_err(|error| Error::InvalidBlock {
                     slot,
                     message: format!("select metadata schema for tx {}: {error}", row.tx_index),
                 })?
                 .0,
-        )
+        ),
     };
     let decode_bytes = canonical.as_deref().unwrap_or(bytes);
     let metadata = wincode::config::deserialize_exact(
@@ -2320,7 +4416,7 @@ mod tests {
     use std::{
         fs,
         path::Path,
-        sync::{Arc, Mutex},
+        sync::{Arc, Barrier, Mutex},
     };
 
     use blockzilla_format::{
@@ -2328,14 +4424,15 @@ mod tests {
         ARCHIVE_V2_TX_FLAG_MESSAGE_V0, ArchiveV2ComputeBudgetInstructionData,
         ArchiveV2HotBlockHeader, ArchiveV2HotInstructionData, ArchiveV2HotLegacyMessage,
         ArchiveV2HotRewards, ArchiveV2HotV0Message, ArchiveV2SystemInstructionData,
-        CompactMessageHeader, CompactReward, CompactShredding, OwnedCompactRecentBlockhash,
-        WincodeArchiveV2Header, wincode_leb128_config, write_archive_v2_hot_block_index,
+        CompactMessageHeader, CompactReward, CompactShredding, CompactTransactionError,
+        OwnedCompactRecentBlockhash, WincodeArchiveV2Header, wincode_leb128_config,
+        write_archive_v2_hot_block_index,
     };
     use tempfile::TempDir;
 
     use super::*;
     use crate::{
-        LocalRangeSource, SourceResult,
+        LocalRangeSource, SourceError, SourceResult,
         manifest::{GenerationFile, compute_generation_digest},
     };
 
@@ -2351,6 +4448,10 @@ mod tests {
 
     impl Fixture {
         fn build() -> Self {
+            Self::build_with_first_storage_tx_indexes([0, 1])
+        }
+
+        fn build_with_first_storage_tx_indexes(first_storage_tx_indexes: [u32; 2]) -> Self {
             let directory = tempfile::tempdir().unwrap();
             let root = directory.path();
             fs::write(
@@ -2390,7 +4491,7 @@ mod tests {
                 tx_count: 2,
                 tx_rows: vec![
                     ArchiveV2HotTxRow {
-                        tx_index: 0,
+                        tx_index: first_storage_tx_indexes[0],
                         flags: 0,
                         message_offset: 0,
                         message_len: first_message.len() as u32,
@@ -2400,7 +4501,7 @@ mod tests {
                         reserved: [0; 3],
                     },
                     ArchiveV2HotTxRow {
-                        tx_index: 1,
+                        tx_index: first_storage_tx_indexes[1],
                         flags: 0,
                         message_offset: first_message.len() as u32,
                         message_len: first_message.len() as u32,
@@ -2592,6 +4693,26 @@ mod tests {
         }
     }
 
+    #[derive(Clone)]
+    struct FailingBlocksSource {
+        inner: LocalRangeSource,
+    }
+
+    impl RangeSource for FailingBlocksSource {
+        fn size(&self, object: &str) -> SourceResult<Option<u64>> {
+            self.inner.size(object)
+        }
+
+        fn read_range(&self, object: &str, offset: u64, length: usize) -> SourceResult<Vec<u8>> {
+            if object == BLOCKS_FILE {
+                return Err(SourceError::Protocol(
+                    "injected ordered block read failure".into(),
+                ));
+            }
+            self.inner.read_range(object, offset, length)
+        }
+    }
+
     #[test]
     fn open_trusted_opens_without_a_published_manifest() {
         let fixture = Fixture::build();
@@ -2612,6 +4733,14 @@ mod tests {
         assert_eq!(archive.index().rows.len(), 2);
         assert_eq!(archive.manifest().epoch, EPOCH);
         assert_eq!(
+            archive.metadata_wire_profile(),
+            ArchiveV2MetadataWireProfile::UnmarkedHistoricalCompatibility
+        );
+        assert_eq!(
+            archive.profiled_binding().metadata_wire_profile,
+            ArchiveV2MetadataWireProfile::UnmarkedHistoricalCompatibility
+        );
+        assert_eq!(
             archive.binding().wire_profile,
             ArchiveV2WireProfile::PostUnknownInstructionFallbacksV1
         );
@@ -2624,6 +4753,90 @@ mod tests {
                 static_account: true,
                 loaded_address: false,
             }
+        );
+    }
+
+    #[test]
+    fn reader_bound_metadata_profile_controls_legacy_error_decoding() {
+        let fixture = Fixture::build();
+        let strict = ArchiveReader::open(fixture.source()).unwrap();
+        let compatible = ArchiveReader::open_trusted(
+            fixture.source(),
+            crate::manifest::TrustedGenerationIdentity {
+                cluster_id: "testnet".into(),
+                epoch: EPOCH,
+                generation_id: "trusted-metadata-compatibility".into(),
+                slots_per_epoch: SLOTS_PER_EPOCH,
+                wire_profile: ArchiveV2WireProfile::PostUnknownInstructionFallbacksV1,
+            },
+            OpenOptions {
+                hash_verification: HashVerification::SizesOnly,
+                ..OpenOptions::default()
+            },
+        )
+        .unwrap();
+
+        let current = CompactMetaV1 {
+            err: Some(CompactTransactionError::AccountInUse),
+            fee: 5_000,
+            pre_balances: Vec::new(),
+            post_balances: Vec::new(),
+            inner_instructions: None,
+            logs: None,
+            pre_token_balances: Vec::new(),
+            post_token_balances: Vec::new(),
+            rewards: Vec::new(),
+            loaded_writable_addresses: Vec::new(),
+            loaded_readonly_addresses: Vec::new(),
+            return_data: None,
+            compute_units_consumed: None,
+            cost_units: None,
+        };
+        let current = wincode::config::serialize(&current, wincode_leb128_config()).unwrap();
+        assert_eq!(&current[..2], &[1, 0]);
+        let mut legacy = Vec::with_capacity(current.len() + 4);
+        legacy.extend_from_slice(&[1, 4, 0, 0, 0, 0]);
+        legacy.extend_from_slice(&current[2..]);
+        assert_eq!(
+            crate::classify_archive_v2_metadata_schema_exact(&legacy),
+            crate::ArchiveV2MetadataSchemaClassification::LegacyOnly
+        );
+        let limits = ArchiveV2MetadataProjectionLimits {
+            total_message_accounts: 0,
+            top_level_instruction_count: 0,
+        };
+
+        assert!(strict.validate_metadata_exact(&legacy, limits).is_err());
+        assert!(compatible.validate_metadata_exact(&legacy, limits).is_ok());
+    }
+
+    #[test]
+    fn published_unmarked_metadata_requires_explicit_compatibility() {
+        let fixture = Fixture::build();
+        let manifest_path = fixture.directory.path().join(GENERATION_MANIFEST_FILE);
+        let mut manifest = GenerationManifest::parse(&fs::read(&manifest_path).unwrap()).unwrap();
+        manifest
+            .files
+            .retain(|file| file.name != CURRENT_TYPED_ERRORS_MARKER_FILE);
+        manifest.generation_digest = compute_generation_digest(&manifest).unwrap();
+        fs::write(&manifest_path, serde_json::to_vec(&manifest).unwrap()).unwrap();
+        fs::remove_file(
+            fixture
+                .directory
+                .path()
+                .join(CURRENT_TYPED_ERRORS_MARKER_FILE),
+        )
+        .unwrap();
+
+        assert!(ArchiveReader::open(fixture.source()).is_err());
+        let compatible = ArchiveReader::open_with_metadata_admission(
+            fixture.source(),
+            ArchiveV2MetadataProfileAdmission::AllowUnmarkedHistorical,
+        )
+        .unwrap();
+        assert_eq!(
+            compatible.metadata_wire_profile(),
+            ArchiveV2MetadataWireProfile::UnmarkedHistoricalCompatibility
         );
     }
 
@@ -2655,6 +4868,147 @@ mod tests {
             archive.message_projector().wire_profile(),
             ArchiveV2WireProfile::PreUnknownInstructionFallbacksV1
         );
+    }
+
+    #[test]
+    fn open_trusted_binds_additional_file_sizes_and_wire_profile() {
+        let fixture = Fixture::build();
+        fs::remove_file(fixture.directory.path().join(GENERATION_MANIFEST_FILE)).unwrap();
+        fs::write(
+            fixture.directory.path().join("required-sidecar.bin"),
+            [1, 2, 3],
+        )
+        .unwrap();
+
+        let identity = |wire_profile| crate::manifest::TrustedGenerationIdentity {
+            cluster_id: "testnet".into(),
+            epoch: EPOCH,
+            generation_id: "trusted-additional-files".into(),
+            slots_per_epoch: SLOTS_PER_EPOCH,
+            wire_profile,
+        };
+        let options = OpenOptions {
+            hash_verification: HashVerification::SizesOnly,
+            ..OpenOptions::default()
+        };
+        let post = ArchiveReader::open_trusted_with_additional_files(
+            fixture.source(),
+            identity(ArchiveV2WireProfile::PostUnknownInstructionFallbacksV1),
+            &[SIGNATURES_FILE, "required-sidecar.bin"],
+            &["absent-optional.bin"],
+            options.clone(),
+        )
+        .unwrap();
+        assert_eq!(
+            post.manifest()
+                .required_file("required-sidecar.bin")
+                .unwrap()
+                .size,
+            3
+        );
+        assert!(post.manifest().file("absent-optional.bin").is_none());
+        let current_metadata =
+            ArchiveReader::open_trusted_with_additional_files_and_metadata_profile(
+                fixture.source(),
+                identity(ArchiveV2WireProfile::PostUnknownInstructionFallbacksV1),
+                &[SIGNATURES_FILE, "required-sidecar.bin"],
+                &["absent-optional.bin"],
+                ArchiveV2MetadataWireProfile::CurrentTypedErrorsV1,
+                options.clone(),
+            )
+            .unwrap();
+        assert_ne!(
+            post.binding().generation_digest,
+            current_metadata.binding().generation_digest
+        );
+        assert_eq!(
+            current_metadata.profiled_binding().metadata_wire_profile,
+            ArchiveV2MetadataWireProfile::CurrentTypedErrorsV1
+        );
+
+        let pre = ArchiveReader::open_trusted_with_additional_files(
+            fixture.source(),
+            identity(ArchiveV2WireProfile::PreUnknownInstructionFallbacksV1),
+            &[SIGNATURES_FILE, "required-sidecar.bin"],
+            &[],
+            options,
+        )
+        .unwrap();
+        assert_ne!(
+            post.binding().generation_digest,
+            pre.binding().generation_digest
+        );
+
+        fs::write(
+            fixture.directory.path().join("required-sidecar.bin"),
+            [1, 2, 3, 4],
+        )
+        .unwrap();
+        let resized = ArchiveReader::open_trusted_with_additional_files(
+            fixture.source(),
+            identity(ArchiveV2WireProfile::PostUnknownInstructionFallbacksV1),
+            &[SIGNATURES_FILE, "required-sidecar.bin"],
+            &[],
+            OpenOptions {
+                hash_verification: HashVerification::SizesOnly,
+                ..OpenOptions::default()
+            },
+        )
+        .unwrap();
+        assert_ne!(
+            post.binding().generation_digest,
+            resized.binding().generation_digest
+        );
+    }
+
+    #[test]
+    fn open_trusted_rejects_a_missing_required_additional_file() {
+        let fixture = Fixture::build();
+        fs::remove_file(fixture.directory.path().join(GENERATION_MANIFEST_FILE)).unwrap();
+        let identity = crate::manifest::TrustedGenerationIdentity {
+            cluster_id: "testnet".into(),
+            epoch: EPOCH,
+            generation_id: "trusted-missing-file".into(),
+            slots_per_epoch: SLOTS_PER_EPOCH,
+            wire_profile: ArchiveV2WireProfile::PostUnknownInstructionFallbacksV1,
+        };
+        let options = OpenOptions {
+            hash_verification: HashVerification::SizesOnly,
+            ..OpenOptions::default()
+        };
+        let error = ArchiveReader::open_trusted_with_additional_files(
+            fixture.source(),
+            identity,
+            &["missing-sidecar.bin"],
+            &[],
+            options,
+        )
+        .unwrap_err();
+        assert!(matches!(error, Error::MissingFile(name) if name == "missing-sidecar.bin"));
+    }
+
+    #[test]
+    fn trusted_profile_cannot_synthesize_a_fixed_metadata_marker_binding() {
+        let fixture = Fixture::build();
+        let error = ArchiveReader::open_trusted_with_additional_files_and_metadata_profile(
+            fixture.source(),
+            crate::manifest::TrustedGenerationIdentity {
+                cluster_id: "testnet".into(),
+                epoch: EPOCH,
+                generation_id: "trusted-no-synthetic-marker".into(),
+                slots_per_epoch: SLOTS_PER_EPOCH,
+                wire_profile: ArchiveV2WireProfile::PostUnknownInstructionFallbacksV1,
+            },
+            &[CURRENT_TYPED_ERRORS_MARKER_FILE],
+            &[],
+            ArchiveV2MetadataWireProfile::CurrentTypedErrorsV1,
+            OpenOptions {
+                hash_verification: HashVerification::SizesOnly,
+                ..OpenOptions::default()
+            },
+        )
+        .unwrap_err();
+        assert!(matches!(error, Error::InvalidManifest(message) if message.contains("synthetic")));
     }
 
     #[derive(wincode::SchemaWrite)]
@@ -2861,6 +5215,1002 @@ mod tests {
     }
 
     #[test]
+    fn ordered_parallel_pipeline_reads_once_and_publishes_row_order() {
+        let fixture = Fixture::build();
+        let source = CountingSource::new(fixture.source());
+        let options = OpenOptions {
+            hash_verification: HashVerification::SizesOnly,
+            ..OpenOptions::default()
+        };
+        let archive = ArchiveReader::open_with_options(source.clone(), options).unwrap();
+        source.clear();
+
+        let completion_barrier = Arc::new(Barrier::new(2));
+        let completed = Arc::new(Mutex::new(Vec::new()));
+        let consumed = Arc::new(Mutex::new(Vec::new()));
+        let project_barrier = Arc::clone(&completion_barrier);
+        let project_completed = Arc::clone(&completed);
+        let ordered_consumed = Arc::clone(&consumed);
+        let stats = archive
+            .process_borrowed_blocks_parallel_ordered(
+                0..2,
+                OrderedParallelBlockConfig {
+                    decode_workers: 2,
+                    discard_rewards: true,
+                    ..OrderedParallelBlockConfig::default()
+                },
+                |_| (),
+                move |_, row_number, block| {
+                    project_barrier.wait();
+                    if row_number == 0 {
+                        std::thread::sleep(Duration::from_millis(20));
+                    }
+                    project_completed.lock().unwrap().push(row_number);
+                    assert!(!block.uses_owned_fallback());
+                    Ok(block.header().slot)
+                },
+                move |row_number, slot| {
+                    ordered_consumed.lock().unwrap().push((row_number, slot));
+                    Ok(())
+                },
+            )
+            .unwrap();
+
+        assert_eq!(*completed.lock().unwrap(), vec![1, 0]);
+        assert_eq!(*consumed.lock().unwrap(), vec![(0, 101), (1, 102)]);
+        assert_eq!(stats.block_count, 2);
+        assert_eq!(stats.borrowed_storage_blocks, 2);
+        assert_eq!(stats.owned_schema_fallback_blocks, 0);
+        assert_eq!(stats.batch_count, 1);
+        assert_eq!(stats.read_call_count, 1);
+        assert_eq!(stats.compressed_bytes, archive.index().blob_file_bytes);
+        assert_eq!(
+            stats.max_compressed_batch_bytes as u64,
+            archive.index().blob_file_bytes
+        );
+        assert_eq!(
+            stats.max_declared_uncompressed_batch_bytes,
+            archive
+                .index()
+                .rows
+                .iter()
+                .map(|row| u64::from(row.uncompressed_len))
+                .sum::<u64>()
+        );
+        assert_eq!(
+            source.reads_for(BLOCKS_FILE),
+            vec![(0, archive.index().blob_file_bytes as usize)]
+        );
+    }
+
+    #[derive(Debug, Default)]
+    struct BatchBarrierTestState {
+        stage_a_pointers: Vec<Option<usize>>,
+        merged_rows: Vec<usize>,
+        finished_batches: Vec<Range<usize>>,
+    }
+
+    #[test]
+    fn batch_barrier_reads_and_decompresses_once_then_reuses_the_same_bytes() {
+        let fixture = Fixture::build();
+        let source = CountingSource::new(fixture.source());
+        let options = OpenOptions {
+            hash_verification: HashVerification::SizesOnly,
+            ..OpenOptions::default()
+        };
+        let archive = ArchiveReader::open_with_options(source.clone(), options).unwrap();
+        source.clear();
+
+        let mut coordinator = BatchBarrierTestState {
+            stage_a_pointers: vec![None; archive.index().rows.len()],
+            ..BatchBarrierTestState::default()
+        };
+        let mut consumed = Vec::new();
+        let stats = archive
+            .process_borrowed_blocks_parallel_batch_barrier(
+                0..2,
+                OrderedParallelBlockConfig {
+                    decode_workers: 2,
+                    discard_rewards: true,
+                    ..OrderedParallelBlockConfig::default()
+                },
+                &mut coordinator,
+                |_| (),
+                |_, row_number, block| {
+                    Ok((
+                        block.header().slot,
+                        block.uncompressed_bytes().as_ptr() as usize,
+                        row_number,
+                    ))
+                },
+                |state, row_number, (slot, pointer, projected_row)| {
+                    assert_eq!(projected_row, row_number);
+                    assert_eq!(slot, 101 + row_number as u64);
+                    state.stage_a_pointers[row_number] = Some(pointer);
+                    state.merged_rows.push(row_number);
+                    Ok(())
+                },
+                |state, rows| {
+                    assert_eq!(state.merged_rows, vec![0, 1]);
+                    state.finished_batches.push(rows);
+                    Ok(())
+                },
+                |_, state, row_number, block| {
+                    assert_eq!(state.merged_rows, vec![0, 1]);
+                    assert_eq!(state.finished_batches, vec![0..2]);
+                    assert_eq!(
+                        state.stage_a_pointers[row_number],
+                        Some(block.uncompressed_bytes().as_ptr() as usize),
+                    );
+                    Ok(block.header().slot)
+                },
+                |_, row_number, slot| {
+                    consumed.push((row_number, slot));
+                    Ok(())
+                },
+            )
+            .unwrap();
+
+        assert_eq!(consumed, vec![(0, 101), (1, 102)]);
+        assert_eq!(coordinator.merged_rows, vec![0, 1]);
+        assert_eq!(coordinator.finished_batches, vec![0..2]);
+        assert_eq!(stats.block_count, 2);
+        assert_eq!(stats.batch_count, 1);
+        assert_eq!(stats.read_call_count, 1);
+        assert_eq!(stats.decompression_count, 2);
+        assert_eq!(stats.stage_a_block_count, 2);
+        assert_eq!(stats.stage_b_block_count, 2);
+        assert_eq!(stats.borrowed_storage_blocks, 2);
+        assert_eq!(stats.owned_schema_fallback_blocks, 0);
+        assert_eq!(
+            stats.decompressed_bytes,
+            archive
+                .index()
+                .rows
+                .iter()
+                .map(|row| u64::from(row.uncompressed_len))
+                .sum::<u64>()
+        );
+        assert_eq!(
+            stats.max_live_decompressed_batch_bytes as u64,
+            stats.decompressed_bytes
+        );
+        assert_eq!(stats.decompressed_buffer_growth_count, 2);
+        assert_eq!(stats.decompressed_buffer_reuse_count, 0);
+        assert!(
+            stats.max_retained_decompressed_capacity_bytes
+                <= OrderedParallelBlockConfig::default().uncompressed_batch_budget_bytes
+        );
+        assert_eq!(
+            source.reads_for(BLOCKS_FILE),
+            vec![(0, archive.index().blob_file_bytes as usize)]
+        );
+    }
+
+    #[derive(Debug, Default)]
+    struct TransactionStateTestCoordinator {
+        phase: u8,
+        merged_rows: Vec<usize>,
+        state_pointers: Vec<Option<usize>>,
+        decompressed_pointers: Vec<Option<usize>>,
+    }
+
+    #[test]
+    fn batch_barrier_transaction_state_keeps_storage_order_and_coordinator_phases() {
+        let fixture = Fixture::build_with_first_storage_tx_indexes([1, 0]);
+        let archive = ArchiveReader::open(fixture.source()).unwrap();
+        let mut coordinator = TransactionStateTestCoordinator {
+            phase: 7,
+            state_pointers: vec![None; 2],
+            decompressed_pointers: vec![None; 2],
+            ..TransactionStateTestCoordinator::default()
+        };
+        let mut consumed = Vec::new();
+
+        let stats = archive
+            .process_borrowed_blocks_parallel_batch_barrier_with_transaction_state(
+                0..2,
+                OrderedParallelBlockConfig {
+                    decode_workers: 2,
+                    discard_rewards: true,
+                    ..OrderedParallelBlockConfig::default()
+                },
+                1024,
+                &mut coordinator,
+                |_| (),
+                |_, state, row_number, block, transaction_state: &mut [u8]| {
+                    assert_eq!(state.phase, 7);
+                    assert!(state.merged_rows.is_empty());
+                    assert_eq!(transaction_state.len(), block.tx_count() as usize);
+                    for (value, located) in transaction_state
+                        .iter_mut()
+                        .zip(block.storage_transaction_rows())
+                    {
+                        *value = u8::try_from(located.row.tx_index).unwrap() + 10;
+                    }
+                    if row_number == 0 {
+                        assert_eq!(transaction_state, [11, 10]);
+                    }
+                    Ok((
+                        transaction_state.as_ptr() as usize,
+                        block.uncompressed_bytes().as_ptr() as usize,
+                    ))
+                },
+                |state, row_number, (state_pointer, decompressed_pointer)| {
+                    state.merged_rows.push(row_number);
+                    state.state_pointers[row_number] = Some(state_pointer);
+                    state.decompressed_pointers[row_number] = Some(decompressed_pointer);
+                    Ok(())
+                },
+                |state, rows| {
+                    assert_eq!(rows, 0..2);
+                    assert_eq!(state.phase, 7);
+                    assert_eq!(state.merged_rows, [0, 1]);
+                    state.phase = 9;
+                    Ok(())
+                },
+                |_, state, row_number, block, transaction_state: &[u8]| {
+                    assert_eq!(state.phase, 9);
+                    assert_eq!(state.merged_rows, [0, 1]);
+                    assert_eq!(
+                        state.state_pointers[row_number],
+                        Some(transaction_state.as_ptr() as usize)
+                    );
+                    assert_eq!(
+                        state.decompressed_pointers[row_number],
+                        Some(block.uncompressed_bytes().as_ptr() as usize)
+                    );
+                    for (value, located) in transaction_state
+                        .iter()
+                        .zip(block.storage_transaction_rows())
+                    {
+                        assert_eq!(*value, u8::try_from(located.row.tx_index).unwrap() + 10);
+                    }
+                    Ok(transaction_state.to_vec())
+                },
+                |_, row_number, transaction_state| {
+                    consumed.push((row_number, transaction_state));
+                    Ok(())
+                },
+            )
+            .unwrap();
+
+        assert_eq!(consumed, [(0, vec![11, 10]), (1, vec![10])]);
+        assert_eq!(stats.max_live_transaction_state_bytes, 3);
+        assert_eq!(stats.transaction_state_buffer_growth_count, 2);
+        assert_eq!(stats.transaction_state_buffer_reuse_count, 0);
+        assert!(stats.max_retained_transaction_state_capacity_bytes >= 3);
+    }
+
+    #[test]
+    fn batch_barrier_transaction_state_buffers_reset_and_reuse_across_batches() {
+        let fixture = Fixture::build();
+        let archive = ArchiveReader::open(fixture.source()).unwrap();
+        let mut coordinator = Vec::new();
+
+        let stats = archive
+            .process_borrowed_blocks_parallel_batch_barrier_with_transaction_state(
+                0..2,
+                OrderedParallelBlockConfig {
+                    max_blocks_per_batch: 1,
+                    decode_workers: 1,
+                    discard_rewards: true,
+                    ..OrderedParallelBlockConfig::default()
+                },
+                1024,
+                &mut coordinator,
+                |_| (),
+                |_, _, row_number, _, transaction_state: &mut [u8]| {
+                    assert!(transaction_state.iter().all(|value| *value == 0));
+                    transaction_state.fill(u8::try_from(row_number).unwrap() + 1);
+                    Ok(transaction_state.as_ptr() as usize)
+                },
+                |state, _, pointer| {
+                    state.push(pointer);
+                    Ok(())
+                },
+                |_, _| Ok(()),
+                |_, state, row_number, _, transaction_state: &[u8]| {
+                    assert_eq!(state[row_number], transaction_state.as_ptr() as usize);
+                    assert!(
+                        transaction_state
+                            .iter()
+                            .all(|value| *value == u8::try_from(row_number).unwrap() + 1)
+                    );
+                    Ok(())
+                },
+                |_, _, ()| Ok(()),
+            )
+            .unwrap();
+
+        assert_eq!(coordinator.len(), 2);
+        assert_eq!(coordinator[0], coordinator[1]);
+        assert_eq!(stats.batch_count, 2);
+        assert_eq!(stats.transaction_state_buffer_growth_count, 1);
+        assert_eq!(stats.transaction_state_buffer_reuse_count, 1);
+        assert_eq!(stats.max_live_transaction_state_bytes, 2);
+        assert!(stats.max_retained_transaction_state_capacity_bytes >= 2);
+    }
+
+    #[test]
+    fn batch_barrier_transaction_state_prefix_is_checked_and_budgeted() {
+        let fixture = Fixture::build();
+        let archive = ArchiveReader::open(fixture.source()).unwrap();
+        let rows = &archive.index().rows;
+        let mut offsets = Vec::new();
+
+        assert_eq!(
+            prepare_batch_transaction_state_offsets(rows, &mut offsets, 1, 3).unwrap(),
+            (3, 3)
+        );
+        assert_eq!(offsets, [0, 2, 3]);
+        let valid_offsets = offsets.clone();
+
+        let budget_error =
+            prepare_batch_transaction_state_offsets(rows, &mut offsets, 1, 2).unwrap_err();
+        assert!(matches!(budget_error, Error::InvalidManifest(_)));
+        assert_eq!(offsets, valid_offsets);
+
+        let overflow =
+            prepare_batch_transaction_state_offsets(rows, &mut offsets, usize::MAX, usize::MAX)
+                .unwrap_err();
+        assert!(matches!(overflow, Error::Overflow(_)));
+        assert_eq!(offsets, valid_offsets);
+    }
+
+    #[test]
+    fn batch_barrier_transaction_state_budget_error_suppresses_both_stages() {
+        let fixture = Fixture::build();
+        let archive = ArchiveReader::open(fixture.source()).unwrap();
+        let mut coordinator = Vec::<usize>::new();
+
+        let error = archive
+            .process_borrowed_blocks_parallel_batch_barrier_with_transaction_state(
+                0..2,
+                OrderedParallelBlockConfig {
+                    decode_workers: 2,
+                    ..OrderedParallelBlockConfig::default()
+                },
+                2,
+                &mut coordinator,
+                |_| (),
+                |_, _, _, _, _: &mut [u8]| -> Result<()> {
+                    panic!("a transaction-state budget error ran stage A")
+                },
+                |_, _, ()| panic!("a transaction-state budget error merged stage A"),
+                |_, _| panic!("a transaction-state budget error finalized stage A"),
+                |_, _, _, _, _: &[u8]| -> Result<()> {
+                    panic!("a transaction-state budget error ran stage B")
+                },
+                |_, _, ()| panic!("a transaction-state budget error consumed stage B"),
+            )
+            .unwrap_err();
+
+        assert!(matches!(error, Error::InvalidManifest(_)));
+        assert!(error.to_string().contains("exceeding its 2-byte budget"));
+        assert!(coordinator.is_empty());
+    }
+
+    #[test]
+    fn batch_barrier_reuses_decompressed_row_slots_across_batches() {
+        let fixture = Fixture::build();
+        let source = CountingSource::new(fixture.source());
+        let options = OpenOptions {
+            hash_verification: HashVerification::SizesOnly,
+            ..OpenOptions::default()
+        };
+        let archive = ArchiveReader::open_with_options(source.clone(), options).unwrap();
+        source.clear();
+        let mut coordinator = Vec::new();
+
+        let stats = archive
+            .process_borrowed_blocks_parallel_batch_barrier(
+                0..2,
+                OrderedParallelBlockConfig {
+                    max_blocks_per_batch: 1,
+                    decode_workers: 1,
+                    discard_rewards: true,
+                    ..OrderedParallelBlockConfig::default()
+                },
+                &mut coordinator,
+                |_| (),
+                |_, row_number, block| {
+                    Ok((row_number, block.uncompressed_bytes().as_ptr() as usize))
+                },
+                |state, row_number, output| {
+                    assert_eq!(output.0, row_number);
+                    state.push(output.1);
+                    Ok(())
+                },
+                |_, _| Ok(()),
+                |_, state, row_number, block| {
+                    assert_eq!(
+                        state[row_number],
+                        block.uncompressed_bytes().as_ptr() as usize
+                    );
+                    Ok(())
+                },
+                |_, _, ()| Ok(()),
+            )
+            .unwrap();
+
+        assert_eq!(stats.batch_count, 2);
+        assert_eq!(stats.read_call_count, 2);
+        assert_eq!(stats.decompression_count, 2);
+        assert_eq!(
+            stats
+                .decompressed_buffer_growth_count
+                .checked_add(stats.decompressed_buffer_reuse_count),
+            Some(2)
+        );
+        assert!(stats.decompressed_buffer_reuse_count >= 1);
+        assert_eq!(source.reads_for(BLOCKS_FILE).len(), 2);
+    }
+
+    #[test]
+    fn batch_barrier_stage_a_error_merges_nothing_and_skips_stage_b() {
+        use std::sync::atomic::{AtomicUsize, Ordering};
+
+        let fixture = Fixture::build();
+        let archive = ArchiveReader::open(fixture.source()).unwrap();
+        let completion_barrier = Arc::new(Barrier::new(2));
+        let projected = Arc::new(AtomicUsize::new(0));
+        let stage_b_visits = Arc::new(AtomicUsize::new(0));
+        let project_barrier = Arc::clone(&completion_barrier);
+        let projected_count = Arc::clone(&projected);
+        let stage_b_count = Arc::clone(&stage_b_visits);
+        let mut coordinator = Vec::new();
+
+        let error = archive
+            .process_borrowed_blocks_parallel_batch_barrier(
+                0..2,
+                OrderedParallelBlockConfig {
+                    decode_workers: 2,
+                    ..OrderedParallelBlockConfig::default()
+                },
+                &mut coordinator,
+                |_| (),
+                move |_, row_number, _| -> Result<()> {
+                    project_barrier.wait();
+                    projected_count.fetch_add(1, Ordering::SeqCst);
+                    if row_number == 0 {
+                        std::thread::sleep(Duration::from_millis(20));
+                    }
+                    Err(Error::InvalidBlock {
+                        slot: 101 + row_number as u64,
+                        message: format!("stage A row {row_number} failed"),
+                    })
+                },
+                |state, row_number, ()| {
+                    state.push(row_number);
+                    Ok(())
+                },
+                |_, _| panic!("a failed stage-A batch was finalized"),
+                move |_, _, _, _| -> Result<()> {
+                    stage_b_count.fetch_add(1, Ordering::SeqCst);
+                    Ok(())
+                },
+                |_, _, ()| panic!("a failed stage-A batch published stage B"),
+            )
+            .unwrap_err();
+
+        assert!(matches!(error, Error::InvalidBlock { slot: 101, .. }));
+        assert!(error.to_string().contains("stage A row 0 failed"));
+        assert_eq!(projected.load(Ordering::SeqCst), 2);
+        assert_eq!(stage_b_visits.load(Ordering::SeqCst), 0);
+        assert!(coordinator.is_empty());
+    }
+
+    #[test]
+    fn batch_barrier_stage_b_error_runs_no_ordered_stage_b_consumers() {
+        let fixture = Fixture::build();
+        let archive = ArchiveReader::open(fixture.source()).unwrap();
+        let completion_barrier = Arc::new(Barrier::new(2));
+        let stage_b_barrier = Arc::clone(&completion_barrier);
+        let consumed = Arc::new(Mutex::new(Vec::new()));
+        let ordered_consumed = Arc::clone(&consumed);
+        let mut coordinator = Vec::new();
+
+        let error = archive
+            .process_borrowed_blocks_parallel_batch_barrier(
+                0..2,
+                OrderedParallelBlockConfig {
+                    decode_workers: 2,
+                    ..OrderedParallelBlockConfig::default()
+                },
+                &mut coordinator,
+                |_| (),
+                |_, row_number, _| Ok(row_number),
+                |state, _, row_number| {
+                    state.push(row_number);
+                    Ok(())
+                },
+                |_, _| Ok(()),
+                move |_, _, row_number, _| -> Result<()> {
+                    stage_b_barrier.wait();
+                    if row_number == 0 {
+                        std::thread::sleep(Duration::from_millis(20));
+                    }
+                    Err(Error::InvalidBlock {
+                        slot: 101 + row_number as u64,
+                        message: format!("stage B row {row_number} failed"),
+                    })
+                },
+                move |_, row_number, ()| {
+                    ordered_consumed.lock().unwrap().push(row_number);
+                    Ok(())
+                },
+            )
+            .unwrap_err();
+
+        assert!(matches!(error, Error::InvalidBlock { slot: 101, .. }));
+        assert!(error.to_string().contains("stage B row 0 failed"));
+        assert!(consumed.lock().unwrap().is_empty());
+    }
+
+    #[test]
+    fn batch_barrier_recycling_preserves_normal_storage_across_an_oversized_frame() {
+        let normal = Vec::<u8>::with_capacity(4096);
+        let normal_pointer = normal.as_ptr();
+        let normal_capacity = normal.capacity();
+        let oversized_bytes = normal_capacity.checked_add(1).unwrap();
+        let mut buffer = BatchBarrierDecodedBuffer {
+            bytes: normal,
+            retained_buffer: None,
+        };
+
+        assert!(!buffer.prepare(oversized_bytes, normal_capacity));
+        assert_eq!(
+            buffer.retained_buffer.as_ref().map(Vec::as_ptr),
+            Some(normal_pointer)
+        );
+        buffer.bytes.resize(oversized_bytes, 7);
+        let retained =
+            recycle_batch_barrier_buffers(std::slice::from_mut(&mut buffer), normal_capacity);
+
+        assert!(buffer.retained_buffer.is_none());
+        assert!(buffer.bytes.is_empty());
+        assert_eq!(buffer.bytes.capacity(), normal_capacity);
+        assert_eq!(buffer.bytes.as_ptr(), normal_pointer);
+        assert_eq!(retained, normal_capacity);
+    }
+
+    #[test]
+    fn ordered_compressed_buffers_keep_the_normal_allocation_across_an_oversized_frame() {
+        let normal = Vec::<u8>::with_capacity(4096);
+        let normal_pointer = normal.as_ptr();
+        let normal_capacity = normal.capacity();
+        let oversized_bytes = normal_capacity.checked_add(1).unwrap();
+        let (mut oversized, retained) =
+            ordered_compressed_read_buffer(normal, oversized_bytes, normal_capacity);
+        assert_eq!(oversized.capacity(), 0);
+        oversized.resize(oversized_bytes, 7);
+        let recycled = recycle_ordered_compressed_buffer(OrderedReadyBatch {
+            plan: OrderedParallelBatchPlan {
+                row_start: 0,
+                row_end: 1,
+                compressed_offset: 0,
+                compressed_len: oversized_bytes,
+                declared_uncompressed_bytes: oversized_bytes as u64,
+            },
+            bytes: oversized,
+            retained_buffer: retained,
+        });
+        assert!(recycled.is_empty());
+        assert_eq!(recycled.capacity(), normal_capacity);
+        assert_eq!(recycled.as_ptr(), normal_pointer);
+
+        let (mut normal_read, retained) =
+            ordered_compressed_read_buffer(recycled, 2048, normal_capacity);
+        assert!(retained.is_none());
+        normal_read.resize(2048, 9);
+        let recycled = recycle_ordered_compressed_buffer(OrderedReadyBatch {
+            plan: OrderedParallelBatchPlan {
+                row_start: 0,
+                row_end: 1,
+                compressed_offset: 0,
+                compressed_len: 2048,
+                declared_uncompressed_bytes: 2048,
+            },
+            bytes: normal_read,
+            retained_buffer: None,
+        });
+        assert!(recycled.is_empty());
+        assert_eq!(recycled.capacity(), normal_capacity);
+        assert_eq!(recycled.as_ptr(), normal_pointer);
+    }
+
+    #[test]
+    fn ordered_worker_reuses_normal_decompression_storage_and_preserves_it_on_oversize() {
+        let fixture = Fixture::build();
+        let archive = ArchiveReader::open(fixture.source()).unwrap();
+        let row = archive.index().rows[0];
+        let compressed = archive
+            .source
+            .read_range(
+                BLOCKS_FILE,
+                row.compressed_offset,
+                row.compressed_len as usize,
+            )
+            .unwrap();
+        let expected = row.uncompressed_len as usize;
+        let decompressed = Vec::with_capacity(expected);
+        let retained = decompressed.capacity();
+        let mut worker = OrderedParallelWorker {
+            decompressor: None,
+            decompressed,
+            caller: (),
+        };
+        let retained_pointer = worker.decompressed.as_ptr();
+        worker
+            .decode_and_project(
+                &archive,
+                row,
+                &compressed,
+                0,
+                true,
+                retained,
+                &|_, _, block| Ok(block.tx_count()),
+            )
+            .unwrap();
+        assert!(worker.decompressed.is_empty());
+        assert_eq!(worker.decompressed.as_ptr(), retained_pointer);
+        assert_eq!(worker.decompressed.capacity(), retained);
+
+        let mut worker = OrderedParallelWorker {
+            decompressor: None,
+            decompressed: Vec::with_capacity(128),
+            caller: (),
+        };
+        let normal_pointer = worker.decompressed.as_ptr();
+        worker
+            .decode_and_project(&archive, row, &compressed, 0, true, 128, &|_, _, block| {
+                Ok(block.tx_count())
+            })
+            .unwrap();
+        assert!(worker.decompressed.is_empty());
+        assert_eq!(worker.decompressed.capacity(), 128);
+        assert_eq!(worker.decompressed.as_ptr(), normal_pointer);
+    }
+
+    #[test]
+    fn ordered_parallel_empty_range_does_not_start_workers_or_read_blocks() {
+        let fixture = Fixture::build();
+        let source = CountingSource::new(fixture.source());
+        let options = OpenOptions {
+            hash_verification: HashVerification::SizesOnly,
+            ..OpenOptions::default()
+        };
+        let archive = ArchiveReader::open_with_options(source.clone(), options).unwrap();
+        source.clear();
+        let mut worker_states_created = 0usize;
+
+        let stats = archive
+            .process_borrowed_blocks_parallel_ordered(
+                1..1,
+                OrderedParallelBlockConfig::default(),
+                |_| {
+                    worker_states_created += 1;
+                },
+                |_, _, _| -> Result<()> { panic!("empty range ran a projection") },
+                |_, ()| -> Result<()> { panic!("empty range published a result") },
+            )
+            .unwrap();
+
+        assert_eq!(worker_states_created, 0);
+        assert_eq!(stats, OrderedParallelBlockStats::default());
+        assert!(source.reads_for(BLOCKS_FILE).is_empty());
+    }
+
+    #[test]
+    fn ordered_parallel_pipeline_splits_only_on_frame_boundaries() {
+        let fixture = Fixture::build();
+        let source = CountingSource::new(fixture.source());
+        let options = OpenOptions {
+            hash_verification: HashVerification::SizesOnly,
+            ..OpenOptions::default()
+        };
+        let archive = ArchiveReader::open_with_options(source.clone(), options).unwrap();
+        source.clear();
+        let first = archive.index().rows[0];
+        let second = archive.index().rows[1];
+        let mut slots = Vec::new();
+        let stats = archive
+            .process_borrowed_blocks_parallel_ordered(
+                0..2,
+                OrderedParallelBlockConfig {
+                    compressed_batch_target_bytes: first.compressed_len as usize,
+                    uncompressed_batch_budget_bytes: MAX_ORDERED_PARALLEL_UNCOMPRESSED_BATCH_BYTES,
+                    compressed_buffer_count: 2,
+                    decode_workers: 1,
+                    ..OrderedParallelBlockConfig::default()
+                },
+                |_| (),
+                |_, _, block| Ok(block.header().slot),
+                |_, slot| {
+                    slots.push(slot);
+                    Ok(())
+                },
+            )
+            .unwrap();
+
+        assert_eq!(slots, vec![101, 102]);
+        assert_eq!(stats.batch_count, 2);
+        assert_eq!(stats.read_call_count, 2);
+        assert_eq!(
+            source.reads_for(BLOCKS_FILE),
+            vec![
+                (first.compressed_offset, first.compressed_len as usize),
+                (second.compressed_offset, second.compressed_len as usize),
+            ]
+        );
+    }
+
+    #[test]
+    fn ordered_parallel_uncompressed_budget_splits_and_admits_one_oversized_frame() {
+        let fixture = Fixture::build();
+        let source = CountingSource::new(fixture.source());
+        let options = OpenOptions {
+            hash_verification: HashVerification::SizesOnly,
+            ..OpenOptions::default()
+        };
+        let archive = ArchiveReader::open_with_options(source.clone(), options).unwrap();
+        source.clear();
+        let rows = &archive.index().rows;
+        let mut slots = Vec::new();
+
+        let stats = archive
+            .process_borrowed_blocks_parallel_ordered(
+                0..rows.len(),
+                OrderedParallelBlockConfig {
+                    compressed_batch_target_bytes: archive.index().blob_file_bytes as usize,
+                    uncompressed_batch_budget_bytes: 1,
+                    compressed_buffer_count: 2,
+                    decode_workers: 2,
+                    ..OrderedParallelBlockConfig::default()
+                },
+                |_| (),
+                |_, _, block| Ok(block.header().slot),
+                |_, slot| {
+                    slots.push(slot);
+                    Ok(())
+                },
+            )
+            .unwrap();
+
+        assert_eq!(slots, vec![101, 102]);
+        assert_eq!(stats.batch_count, 2);
+        assert_eq!(stats.read_call_count, 2);
+        assert!(stats.max_declared_uncompressed_batch_bytes > 1);
+        assert_eq!(
+            source.reads_for(BLOCKS_FILE),
+            rows.iter()
+                .map(|row| (row.compressed_offset, row.compressed_len as usize))
+                .collect::<Vec<_>>()
+        );
+    }
+
+    #[test]
+    fn ordered_parallel_block_bound_splits_before_projection_results_can_accumulate() {
+        let fixture = Fixture::build();
+        let source = CountingSource::new(fixture.source());
+        let options = OpenOptions {
+            hash_verification: HashVerification::SizesOnly,
+            ..OpenOptions::default()
+        };
+        let archive = ArchiveReader::open_with_options(source.clone(), options).unwrap();
+        source.clear();
+        let mut slots = Vec::new();
+
+        let stats = archive
+            .process_borrowed_blocks_parallel_ordered(
+                0..archive.index().rows.len(),
+                OrderedParallelBlockConfig {
+                    compressed_batch_target_bytes: usize::MAX,
+                    uncompressed_batch_budget_bytes: MAX_ORDERED_PARALLEL_UNCOMPRESSED_BATCH_BYTES,
+                    max_blocks_per_batch: 1,
+                    compressed_buffer_count: 2,
+                    decode_workers: 2,
+                    ..OrderedParallelBlockConfig::default()
+                },
+                |_| (),
+                |_, _, block| Ok(block.header().slot),
+                |_, slot| {
+                    slots.push(slot);
+                    Ok(())
+                },
+            )
+            .unwrap();
+
+        assert_eq!(slots, vec![101, 102]);
+        assert_eq!(stats.batch_count, 2);
+        assert_eq!(stats.read_call_count, 2);
+    }
+
+    #[test]
+    fn ordered_parallel_pipeline_selects_the_first_row_error() {
+        let fixture = Fixture::build();
+        let archive = ArchiveReader::open(fixture.source()).unwrap();
+        let completion_barrier = Arc::new(Barrier::new(2));
+        let project_barrier = Arc::clone(&completion_barrier);
+        let consumed = Arc::new(Mutex::new(Vec::new()));
+        let ordered_consumed = Arc::clone(&consumed);
+        let error = archive
+            .process_borrowed_blocks_parallel_ordered(
+                0..2,
+                OrderedParallelBlockConfig {
+                    decode_workers: 2,
+                    ..OrderedParallelBlockConfig::default()
+                },
+                |_| (),
+                move |_, row_number, _| -> Result<()> {
+                    project_barrier.wait();
+                    if row_number == 0 {
+                        std::thread::sleep(Duration::from_millis(20));
+                    }
+                    Err(Error::InvalidBlock {
+                        slot: 101 + row_number as u64,
+                        message: format!("row {row_number} failed"),
+                    })
+                },
+                move |row_number, ()| {
+                    ordered_consumed.lock().unwrap().push(row_number);
+                    Ok(())
+                },
+            )
+            .unwrap_err();
+
+        assert!(matches!(error, Error::InvalidBlock { slot: 101, .. }));
+        assert!(error.to_string().contains("row 0 failed"));
+        assert!(consumed.lock().unwrap().is_empty());
+    }
+
+    #[test]
+    fn ordered_parallel_early_error_releases_the_producer() {
+        let fixture = Fixture::build();
+        let source = CountingSource::new(fixture.source());
+        let options = OpenOptions {
+            hash_verification: HashVerification::SizesOnly,
+            ..OpenOptions::default()
+        };
+        let archive = ArchiveReader::open_with_options(source, options).unwrap();
+        let first_frame_bytes = archive.index().rows[0].compressed_len as usize;
+        let error = archive
+            .process_borrowed_blocks_parallel_ordered(
+                0..2,
+                OrderedParallelBlockConfig {
+                    compressed_batch_target_bytes: first_frame_bytes,
+                    compressed_buffer_count: 1,
+                    decode_workers: 1,
+                    ..OrderedParallelBlockConfig::default()
+                },
+                |_| (),
+                |_, row_number, _| -> Result<()> {
+                    Err(Error::InvalidBlock {
+                        slot: 101 + row_number as u64,
+                        message: "stop after the first ordered block".into(),
+                    })
+                },
+                |_, ()| Ok(()),
+            )
+            .unwrap_err();
+        assert!(matches!(error, Error::InvalidBlock { slot: 101, .. }));
+    }
+
+    #[test]
+    fn ordered_parallel_consume_error_releases_the_producer() {
+        let fixture = Fixture::build();
+        let archive = ArchiveReader::open(fixture.source()).unwrap();
+        let first_frame_bytes = archive.index().rows[0].compressed_len as usize;
+
+        let error = archive
+            .process_borrowed_blocks_parallel_ordered(
+                0..2,
+                OrderedParallelBlockConfig {
+                    compressed_batch_target_bytes: first_frame_bytes,
+                    compressed_buffer_count: 1,
+                    decode_workers: 1,
+                    ..OrderedParallelBlockConfig::default()
+                },
+                |_| (),
+                |_, _, block| Ok(block.header().slot),
+                |row_number, _| {
+                    Err(Error::WireProfileAudit(format!(
+                        "stop while consuming row {row_number}"
+                    )))
+                },
+            )
+            .unwrap_err();
+
+        assert!(matches!(error, Error::WireProfileAudit(_)));
+        assert!(error.to_string().contains("consuming row 0"));
+    }
+
+    #[test]
+    fn ordered_parallel_source_error_releases_the_coordinator() {
+        let fixture = Fixture::build();
+        let source = FailingBlocksSource {
+            inner: fixture.source(),
+        };
+        let options = OpenOptions {
+            hash_verification: HashVerification::SizesOnly,
+            ..OpenOptions::default()
+        };
+        let archive = ArchiveReader::open_with_options(source, options).unwrap();
+
+        let error = archive
+            .process_borrowed_blocks_parallel_ordered(
+                0..2,
+                OrderedParallelBlockConfig {
+                    compressed_buffer_count: 1,
+                    decode_workers: 1,
+                    ..OrderedParallelBlockConfig::default()
+                },
+                |_| (),
+                |_, _, _| -> Result<()> { panic!("failed source ran a projection") },
+                |_, ()| -> Result<()> { panic!("failed source published a result") },
+            )
+            .unwrap_err();
+
+        assert!(matches!(error, Error::Source(SourceError::Protocol(_))));
+        assert!(
+            error
+                .to_string()
+                .contains("injected ordered block read failure")
+        );
+    }
+
+    #[test]
+    fn ordered_parallel_config_rejects_excessive_resources() {
+        let invalid = [
+            OrderedParallelBlockConfig {
+                decode_workers: MAX_ORDERED_PARALLEL_DECODE_WORKERS + 1,
+                ..OrderedParallelBlockConfig::default()
+            },
+            OrderedParallelBlockConfig {
+                compressed_buffer_count: MAX_ORDERED_PARALLEL_COMPRESSED_BUFFERS + 1,
+                ..OrderedParallelBlockConfig::default()
+            },
+            OrderedParallelBlockConfig {
+                uncompressed_batch_budget_bytes: MAX_ORDERED_PARALLEL_UNCOMPRESSED_BATCH_BYTES + 1,
+                ..OrderedParallelBlockConfig::default()
+            },
+            OrderedParallelBlockConfig {
+                max_blocks_per_batch: MAX_ORDERED_PARALLEL_BLOCKS_PER_BATCH + 1,
+                ..OrderedParallelBlockConfig::default()
+            },
+            OrderedParallelBlockConfig {
+                decode_workers: MAX_ORDERED_PARALLEL_DECODE_WORKERS,
+                retained_decompressed_bytes_per_worker:
+                    MAX_ORDERED_PARALLEL_RETAINED_DECOMPRESSED_BYTES
+                        / MAX_ORDERED_PARALLEL_DECODE_WORKERS
+                        + 1,
+                ..OrderedParallelBlockConfig::default()
+            },
+        ];
+        for config in invalid {
+            assert!(matches!(
+                validate_ordered_parallel_config(config),
+                Err(Error::InvalidManifest(_))
+            ));
+        }
+
+        assert!(
+            validate_ordered_parallel_config(OrderedParallelBlockConfig {
+                decode_workers: MAX_ORDERED_PARALLEL_DECODE_WORKERS,
+                compressed_buffer_count: MAX_ORDERED_PARALLEL_COMPRESSED_BUFFERS,
+                uncompressed_batch_budget_bytes: MAX_ORDERED_PARALLEL_UNCOMPRESSED_BATCH_BYTES,
+                max_blocks_per_batch: MAX_ORDERED_PARALLEL_BLOCKS_PER_BATCH,
+                retained_decompressed_bytes_per_worker:
+                    MAX_ORDERED_PARALLEL_RETAINED_DECOMPRESSED_BYTES
+                        / MAX_ORDERED_PARALLEL_DECODE_WORKERS,
+                ..OrderedParallelBlockConfig::default()
+            })
+            .is_ok()
+        );
+    }
+
+    #[test]
     fn lending_stream_matches_owned_blocks_and_coalesces_the_same_range() {
         let fixture = Fixture::build();
         let source = CountingSource::new(fixture.source());
@@ -2993,6 +6343,26 @@ mod tests {
                 .collect::<Vec<_>>(),
             vec![1, 0],
         );
+        let (storage_rows, allocations) =
+            crate::test_allocations::count_current_thread_allocations(|| {
+                let mut rows = borrowed.storage_transaction_rows();
+                assert_eq!(rows.len(), 2);
+                let first = rows.next().unwrap();
+                let second = rows.next().unwrap();
+                assert!(rows.next().is_none());
+                [first, second]
+            });
+        assert_eq!(allocations, 0);
+        assert_eq!(
+            storage_rows.map(|location| {
+                (
+                    location.row.tx_index,
+                    location.storage_position,
+                    location.first_signature_offset,
+                )
+            }),
+            [(1, 0, 0), (0, 1, 2)],
+        );
         let borrowed_order = borrowed.transaction_row_order();
         assert!(!borrowed_order.storage_order_is_canonical());
         assert_eq!(borrowed_order.len(), 2);
@@ -3045,6 +6415,37 @@ mod tests {
                 .read_transaction_signatures(scanned.transactions[1].signatures)
                 .unwrap(),
             vec![[7u8; 64], [70u8; 64]],
+        );
+    }
+
+    #[test]
+    fn canonical_storage_transaction_rows_stream_without_allocating() {
+        let fixture = Fixture::build();
+        let archive = ArchiveReader::open(fixture.source()).unwrap();
+        let mut blocks = archive.borrowed_blocks_without_rewards_range(0..1).unwrap();
+        let block = blocks.next_block().unwrap().unwrap();
+        assert!(!block.uses_owned_fallback());
+
+        let (locations, allocations) =
+            crate::test_allocations::count_current_thread_allocations(|| {
+                let mut rows = block.storage_transaction_rows();
+                assert_eq!(rows.len(), 2);
+                let first = rows.next().unwrap();
+                let second = rows.next().unwrap();
+                assert!(rows.next().is_none());
+                [first, second]
+            });
+
+        assert_eq!(allocations, 0);
+        assert_eq!(
+            locations.map(|location| {
+                (
+                    location.row.tx_index,
+                    location.storage_position,
+                    location.first_signature_offset,
+                )
+            }),
+            [(0, 0, 0), (1, 1, 2)],
         );
     }
 
@@ -3145,6 +6546,33 @@ mod tests {
             assert_eq!(decoded.header().slot, 777);
             assert_eq!(decoded.tx_rows_len(), 0);
         }
+
+        let compressed = zstd::bulk::compress(&bytes, 3).unwrap();
+        let mut compressed_row = row;
+        compressed_row.compressed_len = compressed.len() as u32;
+        let mut worker = OrderedParallelWorker {
+            decompressor: None,
+            decompressed: Vec::new(),
+            caller: (),
+        };
+        let projected = worker
+            .decode_and_project(
+                &archive,
+                compressed_row,
+                &compressed,
+                9,
+                true,
+                0,
+                &|_, row_number, decoded| {
+                    assert_eq!(row_number, 9);
+                    assert_eq!(decoded.header().slot, 777);
+                    Ok(decoded.uses_owned_fallback())
+                },
+            )
+            .unwrap();
+        assert!(projected.output);
+        assert!(projected.used_owned_schema_fallback);
+        assert_eq!(worker.decompressed.capacity(), 0);
     }
 
     #[test]
@@ -3205,6 +6633,11 @@ mod tests {
         assert!(!source.reads_for(REGISTRY_FILE).is_empty());
         assert!(!source.reads_for(BLOCK_INDEX_FILE).is_empty());
         assert!(!source.reads_for(META_FILE).is_empty());
+        assert!(
+            !source
+                .reads_for(CURRENT_TYPED_ERRORS_MARKER_FILE)
+                .is_empty()
+        );
     }
 
     #[test]
@@ -3254,6 +6687,45 @@ mod tests {
                 &mut decompressor,
                 &mut decompressed,
                 false,
+            )
+            .unwrap_err();
+        assert!(error.to_string().contains("first zstd frame"));
+    }
+
+    #[test]
+    fn ordered_parallel_pipeline_rejects_a_concatenated_frame() {
+        let fixture = Fixture::build();
+        let mut archive = ArchiveReader::open(fixture.source()).unwrap();
+        let mut blocks = fs::read(fixture.directory.path().join(BLOCKS_FILE)).unwrap();
+        let first_frame_end = archive.index.rows[0].compressed_len as usize;
+        let extra = zstd::bulk::compress(b"second-frame", 3).unwrap();
+        blocks.splice(first_frame_end..first_frame_end, extra.iter().copied());
+        fs::write(fixture.directory.path().join(BLOCKS_FILE), blocks).unwrap();
+
+        archive.index.rows[0].compressed_len = archive.index.rows[0]
+            .compressed_len
+            .checked_add(extra.len() as u32)
+            .unwrap();
+        archive.index.rows[1].compressed_offset = archive.index.rows[1]
+            .compressed_offset
+            .checked_add(extra.len() as u64)
+            .unwrap();
+        archive.index.blob_file_bytes = archive
+            .index
+            .blob_file_bytes
+            .checked_add(extra.len() as u64)
+            .unwrap();
+
+        let error = archive
+            .process_borrowed_blocks_parallel_ordered(
+                0..2,
+                OrderedParallelBlockConfig {
+                    decode_workers: 2,
+                    ..OrderedParallelBlockConfig::default()
+                },
+                |_| (),
+                |_, _, _| Ok(()),
+                |_, ()| Ok(()),
             )
             .unwrap_err();
         assert!(error.to_string().contains("first zstd frame"));
@@ -3489,7 +6961,13 @@ mod tests {
         };
 
         assert!(matches!(
-            metadata_state(&block, &row, 101, true),
+            metadata_state(
+                &block,
+                &row,
+                101,
+                true,
+                ArchiveV2MetadataWireProfile::CurrentTypedErrorsV1,
+            ),
             Err(Error::InvalidBlock { slot: 101, message })
                 if message.contains("decode metadata for tx 3")
         ));
@@ -3662,6 +7140,13 @@ mod tests {
         )
         .unwrap();
         files.push(marker);
+        let metadata_marker = crate::metadata_wire_profile::current_typed_errors_marker();
+        fs::write(
+            root.join(&metadata_marker.name),
+            crate::CURRENT_TYPED_ERRORS_MARKER_BYTES,
+        )
+        .unwrap();
+        files.push(metadata_marker);
         let mut manifest = GenerationManifest {
             schema_version: 1,
             cluster_id: "testnet".into(),

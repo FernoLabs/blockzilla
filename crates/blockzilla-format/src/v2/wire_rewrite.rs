@@ -175,6 +175,11 @@ impl Default for ArchiveV2WireRewriteLimits {
 pub struct ArchiveV2WireRewriteStats {
     pub input_bytes: usize,
     pub output_bytes: usize,
+    /// Counts of decoded source instruction-data tags `0..=8`.
+    ///
+    /// For a Pre-to-Post transcode, only entries `0..=6` can be nonzero. These are the
+    /// historical source tags, before the transcoder maps tags `1..=6` to `3..=8`.
+    pub source_instruction_data_tag_counts: [u64; 9],
     pub eligible_pubkey_references: usize,
     pub excluded_pubkey_references: usize,
     pub recent_blockhash_ids: usize,
@@ -351,7 +356,7 @@ pub fn rewrite_archive_v2_hot_message_wire<V: ArchiveV2WireRewriteVisitor>(
     visitor: &mut V,
     limits: ArchiveV2WireRewriteLimits,
 ) -> ArchiveV2WireRewriteResult<ArchiveV2WireRewriteStats> {
-    transform_transactionally::<_, false>(input, output, visitor, limits, WireValue::Message)
+    transform_transactionally::<_, false, false>(input, output, visitor, limits, WireValue::Message)
 }
 
 /// Transform one historical, pre-unknown-fallback `ArchiveV2HotMessagePayload` wire value.
@@ -365,7 +370,27 @@ pub fn rewrite_archive_v2_hot_message_wire_pre_unknown_fallbacks<V: ArchiveV2Wir
     visitor: &mut V,
     limits: ArchiveV2WireRewriteLimits,
 ) -> ArchiveV2WireRewriteResult<ArchiveV2WireRewriteStats> {
-    transform_transactionally::<_, true>(input, output, visitor, limits, WireValue::Message)
+    transform_transactionally::<_, true, false>(input, output, visitor, limits, WireValue::Message)
+}
+
+/// Transcode one historical, pre-unknown-fallback message to the canonical current wire grammar.
+///
+/// The source grammar is exact and authoritative: this function never probes or retries the
+/// current grammar. It maps historical instruction-data tags `0..=6` to canonical tags
+/// `0, 3..=8` while streaming each payload through the same bounded field decoder used by the
+/// wire rewriter. Unknown tags, malformed fields, trailing input, and limit violations fail the
+/// complete transaction and restore both `output` and `visitor` to their checkpoints.
+///
+/// Profile admission belongs at the generation boundary. Callers must use this function only for
+/// a generation that was independently admitted as
+/// `PreUnknownInstructionFallbacksV1`; it is not a message-level profile detector.
+pub fn transcode_archive_v2_hot_message_wire_pre_to_post<V: ArchiveV2WireRewriteVisitor>(
+    input: &[u8],
+    output: &mut Vec<u8>,
+    visitor: &mut V,
+    limits: ArchiveV2WireRewriteLimits,
+) -> ArchiveV2WireRewriteResult<ArchiveV2WireRewriteStats> {
+    transform_transactionally::<_, true, true>(input, output, visitor, limits, WireValue::Message)
 }
 
 /// Transform one successful (`err=None`) current-schema `CompactMetaV1` wire value.
@@ -378,7 +403,7 @@ pub fn rewrite_archive_v2_successful_metadata_wire<V: ArchiveV2WireRewriteVisito
     visitor: &mut V,
     limits: ArchiveV2WireRewriteLimits,
 ) -> ArchiveV2WireRewriteResult<ArchiveV2WireRewriteStats> {
-    transform_transactionally::<_, false>(
+    transform_transactionally::<_, false, false>(
         input,
         output,
         visitor,
@@ -402,8 +427,13 @@ pub fn rewrite_archive_v2_metadata_wire<V: ArchiveV2WireRewriteVisitor>(
     limits: ArchiveV2WireRewriteLimits,
 ) -> ArchiveV2WireRewriteResult<ArchiveV2WireRewriteStats> {
     let has_error = input.first() == Some(&1);
-    match transform_transactionally::<_, false>(input, output, visitor, limits, WireValue::Metadata)
-    {
+    match transform_transactionally::<_, false, false>(
+        input,
+        output,
+        visitor,
+        limits,
+        WireValue::Metadata,
+    ) {
         Ok(stats) => Ok(stats),
         Err(error)
             if has_error
@@ -424,14 +454,87 @@ pub fn rewrite_archive_v2_metadata_wire<V: ArchiveV2WireRewriteVisitor>(
     }
 }
 
+/// Transform one current- or legacy-schema metadata value while preserving
+/// the selected transaction-error prefix byte-for-byte.
+///
+/// This is for portable dump consolidation where only typed
+/// [`CompactPubkey`] references may change. An ambiguous `err=Some` prefix
+/// still requests an owned or source-profile decision. Callers must not guess
+/// its schema at record scope.
+pub fn rewrite_archive_v2_metadata_wire_preserving_error_schema<V: ArchiveV2WireRewriteVisitor>(
+    input: &[u8],
+    output: &mut Vec<u8>,
+    visitor: &mut V,
+    limits: ArchiveV2WireRewriteLimits,
+) -> ArchiveV2WireRewriteResult<ArchiveV2WireRewriteStats> {
+    transform_transactionally::<_, false, false>(
+        input,
+        output,
+        visitor,
+        limits,
+        WireValue::MetadataPreserveErrorSchema(None),
+    )
+}
+
+/// Transform one metadata value while preserving the already selected
+/// transaction-error schema and its source prefix byte-for-byte.
+///
+/// This entry point does not probe the other error schema. It is for callers
+/// that selected the schema from a trusted generation profile or from a
+/// complete value-level ambiguity check.
+pub fn rewrite_archive_v2_metadata_wire_preserving_selected_error_schema<
+    V: ArchiveV2WireRewriteVisitor,
+>(
+    input: &[u8],
+    output: &mut Vec<u8>,
+    visitor: &mut V,
+    limits: ArchiveV2WireRewriteLimits,
+    schema: ArchiveV2WireMetadataErrorSchema,
+) -> ArchiveV2WireRewriteResult<ArchiveV2WireRewriteStats> {
+    transform_transactionally::<_, false, false>(
+        input,
+        output,
+        visitor,
+        limits,
+        WireValue::MetadataPreserveErrorSchema(Some(schema)),
+    )
+}
+
+/// Transform one metadata value whose current typed-error schema was already
+/// selected by generation admission or by the owned ambiguity rule.
+///
+/// This entry point is for callers that first use
+/// [`canonicalize_archive_v2_metadata_owned`] on an ambiguous historical
+/// `err=Some` value. It does not probe the legacy stored-error prefix. The
+/// output always uses the current typed-error schema.
+pub fn rewrite_archive_v2_current_metadata_wire<V: ArchiveV2WireRewriteVisitor>(
+    input: &[u8],
+    output: &mut Vec<u8>,
+    visitor: &mut V,
+    limits: ArchiveV2WireRewriteLimits,
+) -> ArchiveV2WireRewriteResult<ArchiveV2WireRewriteStats> {
+    transform_transactionally::<_, false, false>(
+        input,
+        output,
+        visitor,
+        limits,
+        WireValue::MetadataPreserveErrorSchema(Some(ArchiveV2WireMetadataErrorSchema::Current)),
+    )
+}
+
 #[derive(Clone, Copy)]
 enum WireValue {
     Message,
     SuccessfulMetadata,
     Metadata,
+    MetadataPreserveErrorSchema(Option<ArchiveV2WireMetadataErrorSchema>),
 }
 
-fn transform_transactionally<V: ArchiveV2WireRewriteVisitor, const PRE_UNKNOWN_FALLBACKS: bool>(
+fn transform_transactionally<
+    V: ArchiveV2WireRewriteVisitor,
+    const PRE_UNKNOWN_FALLBACKS: bool,
+    const TRANSCODE_PRE_TO_POST: bool,
+>(
     input: &[u8],
     output: &mut Vec<u8>,
     visitor: &mut V,
@@ -461,9 +564,14 @@ fn transform_transactionally<V: ArchiveV2WireRewriteVisitor, const PRE_UNKNOWN_F
             unchecked_small_puts: 0,
         };
         match value {
-            WireValue::Message => transformer.message::<PRE_UNKNOWN_FALLBACKS>()?,
+            WireValue::Message => {
+                transformer.message::<PRE_UNKNOWN_FALLBACKS, TRANSCODE_PRE_TO_POST>()?
+            }
             WireValue::SuccessfulMetadata => transformer.successful_metadata()?,
             WireValue::Metadata => transformer.metadata()?,
+            WireValue::MetadataPreserveErrorSchema(schema) => {
+                transformer.metadata_preserving_error_schema(schema)?
+            }
         }
         if !transformer.cursor.is_empty() {
             return Err(ArchiveV2WireRewriteError::invalid_value(format_args!(
@@ -509,10 +617,31 @@ struct BoundedAppendWriter<'a> {
     max_output_bytes: usize,
 }
 
+/// Message-coordinate reference carried by one transaction error.
+///
+/// The selected-schema metadata splitter reports this without constructing an
+/// owned [`crate::CompactTransactionError`], so selective readers can apply
+/// their message-specific index limits before they visit the metadata tail.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ArchiveV2WireMetadataErrorIndex {
+    TopLevelInstruction(u8),
+    MessageAccount(u8),
+}
+
+#[derive(Clone, Copy)]
 struct MetadataErrorPrefix<'a> {
-    error: crate::CompactTransactionError,
     tail: &'a [u8],
     schema: ArchiveV2WireMetadataErrorSchema,
+    error_index: Option<ArchiveV2WireMetadataErrorIndex>,
+}
+
+/// Borrowed metadata tail after an explicitly selected transaction-error
+/// prefix was validated.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct BorrowedArchiveV2MetadataTail<'a> {
+    pub bytes: &'a [u8],
+    pub has_error: bool,
+    pub error_index: Option<ArchiveV2WireMetadataErrorIndex>,
 }
 
 fn sequence_read_error(
@@ -527,24 +656,190 @@ fn sequence_read_error(
     }
 }
 
-fn decode_current_metadata_error_prefix(
+fn read_current_error_scalar<'de, T>(
+    input: &mut &'de [u8],
+    context: &'static str,
+) -> ArchiveV2WireRewriteResult<T>
+where
+    T: SchemaRead<'de, ArchiveV2WireBoundedConfig, Dst = T>,
+{
+    T::get(input).map_err(|error| ArchiveV2WireRewriteError::invalid(context, error))
+}
+
+fn validate_current_instruction_error(
+    input: &mut &[u8],
+    max_sequence_items: usize,
+) -> ArchiveV2WireRewriteResult<()> {
+    let tag = read_current_error_scalar::<u8>(input, "current instruction-error tag")?;
+    match tag {
+        0..=24 | 26..=43 | 45..=53 => Ok(()),
+        25 => {
+            read_current_error_scalar::<u32>(input, "current custom instruction error")?;
+            Ok(())
+        }
+        44 => {
+            let len = <wincode::len::BincodeLen as SeqLen<ArchiveV2WireBoundedConfig>>::read_prealloc_check::<u8>(&mut *input)
+                .map_err(|error| sequence_read_error("current Borsh I/O error byte length", error))?;
+            if len > max_sequence_items {
+                return Err(ArchiveV2WireRewriteError::limit(format_args!(
+                    "current Borsh I/O error has {len} bytes, item limit is {max_sequence_items}"
+                )));
+            }
+            if len > input.len() {
+                return Err(ArchiveV2WireRewriteError::invalid_value(format_args!(
+                    "current Borsh I/O error has {len} bytes, but only {} input bytes remain",
+                    input.len()
+                )));
+            }
+            let bytes = input.take_borrowed(len).map_err(|error| {
+                ArchiveV2WireRewriteError::invalid("current Borsh I/O error bytes", error)
+            })?;
+            std::str::from_utf8(bytes).map_err(|error| {
+                ArchiveV2WireRewriteError::invalid("current Borsh I/O error UTF-8", error)
+            })?;
+            Ok(())
+        }
+        _ => Err(ArchiveV2WireRewriteError::invalid_value(format_args!(
+            "current instruction-error tag {tag} is outside 0..=53"
+        ))),
+    }
+}
+
+fn validate_current_metadata_error_prefix(
     input: &[u8],
+    max_sequence_items: usize,
 ) -> ArchiveV2WireRewriteResult<MetadataErrorPrefix<'_>> {
     let mut tail = input;
-    let error =
-        <crate::CompactTransactionError as SchemaRead<ArchiveV2WireBoundedConfig>>::get(&mut tail)
-            .map_err(|error| {
-                ArchiveV2WireRewriteError::invalid("current metadata transaction error", error)
-            })?;
+    let tag = read_current_error_scalar::<u8>(&mut tail, "current transaction-error tag")?;
+    let error_index = match tag {
+        0..=7 | 9..=29 | 32..=34 | 36..=38 => None,
+        8 => {
+            let index = read_current_error_scalar::<u8>(&mut tail, "current instruction index")?;
+            validate_current_instruction_error(&mut tail, max_sequence_items)?;
+            Some(ArchiveV2WireMetadataErrorIndex::TopLevelInstruction(index))
+        }
+        30 => Some(ArchiveV2WireMetadataErrorIndex::TopLevelInstruction(
+            read_current_error_scalar::<u8>(&mut tail, "current duplicate-instruction index")?,
+        )),
+        31 | 35 => Some(ArchiveV2WireMetadataErrorIndex::MessageAccount(
+            read_current_error_scalar::<u8>(&mut tail, "current transaction-error account index")?,
+        )),
+        _ => {
+            return Err(ArchiveV2WireRewriteError::invalid_value(format_args!(
+                "current transaction-error tag {tag} is outside 0..=38"
+            )));
+        }
+    };
     Ok(MetadataErrorPrefix {
-        error,
         tail,
         schema: ArchiveV2WireMetadataErrorSchema::Current,
+        error_index,
     })
 }
 
-fn decode_legacy_metadata_error_prefix(
+fn take_legacy_error_bytes<'a>(
+    input: &mut &'a [u8],
+    len: usize,
+    context: &'static str,
+) -> ArchiveV2WireRewriteResult<&'a [u8]> {
+    if len > input.len() {
+        return Err(ArchiveV2WireRewriteError::invalid_value(format_args!(
+            "{context} needs {len} bytes, but only {} bytes remain",
+            input.len()
+        )));
+    }
+    input
+        .take_borrowed(len)
+        .map_err(|error| ArchiveV2WireRewriteError::invalid(context, error))
+}
+
+fn read_legacy_error_u32(
+    input: &mut &[u8],
+    context: &'static str,
+) -> ArchiveV2WireRewriteResult<u32> {
+    let bytes = take_legacy_error_bytes(input, 4, context)?;
+    Ok(u32::from_le_bytes(
+        bytes.try_into().expect("checked length"),
+    ))
+}
+
+fn validate_legacy_stored_instruction_error(
+    input: &mut &[u8],
+    max_sequence_items: usize,
+) -> ArchiveV2WireRewriteResult<()> {
+    let tag = read_legacy_error_u32(input, "legacy instruction-error tag")?;
+    match tag {
+        0..=24 | 26..=43 | 45..=53 => Ok(()),
+        25 => {
+            take_legacy_error_bytes(input, 4, "legacy custom instruction error")?;
+            Ok(())
+        }
+        44 if input.is_empty() => {
+            // Old Solana archives encoded BorshIoError as a unit variant.
+            Ok(())
+        }
+        44 => {
+            let len_bytes = take_legacy_error_bytes(input, 8, "legacy Borsh I/O error length")?;
+            let len_u64 = u64::from_le_bytes(len_bytes.try_into().expect("checked length"));
+            let len = usize::try_from(len_u64).map_err(|_| {
+                ArchiveV2WireRewriteError::limit(format_args!(
+                    "legacy Borsh I/O error length {len_u64} does not fit usize"
+                ))
+            })?;
+            if len > max_sequence_items {
+                return Err(ArchiveV2WireRewriteError::limit(format_args!(
+                    "legacy Borsh I/O error has {len} bytes, item limit is {max_sequence_items}"
+                )));
+            }
+            let bytes = take_legacy_error_bytes(input, len, "legacy Borsh I/O error bytes")?;
+            std::str::from_utf8(bytes).map_err(|error| {
+                ArchiveV2WireRewriteError::invalid("legacy Borsh I/O error UTF-8", error)
+            })?;
+            Ok(())
+        }
+        _ => Err(ArchiveV2WireRewriteError::invalid_value(format_args!(
+            "legacy instruction-error tag {tag} is outside 0..=53"
+        ))),
+    }
+}
+
+fn validate_legacy_stored_transaction_error(
+    stored: &[u8],
+    max_sequence_items: usize,
+) -> ArchiveV2WireRewriteResult<Option<ArchiveV2WireMetadataErrorIndex>> {
+    let mut tail = stored;
+    let tag = read_legacy_error_u32(&mut tail, "legacy transaction-error tag")?;
+    let error_index = match tag {
+        0..=7 | 9..=29 | 32..=34 | 36..=38 => None,
+        8 => {
+            let index = take_legacy_error_bytes(&mut tail, 1, "legacy instruction index")?[0];
+            validate_legacy_stored_instruction_error(&mut tail, max_sequence_items)?;
+            Some(ArchiveV2WireMetadataErrorIndex::TopLevelInstruction(index))
+        }
+        30 => Some(ArchiveV2WireMetadataErrorIndex::TopLevelInstruction(
+            take_legacy_error_bytes(&mut tail, 1, "legacy duplicate-instruction index")?[0],
+        )),
+        31 | 35 => Some(ArchiveV2WireMetadataErrorIndex::MessageAccount(
+            take_legacy_error_bytes(&mut tail, 1, "legacy transaction-error account index")?[0],
+        )),
+        _ => {
+            return Err(ArchiveV2WireRewriteError::invalid_value(format_args!(
+                "legacy transaction-error tag {tag} is outside 0..=38"
+            )));
+        }
+    };
+    if !tail.is_empty() {
+        return Err(ArchiveV2WireRewriteError::invalid_value(format_args!(
+            "legacy transaction error has {} trailing bytes",
+            tail.len()
+        )));
+    }
+    Ok(error_index)
+}
+
+fn validate_legacy_metadata_error_prefix(
     input: &[u8],
+    max_sequence_items: usize,
 ) -> ArchiveV2WireRewriteResult<MetadataErrorPrefix<'_>> {
     let mut tail = input;
     let len = <wincode::len::BincodeLen as SeqLen<ArchiveV2WireBoundedConfig>>::read_prealloc_check::<u8>(
@@ -553,6 +848,11 @@ fn decode_legacy_metadata_error_prefix(
     .map_err(|error| {
         sequence_read_error("legacy metadata transaction-error byte length", error)
     })?;
+    if len > max_sequence_items {
+        return Err(ArchiveV2WireRewriteError::limit(format_args!(
+            "legacy metadata transaction error has {len} bytes, item limit is {max_sequence_items}"
+        )));
+    }
     if len > tail.len() {
         return Err(ArchiveV2WireRewriteError::invalid_value(format_args!(
             "legacy metadata transaction error is {len} bytes, but only {} input bytes remain",
@@ -562,15 +862,99 @@ fn decode_legacy_metadata_error_prefix(
     let stored = tail.take_borrowed(len).map_err(|error| {
         ArchiveV2WireRewriteError::invalid("legacy metadata transaction-error bytes", error)
     })?;
-    let error =
-        crate::CompactTransactionError::from_stored_wincode_bytes(stored).map_err(|error| {
-            ArchiveV2WireRewriteError::invalid("legacy metadata transaction error", error)
-        })?;
+    let error_index = validate_legacy_stored_transaction_error(stored, max_sequence_items)?;
     Ok(MetadataErrorPrefix {
-        error,
         tail,
         schema: ArchiveV2WireMetadataErrorSchema::Legacy,
+        error_index,
     })
+}
+
+/// Validate the metadata option and transaction-error prefix under one
+/// explicitly selected wire schema, then borrow the common metadata tail.
+///
+/// This function does not inspect the returned tail. It is for selective
+/// readers that validate the common `CompactMetaV1` tail themselves without
+/// allocating an owned metadata graph. `max_sequence_items` bounds strings or
+/// byte sequences inside the selected transaction error.
+pub fn validate_archive_v2_metadata_error_prefix_for_selected_schema(
+    input: &[u8],
+    schema: ArchiveV2WireMetadataErrorSchema,
+    max_sequence_items: usize,
+) -> ArchiveV2WireRewriteResult<BorrowedArchiveV2MetadataTail<'_>> {
+    let mut tail = input;
+    match read_current_error_scalar::<u8>(&mut tail, "metadata transaction-error option")? {
+        0 => Ok(BorrowedArchiveV2MetadataTail {
+            bytes: tail,
+            has_error: false,
+            error_index: None,
+        }),
+        1 => {
+            let selected = match schema {
+                ArchiveV2WireMetadataErrorSchema::Current => {
+                    validate_current_metadata_error_prefix(tail, max_sequence_items)?
+                }
+                ArchiveV2WireMetadataErrorSchema::Legacy => {
+                    validate_legacy_metadata_error_prefix(tail, max_sequence_items)?
+                }
+            };
+            debug_assert_eq!(selected.schema, schema);
+            Ok(BorrowedArchiveV2MetadataTail {
+                bytes: selected.tail,
+                has_error: true,
+                error_index: selected.error_index,
+            })
+        }
+        tag => Err(ArchiveV2WireRewriteError::invalid_value(format_args!(
+            "metadata transaction-error option has invalid tag {tag}"
+        ))),
+    }
+}
+
+fn decode_admitted_metadata_error_prefix(
+    input: &[u8],
+    selected: MetadataErrorPrefix<'_>,
+) -> ArchiveV2WireRewriteResult<crate::CompactTransactionError> {
+    let prefix_len = input
+        .len()
+        .checked_sub(selected.tail.len())
+        .ok_or_else(|| {
+            ArchiveV2WireRewriteError::invalid_value(
+                "metadata transaction-error prefix is outside its input",
+            )
+        })?;
+    let mut prefix = &input[..prefix_len];
+    let error = match selected.schema {
+        ArchiveV2WireMetadataErrorSchema::Current => {
+            <crate::CompactTransactionError as SchemaRead<ArchiveV2WireBoundedConfig>>::get(
+                &mut prefix,
+            )
+            .map_err(|error| {
+                ArchiveV2WireRewriteError::invalid("current metadata transaction error", error)
+            })?
+        }
+        ArchiveV2WireMetadataErrorSchema::Legacy => {
+            let len = <wincode::len::BincodeLen as SeqLen<ArchiveV2WireBoundedConfig>>::read_prealloc_check::<u8>(
+                &mut prefix,
+            )
+            .map_err(|error| {
+                sequence_read_error("legacy metadata transaction-error byte length", error)
+            })?;
+            let stored = prefix.take_borrowed(len).map_err(|error| {
+                ArchiveV2WireRewriteError::invalid("legacy metadata transaction-error bytes", error)
+            })?;
+            crate::CompactTransactionError::from_stored_wincode_bytes(stored).map_err(|error| {
+                ArchiveV2WireRewriteError::invalid("legacy metadata transaction error", error)
+            })?
+        }
+    };
+    if !prefix.is_empty() {
+        return Err(ArchiveV2WireRewriteError::invalid_value(format_args!(
+            "metadata transaction-error prefix has {} trailing bytes",
+            prefix.len()
+        )));
+    }
+    Ok(error)
 }
 
 impl Writer for BoundedAppendWriter<'_> {
@@ -850,18 +1234,21 @@ impl<V: ArchiveV2WireRewriteVisitor> Transformer<'_, V> {
         self.check_output_limit()
     }
 
-    fn message<const PRE_UNKNOWN_FALLBACKS: bool>(&mut self) -> ArchiveV2WireRewriteResult<()> {
+    fn message<const PRE_UNKNOWN_FALLBACKS: bool, const TRANSCODE_PRE_TO_POST: bool>(
+        &mut self,
+    ) -> ArchiveV2WireRewriteResult<()> {
+        debug_assert!(!TRANSCODE_PRE_TO_POST || PRE_UNKNOWN_FALLBACKS);
         let variant = self.enum_tag("hot message variant")?;
         match variant {
-            0 => self.message_body::<PRE_UNKNOWN_FALLBACKS>(false),
-            1 => self.message_body::<PRE_UNKNOWN_FALLBACKS>(true),
+            0 => self.message_body::<PRE_UNKNOWN_FALLBACKS, TRANSCODE_PRE_TO_POST>(false),
+            1 => self.message_body::<PRE_UNKNOWN_FALLBACKS, TRANSCODE_PRE_TO_POST>(true),
             tag => Err(ArchiveV2WireRewriteError::fallback(
                 ArchiveV2WireFallbackReason::UnsupportedMessageVariant(tag),
             )),
         }
     }
 
-    fn message_body<const PRE_UNKNOWN_FALLBACKS: bool>(
+    fn message_body<const PRE_UNKNOWN_FALLBACKS: bool, const TRANSCODE_PRE_TO_POST: bool>(
         &mut self,
         v0: bool,
     ) -> ArchiveV2WireRewriteResult<()> {
@@ -878,7 +1265,7 @@ impl<V: ArchiveV2WireRewriteVisitor> Transformer<'_, V> {
         let instruction_count =
             self.sequence_len::<crate::ArchiveV2HotInstruction>("message instruction count")?;
         for _ in 0..instruction_count {
-            self.instruction::<PRE_UNKNOWN_FALLBACKS>()?;
+            self.instruction::<PRE_UNKNOWN_FALLBACKS, TRANSCODE_PRE_TO_POST>()?;
         }
 
         if v0 {
@@ -914,10 +1301,34 @@ impl<V: ArchiveV2WireRewriteVisitor> Transformer<'_, V> {
         }
     }
 
-    fn instruction<const PRE_UNKNOWN_FALLBACKS: bool>(&mut self) -> ArchiveV2WireRewriteResult<()> {
+    fn instruction<const PRE_UNKNOWN_FALLBACKS: bool, const TRANSCODE_PRE_TO_POST: bool>(
+        &mut self,
+    ) -> ArchiveV2WireRewriteResult<()> {
         self.scalar::<u8>("instruction program-id index")?;
         self.bytes("instruction account indexes")?;
-        let tag = self.enum_tag("hot instruction-data variant")?;
+        let tag = if TRANSCODE_PRE_TO_POST {
+            let source_tag = self.get::<u32>("historical hot instruction-data variant")?;
+            let canonical_tag = match source_tag {
+                0 => 0,
+                1..=6 => source_tag + 2,
+                tag => {
+                    return Err(ArchiveV2WireRewriteError::invalid_value(format_args!(
+                        "historical hot instruction-data has invalid variant {tag}"
+                    )));
+                }
+            };
+            self.put_small(&canonical_tag, "canonical hot instruction-data variant")?;
+            source_tag
+        } else {
+            self.enum_tag("hot instruction-data variant")?
+        };
+        let maximum_source_tag = if PRE_UNKNOWN_FALLBACKS { 6 } else { 8 };
+        if tag <= maximum_source_tag {
+            let count = &mut self.stats.source_instruction_data_tag_counts[tag as usize];
+            *count = count.checked_add(1).ok_or_else(|| {
+                ArchiveV2WireRewriteError::limit("instruction-data tag count overflow")
+            })?;
+        }
         if PRE_UNKNOWN_FALLBACKS {
             match tag {
                 0 => self.bytes("raw instruction data"),
@@ -1081,8 +1492,14 @@ impl<V: ArchiveV2WireRewriteVisitor> Transformer<'_, V> {
                 self.put_small(&0u8, "metadata transaction-error option")?;
             }
             1 => {
-                let current = decode_current_metadata_error_prefix(self.cursor);
-                let legacy = decode_legacy_metadata_error_prefix(self.cursor);
+                let current = validate_current_metadata_error_prefix(
+                    self.cursor,
+                    self.limits.max_sequence_items,
+                );
+                let legacy = validate_legacy_metadata_error_prefix(
+                    self.cursor,
+                    self.limits.max_sequence_items,
+                );
                 let selected = match (current, legacy) {
                     (Ok(current), Err(_)) => current,
                     (Err(_), Ok(legacy)) => legacy,
@@ -1097,8 +1514,83 @@ impl<V: ArchiveV2WireRewriteVisitor> Transformer<'_, V> {
                         ));
                     }
                 };
+                let error = decode_admitted_metadata_error_prefix(self.cursor, selected)?;
                 self.put_small(&1u8, "metadata transaction-error option")?;
-                self.put_owned(&selected.error, "metadata transaction error")?;
+                self.put_owned(&error, "metadata transaction error")?;
+                self.cursor = selected.tail;
+                self.stats.metadata_error_schema = Some(selected.schema);
+            }
+            tag => {
+                return Err(ArchiveV2WireRewriteError::invalid_value(format_args!(
+                    "metadata transaction-error option has invalid tag {tag}"
+                )));
+            }
+        }
+
+        self.metadata_tail()
+    }
+
+    fn metadata_preserving_error_schema(
+        &mut self,
+        selected_schema: Option<ArchiveV2WireMetadataErrorSchema>,
+    ) -> ArchiveV2WireRewriteResult<()> {
+        match self.get::<u8>("metadata transaction-error option")? {
+            0 => {
+                self.put_small(&0u8, "metadata transaction-error option")?;
+            }
+            1 => {
+                let selected = match selected_schema {
+                    Some(ArchiveV2WireMetadataErrorSchema::Current) => {
+                        validate_current_metadata_error_prefix(
+                            self.cursor,
+                            self.limits.max_sequence_items,
+                        )?
+                    }
+                    Some(ArchiveV2WireMetadataErrorSchema::Legacy) => {
+                        validate_legacy_metadata_error_prefix(
+                            self.cursor,
+                            self.limits.max_sequence_items,
+                        )?
+                    }
+                    None => {
+                        let current = validate_current_metadata_error_prefix(
+                            self.cursor,
+                            self.limits.max_sequence_items,
+                        );
+                        let legacy = validate_legacy_metadata_error_prefix(
+                            self.cursor,
+                            self.limits.max_sequence_items,
+                        );
+                        match (current, legacy) {
+                            (Ok(current), Err(_)) => current,
+                            (Err(_), Ok(legacy)) => legacy,
+                            (Ok(_), Ok(_)) => {
+                                return Err(ArchiveV2WireRewriteError::fallback(
+                                    ArchiveV2WireFallbackReason::MetadataErrorSchemaAmbiguous,
+                                ));
+                            }
+                            (Err(_), Err(_)) => {
+                                return Err(ArchiveV2WireRewriteError::fallback(
+                                    ArchiveV2WireFallbackReason::MetadataErrorPrefixRequiresOwnedFallback,
+                                ));
+                            }
+                        }
+                    }
+                };
+                let prefix_len = self
+                    .cursor
+                    .len()
+                    .checked_sub(selected.tail.len())
+                    .ok_or_else(|| {
+                        ArchiveV2WireRewriteError::invalid_value(
+                            "metadata transaction-error prefix is outside its input",
+                        )
+                    })?;
+                self.put_small(&1u8, "metadata transaction-error option")?;
+                self.append(
+                    &self.cursor[..prefix_len],
+                    "preserved metadata transaction error",
+                )?;
                 self.cursor = selected.tail;
                 self.stats.metadata_error_schema = Some(selected.schema);
             }
@@ -1929,6 +2421,323 @@ mod tests {
         assert_eq!(visitor.recent_blockhashes, [-9]);
     }
 
+    #[test]
+    fn pre_to_post_transcoder_maps_all_frozen_tags_in_one_mixed_message() {
+        let source_update = vote_update(ArchiveV2VoteHashRef::Block(42), 10);
+        let source_tower = ArchiveV2VoteTowerSync {
+            update: vote_update(ArchiveV2VoteHashRef::Block(43), 20),
+            block_id_hash: ArchiveV2VoteHashRef::Raw([44; 32]),
+        };
+        let source = HistoricalMessagePayload::Legacy(HistoricalLegacyMessage {
+            header: CompactMessageHeader {
+                num_required_signatures: 1,
+                num_readonly_signed_accounts: 0,
+                num_readonly_unsigned_accounts: 1,
+            },
+            account_keys: vec![CompactPubkey::Id(1), CompactPubkey::Id(2)],
+            recent_blockhash: OwnedCompactRecentBlockhash::Id(-11),
+            instructions: vec![
+                HistoricalInstruction {
+                    program_id_index: 1,
+                    accounts: vec![0],
+                    data: HistoricalInstructionData::Raw(vec![1, 2, 3]),
+                },
+                HistoricalInstruction {
+                    program_id_index: 1,
+                    accounts: vec![],
+                    data: HistoricalInstructionData::ComputeBudget(
+                        ArchiveV2ComputeBudgetInstructionData::SetComputeUnitLimit(200_000),
+                    ),
+                },
+                HistoricalInstruction {
+                    program_id_index: 1,
+                    accounts: vec![0, 1],
+                    data: HistoricalInstructionData::System(
+                        ArchiveV2SystemInstructionData::Transfer { lamports: 99 },
+                    ),
+                },
+                HistoricalInstruction {
+                    program_id_index: 1,
+                    accounts: vec![],
+                    data: HistoricalInstructionData::VoteCompactUpdateVoteState(
+                        source_update.clone(),
+                    ),
+                },
+                HistoricalInstruction {
+                    program_id_index: 1,
+                    accounts: vec![],
+                    data: HistoricalInstructionData::VoteCompactUpdateVoteStateSwitch {
+                        update: source_update,
+                        switch_proof_hash: ArchiveV2VoteHashRef::Raw([45; 32]),
+                    },
+                },
+                HistoricalInstruction {
+                    program_id_index: 1,
+                    accounts: vec![],
+                    data: HistoricalInstructionData::VoteTowerSync(source_tower.clone()),
+                },
+                HistoricalInstruction {
+                    program_id_index: 1,
+                    accounts: vec![],
+                    data: HistoricalInstructionData::VoteTowerSyncSwitch {
+                        tower: source_tower,
+                        switch_proof_hash: ArchiveV2VoteHashRef::Zero,
+                    },
+                },
+            ],
+        });
+
+        let expected_update = vote_update(ArchiveV2VoteHashRef::Block(42), 10);
+        let expected_tower = ArchiveV2VoteTowerSync {
+            update: vote_update(ArchiveV2VoteHashRef::Block(43), 20),
+            block_id_hash: ArchiveV2VoteHashRef::Raw([44; 32]),
+        };
+        let expected = ArchiveV2HotMessagePayload::Legacy(ArchiveV2HotLegacyMessage {
+            header: CompactMessageHeader {
+                num_required_signatures: 1,
+                num_readonly_signed_accounts: 0,
+                num_readonly_unsigned_accounts: 1,
+            },
+            account_keys: vec![CompactPubkey::Id(1), CompactPubkey::Id(2)],
+            recent_blockhash: OwnedCompactRecentBlockhash::Id(-11),
+            instructions: vec![
+                ArchiveV2HotInstruction {
+                    program_id_index: 1,
+                    accounts: vec![0],
+                    data: ArchiveV2HotInstructionData::Raw(vec![1, 2, 3]),
+                },
+                ArchiveV2HotInstruction {
+                    program_id_index: 1,
+                    accounts: vec![],
+                    data: ArchiveV2HotInstructionData::ComputeBudget(
+                        ArchiveV2ComputeBudgetInstructionData::SetComputeUnitLimit(200_000),
+                    ),
+                },
+                ArchiveV2HotInstruction {
+                    program_id_index: 1,
+                    accounts: vec![0, 1],
+                    data: ArchiveV2HotInstructionData::System(
+                        ArchiveV2SystemInstructionData::Transfer { lamports: 99 },
+                    ),
+                },
+                ArchiveV2HotInstruction {
+                    program_id_index: 1,
+                    accounts: vec![],
+                    data: ArchiveV2HotInstructionData::VoteCompactUpdateVoteState(
+                        expected_update.clone(),
+                    ),
+                },
+                ArchiveV2HotInstruction {
+                    program_id_index: 1,
+                    accounts: vec![],
+                    data: ArchiveV2HotInstructionData::VoteCompactUpdateVoteStateSwitch {
+                        update: expected_update,
+                        switch_proof_hash: ArchiveV2VoteHashRef::Raw([45; 32]),
+                    },
+                },
+                ArchiveV2HotInstruction {
+                    program_id_index: 1,
+                    accounts: vec![],
+                    data: ArchiveV2HotInstructionData::VoteTowerSync(expected_tower.clone()),
+                },
+                ArchiveV2HotInstruction {
+                    program_id_index: 1,
+                    accounts: vec![],
+                    data: ArchiveV2HotInstructionData::VoteTowerSyncSwitch {
+                        tower: expected_tower,
+                        switch_proof_hash: ArchiveV2VoteHashRef::Zero,
+                    },
+                },
+            ],
+        });
+
+        let source = wincode::config::serialize(&source, wincode_leb128_config()).unwrap();
+        let expected = wincode::config::serialize(&expected, wincode_leb128_config()).unwrap();
+        assert_eq!(
+            source.len(),
+            expected.len(),
+            "every frozen Pre tag and its canonical Post tag have the same wire width"
+        );
+        let changed_bytes = source
+            .iter()
+            .zip(&expected)
+            .filter(|&(&source, &target)| {
+                if source == target {
+                    return false;
+                }
+                assert!((1..=6).contains(&source));
+                assert_eq!(target, source + 2);
+                true
+            })
+            .count();
+        assert_eq!(changed_bytes, 6);
+        let mut output = vec![0xaa, 0xbb];
+        let stats = transcode_archive_v2_hot_message_wire_pre_to_post(
+            &source,
+            &mut output,
+            &mut ArchiveV2WireIdentityVisitor,
+            ArchiveV2WireRewriteLimits::default(),
+        )
+        .unwrap();
+
+        assert_eq!(&output[2..], expected);
+        assert_eq!(stats.input_bytes, source.len());
+        assert_eq!(stats.output_bytes, expected.len());
+        assert_eq!(
+            stats.source_instruction_data_tag_counts,
+            [1, 1, 1, 1, 1, 1, 1, 0, 0]
+        );
+        assert_eq!(stats.eligible_pubkey_references, 2);
+        assert_eq!(stats.recent_blockhash_ids, 1);
+        assert_eq!(stats.vote_hash_block_ids, 4);
+    }
+
+    #[test]
+    fn pre_to_post_transcoder_preserves_v0_envelope_and_message_length() {
+        let source = HistoricalMessagePayload::V0(HistoricalV0Message {
+            header: CompactMessageHeader {
+                num_required_signatures: 1,
+                num_readonly_signed_accounts: 0,
+                num_readonly_unsigned_accounts: 1,
+            },
+            account_keys: vec![CompactPubkey::Id(10), CompactPubkey::Id(11)],
+            recent_blockhash: OwnedCompactRecentBlockhash::Nonce([12; 32]),
+            instructions: vec![
+                HistoricalInstruction {
+                    program_id_index: 1,
+                    accounts: vec![0, 2],
+                    data: HistoricalInstructionData::Raw(vec![13, 14]),
+                },
+                HistoricalInstruction {
+                    program_id_index: 1,
+                    accounts: vec![0],
+                    data: HistoricalInstructionData::System(
+                        ArchiveV2SystemInstructionData::Allocate { space: 15 },
+                    ),
+                },
+            ],
+            address_table_lookups: vec![OwnedCompactAddressTableLookup {
+                account_key: CompactPubkey::Id(16),
+                writable_indexes: vec![0],
+                readonly_indexes: vec![1],
+            }],
+        });
+        let expected = ArchiveV2HotMessagePayload::V0(ArchiveV2HotV0Message {
+            header: CompactMessageHeader {
+                num_required_signatures: 1,
+                num_readonly_signed_accounts: 0,
+                num_readonly_unsigned_accounts: 1,
+            },
+            account_keys: vec![CompactPubkey::Id(10), CompactPubkey::Id(11)],
+            recent_blockhash: OwnedCompactRecentBlockhash::Nonce([12; 32]),
+            instructions: vec![
+                ArchiveV2HotInstruction {
+                    program_id_index: 1,
+                    accounts: vec![0, 2],
+                    data: ArchiveV2HotInstructionData::Raw(vec![13, 14]),
+                },
+                ArchiveV2HotInstruction {
+                    program_id_index: 1,
+                    accounts: vec![0],
+                    data: ArchiveV2HotInstructionData::System(
+                        ArchiveV2SystemInstructionData::Allocate { space: 15 },
+                    ),
+                },
+            ],
+            address_table_lookups: vec![OwnedCompactAddressTableLookup {
+                account_key: CompactPubkey::Id(16),
+                writable_indexes: vec![0],
+                readonly_indexes: vec![1],
+            }],
+        });
+        let source = wincode::config::serialize(&source, wincode_leb128_config()).unwrap();
+        let expected = wincode::config::serialize(&expected, wincode_leb128_config()).unwrap();
+        assert_eq!(source.len(), expected.len());
+
+        let mut output = Vec::with_capacity(source.len());
+        let stats = transcode_archive_v2_hot_message_wire_pre_to_post(
+            &source,
+            &mut output,
+            &mut ArchiveV2WireIdentityVisitor,
+            ArchiveV2WireRewriteLimits::default(),
+        )
+        .unwrap();
+
+        assert_eq!(output, expected);
+        assert_eq!(stats.input_bytes, stats.output_bytes);
+        assert_eq!(
+            stats.source_instruction_data_tag_counts,
+            [1, 0, 1, 0, 0, 0, 0, 0, 0]
+        );
+        assert_eq!(stats.eligible_pubkey_references, 3);
+    }
+
+    #[test]
+    fn pre_to_post_transcoder_rejects_bad_input_and_rolls_back() {
+        // Historical Legacy message with one account and one instruction whose Pre tag 7 is not
+        // part of the frozen tag table. Every scalar uses its one-byte canonical LEB128 form.
+        let unsupported = [
+            0, // Legacy message
+            0, 0, 0, // header
+            1, // account-key count
+            1, // CompactPubkey Id(1)
+            0, 0, // recent blockhash Id(0)
+            1, // instruction count
+            0, // program-id index
+            0, // account-index count
+            7, // unsupported historical instruction-data tag
+        ];
+        let prefix = vec![0xc1, 0xc2];
+        let mut output = prefix.clone();
+        let mut visitor = RecordingVisitor::default();
+        let error = transcode_archive_v2_hot_message_wire_pre_to_post(
+            &unsupported,
+            &mut output,
+            &mut visitor,
+            ArchiveV2WireRewriteLimits::default(),
+        )
+        .unwrap_err();
+        assert_eq!(error.kind(), ArchiveV2WireRewriteErrorKind::InvalidInput);
+        assert_eq!(output, prefix);
+        assert!(visitor.pubkeys.is_empty());
+        assert_eq!(visitor.commits, 0);
+        assert_eq!(visitor.rollbacks, 1);
+
+        let mut valid = wincode::config::serialize(
+            &HistoricalMessagePayload::Legacy(HistoricalLegacyMessage {
+                header: CompactMessageHeader {
+                    num_required_signatures: 1,
+                    num_readonly_signed_accounts: 0,
+                    num_readonly_unsigned_accounts: 0,
+                },
+                account_keys: vec![CompactPubkey::Id(1)],
+                recent_blockhash: OwnedCompactRecentBlockhash::Id(0),
+                instructions: vec![HistoricalInstruction {
+                    program_id_index: 0,
+                    accounts: vec![0],
+                    data: HistoricalInstructionData::Raw(vec![9]),
+                }],
+            }),
+            wincode_leb128_config(),
+        )
+        .unwrap();
+        valid.push(0xff);
+        let mut output = prefix.clone();
+        let mut visitor = RecordingVisitor::default();
+        let error = transcode_archive_v2_hot_message_wire_pre_to_post(
+            &valid,
+            &mut output,
+            &mut visitor,
+            ArchiveV2WireRewriteLimits::default(),
+        )
+        .unwrap_err();
+        assert_eq!(error.kind(), ArchiveV2WireRewriteErrorKind::InvalidInput);
+        assert_eq!(output, prefix);
+        assert!(visitor.pubkeys.is_empty());
+        assert_eq!(visitor.commits, 0);
+        assert_eq!(visitor.rollbacks, 1);
+    }
+
     fn pubkey_or_string(id: u32, offset: u32) -> system_program::PubkeyOrString {
         system_program::PubkeyOrString::Pubkey(pk(id, offset))
     }
@@ -2291,7 +3100,7 @@ mod tests {
             "legacy prefix must reject the current tag schema"
         );
         let mut source =
-            wincode::config::serialize(&Some(stored), wincode_leb128_config()).unwrap();
+            wincode::config::serialize(&Some(stored.clone()), wincode_leb128_config()).unwrap();
         source.extend_from_slice(&successful[1..]);
 
         let mut expected_value = metadata_fixture(DELTA);
@@ -2318,6 +3127,273 @@ mod tests {
         );
         assert_eq!(visitor.commits, 1);
         assert_eq!(visitor.rollbacks, 0);
+
+        let expected_successful =
+            wincode::config::serialize(&metadata_fixture(DELTA), wincode_leb128_config()).unwrap();
+        let mut preserved_expected =
+            wincode::config::serialize(&Some(stored), wincode_leb128_config()).unwrap();
+        preserved_expected.extend_from_slice(&expected_successful[1..]);
+        let mut preserved = Vec::new();
+        let mut preserving_visitor = RecordingVisitor::default();
+        let preserving_stats = rewrite_archive_v2_metadata_wire_preserving_error_schema(
+            &source,
+            &mut preserved,
+            &mut preserving_visitor,
+            ArchiveV2WireRewriteLimits::default(),
+        )
+        .unwrap();
+        assert_eq!(preserved, preserved_expected);
+        assert_eq!(
+            preserving_stats.metadata_error_schema,
+            Some(ArchiveV2WireMetadataErrorSchema::Legacy)
+        );
+        assert_eq!(preserving_visitor.commits, 1);
+        assert_eq!(preserving_visitor.rollbacks, 0);
+    }
+
+    #[test]
+    fn selected_error_prefix_splitter_borrows_current_and_legacy_tails() {
+        let successful =
+            wincode::config::serialize(&metadata_fixture(0), wincode_leb128_config()).unwrap();
+        assert_eq!(successful.first(), Some(&0));
+
+        let mut current_value = metadata_fixture(0);
+        current_value.err = Some(crate::CompactTransactionError::InstructionError(
+            7,
+            crate::CompactInstructionError::GenericError,
+        ));
+        let current = wincode::config::serialize(&current_value, wincode_leb128_config()).unwrap();
+        let current_tail = validate_archive_v2_metadata_error_prefix_for_selected_schema(
+            &current,
+            ArchiveV2WireMetadataErrorSchema::Current,
+            current.len(),
+        )
+        .unwrap();
+        assert!(current_tail.has_error);
+        assert_eq!(current_tail.bytes, &successful[1..]);
+        assert_eq!(
+            current_tail.error_index,
+            Some(ArchiveV2WireMetadataErrorIndex::TopLevelInstruction(7))
+        );
+
+        let stored = wincode::serialize(&StoredTransactionError::InstructionError(
+            7,
+            StoredInstructionError::GenericError,
+        ))
+        .unwrap();
+        let mut legacy =
+            wincode::config::serialize(&Some(stored), wincode_leb128_config()).unwrap();
+        legacy.extend_from_slice(&successful[1..]);
+        let legacy_tail = validate_archive_v2_metadata_error_prefix_for_selected_schema(
+            &legacy,
+            ArchiveV2WireMetadataErrorSchema::Legacy,
+            legacy.len(),
+        )
+        .unwrap();
+        assert!(legacy_tail.has_error);
+        assert_eq!(legacy_tail.bytes, &successful[1..]);
+        assert_eq!(
+            legacy_tail.error_index,
+            Some(ArchiveV2WireMetadataErrorIndex::TopLevelInstruction(7))
+        );
+
+        let successful_tail = validate_archive_v2_metadata_error_prefix_for_selected_schema(
+            &successful,
+            ArchiveV2WireMetadataErrorSchema::Legacy,
+            successful.len(),
+        )
+        .unwrap();
+        assert!(!successful_tail.has_error);
+        assert_eq!(successful_tail.bytes, &successful[1..]);
+        assert_eq!(successful_tail.error_index, None);
+    }
+
+    #[test]
+    fn selected_legacy_schema_resolves_an_ambiguous_prefix_without_changing_it() {
+        let successful =
+            wincode::config::serialize(&metadata_fixture(0), wincode_leb128_config()).unwrap();
+        let expected_successful =
+            wincode::config::serialize(&metadata_fixture(DELTA), wincode_leb128_config()).unwrap();
+        let stored = wincode::serialize(&StoredTransactionError::AccountInUse).unwrap();
+        assert_eq!(stored, [0, 0, 0, 0]);
+
+        let mut source =
+            wincode::config::serialize(&Some(stored.clone()), wincode_leb128_config()).unwrap();
+        source.extend_from_slice(&successful[1..]);
+        let mut expected =
+            wincode::config::serialize(&Some(stored), wincode_leb128_config()).unwrap();
+        expected.extend_from_slice(&expected_successful[1..]);
+
+        let prefix = vec![0xe1, 0xe2];
+        let mut probing_output = prefix.clone();
+        let mut probing_visitor = RecordingVisitor::default();
+        let probing_error = rewrite_archive_v2_metadata_wire_preserving_error_schema(
+            &source,
+            &mut probing_output,
+            &mut probing_visitor,
+            ArchiveV2WireRewriteLimits::default(),
+        )
+        .unwrap_err();
+        assert_eq!(
+            probing_error.fallback_reason(),
+            Some(ArchiveV2WireFallbackReason::MetadataErrorSchemaAmbiguous)
+        );
+        assert_eq!(probing_output, prefix);
+        assert!(probing_visitor.pubkeys.is_empty());
+        assert_eq!(probing_visitor.rollbacks, 1);
+
+        let mut output = Vec::new();
+        let mut visitor = RecordingVisitor::default();
+        let stats = rewrite_archive_v2_metadata_wire_preserving_selected_error_schema(
+            &source,
+            &mut output,
+            &mut visitor,
+            ArchiveV2WireRewriteLimits::default(),
+            ArchiveV2WireMetadataErrorSchema::Legacy,
+        )
+        .unwrap();
+        assert_eq!(output, expected);
+        assert_eq!(
+            stats.metadata_error_schema,
+            Some(ArchiveV2WireMetadataErrorSchema::Legacy)
+        );
+
+        let mut identity_output = Vec::new();
+        let mut identity = ArchiveV2WireIdentityVisitor;
+        rewrite_archive_v2_metadata_wire_preserving_selected_error_schema(
+            &source,
+            &mut identity_output,
+            &mut identity,
+            ArchiveV2WireRewriteLimits::default(),
+            ArchiveV2WireMetadataErrorSchema::Legacy,
+        )
+        .unwrap();
+        assert_eq!(identity_output, source);
+    }
+
+    #[test]
+    fn selected_current_schema_preserves_its_prefix_and_identity_bytes() {
+        let mut source_value = metadata_fixture(0);
+        source_value.err = Some(crate::CompactTransactionError::InstructionError(
+            7,
+            crate::CompactInstructionError::BorshIoError("current-error".to_owned()),
+        ));
+        let source = wincode::config::serialize(&source_value, wincode_leb128_config()).unwrap();
+        let mut expected_value = metadata_fixture(DELTA);
+        expected_value.err = Some(crate::CompactTransactionError::InstructionError(
+            7,
+            crate::CompactInstructionError::BorshIoError("current-error".to_owned()),
+        ));
+        let expected =
+            wincode::config::serialize(&expected_value, wincode_leb128_config()).unwrap();
+
+        let mut output = Vec::new();
+        let mut visitor = RecordingVisitor::default();
+        let stats = rewrite_archive_v2_metadata_wire_preserving_selected_error_schema(
+            &source,
+            &mut output,
+            &mut visitor,
+            ArchiveV2WireRewriteLimits::default(),
+            ArchiveV2WireMetadataErrorSchema::Current,
+        )
+        .unwrap();
+        assert_eq!(output, expected);
+        assert_eq!(
+            stats.metadata_error_schema,
+            Some(ArchiveV2WireMetadataErrorSchema::Current)
+        );
+
+        let mut identity_output = Vec::new();
+        let mut identity = ArchiveV2WireIdentityVisitor;
+        rewrite_archive_v2_metadata_wire_preserving_selected_error_schema(
+            &source,
+            &mut identity_output,
+            &mut identity,
+            ArchiveV2WireRewriteLimits::default(),
+            ArchiveV2WireMetadataErrorSchema::Current,
+        )
+        .unwrap();
+        assert_eq!(identity_output, source);
+    }
+
+    #[test]
+    fn selected_error_string_obeys_the_runtime_item_limit_without_partial_state() {
+        let mut value = metadata_fixture(0);
+        value.err = Some(crate::CompactTransactionError::InstructionError(
+            0,
+            crate::CompactInstructionError::BorshIoError("0123456789abcdef".to_owned()),
+        ));
+        let source = wincode::config::serialize(&value, wincode_leb128_config()).unwrap();
+        let limits = ArchiveV2WireRewriteLimits {
+            max_sequence_items: 8,
+            ..ArchiveV2WireRewriteLimits::default()
+        };
+        let prefix = vec![0xf1];
+        let mut output = prefix.clone();
+        let mut visitor = RecordingVisitor::default();
+        let error = rewrite_archive_v2_metadata_wire_preserving_selected_error_schema(
+            &source,
+            &mut output,
+            &mut visitor,
+            limits,
+            ArchiveV2WireMetadataErrorSchema::Current,
+        )
+        .unwrap_err();
+
+        assert_eq!(error.kind(), ArchiveV2WireRewriteErrorKind::LimitExceeded);
+        assert_eq!(output, prefix);
+        assert!(visitor.pubkeys.is_empty());
+        assert_eq!(visitor.commits, 0);
+        assert_eq!(visitor.rollbacks, 1);
+    }
+
+    #[test]
+    fn selected_schemas_reject_nonexistent_transaction_error_tag_39() {
+        let successful =
+            wincode::config::serialize(&metadata_fixture(0), wincode_leb128_config()).unwrap();
+        let mut current = vec![1, 39];
+        current.extend_from_slice(&successful[1..]);
+
+        let prefix = vec![0xfa];
+        let mut current_output = prefix.clone();
+        let mut current_visitor = RecordingVisitor::default();
+        let current_error = rewrite_archive_v2_metadata_wire_preserving_selected_error_schema(
+            &current,
+            &mut current_output,
+            &mut current_visitor,
+            ArchiveV2WireRewriteLimits::default(),
+            ArchiveV2WireMetadataErrorSchema::Current,
+        )
+        .unwrap_err();
+        assert_eq!(
+            current_error.kind(),
+            ArchiveV2WireRewriteErrorKind::InvalidInput
+        );
+        assert_eq!(current_output, prefix);
+        assert_eq!(current_visitor.rollbacks, 1);
+
+        let mut legacy = wincode::config::serialize(
+            &Some(39u32.to_le_bytes().to_vec()),
+            wincode_leb128_config(),
+        )
+        .unwrap();
+        legacy.extend_from_slice(&successful[1..]);
+        let mut legacy_output = prefix.clone();
+        let mut legacy_visitor = RecordingVisitor::default();
+        let legacy_error = rewrite_archive_v2_metadata_wire_preserving_selected_error_schema(
+            &legacy,
+            &mut legacy_output,
+            &mut legacy_visitor,
+            ArchiveV2WireRewriteLimits::default(),
+            ArchiveV2WireMetadataErrorSchema::Legacy,
+        )
+        .unwrap_err();
+        assert_eq!(
+            legacy_error.kind(),
+            ArchiveV2WireRewriteErrorKind::InvalidInput
+        );
+        assert_eq!(legacy_output, prefix);
+        assert_eq!(legacy_visitor.rollbacks, 1);
     }
 
     #[test]
@@ -2327,8 +3403,8 @@ mod tests {
         // select a value safely.
         let mut source = vec![1, 4, 0, 0, 0, 0];
         source.extend_from_slice(&[0; 13]);
-        assert!(decode_current_metadata_error_prefix(&source[1..]).is_ok());
-        assert!(decode_legacy_metadata_error_prefix(&source[1..]).is_ok());
+        assert!(validate_current_metadata_error_prefix(&source[1..], usize::MAX).is_ok());
+        assert!(validate_legacy_metadata_error_prefix(&source[1..], usize::MAX).is_ok());
 
         let prefix = vec![0xa1, 0xa2];
         let mut output = prefix.clone();
@@ -2349,6 +3425,66 @@ mod tests {
         assert!(visitor.pubkeys.is_empty());
         assert_eq!(visitor.commits, 0);
         assert_eq!(visitor.rollbacks, 1);
+    }
+
+    #[test]
+    fn admitted_current_metadata_does_not_probe_the_legacy_error_prefix() {
+        // Current tag 4 is also a valid four-byte legacy error length prefix.
+        // Generation admission or the owned ambiguity rule has already selected
+        // the current value before this entry point is called.
+        let fixture = |offset| CompactMetaV1 {
+            err: Some(crate::CompactTransactionError::InsufficientFundsForFee),
+            fee: 0,
+            pre_balances: Vec::new(),
+            post_balances: Vec::new(),
+            inner_instructions: None,
+            logs: None,
+            pre_token_balances: Vec::new(),
+            post_token_balances: Vec::new(),
+            rewards: Vec::new(),
+            loaded_writable_addresses: vec![pk(207, offset)],
+            loaded_readonly_addresses: Vec::new(),
+            return_data: None,
+            compute_units_consumed: None,
+            cost_units: None,
+        };
+        let source_value = fixture(0);
+        let source = wincode::config::serialize(&source_value, wincode_leb128_config()).unwrap();
+        let expected_value = fixture(DELTA);
+        let expected =
+            wincode::config::serialize(&expected_value, wincode_leb128_config()).unwrap();
+
+        let mut probing_output = Vec::new();
+        let mut probing_visitor = RecordingVisitor::default();
+        let probing_error = rewrite_archive_v2_metadata_wire(
+            &source,
+            &mut probing_output,
+            &mut probing_visitor,
+            ArchiveV2WireRewriteLimits::default(),
+        )
+        .unwrap_err();
+        assert_eq!(
+            probing_error.fallback_reason(),
+            Some(ArchiveV2WireFallbackReason::MetadataErrorSchemaAmbiguous)
+        );
+
+        let mut output = Vec::new();
+        let mut visitor = RecordingVisitor::default();
+        let stats = rewrite_archive_v2_current_metadata_wire(
+            &source,
+            &mut output,
+            &mut visitor,
+            ArchiveV2WireRewriteLimits::default(),
+        )
+        .unwrap();
+
+        assert_eq!(output, expected);
+        assert_eq!(
+            stats.metadata_error_schema,
+            Some(ArchiveV2WireMetadataErrorSchema::Current)
+        );
+        assert_eq!(visitor.commits, 1);
+        assert_eq!(visitor.rollbacks, 0);
     }
 
     #[test]
