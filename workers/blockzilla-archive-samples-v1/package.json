@@ -1,0 +1,13 @@
+{
+  "name": "blockzilla-archive-samples-v1",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "check": "wrangler deploy --dry-run --outdir .wrangler/dry-run",
+    "test": "node --test test/worker.test.mjs",
+    "types": "wrangler types"
+  },
+  "devDependencies": {
+    "wrangler": "4.127.1"
+  }
+}

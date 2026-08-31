@@ -200,6 +200,11 @@ The readers still validate internal headers, indexes, offsets, counts, and
 epoch geometry. Output SHA-256 values in workload tools check application
 result parity. They are not archive publication hashes.
 
+The public source is a small read-only
+[`blockzilla-archive-samples-v1` Worker](../../workers/blockzilla-archive-samples-v1/README.md).
+It exposes only the fixed epoch and object allowlists in this document and
+streams complete or single-range R2 reads without buffering archive payloads.
+
 ## Dedicated SDKs and examples
 
 Each example binary has one format and one job. There is no run-time format
