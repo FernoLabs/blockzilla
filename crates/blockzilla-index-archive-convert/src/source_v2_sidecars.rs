@@ -11,6 +11,16 @@ pub const PREVIOUS_BLOCKHASH_CURRENT_RECORD_LEN: usize = 40;
 pub const PREVIOUS_BLOCKHASH_LEGACY_RECORD_LEN: usize = 32;
 pub const PREVIOUS_BLOCKHASH_TAIL_CAPACITY: usize = 300;
 
+/// The relation between Compact V2 blockhash records and indexed blocks.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum BlockhashRegistryLayout {
+    /// One registry record for each produced block. A nonzero epoch needs the
+    /// legacy predecessor-tail object.
+    LegacyCurrentOnly,
+    /// Registry record 0 is the epoch boundary. Produced blocks start at ID 1.
+    BoundaryPrefixed,
+}
+
 /// The source PoH entry schema proved by exact frame decoding.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum SourcePohSchema {
@@ -72,7 +82,7 @@ pub struct PreviousBlockhashTail {
     pub entries: Vec<PreviousBlockhash>,
 }
 
-/// Exact signed-ID resolver for current and previous-epoch blockhashes.
+/// Exact signed-ID resolver for registry and legacy previous-epoch hashes.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct BlockhashResolver {
     current: Vec<[u8; 32]>,
@@ -98,8 +108,9 @@ impl BlockhashResolver {
         &self.previous
     }
 
-    /// Resolve `>= 0` in the current registry and `< 0` from the previous
-    /// tail, where `-1` is the newest previous hash.
+    /// Resolve `>= 0` in the registry and `< 0` from the legacy previous tail,
+    /// where `-1` is the newest previous hash. In the boundary-prefixed
+    /// layout, ID 0 is the epoch boundary hash.
     pub fn resolve(&self, id: i32) -> Result<[u8; 32], SidecarConversionError> {
         if id >= 0 {
             return self
@@ -132,8 +143,10 @@ impl BlockhashResolver {
     }
 
     /// Resolve the unsigned header representation of the previous blockhash.
-    /// Compact V2 uses `(blockhash_id=0, previous_id=0)` for the first current
-    /// block and obtains its predecessor from the newest previous-tail row.
+    /// Legacy Compact V2 uses `(blockhash_id=0, previous_id=0)` for the first
+    /// current block and obtains its predecessor from the newest previous-tail
+    /// row. The boundary-prefixed layout uses `(1, 0)`, so ID 0 resolves from
+    /// the registry.
     pub fn resolve_header_previous(
         &self,
         blockhash_id: u32,
@@ -161,6 +174,10 @@ pub enum SidecarConversionError {
     },
     BlockhashRegistryTooLarge {
         records: usize,
+    },
+    BlockhashRegistryBlockCount {
+        records: usize,
+        blocks: usize,
     },
     PreviousTailLength {
         schema: PreviousBlockhashTailSchema,
@@ -208,6 +225,10 @@ impl fmt::Display for SidecarConversionError {
             Self::BlockhashRegistryTooLarge { records } => write!(
                 f,
                 "blockhash registry has {records} records, above the i32 ID range"
+            ),
+            Self::BlockhashRegistryBlockCount { records, blocks } => write!(
+                f,
+                "blockhash registry has {records} records for {blocks} archive blocks; expected one record per block or one leading boundary record"
             ),
             Self::PreviousTailLength {
                 schema,
@@ -261,6 +282,18 @@ impl fmt::Display for SidecarConversionError {
 }
 
 impl Error for SidecarConversionError {}
+
+/// Detect the legacy or boundary-prefixed registry layout from exact counts.
+pub fn detect_blockhash_registry_layout(
+    records: usize,
+    blocks: usize,
+) -> Result<BlockhashRegistryLayout, SidecarConversionError> {
+    match records.checked_sub(blocks) {
+        Some(0) => Ok(BlockhashRegistryLayout::LegacyCurrentOnly),
+        Some(1) => Ok(BlockhashRegistryLayout::BoundaryPrefixed),
+        _ => Err(SidecarConversionError::BlockhashRegistryBlockCount { records, blocks }),
+    }
+}
 
 /// Detect and parse the bounded previous-blockhash tail.
 ///
@@ -430,6 +463,45 @@ mod tests {
             resolver.resolve(-3),
             Err(SidecarConversionError::PreviousBlockhashIdOutOfRange { .. })
         ));
+    }
+
+    #[test]
+    fn boundary_prefixed_resolver_uses_record_zero_without_a_tail() {
+        let resolver = BlockhashResolver::from_bytes(
+            &[[7; 32], [8; 32]].concat(),
+            PreviousBlockhashTail {
+                schema: PreviousBlockhashTailSchema::CurrentHashAndSlot,
+                entries: Vec::new(),
+            },
+        )
+        .unwrap();
+        assert_eq!(resolver.resolve_header_previous(1, 0).unwrap(), [7; 32]);
+        assert_eq!(resolver.resolve(1).unwrap(), [8; 32]);
+    }
+
+    #[test]
+    fn registry_layout_accepts_legacy_and_boundary_prefixed_counts() {
+        assert_eq!(
+            detect_blockhash_registry_layout(2, 2).unwrap(),
+            BlockhashRegistryLayout::LegacyCurrentOnly
+        );
+        assert_eq!(
+            detect_blockhash_registry_layout(3, 2).unwrap(),
+            BlockhashRegistryLayout::BoundaryPrefixed
+        );
+    }
+
+    #[test]
+    fn registry_layout_rejects_all_other_counts() {
+        for records in [0, 1, 4] {
+            assert!(matches!(
+                detect_blockhash_registry_layout(records, 2),
+                Err(SidecarConversionError::BlockhashRegistryBlockCount {
+                    records: actual,
+                    blocks: 2
+                }) if actual == records
+            ));
+        }
     }
 
     #[test]

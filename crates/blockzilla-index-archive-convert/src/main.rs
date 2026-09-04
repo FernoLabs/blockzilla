@@ -39,8 +39,8 @@ use blockzilla_index_archive_convert::source_v2::{
     validate_v0_loaded_address_counts,
 };
 use blockzilla_index_archive_convert::source_v2_sidecars::{
-    BlockhashResolver, PreviousBlockhashTail, PreviousBlockhashTailSchema,
-    parse_previous_blockhash_tail,
+    BlockhashRegistryLayout, BlockhashResolver, PreviousBlockhash, PreviousBlockhashTail,
+    PreviousBlockhashTailSchema, detect_blockhash_registry_layout, parse_previous_blockhash_tail,
 };
 use blockzilla_index_archive_convert::{
     candidate::validate_complete_candidate,
@@ -576,6 +576,7 @@ fn validate_source_publication(source: &Path, args: &Args) -> Result<SourceConte
             );
         }
         ensure!(manifest.complete, "source generation is not complete");
+        let index = validated.index().clone();
         for name in [
             ARCHIVE_V2_BLOCKS_FILE,
             ARCHIVE_V2_BLOCK_INDEX_FILE,
@@ -594,11 +595,8 @@ fn validate_source_publication(source: &Path, args: &Args) -> Result<SourceConte
             manifest
                 .required_file(ARCHIVE_V2_GENESIS_BIN_FILE)
                 .context("epoch-zero source manifest does not bind genesis.bin")?;
-        } else {
-            manifest
-                .required_file(ARCHIVE_V2_PREV_BLOCKHASH_TAIL_FILE)
-                .context("source manifest does not bind prev_blockhash_tail.bin")?;
         }
+        validate_published_blockhash_bindings(manifest, index.rows.len())?;
         if pinned.size(ARCHIVE_V2_VOTE_HASH_REGISTRY_FILE)?.is_some() {
             manifest
                 .required_file(ARCHIVE_V2_VOTE_HASH_REGISTRY_FILE)
@@ -607,7 +605,6 @@ fn validate_source_publication(source: &Path, args: &Args) -> Result<SourceConte
         let message_schema = select_compact_v2_message_schema(&pinned, manifest)
             .context("select manifest-bound Compact V2 message grammar")?;
         let metadata_schema = select_published_metadata_schema(manifest)?;
-        let index = validated.index().clone();
         return Ok(SourceContext {
             epoch: manifest.epoch,
             slots_per_epoch: manifest.slots_per_epoch,
@@ -665,6 +662,30 @@ fn validate_source_publication(source: &Path, args: &Args) -> Result<SourceConte
     })
 }
 
+fn validate_published_blockhash_bindings(
+    manifest: &blockzilla_read_sdk::manifest::GenerationManifest,
+    block_count: usize,
+) -> Result<BlockhashRegistryLayout> {
+    let registry = manifest
+        .required_file(ARCHIVE_V2_BLOCKHASH_REGISTRY_FILE)
+        .context("source manifest does not bind blockhash_registry.bin")?;
+    ensure!(
+        registry.size.is_multiple_of(32),
+        "manifest-bound blockhash registry size {} is not 32-byte aligned",
+        registry.size
+    );
+    let records = usize::try_from(registry.size / 32)
+        .context("manifest-bound blockhash registry record count exceeds usize")?;
+    let layout = detect_blockhash_registry_layout(records, block_count)
+        .context("manifest-bound blockhash registry row count does not match the block index")?;
+    if layout == BlockhashRegistryLayout::LegacyCurrentOnly && manifest.epoch != 0 {
+        manifest
+            .required_file(ARCHIVE_V2_PREV_BLOCKHASH_TAIL_FILE)
+            .context("legacy source manifest does not bind prev_blockhash_tail.bin")?;
+    }
+    Ok(layout)
+}
+
 fn select_published_metadata_schema(
     manifest: &blockzilla_read_sdk::manifest::GenerationManifest,
 ) -> Result<CompactV2MetadataSchema> {
@@ -682,6 +703,21 @@ fn read_pinned_all(source: &PinnedLocalRangeSource, object: &str) -> Result<Vec<
     source
         .read_range(object, 0, length)
         .with_context(|| format!("read pinned source object {object}"))
+}
+
+fn boundary_registry_predecessor(
+    blockhash_registry: &[u8],
+    parent_slot: u64,
+) -> Result<PreviousBlockhash> {
+    let hash: [u8; 32] = blockhash_registry
+        .get(..32)
+        .context("boundary-prefixed blockhash registry has no record 0")?
+        .try_into()
+        .expect("checked boundary record width");
+    Ok(PreviousBlockhash {
+        hash,
+        slot: Some(parent_slot),
+    })
 }
 
 fn usable_parent(path: &Path) -> &Path {
@@ -4015,57 +4051,89 @@ fn main() -> Result<()> {
         "source has a present-but-empty shredding record. Old live archives used this shape as an unknown placeholder, so exact shredding needs embedded-header evidence or a trusted backfill"
     );
 
-    let previous_tail = if source_context.epoch == 0 {
-        PreviousBlockhashTail {
-            schema: PreviousBlockhashTailSchema::CurrentHashAndSlot,
-            entries: Vec::new(),
-        }
-    } else if let Some((hash, slot)) = fixture_predecessor {
-        let first_row = index
-            .rows
-            .first()
-            .copied()
-            .context("fixture source has no blocks")?;
-        let first_parent = decode_source_block(&repair_blocks, first_row)?
-            .block
-            .header
-            .parent_slot;
-        ensure!(
-            slot == first_parent,
-            "fixture predecessor slot {slot} does not match the first block predecessor {first_parent}"
-        );
-        PreviousBlockhashTail {
-            schema: PreviousBlockhashTailSchema::CurrentHashAndSlot,
-            entries: vec![
-                blockzilla_index_archive_convert::source_v2_sidecars::PreviousBlockhash {
-                    hash,
-                    slot: Some(slot),
-                },
-            ],
-        }
-    } else {
-        let bytes = read_pinned_all(&source_context.source, ARCHIVE_V2_PREV_BLOCKHASH_TAIL_FILE)?;
-        let tail =
-            parse_previous_blockhash_tail(&bytes, PreviousBlockhashTailSchema::CurrentHashAndSlot)
-                .context("decode exact current hash-and-slot predecessor-tail schema")?;
-        let epoch_start = source_context
-            .epoch
-            .checked_mul(source_context.slots_per_epoch)
-            .context("epoch start overflows u64")?;
-        let previous_start = epoch_start
-            .checked_sub(source_context.slots_per_epoch)
-            .context("previous epoch start underflows")?;
-        ensure!(
-            tail.entries.iter().all(|entry| entry
-                .slot
-                .is_some_and(|slot| (previous_start..epoch_start).contains(&slot))),
-            "current predecessor tail contains a slot outside the previous epoch"
-        );
-        tail
+    let blockhash_layout = match retained_poh.blockhash_registry_offset {
+        0 => BlockhashRegistryLayout::LegacyCurrentOnly,
+        1 => BlockhashRegistryLayout::BoundaryPrefixed,
+        offset => bail!("unsupported source blockhash registry offset {offset}"),
     };
-    if let Some(first_row) = index.rows.first()
-        && source_context.epoch != 0
-    {
+    let first_row = index
+        .rows
+        .first()
+        .copied()
+        .context("source has no blocks")?;
+    let first_header = decode_source_block(&repair_blocks, first_row)?.block.header;
+    let (previous_tail, predecessor_entries) = match blockhash_layout {
+        BlockhashRegistryLayout::BoundaryPrefixed => {
+            ensure!(
+                first_header.previous_blockhash_id == 0,
+                "boundary-prefixed first block previous blockhash ID is {}, expected 0",
+                first_header.previous_blockhash_id
+            );
+            let predecessor =
+                boundary_registry_predecessor(&source_blockhashes, first_header.parent_slot)?;
+            if let Some((fixture_hash, fixture_slot)) = fixture_predecessor {
+                ensure!(
+                    fixture_hash == predecessor.hash && fixture_slot == first_header.parent_slot,
+                    "fixture predecessor does not match blockhash registry record 0 and the first block parent slot"
+                );
+            }
+            (
+                PreviousBlockhashTail {
+                    schema: PreviousBlockhashTailSchema::CurrentHashAndSlot,
+                    entries: Vec::new(),
+                },
+                vec![predecessor],
+            )
+        }
+        BlockhashRegistryLayout::LegacyCurrentOnly if source_context.epoch == 0 => {
+            let tail = PreviousBlockhashTail {
+                schema: PreviousBlockhashTailSchema::CurrentHashAndSlot,
+                entries: Vec::new(),
+            };
+            (tail, Vec::new())
+        }
+        BlockhashRegistryLayout::LegacyCurrentOnly => {
+            let tail = if let Some((hash, slot)) = fixture_predecessor {
+                ensure!(
+                    slot == first_header.parent_slot,
+                    "fixture predecessor slot {slot} does not match the first block predecessor {}",
+                    first_header.parent_slot
+                );
+                PreviousBlockhashTail {
+                    schema: PreviousBlockhashTailSchema::CurrentHashAndSlot,
+                    entries: vec![PreviousBlockhash {
+                        hash,
+                        slot: Some(slot),
+                    }],
+                }
+            } else {
+                let bytes =
+                    read_pinned_all(&source_context.source, ARCHIVE_V2_PREV_BLOCKHASH_TAIL_FILE)?;
+                let tail = parse_previous_blockhash_tail(
+                    &bytes,
+                    PreviousBlockhashTailSchema::CurrentHashAndSlot,
+                )
+                .context("decode exact current hash-and-slot predecessor-tail schema")?;
+                let epoch_start = source_context
+                    .epoch
+                    .checked_mul(source_context.slots_per_epoch)
+                    .context("epoch start overflows u64")?;
+                let previous_start = epoch_start
+                    .checked_sub(source_context.slots_per_epoch)
+                    .context("previous epoch start underflows")?;
+                ensure!(
+                    tail.entries.iter().all(|entry| entry
+                        .slot
+                        .is_some_and(|slot| (previous_start..epoch_start).contains(&slot))),
+                    "current predecessor tail contains a slot outside the previous epoch"
+                );
+                tail
+            };
+            let entries = tail.entries.clone();
+            (tail, entries)
+        }
+    };
+    if blockhash_layout == BlockhashRegistryLayout::LegacyCurrentOnly && source_context.epoch != 0 {
         let predecessor = previous_tail
             .entries
             .last()
@@ -4075,14 +4143,11 @@ fn main() -> Result<()> {
                 || predecessor.slot.is_some_and(|slot| slot < first_row.slot),
             "predecessor-tail slot is not before the first source block"
         );
-        let first_parent = decode_source_block(&repair_blocks, *first_row)?
-            .block
-            .header
-            .parent_slot;
         ensure!(
-            predecessor.slot == Some(first_parent),
-            "predecessor-tail slot {:?} does not match first block parent {first_parent}",
-            predecessor.slot
+            predecessor.slot == Some(first_header.parent_slot),
+            "predecessor-tail slot {:?} does not match first block parent {}",
+            predecessor.slot,
+            first_header.parent_slot
         );
     }
     let source_hash_resolver = Arc::new(
@@ -4134,7 +4199,7 @@ fn main() -> Result<()> {
         final_poh_block_by_source_hash: &final_poh_block_by_source_hash,
         final_poh_hash_index: &final_poh_hash_index,
     };
-    for entry in &source_hash_resolver.previous().entries {
+    for entry in &predecessor_entries {
         if final_poh_hash_index
             .binary_search_by_key(&entry.hash, |candidate| candidate.0)
             .is_ok()
@@ -5302,6 +5367,81 @@ mod tests {
     use tempfile::tempdir;
 
     use super::*;
+
+    fn blockhash_manifest(
+        epoch: u64,
+        files: impl IntoIterator<Item = (&'static str, u64)>,
+    ) -> blockzilla_read_sdk::manifest::GenerationManifest {
+        blockzilla_read_sdk::manifest::GenerationManifest {
+            schema_version: 1,
+            cluster_id: "mainnet-beta".to_owned(),
+            epoch,
+            generation_id: "test".to_owned(),
+            generation_digest: "0".repeat(64),
+            slots_per_epoch: 432_000,
+            complete: true,
+            files: files
+                .into_iter()
+                .map(
+                    |(name, size)| blockzilla_read_sdk::manifest::GenerationFile {
+                        name: name.to_owned(),
+                        size,
+                        sha256: "0".repeat(64),
+                    },
+                )
+                .collect(),
+        }
+    }
+
+    #[test]
+    fn boundary_prefixed_manifest_does_not_require_a_tail_binding() {
+        let manifest = blockhash_manifest(2, [(ARCHIVE_V2_BLOCKHASH_REGISTRY_FILE, 3 * 32)]);
+        assert_eq!(
+            validate_published_blockhash_bindings(&manifest, 2).unwrap(),
+            BlockhashRegistryLayout::BoundaryPrefixed
+        );
+    }
+
+    #[test]
+    fn legacy_manifest_keeps_the_tail_binding_requirement() {
+        let bound = blockhash_manifest(
+            2,
+            [
+                (ARCHIVE_V2_BLOCKHASH_REGISTRY_FILE, 2 * 32),
+                (ARCHIVE_V2_PREV_BLOCKHASH_TAIL_FILE, 40),
+            ],
+        );
+        assert_eq!(
+            validate_published_blockhash_bindings(&bound, 2).unwrap(),
+            BlockhashRegistryLayout::LegacyCurrentOnly
+        );
+
+        let unbound = blockhash_manifest(2, [(ARCHIVE_V2_BLOCKHASH_REGISTRY_FILE, 2 * 32)]);
+        let error = validate_published_blockhash_bindings(&unbound, 2).unwrap_err();
+        assert!(error.to_string().contains("prev_blockhash_tail.bin"));
+    }
+
+    #[test]
+    fn manifest_rejects_bad_registry_row_counts_and_bindings() {
+        let bad_count = blockhash_manifest(2, [(ARCHIVE_V2_BLOCKHASH_REGISTRY_FILE, 4 * 32)]);
+        let error = validate_published_blockhash_bindings(&bad_count, 2).unwrap_err();
+        assert!(format!("{error:#}").contains("4 records for 2 archive blocks"));
+
+        let wrong_size = blockhash_manifest(2, [(ARCHIVE_V2_BLOCKHASH_REGISTRY_FILE, 2 * 32 + 1)]);
+        let error = validate_published_blockhash_bindings(&wrong_size, 2).unwrap_err();
+        assert!(error.to_string().contains("not 32-byte aligned"));
+
+        let missing = blockhash_manifest(2, []);
+        let error = validate_published_blockhash_bindings(&missing, 2).unwrap_err();
+        assert!(error.to_string().contains("blockhash_registry.bin"));
+    }
+
+    #[test]
+    fn boundary_predecessor_uses_registry_record_zero_and_first_parent_slot() {
+        let predecessor = boundary_registry_predecessor(&[[7; 32], [8; 32]].concat(), 799).unwrap();
+        assert_eq!(predecessor.hash, [7; 32]);
+        assert_eq!(predecessor.slot, Some(799));
+    }
 
     fn empty_test_metadata(account_count: usize) -> blockzilla_format::CompactMetaV1 {
         blockzilla_format::CompactMetaV1 {

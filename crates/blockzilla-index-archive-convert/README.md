@@ -13,7 +13,8 @@ The current binary supports the Compact V2 current-hot source profile:
 
 - the current hot-block outer schema;
 - the current or manifest-bound May 2024 message schema;
-- the current 40-byte previous-blockhash tail rows;
+- the boundary-prefixed blockhash registry, where record 0 is the predecessor;
+- legacy unprefixed registries with manifest-bound 40-byte predecessor-tail rows;
 - a complete external shredding sidecar;
 - complete signature, PoH, blockhash, pubkey, and required registry files.
 

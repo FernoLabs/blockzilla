@@ -11,7 +11,10 @@ use anyhow::{Context, Result, bail, ensure};
 use blockzilla_format::ArchiveV2HotBlockIndexRow;
 use blockzilla_index_archive_convert::{
     container::{FinishedObject, HeaderedWriter},
-    source_v2_sidecars::{BlockSignatureCountCoverage, PohBlockMapping, SourcePohSchema},
+    source_v2_sidecars::{
+        BlockSignatureCountCoverage, BlockhashRegistryLayout, PohBlockMapping, SourcePohSchema,
+        detect_blockhash_registry_layout,
+    },
 };
 use blockzilla_index_archive_format::{
     ArchiveId, FILE_HEADER_LEN,
@@ -217,14 +220,17 @@ fn retain_poh_selected(
         "blockhash registry is not 32-byte aligned"
     );
     let registry_records = blockhash_registry.len() / 32;
-    let registry_offset = if registry_records == source_block_count {
-        0
-    } else if epoch == 0 && registry_records == source_block_count + 1 {
-        1
-    } else {
-        bail!(
-            "blockhash registry has {registry_records} records for {source_block_count} blocks in epoch {epoch}"
-        );
+    let registry_offset = match detect_blockhash_registry_layout(
+        registry_records,
+        source_block_count,
+    )
+    .with_context(|| {
+        format!(
+            "validate blockhash registry layout for {source_block_count} blocks in epoch {epoch}"
+        )
+    })? {
+        BlockhashRegistryLayout::LegacyCurrentOnly => 0,
+        BlockhashRegistryLayout::BoundaryPrefixed => 1,
     };
 
     let mut reader = BufReader::with_capacity(8 << 20, source);
@@ -691,6 +697,36 @@ mod tests {
                 ],
             })
         );
+        assert_eq!(retained.blockhash_registry_offset, 0);
+    }
+
+    #[test]
+    fn nonzero_epoch_accepts_a_boundary_prefixed_blockhash_registry() {
+        let source = WincodeArchiveV2PohRecord {
+            block_id: 0,
+            slot: 100,
+            entries: vec![CompactPohEntry {
+                num_hashes: 7,
+                hash: [9; 32],
+                tx_count: 1,
+                signature_count: 1,
+            }],
+        };
+        let root = tempdir().unwrap();
+        let source_path = root.path().join("source-boundary.poh");
+        fs::write(&source_path, source_frame(&source)).unwrap();
+
+        let retained = retain_poh(
+            File::open(source_path).unwrap(),
+            root.path(),
+            ArchiveId::new([8; 16]),
+            &[row(1, 1)],
+            &[[8; 32], [9; 32]].concat(),
+            2,
+        )
+        .unwrap();
+
+        assert_eq!(retained.blockhash_registry_offset, 1);
     }
 
     #[test]
