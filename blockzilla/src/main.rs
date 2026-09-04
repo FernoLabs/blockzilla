@@ -23,7 +23,6 @@ mod car_preflight;
 mod first_seen_finalization;
 mod genesis_epoch0;
 mod pre_hot;
-mod predecessor_tail_seed;
 mod scheduler;
 mod split_compact;
 mod token_events;
@@ -164,40 +163,6 @@ enum Commands {
         io_buffer_mib: u16,
     },
 
-    /// Verify and seed predecessor blockhash tails for independent compaction workers.
-    SeedPreviousBlockhashTails {
-        /// Archive root containing `epoch-N` directories.
-        #[arg(long)]
-        archive_root: PathBuf,
-        /// Explicit positive target epochs. Each tail is sourced from epoch N-1.
-        #[arg(
-            long,
-            num_args = 1..,
-            conflicts_with = "discover",
-            required_unless_present = "discover"
-        )]
-        epochs: Vec<u64>,
-        /// Conservatively discover unowned registry-only targets in a bounded range.
-        #[arg(
-            long,
-            conflicts_with = "epochs",
-            requires_all = ["start_epoch", "end_epoch"]
-        )]
-        discover: bool,
-        /// First target epoch to inspect in discovery mode.
-        #[arg(long, requires = "discover")]
-        start_epoch: Option<u64>,
-        /// Last target epoch to inspect in discovery mode.
-        #[arg(long, requires = "discover")]
-        end_epoch: Option<u64>,
-        /// Directory for durable per-target verification receipts.
-        #[arg(long)]
-        receipt_dir: Option<PathBuf>,
-        /// Fully verify sources and targets without publishing tails or receipts.
-        #[arg(long)]
-        dry_run: bool,
-    },
-
     /// Build a sparse slot-gap and block-time sidecar from a local Archive V2 timestamp index.
     BuildBlockTimeGaps {
         /// Input epoch directory or blockhash_index_v3.bin file. No RPC is used.
@@ -252,7 +217,8 @@ enum Commands {
         input: PathBuf,
         /// Output directory for the archive-v2 files.
         output_dir: PathBuf,
-        /// Previous epoch CAR/CAR.ZST used to seed strict recent blockhash resolution.
+        /// Previous epoch path used to find its blockhash registry. The CAR is scanned only if
+        /// that registry is not available.
         #[arg(long)]
         previous_car: Option<PathBuf>,
     },
@@ -273,11 +239,11 @@ enum Commands {
         output_dir: PathBuf,
     },
 
-    /// Build only registry.bin, registry_counts.bin, and blockhash_registry.bin from a CAR/CAR.ZST.
+    /// Build registry.bin, registry_counts.bin, blockhash_registry.bin, and skipped_slots.bin from a CAR/CAR.ZST.
     BuildArchiveV2Registries {
         /// Input CAR or CAR.ZST file.
         input: PathBuf,
-        /// Output directory for registry.bin, registry_counts.bin, and blockhash_registry.bin.
+        /// Output directory for the registry files and skipped_slots.bin.
         output_dir: PathBuf,
         /// Explicit slot/blockhash provenance file for documented PoH-gap blocks.
         #[arg(long)]
@@ -371,12 +337,15 @@ enum Commands {
         level: i32,
     },
 
-    /// Build blockhash_registry.bin, blockhash_index_v3.bin, and its gap sidecar from a CAR file.
+    /// Build the blockhash registries, skipped-slot map, and gap sidecar from a CAR file.
     BuildBlockhashRegistry {
         /// Input CAR or CAR.ZST file.
         input: PathBuf,
-        /// Output directory for blockhash_registry.bin, blockhash_index_v3.bin, and block-time-gaps.bin.
+        /// Output directory for blockhash registries, skipped_slots.bin, and block-time-gaps.bin.
         output_dir: PathBuf,
+        /// Build only skipped_slots.bin. Entry hashes are not decoded.
+        #[arg(long)]
+        skipped_slots_only: bool,
         /// Explicit slot/blockhash provenance file for documented PoH-gap blocks.
         #[arg(long)]
         external_blockhashes: Option<PathBuf>,
@@ -461,7 +430,8 @@ enum Commands {
         input: PathBuf,
         /// Output directory for archive-v2-blocks.zstd and sidecars.
         output_dir: PathBuf,
-        /// Previous epoch CAR/CAR.ZST used to seed strict recent blockhash resolution.
+        /// Prior epoch path used to identify the predecessor. The prior blockhash registry is
+        /// read first; the CAR/CAR.ZST is scanned only when that registry is unavailable.
         #[arg(long)]
         previous_car: Option<PathBuf>,
         /// Existing Archive V2 registry sidecar directory to reuse.
@@ -506,14 +476,15 @@ enum Commands {
         /// Expected unique-key capacity for the first-seen ID table.
         #[arg(long, default_value_t = 34_000_000, requires = "first_seen_registry")]
         first_seen_registry_capacity: usize,
-        /// Parallel transaction/metadata decoders used only by the first-seen builder.
+        /// Parallel transaction and metadata decoders. Block publication stays ordered.
         #[arg(
-            long,
+            long = "decode-workers",
+            visible_alias = "workers",
+            alias = "first-seen-decode-workers",
             default_value_t = 4,
-            requires = "first_seen_registry",
-            value_parser = clap::value_parser!(u8).range(1..=8)
+            value_parser = clap::value_parser!(u8).range(1..=12)
         )]
-        first_seen_decode_workers: u8,
+        decode_workers: u8,
         /// Decompressed CAR prefetch chunk size per buffer (two fixed buffers), only for local .car.zst first-seen builds.
         /// Omit to use the measured 4 MiB default for .car.zst; pass 0 to disable.
         #[arg(
@@ -1176,34 +1147,6 @@ fn main() -> Result<()> {
             required_memory_mib,
             io_buffer_bytes: usize::from(io_buffer_mib) * 1024 * 1024,
         }),
-        Commands::SeedPreviousBlockhashTails {
-            archive_root,
-            epochs,
-            discover,
-            start_epoch,
-            end_epoch,
-            receipt_dir,
-            dry_run,
-        } => {
-            let outcome = predecessor_tail_seed::seed_previous_blockhash_tails(
-                predecessor_tail_seed::SeedPreviousBlockhashTailsConfig {
-                    archive_root: &archive_root,
-                    epochs: &epochs,
-                    discover,
-                    start_epoch,
-                    end_epoch,
-                    receipt_dir: receipt_dir.as_deref(),
-                    dry_run,
-                },
-            )?;
-            if outcome.errors > 0 {
-                anyhow::bail!(
-                    "predecessor-tail discovery completed with {} failed candidate(s)",
-                    outcome.errors
-                );
-            }
-            Ok(())
-        }
         Commands::BuildBlockTimeGaps {
             input,
             epoch,
@@ -1324,14 +1267,21 @@ fn main() -> Result<()> {
         Commands::BuildBlockhashRegistry {
             input,
             output_dir,
+            skipped_slots_only,
             external_blockhashes,
             force,
-        } => archive_v2::build_blockhash_registry(
-            &input,
-            &output_dir,
-            external_blockhashes.as_deref(),
-            force,
-        ),
+        } => {
+            if skipped_slots_only {
+                archive_v2::build_skipped_slot_map(&input, &output_dir, force)
+            } else {
+                archive_v2::build_blockhash_registry(
+                    &input,
+                    &output_dir,
+                    external_blockhashes.as_deref(),
+                    force,
+                )
+            }
+        }
         Commands::OptimizeArchiveV2NoRegistry {
             input,
             output_dir,
@@ -1376,7 +1326,7 @@ fn main() -> Result<()> {
             first_seen_seed_registry,
             first_seen_seed_keys,
             first_seen_registry_capacity,
-            first_seen_decode_workers,
+            decode_workers,
             car_zstd_prefetch_mib,
             first_seen_scan_only,
             first_seen_finalizer_lock,
@@ -1413,7 +1363,7 @@ fn main() -> Result<()> {
                     first_seen_seed_registry.as_deref(),
                     first_seen_seed_keys,
                     first_seen_registry_capacity,
-                    usize::from(first_seen_decode_workers),
+                    usize::from(decode_workers),
                     car_zstd_prefetch_mib,
                     first_seen_scan_only,
                 )
@@ -1432,6 +1382,7 @@ fn main() -> Result<()> {
                     pre_hot_dir.as_deref(),
                     pre_hot_registry_capacity,
                     reuse_pre_hot,
+                    usize::from(decode_workers),
                 )
             } else {
                 archive_v2::build_hot_blocks(
@@ -1444,6 +1395,7 @@ fn main() -> Result<()> {
                     max_blocks,
                     resume,
                     !no_access,
+                    usize::from(decode_workers),
                 )
             }
         }
@@ -2154,6 +2106,67 @@ fn json_f64(value: Option<f64>) -> String {
 mod cli_tests {
     use super::*;
 
+    fn hot_block_decode_workers(arguments: &[&str]) -> u8 {
+        let cli = Cli::try_parse_from(arguments).expect("hot-block command must parse");
+        let Commands::BuildArchiveV2HotBlocks { decode_workers, .. } = cli.command else {
+            panic!("expected build-archive-v2-hot-blocks command");
+        };
+        decode_workers
+    }
+
+    #[test]
+    fn hot_block_decode_workers_default_to_four() {
+        assert_eq!(
+            hot_block_decode_workers(&[
+                "blockzilla",
+                "build-archive-v2-hot-blocks",
+                "epoch.car",
+                "epoch-out",
+            ]),
+            4
+        );
+    }
+
+    #[test]
+    fn hot_block_decode_worker_names_select_the_same_setting() {
+        for option in [
+            "--decode-workers",
+            "--workers",
+            "--first-seen-decode-workers",
+        ] {
+            assert_eq!(
+                hot_block_decode_workers(&[
+                    "blockzilla",
+                    "build-archive-v2-hot-blocks",
+                    "epoch.car",
+                    "epoch-out",
+                    option,
+                    "8",
+                ]),
+                8,
+                "{option} must select the general decode-worker count"
+            );
+        }
+    }
+
+    #[test]
+    fn hot_block_decode_workers_are_bounded_by_the_cli() {
+        for workers in ["0", "9"] {
+            assert!(
+                Cli::try_parse_from([
+                    "blockzilla",
+                    "build-archive-v2-hot-blocks",
+                    "epoch.car",
+                    "epoch-out",
+                    "--decode-workers",
+                    workers,
+                ])
+                .is_err(),
+                "decode worker count {workers} must be rejected"
+            );
+        }
+    }
+
     #[test]
     fn compact_v1_commands_are_not_exposed() {
         for command in ["analyze-compact", "dump-compact-log-strings"] {
@@ -2162,6 +2175,33 @@ mod cli_tests {
                 .expect("Compact V1 commands must remain outside the public CLI");
             assert!(error.to_string().contains("unrecognized subcommand"));
         }
+    }
+
+    #[test]
+    fn blockhash_registry_can_build_only_the_skipped_slot_map() {
+        let cli = Cli::try_parse_from([
+            "blockzilla",
+            "build-blockhash-registry",
+            "epoch.car.zst",
+            "epoch-out",
+            "--skipped-slots-only",
+        ])
+        .unwrap();
+        let Commands::BuildBlockhashRegistry {
+            input,
+            output_dir,
+            skipped_slots_only,
+            external_blockhashes,
+            force,
+        } = cli.command
+        else {
+            panic!("expected build-blockhash-registry command");
+        };
+        assert_eq!(input, PathBuf::from("epoch.car.zst"));
+        assert_eq!(output_dir, PathBuf::from("epoch-out"));
+        assert!(skipped_slots_only);
+        assert!(external_blockhashes.is_none());
+        assert!(!force);
     }
 
     #[test]
@@ -2282,72 +2322,6 @@ mod cli_tests {
         let mut invalid = arguments;
         *invalid.last_mut().unwrap() = "0";
         assert!(Cli::try_parse_from(invalid).is_err());
-    }
-
-    #[test]
-    fn predecessor_tail_cli_supports_explicit_and_bounded_discovery_modes() {
-        let explicit = Cli::try_parse_from([
-            "blockzilla",
-            "seed-previous-blockhash-tails",
-            "--archive-root",
-            "/archive-v2",
-            "--epochs",
-            "799",
-            "713",
-            "799",
-            "--receipt-dir",
-            "/state/tail-receipts",
-        ])
-        .unwrap();
-        let Commands::SeedPreviousBlockhashTails {
-            archive_root,
-            epochs,
-            discover,
-            start_epoch,
-            end_epoch,
-            receipt_dir,
-            dry_run,
-        } = explicit.command
-        else {
-            panic!("expected seed-previous-blockhash-tails command");
-        };
-        assert_eq!(archive_root, PathBuf::from("/archive-v2"));
-        assert_eq!(epochs, [799, 713, 799]);
-        assert!(!discover);
-        assert_eq!(start_epoch, None);
-        assert_eq!(end_epoch, None);
-        assert_eq!(receipt_dir, Some(PathBuf::from("/state/tail-receipts")));
-        assert!(!dry_run);
-
-        let discovery = Cli::try_parse_from([
-            "blockzilla",
-            "seed-previous-blockhash-tails",
-            "--archive-root",
-            "/archive-v2",
-            "--discover",
-            "--start-epoch",
-            "713",
-            "--end-epoch",
-            "799",
-            "--dry-run",
-        ])
-        .unwrap();
-        let Commands::SeedPreviousBlockhashTails {
-            epochs,
-            discover,
-            start_epoch,
-            end_epoch,
-            dry_run,
-            ..
-        } = discovery.command
-        else {
-            panic!("expected seed-previous-blockhash-tails command");
-        };
-        assert!(epochs.is_empty());
-        assert!(discover);
-        assert_eq!(start_epoch, Some(713));
-        assert_eq!(end_epoch, Some(799));
-        assert!(dry_run);
     }
 
     #[test]

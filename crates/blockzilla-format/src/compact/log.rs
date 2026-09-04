@@ -25,6 +25,147 @@ pub struct CompactLogStream {
     pub data: DataTable,
 }
 
+/// Reusable allocation storage for compact log parsing.
+///
+/// A caller can keep one value per worker, parse one log stream, consume that
+/// stream, and then return it with [`Self::recycle`]. The next parse reuses the
+/// event, table, and base64-decoding allocations without a lock.
+#[derive(Debug)]
+pub struct CompactLogReuse {
+    events: Vec<LogEvent>,
+    string_lengths: Vec<u32>,
+    string_bytes: Vec<u8>,
+    data_arrays: Vec<DataArray>,
+    data_chunk_lengths: Vec<u32>,
+    data_bytes: Vec<u8>,
+    decode_buf: Vec<u8>,
+    max_retained_buffer_bytes: usize,
+}
+
+/// Default limit for one retained compact-log buffer.
+///
+/// The limit applies to each vector, not to the sum of all vectors. This keeps
+/// normal transaction allocations hot while a single unusually large log does
+/// not stay pinned in every worker slot.
+pub const DEFAULT_COMPACT_LOG_MAX_RETAINED_BUFFER_BYTES: usize = 1024 * 1024;
+
+impl Default for CompactLogReuse {
+    fn default() -> Self {
+        Self::with_max_retained_buffer_bytes(DEFAULT_COMPACT_LOG_MAX_RETAINED_BUFFER_BYTES)
+    }
+}
+
+impl CompactLogReuse {
+    pub fn new() -> Self {
+        Self::default()
+    }
+
+    pub fn with_max_retained_buffer_bytes(max_retained_buffer_bytes: usize) -> Self {
+        Self {
+            events: Vec::new(),
+            string_lengths: Vec::new(),
+            string_bytes: Vec::new(),
+            data_arrays: Vec::new(),
+            data_chunk_lengths: Vec::new(),
+            data_bytes: Vec::new(),
+            decode_buf: Vec::new(),
+            max_retained_buffer_bytes,
+        }
+    }
+
+    /// Returns an already-consumed output stream to this reuse slot.
+    pub fn recycle(&mut self, logs: CompactLogStream) {
+        retain_reusable_vec(
+            &mut self.events,
+            logs.events,
+            self.max_retained_buffer_bytes,
+        );
+        retain_reusable_vec(
+            &mut self.string_lengths,
+            logs.strings.lengths,
+            self.max_retained_buffer_bytes,
+        );
+        retain_reusable_vec(
+            &mut self.string_bytes,
+            logs.strings.bytes,
+            self.max_retained_buffer_bytes,
+        );
+        retain_reusable_vec(
+            &mut self.data_arrays,
+            logs.data.arrays,
+            self.max_retained_buffer_bytes,
+        );
+        retain_reusable_vec(
+            &mut self.data_chunk_lengths,
+            logs.data.chunk_lengths,
+            self.max_retained_buffer_bytes,
+        );
+        retain_reusable_vec(
+            &mut self.data_bytes,
+            logs.data.bytes,
+            self.max_retained_buffer_bytes,
+        );
+    }
+
+    /// Total capacity, in bytes, currently retained by this reuse slot.
+    pub fn retained_capacity_bytes(&self) -> usize {
+        reusable_vec_bytes(&self.events)
+            .saturating_add(reusable_vec_bytes(&self.string_lengths))
+            .saturating_add(reusable_vec_bytes(&self.string_bytes))
+            .saturating_add(reusable_vec_bytes(&self.data_arrays))
+            .saturating_add(reusable_vec_bytes(&self.data_chunk_lengths))
+            .saturating_add(reusable_vec_bytes(&self.data_bytes))
+            .saturating_add(reusable_vec_bytes(&self.decode_buf))
+    }
+
+    #[inline]
+    fn take_stream(&mut self, estimated_len: usize) -> CompactLogStream {
+        let mut events = std::mem::take(&mut self.events);
+        events.clear();
+        if events.capacity() < estimated_len {
+            events.reserve(estimated_len);
+        }
+
+        CompactLogStream {
+            events,
+            strings: StringTable {
+                lengths: std::mem::take(&mut self.string_lengths),
+                bytes: std::mem::take(&mut self.string_bytes),
+            },
+            data: DataTable {
+                arrays: std::mem::take(&mut self.data_arrays),
+                chunk_lengths: std::mem::take(&mut self.data_chunk_lengths),
+                bytes: std::mem::take(&mut self.data_bytes),
+            },
+        }
+    }
+
+    #[inline]
+    fn recycle_decode_buf(&mut self, decode_buf: Vec<u8>) {
+        retain_reusable_vec(
+            &mut self.decode_buf,
+            decode_buf,
+            self.max_retained_buffer_bytes,
+        );
+    }
+}
+
+#[inline]
+fn reusable_vec_bytes<T>(values: &Vec<T>) -> usize {
+    values.capacity().saturating_mul(std::mem::size_of::<T>())
+}
+
+#[inline]
+fn retain_reusable_vec<T>(slot: &mut Vec<T>, mut values: Vec<T>, max_bytes: usize) {
+    values.clear();
+    if reusable_vec_bytes(&values) > max_bytes {
+        return;
+    }
+    if values.capacity() > slot.capacity() {
+        *slot = values;
+    }
+}
+
 #[derive(Debug, Default, Serialize, Deserialize, SchemaRead, SchemaWrite)]
 pub struct StringTable {
     pub lengths: Vec<u32>,
@@ -791,7 +932,7 @@ const LOG_PUBKEY_CACHE_MAX: usize = 64;
 
 #[derive(Debug, Default)]
 struct LogPubkeyCache<'a> {
-    entries: Vec<(&'a str, Option<CompactPubkey>)>,
+    entries: heapless::Vec<(&'a str, Option<CompactPubkey>), LOG_PUBKEY_CACHE_MAX>,
     hits: u64,
     misses: u64,
     max_entries: usize,
@@ -808,10 +949,71 @@ impl<'a> LogPubkeyCache<'a> {
         let value = index.compact_str(key);
         self.misses = self.misses.saturating_add(1);
         if self.entries.len() < LOG_PUBKEY_CACHE_MAX {
-            self.entries.push((key, value));
+            self.entries
+                .push((key, value))
+                .expect("cache length checked against fixed capacity");
             self.max_entries = self.max_entries.max(self.entries.len());
         }
         value
+    }
+}
+
+const PROGRAM_STACK_INLINE: usize = 16;
+
+/// Keeps the normal Solana invocation stack on the thread stack. The spill
+/// vector preserves the old unlimited behavior for malformed or synthetic
+/// logs with more nesting.
+#[derive(Debug, Default)]
+struct ProgramStack<'a> {
+    inline: heapless::Vec<&'a str, PROGRAM_STACK_INLINE>,
+    overflow: Vec<&'a str>,
+}
+
+impl<'a> ProgramStack<'a> {
+    #[inline]
+    fn last(&self) -> Option<&&'a str> {
+        self.overflow.last().or_else(|| self.inline.last())
+    }
+
+    #[inline]
+    fn push(&mut self, program: &'a str) {
+        if self.overflow.is_empty() && self.inline.len() < PROGRAM_STACK_INLINE {
+            self.inline
+                .push(program)
+                .expect("inline program stack length checked");
+        } else {
+            self.overflow.push(program);
+        }
+    }
+
+    #[inline]
+    fn pop(&mut self) -> Option<&'a str> {
+        self.overflow.pop().or_else(|| self.inline.pop())
+    }
+
+    #[inline]
+    fn clear(&mut self) {
+        self.inline.clear();
+        self.overflow.clear();
+    }
+
+    #[inline]
+    fn rposition(&self, program: &str) -> Option<usize> {
+        self.overflow
+            .iter()
+            .rposition(|active| *active == program)
+            .map(|position| self.inline.len() + position)
+            .or_else(|| self.inline.iter().rposition(|active| *active == program))
+    }
+
+    #[inline]
+    fn truncate(&mut self, len: usize) {
+        if len <= self.inline.len() {
+            self.inline.truncate(len);
+            self.overflow.clear();
+        } else {
+            self.overflow.truncate(len - self.inline.len());
+        }
     }
 }
 
@@ -858,7 +1060,8 @@ pub fn parse_logs_with_compactor<C: PubkeyCompactor>(
     lines: &[String],
     index: &C,
 ) -> CompactLogStream {
-    parse_log_iter_with_compactor(lines.iter().map(String::as_str), lines.len(), index, None)
+    let mut reuse = CompactLogReuse::new();
+    parse_logs_with_compactor_reusing(lines, index, &mut reuse)
 }
 
 pub fn parse_logs_with_compactor_and_stats<C: PubkeyCompactor>(
@@ -866,11 +1069,36 @@ pub fn parse_logs_with_compactor_and_stats<C: PubkeyCompactor>(
     index: &C,
     stats: &mut CompactLogParseStats,
 ) -> CompactLogStream {
-    parse_log_iter_with_compactor(
+    let mut reuse = CompactLogReuse::new();
+    parse_logs_with_compactor_and_stats_reusing(lines, index, stats, &mut reuse)
+}
+
+pub fn parse_logs_with_compactor_reusing<C: PubkeyCompactor>(
+    lines: &[String],
+    index: &C,
+    reuse: &mut CompactLogReuse,
+) -> CompactLogStream {
+    parse_log_iter_with_compactor_reusing(
+        lines.iter().map(String::as_str),
+        lines.len(),
+        index,
+        None,
+        reuse,
+    )
+}
+
+pub fn parse_logs_with_compactor_and_stats_reusing<C: PubkeyCompactor>(
+    lines: &[String],
+    index: &C,
+    stats: &mut CompactLogParseStats,
+    reuse: &mut CompactLogReuse,
+) -> CompactLogStream {
+    parse_log_iter_with_compactor_reusing(
         lines.iter().map(String::as_str),
         lines.len(),
         index,
         Some(stats),
+        reuse,
     )
 }
 
@@ -878,7 +1106,8 @@ pub fn parse_log_strs_with_compactor<C: PubkeyCompactor>(
     lines: &[&str],
     index: &C,
 ) -> CompactLogStream {
-    parse_log_iter_with_compactor(lines.iter().copied(), lines.len(), index, None)
+    let mut reuse = CompactLogReuse::new();
+    parse_log_strs_with_compactor_reusing(lines, index, &mut reuse)
 }
 
 pub fn parse_log_strs_with_compactor_and_stats<C: PubkeyCompactor>(
@@ -886,24 +1115,51 @@ pub fn parse_log_strs_with_compactor_and_stats<C: PubkeyCompactor>(
     index: &C,
     stats: &mut CompactLogParseStats,
 ) -> CompactLogStream {
-    parse_log_iter_with_compactor(lines.iter().copied(), lines.len(), index, Some(stats))
+    let mut reuse = CompactLogReuse::new();
+    parse_log_strs_with_compactor_and_stats_reusing(lines, index, stats, &mut reuse)
 }
 
-fn parse_log_iter_with_compactor<'a, I, C>(
+pub fn parse_log_strs_with_compactor_reusing<C: PubkeyCompactor>(
+    lines: &[&str],
+    index: &C,
+    reuse: &mut CompactLogReuse,
+) -> CompactLogStream {
+    parse_log_iter_with_compactor_reusing(lines.iter().copied(), lines.len(), index, None, reuse)
+}
+
+pub fn parse_log_strs_with_compactor_and_stats_reusing<C: PubkeyCompactor>(
+    lines: &[&str],
+    index: &C,
+    stats: &mut CompactLogParseStats,
+    reuse: &mut CompactLogReuse,
+) -> CompactLogStream {
+    parse_log_iter_with_compactor_reusing(
+        lines.iter().copied(),
+        lines.len(),
+        index,
+        Some(stats),
+        reuse,
+    )
+}
+
+pub(crate) fn parse_log_iter_with_compactor_reusing<'a, I, C>(
     lines: I,
     estimated_len: usize,
     index: &C,
     mut stats: Option<&mut CompactLogParseStats>,
+    reuse: &mut CompactLogReuse,
 ) -> CompactLogStream
 where
     I: IntoIterator<Item = &'a str>,
     C: PubkeyCompactor,
 {
-    let mut st = StringTable::default();
-    let mut dt = DataTable::default();
-    let mut events = Vec::with_capacity(estimated_len);
-    let mut decode_buf = Vec::new();
-    let mut program_stack = Vec::<&'a str>::new();
+    let CompactLogStream {
+        mut events,
+        strings: mut st,
+        data: mut dt,
+    } = reuse.take_stream(estimated_len);
+    let mut decode_buf = std::mem::take(&mut reuse.decode_buf);
+    let mut program_stack = ProgramStack::default();
     let mut pubkey_cache = LogPubkeyCache::default();
 
     let cb_pid = index.compact_str(CB_PK);
@@ -1329,6 +1585,8 @@ where
         stats.record_pubkey_cache(&pubkey_cache);
     }
 
+    reuse.recycle_decode_buf(decode_buf);
+
     CompactLogStream {
         events,
         strings: st,
@@ -1446,7 +1704,7 @@ fn program_log_variant_label(log: &ProgramLog) -> &'static str {
     }
 }
 
-fn update_program_stack<'a>(parsed: ParsedLogLine<'a>, stack: &mut Vec<&'a str>) {
+fn update_program_stack<'a>(parsed: ParsedLogLine<'a>, stack: &mut ProgramStack<'a>) {
     match parsed {
         ParsedLogLine::Invoke { program, depth } => {
             let depth = depth as usize;
@@ -1467,7 +1725,7 @@ fn update_program_stack<'a>(parsed: ParsedLogLine<'a>, stack: &mut Vec<&'a str>)
         | ParsedLogLine::BpfFailure { program, .. } => {
             if stack.last().is_some_and(|active| *active == program) {
                 stack.pop();
-            } else if let Some(position) = stack.iter().rposition(|active| *active == program) {
+            } else if let Some(position) = stack.rposition(program) {
                 stack.truncate(position);
             } else {
                 stack.clear();
@@ -1712,6 +1970,74 @@ mod tests {
             vec![&[1, 2, 3][..], &[4, 5][..]]
         );
         assert_eq!(table.render(id), "AQID BAU=");
+    }
+
+    #[test]
+    fn reusable_log_parser_preserves_output_and_reuses_allocations() {
+        let index = key_index(&[CB_PK]);
+        let lines = vec![
+            format!("Program {CB_PK} invoke [1]"),
+            "Program data: AQID BAU=".to_owned(),
+            "plain runtime text".to_owned(),
+            format!("Program {CB_PK} success"),
+        ];
+        let expected = parse_logs(&lines, &index);
+        let expected_bytes = wincode::serialize(&expected).expect("serialize expected logs");
+        let mut reuse = CompactLogReuse::new();
+
+        let first = parse_logs_with_compactor_reusing(&lines, &index, &mut reuse);
+        assert_eq!(
+            wincode::serialize(&first).expect("serialize first reusable logs"),
+            expected_bytes
+        );
+        let events_ptr = first.events.as_ptr();
+        let string_lengths_ptr = first.strings.lengths.as_ptr();
+        let string_bytes_ptr = first.strings.bytes.as_ptr();
+        let data_arrays_ptr = first.data.arrays.as_ptr();
+        let data_chunk_lengths_ptr = first.data.chunk_lengths.as_ptr();
+        let data_bytes_ptr = first.data.bytes.as_ptr();
+        let decode_buf_ptr = reuse.decode_buf.as_ptr();
+        reuse.recycle(first);
+        assert!(reuse.retained_capacity_bytes() > 0);
+
+        let second = parse_logs_with_compactor_reusing(&lines, &index, &mut reuse);
+        assert_eq!(
+            wincode::serialize(&second).expect("serialize second reusable logs"),
+            expected_bytes
+        );
+        assert_eq!(second.events.as_ptr(), events_ptr);
+        assert_eq!(second.strings.lengths.as_ptr(), string_lengths_ptr);
+        assert_eq!(second.strings.bytes.as_ptr(), string_bytes_ptr);
+        assert_eq!(second.data.arrays.as_ptr(), data_arrays_ptr);
+        assert_eq!(second.data.chunk_lengths.as_ptr(), data_chunk_lengths_ptr);
+        assert_eq!(second.data.bytes.as_ptr(), data_bytes_ptr);
+        assert_eq!(reuse.decode_buf.as_ptr(), decode_buf_ptr);
+    }
+
+    #[test]
+    fn reusable_log_parser_discards_oversized_buffers() {
+        let mut reuse = CompactLogReuse::with_max_retained_buffer_bytes(8);
+        let logs = CompactLogStream {
+            events: Vec::with_capacity(32),
+            strings: StringTable {
+                lengths: Vec::with_capacity(32),
+                bytes: Vec::with_capacity(64),
+            },
+            data: DataTable {
+                arrays: Vec::with_capacity(32),
+                chunk_lengths: Vec::with_capacity(32),
+                bytes: Vec::with_capacity(64),
+            },
+        };
+
+        reuse.recycle(logs);
+
+        assert_eq!(reuse.events.capacity(), 0);
+        assert_eq!(reuse.string_lengths.capacity(), 0);
+        assert_eq!(reuse.string_bytes.capacity(), 0);
+        assert_eq!(reuse.data_arrays.capacity(), 0);
+        assert_eq!(reuse.data_chunk_lengths.capacity(), 0);
+        assert_eq!(reuse.data_bytes.capacity(), 0);
     }
 
     #[test]

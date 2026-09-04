@@ -3345,20 +3345,29 @@ fn load_access_build_context(
     regular_file_metadata(&index_path)?;
     let blockhash_path = source.join(ARCHIVE_V2_BLOCKHASH_REGISTRY_FILE);
     let blockhash_metadata = regular_file_metadata(&blockhash_path)?;
-    let expected_blockhash_bytes = u64::try_from(expected_blocks)?
+    let legacy_blockhash_bytes = u64::try_from(expected_blocks)?
         .checked_mul(32)
         .context("blockhash registry length overflow")?;
+    let boundary_blockhash_bytes = u64::try_from(expected_blocks)?
+        .checked_add(1)
+        .and_then(|records| records.checked_mul(32))
+        .context("boundary-prefixed blockhash registry length overflow")?;
     ensure!(
-        blockhash_metadata.len() == expected_blockhash_bytes,
-        "blockhash registry has invalid length {} for {expected_blocks} blocks (expected {expected_blockhash_bytes})",
+        matches!(blockhash_metadata.len(), len if len == legacy_blockhash_bytes || len == boundary_blockhash_bytes),
+        "blockhash registry has invalid length {} for {expected_blocks} blocks (expected {legacy_blockhash_bytes} or {boundary_blockhash_bytes})",
         blockhash_metadata.len(),
     );
     let blockhashes = super::load_blockhash_registry_plain(&blockhash_path)?;
-    let previous_tail = load_previous_blockhash_tail_bounded(source, epoch)?;
-    ensure!(
-        !previous_tail.is_empty(),
-        "block-access rebuild for a non-genesis epoch requires a non-empty previous blockhash tail"
-    );
+    let previous_tail = if blockhash_metadata.len() == legacy_blockhash_bytes {
+        let tail = load_previous_blockhash_tail_bounded(source, epoch)?;
+        ensure!(
+            !tail.is_empty(),
+            "legacy block-access rebuild requires a non-empty previous blockhash tail"
+        );
+        tail
+    } else {
+        Vec::new()
+    };
     let vote_path = source.join(ARCHIVE_V2_VOTE_HASH_REGISTRY_FILE);
     let vote_hashes = if vote_path.try_exists()? {
         let metadata = regular_file_metadata(&vote_path)?;

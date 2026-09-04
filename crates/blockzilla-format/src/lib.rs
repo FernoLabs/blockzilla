@@ -5,6 +5,7 @@ pub mod live_producer;
 pub mod reader;
 pub mod registry;
 pub mod replay_v1;
+pub mod skipped_slots;
 pub mod writer;
 
 pub mod blockhash_registry;
@@ -24,6 +25,7 @@ pub use pass1::*;
 pub use reader::*;
 pub use registry::*;
 pub use replay_v1::*;
+pub use skipped_slots::*;
 pub use split_compact::*;
 pub use v2::*;
 pub use writer::*;

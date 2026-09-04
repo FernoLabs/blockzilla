@@ -7,8 +7,8 @@
 
 use super::{
     LIVE_FINALIZER_MAX_FRAME_SIZE, LiveNoRegistryBlockLegacy, PreviousBlockhash,
-    build_block_access_sidecar_with_previous_tail, build_get_block_index_rows,
-    read_prev_blockhash_tail, to_no_registry_transaction, write_prev_blockhash_tail,
+    build_block_access_sidecar_without_previous_tail, build_get_block_index_rows,
+    to_no_registry_transaction,
 };
 use anyhow::{Context, Result, anyhow, bail};
 use base64::{Engine as _, engine::general_purpose::STANDARD as BASE64_STANDARD};
@@ -263,6 +263,8 @@ struct MaterializedMarker {
     transactions: u64,
     first_produced_slot: Option<u64>,
     last_produced_slot: Option<u64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    predecessor: Option<MaterializedPredecessor>,
     normalized_blocks: String,
     produced_blockhashes: String,
     available_poh: String,
@@ -272,6 +274,12 @@ struct MaterializedMarker {
     merge_plan_sha256: String,
     progress_json: String,
     limitations: Vec<String>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+struct MaterializedPredecessor {
+    blockhash: String,
+    slot: u64,
 }
 
 #[derive(Debug)]
@@ -285,6 +293,7 @@ pub(crate) struct MaterializedForHot {
     pub available_poh_records: u64,
     pub available_poh_entries: u64,
     pub missing_poh_ids: Vec<u32>,
+    pub(super) predecessor: Option<PreviousBlockhash>,
     pub source_marker_sha256: String,
     pub source_manifest_sha256: String,
     pub source_plan_sha256: String,
@@ -492,6 +501,7 @@ pub(crate) fn materialize_live_repair(
 
     let mut context = validate_repair_bundle(repair_root)?;
     validate_plan_and_partial_poh(&mut context)?;
+    let predecessor = derive_optional_repair_predecessor(&context)?;
 
     if output.exists() {
         validate_existing_output(&output, &context)?;
@@ -707,6 +717,7 @@ pub(crate) fn materialize_live_repair(
         transactions: checkpoint.transactions,
         first_produced_slot: context.manifest.first_produced_slot,
         last_produced_slot: context.manifest.last_produced_slot,
+        predecessor: predecessor.map(materialized_predecessor),
         normalized_blocks: OUTPUT_BLOCKS.to_string(),
         produced_blockhashes: OUTPUT_BLOCKHASHES.to_string(),
         available_poh: OUTPUT_AVAILABLE_POH.to_string(),
@@ -2150,6 +2161,11 @@ fn validate_existing_output(output: &Path, context: &ValidatedContext) -> Result
             && marker.merge_plan_sha256 == context.plan_sha256,
         "existing materialized output was built from different inputs"
     );
+    anyhow::ensure!(
+        decode_materialized_predecessor(marker.predecessor.as_ref(), marker.epoch_start_slot)?
+            == derive_optional_repair_predecessor(context)?,
+        "existing materialized predecessor differs from repair input"
+    );
     for path in [
         output.join(OUTPUT_BLOCKS),
         output.join(OUTPUT_BLOCKHASHES),
@@ -2245,6 +2261,8 @@ pub(crate) fn validate_materialized_for_hot(materialized_dir: &Path) -> Result<M
     );
     decode_hex_32(&marker.manifest_sha256)?;
     decode_hex_32(&marker.merge_plan_sha256)?;
+    let predecessor =
+        decode_materialized_predecessor(marker.predecessor.as_ref(), marker.epoch_start_slot)?;
     for forbidden in [
         "READY",
         "poh.wincode",
@@ -2335,6 +2353,12 @@ pub(crate) fn validate_materialized_for_hot(materialized_dir: &Path) -> Result<M
             && marker.missing_poh_and_shredding_blocks == marker.rpc_only_blocks,
         "materialized partial PoH coverage differs from marker"
     );
+    if predecessor.is_some() {
+        anyhow::ensure!(
+            missing_ids.first().copied() == Some(0),
+            "materialized predecessor requires RPC block id 0"
+        );
+    }
 
     let input_fingerprint = materialized_input_fingerprint(&root)?;
     Ok(MaterializedForHot {
@@ -2347,6 +2371,7 @@ pub(crate) fn validate_materialized_for_hot(materialized_dir: &Path) -> Result<M
         available_poh_records: available_records,
         available_poh_entries: available_entries,
         missing_poh_ids: missing_ids,
+        predecessor,
         source_marker_sha256: marker_sha256,
         source_manifest_sha256: marker.manifest_sha256,
         source_plan_sha256: marker.merge_plan_sha256,
@@ -2536,8 +2561,7 @@ fn degraded_hot_files(block_access_ready: bool) -> DegradedHotFiles {
         block_access_index: block_access_ready
             .then(|| ARCHIVE_V2_BLOCK_ACCESS_INDEX_FILE.to_string()),
         get_block_index: block_access_ready.then(|| ARCHIVE_V2_GET_BLOCK_INDEX_FILE.to_string()),
-        previous_blockhash_tail: block_access_ready
-            .then(|| ARCHIVE_V2_PREV_BLOCKHASH_TAIL_FILE.to_string()),
+        previous_blockhash_tail: None,
     }
 }
 
@@ -2592,6 +2616,8 @@ fn validate_degraded_hot_candidates(
     );
     let expected_blockhash_bytes = receipt
         .produced_blocks
+        .checked_add(u64::from(receipt.predecessor.is_some()))
+        .context("hot blockhash row count overflow")?
         .checked_mul(32)
         .context("hot blockhash byte length overflow")?;
     anyhow::ensure!(
@@ -2599,6 +2625,14 @@ fn validate_degraded_hot_candidates(
             == expected_blockhash_bytes,
         "hot blockhash registry byte length mismatch"
     );
+    if let Some(predecessor) = receipt.predecessor {
+        let mut boundary = [0u8; 32];
+        File::open(root.join(ARCHIVE_V2_BLOCKHASH_REGISTRY_FILE))?.read_exact(&mut boundary)?;
+        anyhow::ensure!(
+            boundary == predecessor.hash,
+            "hot blockhash registry record 0 differs from validated predecessor"
+        );
+    }
     anyhow::ensure!(
         sha256_file_hex(&root.join(SOURCE_MATERIALIZED_MARKER))? == receipt.source_marker_sha256,
         "retained source REPAIR-MATERIALIZED marker digest mismatch"
@@ -2714,6 +2748,10 @@ fn validate_degraded_hot_candidates(
 }
 
 fn validate_degraded_hot_output(root: &Path, receipt: &MaterializedForHot) -> Result<()> {
+    anyhow::ensure!(
+        !root.join(ARCHIVE_V2_PREV_BLOCKHASH_TAIL_FILE).exists(),
+        "repair hot output must not publish a previous-blockhash tail"
+    );
     let marker: DegradedHotMarker =
         read_json_bounded(&root.join(COMPACTED_MARKER), MANIFEST_MAX_BYTES)?;
     anyhow::ensure!(
@@ -2784,11 +2822,9 @@ fn validate_degraded_hot_output(root: &Path, receipt: &MaterializedForHot) -> Re
         },
     )?;
     if marker.block_access_ready {
-        let previous_tail = read_prev_blockhash_tail(root)?
-            .context("block-access-ready output has no previous blockhash tail")?;
-        let predecessor = *previous_tail
-            .last()
-            .context("block-access-ready output has an empty previous blockhash tail")?;
+        let predecessor = receipt
+            .predecessor
+            .context("block-access-ready repair output has no validated predecessor")?;
         validate_repair_access_sidecars(
             root,
             root,
@@ -2876,12 +2912,10 @@ pub(crate) fn build_repair_block_access(repair_dir: &Path, hot_output: &Path) ->
             .with_context(|| format!("remove stale access stage {}", stage.display()))?;
     }
     fs::create_dir(&stage).with_context(|| format!("create access stage {}", stage.display()))?;
-    write_prev_blockhash_tail(&stage, &[predecessor])?;
-    build_block_access_sidecar_with_previous_tail(
+    build_block_access_sidecar_without_previous_tail(
         &hot_root.join(ARCHIVE_V2_BLOCKS_FILE),
         &stage,
         &hot_root.join(ARCHIVE_V2_BLOCK_INDEX_FILE),
-        &[predecessor],
     )?;
     validate_repair_access_sidecars(
         &hot_root,
@@ -2953,12 +2987,11 @@ pub(crate) fn build_repair_block_access(repair_dir: &Path, hot_output: &Path) ->
     Ok(())
 }
 
-fn repair_access_artifacts() -> [&'static str; 4] {
+fn repair_access_artifacts() -> [&'static str; 3] {
     [
         ARCHIVE_V2_BLOCK_ACCESS_FILE,
         ARCHIVE_V2_BLOCK_ACCESS_INDEX_FILE,
         ARCHIVE_V2_GET_BLOCK_INDEX_FILE,
-        ARCHIVE_V2_PREV_BLOCKHASH_TAIL_FILE,
     ]
 }
 
@@ -3024,6 +3057,40 @@ fn derive_first_rpc_predecessor(context: &ValidatedContext) -> Result<PreviousBl
     })
 }
 
+fn derive_optional_repair_predecessor(
+    context: &ValidatedContext,
+) -> Result<Option<PreviousBlockhash>> {
+    if context.rpc_block_ids.first().copied() == Some(0) {
+        return derive_first_rpc_predecessor(context).map(Some);
+    }
+    Ok(None)
+}
+
+fn materialized_predecessor(predecessor: PreviousBlockhash) -> MaterializedPredecessor {
+    MaterializedPredecessor {
+        blockhash: bs58::encode(predecessor.hash).into_string(),
+        slot: predecessor.slot,
+    }
+}
+
+fn decode_materialized_predecessor(
+    predecessor: Option<&MaterializedPredecessor>,
+    epoch_start_slot: u64,
+) -> Result<Option<PreviousBlockhash>> {
+    predecessor
+        .map(|predecessor| {
+            ensure_repair_predecessor_before_epoch(predecessor.slot, epoch_start_slot)?;
+            Ok(PreviousBlockhash {
+                hash: decode_base58_32(
+                    &predecessor.blockhash,
+                    "materialized predecessor blockhash",
+                )?,
+                slot: predecessor.slot,
+            })
+        })
+        .transpose()
+}
+
 fn validate_repair_hot_output(
     root: &Path,
     context: &ValidatedContext,
@@ -3060,6 +3127,13 @@ fn validate_repair_hot_output(
         "retained source REPAIR-MATERIALIZED marker has incompatible state"
     );
     anyhow::ensure!(
+        decode_materialized_predecessor(
+            source_marker.predecessor.as_ref(),
+            source_marker.epoch_start_slot,
+        )? == Some(predecessor),
+        "retained materialized predecessor differs from validated repair predecessor"
+    );
+    anyhow::ensure!(
         source_marker.epoch == context.manifest.epoch
             && source_marker.epoch_start_slot == context.manifest.epoch_start_slot
             && source_marker.epoch_end_slot == context.manifest.epoch_end_slot
@@ -3093,6 +3167,7 @@ fn validate_repair_hot_output(
         available_poh_records: context.manifest.poh.records,
         available_poh_entries: context.manifest.poh.entries,
         missing_poh_ids: context.manifest.poh.missing_record_ids.clone(),
+        predecessor: Some(predecessor),
         source_marker_sha256,
         source_manifest_sha256: context.manifest_sha256.clone(),
         source_plan_sha256: context.plan_sha256.clone(),
@@ -3135,20 +3210,56 @@ fn validate_repair_access_sidecars(
     epoch_start_slot: u64,
     produced_blocks: u64,
 ) -> Result<()> {
-    ensure_regular_file(&access_root.join(ARCHIVE_V2_PREV_BLOCKHASH_TAIL_FILE), 40)?;
-    let tail = read_prev_blockhash_tail(access_root)?
-        .context("repair block-access previous blockhash tail is missing")?;
-    anyhow::ensure!(
-        tail == [predecessor],
-        "repair block-access previous blockhash tail is not the validated first RPC predecessor"
-    );
     ensure_repair_predecessor_before_epoch(predecessor.slot, epoch_start_slot)
-        .context("previous-blockhash tail is not valid for repaired epoch")?;
+        .context("predecessor boundary is not valid for repaired epoch")?;
+    anyhow::ensure!(
+        !hot_root.join(ARCHIVE_V2_PREV_BLOCKHASH_TAIL_FILE).exists()
+            && !access_root
+                .join(ARCHIVE_V2_PREV_BLOCKHASH_TAIL_FILE)
+                .exists(),
+        "repair output must not publish a previous-blockhash tail"
+    );
+
+    let blockhash_path = hot_root.join(ARCHIVE_V2_BLOCKHASH_REGISTRY_FILE);
+    ensure_regular_file(&blockhash_path, u64::MAX)?;
+    let expected_blockhash_bytes = produced_blocks
+        .checked_add(1)
+        .and_then(|rows| rows.checked_mul(32))
+        .context("repair blockhash registry byte length overflow")?;
+    anyhow::ensure!(
+        fs::metadata(&blockhash_path)?.len() == expected_blockhash_bytes,
+        "repair blockhash registry must contain one boundary row plus every produced block"
+    );
+    let mut blockhash_file = File::open(&blockhash_path)?;
+    let mut boundary = [0u8; 32];
+    blockhash_file.read_exact(&mut boundary)?;
+    anyhow::ensure!(
+        boundary == predecessor.hash,
+        "repair blockhash registry record 0 is not the validated first RPC predecessor"
+    );
 
     let hot_index = read_archive_v2_hot_block_index(&hot_root.join(ARCHIVE_V2_BLOCK_INDEX_FILE))?;
     anyhow::ensure!(
         hot_index.rows.len() as u64 == produced_blocks,
         "hot block index row count differs from repair produced count"
+    );
+    let first_hot = hot_index
+        .rows
+        .first()
+        .context("repair hot archive has no first block")?;
+    let mut first_compressed = vec![0u8; first_hot.compressed_len as usize];
+    let mut hot_file = File::open(hot_root.join(ARCHIVE_V2_BLOCKS_FILE))?;
+    hot_file.seek(SeekFrom::Start(first_hot.compressed_offset))?;
+    hot_file.read_exact(&mut first_compressed)?;
+    let first_bytes =
+        zstd::bulk::decompress(&first_compressed, first_hot.uncompressed_len as usize)
+            .context("decompress first repaired hot block")?;
+    let first_hot_block = blockzilla_format::deserialize_archive_v2_hot_block_blob(&first_bytes)
+        .context("decode first repaired hot block")?;
+    anyhow::ensure!(
+        first_hot_block.header.blockhash_id == 1
+            && first_hot_block.header.previous_blockhash_id == 0,
+        "first repaired hot block must use blockhash ids 1/0"
     );
     let access_path = access_root.join(ARCHIVE_V2_BLOCK_ACCESS_FILE);
     ensure_regular_file(&access_path, u64::MAX)?;
@@ -3211,10 +3322,6 @@ fn validate_repair_access_sidecars(
         );
     }
 
-    let first_hot = hot_index
-        .rows
-        .first()
-        .context("repair hot archive has no first block")?;
     anyhow::ensure!(
         predecessor.slot < first_hot.slot,
         "first RPC predecessor slot is not before the first produced slot"
@@ -3239,8 +3346,7 @@ fn validate_repair_access_sidecars(
         "first block-access payload does not contain the validated RPC predecessor hash"
     );
     let mut first_registry_hash = [0u8; 32];
-    File::open(hot_root.join(ARCHIVE_V2_BLOCKHASH_REGISTRY_FILE))?
-        .read_exact(&mut first_registry_hash)?;
+    blockhash_file.read_exact(&mut first_registry_hash)?;
     anyhow::ensure!(
         first.blockhash == first_registry_hash,
         "first block-access blockhash differs from blockhash registry"
@@ -4182,6 +4288,29 @@ mod tests {
             read_json_bounded(&hot_output.join(COMPACTED_MARKER), MANIFEST_MAX_BYTES).unwrap();
         assert!(!before.block_access_ready);
         assert_eq!(before.files.block_access, None);
+        assert_eq!(before.files.previous_blockhash_tail, None);
+        assert!(
+            !hot_output
+                .join(ARCHIVE_V2_PREV_BLOCKHASH_TAIL_FILE)
+                .exists()
+        );
+        let blockhashes = fs::read(hot_output.join(ARCHIVE_V2_BLOCKHASH_REGISTRY_FILE)).unwrap();
+        assert_eq!(blockhashes.len(), 3 * 32);
+        assert_eq!(&blockhashes[..32], &hash(9));
+        let hot_index =
+            read_archive_v2_hot_block_index(&hot_output.join(ARCHIVE_V2_BLOCK_INDEX_FILE)).unwrap();
+        let first_row = hot_index.rows[0];
+        let mut compressed = vec![0; first_row.compressed_len as usize];
+        let mut hot_file = File::open(hot_output.join(ARCHIVE_V2_BLOCKS_FILE)).unwrap();
+        hot_file
+            .seek(SeekFrom::Start(first_row.compressed_offset))
+            .unwrap();
+        hot_file.read_exact(&mut compressed).unwrap();
+        let decoded =
+            zstd::bulk::decompress(&compressed, first_row.uncompressed_len as usize).unwrap();
+        let first_hot = blockzilla_format::deserialize_archive_v2_hot_block_blob(&decoded).unwrap();
+        assert_eq!(first_hot.header.blockhash_id, 1);
+        assert_eq!(first_hot.header.previous_blockhash_id, 0);
         let original_marker = fs::read(hot_output.join(COMPACTED_MARKER)).unwrap();
         let mut wrong_provenance: Value = serde_json::from_slice(&original_marker).unwrap();
         wrong_provenance["source_manifest_sha256"] = Value::String("00".repeat(32));
@@ -4202,6 +4331,7 @@ mod tests {
         assert!(after.block_archive_ready);
         assert!(after.block_access_ready);
         assert_eq!(after.files, degraded_hot_files(true));
+        assert_eq!(after.files.previous_blockhash_tail, None);
         for required in repair_access_artifacts() {
             assert!(hot_output.join(required).is_file(), "{required}");
         }
@@ -4210,21 +4340,18 @@ mod tests {
             "poh.wincode",
             "shredding.wincode",
             "poh/poh.wincode",
+            ARCHIVE_V2_PREV_BLOCKHASH_TAIL_FILE,
         ] {
             assert!(!hot_output.join(forbidden).exists(), "{forbidden}");
         }
-        let tail = read_prev_blockhash_tail(&hot_output).unwrap().unwrap();
-        assert_eq!(
-            tail,
-            vec![PreviousBlockhash {
-                hash: hash(9),
-                slot: crate::SLOTS_PER_EPOCH - 1
-            }]
-        );
+        let predecessor = PreviousBlockhash {
+            hash: hash(9),
+            slot: crate::SLOTS_PER_EPOCH - 1,
+        };
         validate_repair_access_sidecars(
             &hot_output,
             &hot_output,
-            tail[0],
+            predecessor,
             1,
             crate::SLOTS_PER_EPOCH,
             2,

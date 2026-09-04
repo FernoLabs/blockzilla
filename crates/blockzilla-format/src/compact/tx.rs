@@ -77,7 +77,8 @@ pub struct CompactAddressTableLookup<'a> {
 pub enum CompactRecentBlockhash<'a> {
     /// Normal case: index into epoch blockhash registry.
     Id(i32),
-    /// Durable nonce case: store the nonce value inline.
+    /// Raw inline fallback. The historical wire name is `Nonce`, but this also
+    /// stores a valid recent hash that is outside this epoch's ID dictionary.
     #[serde(borrow)]
     Nonce(Nonce<'a>),
 }

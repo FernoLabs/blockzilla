@@ -40,6 +40,7 @@ pub struct OwnedCompactAddressTableLookup {
 #[derive(Debug, Clone, Serialize, Deserialize, SchemaRead, SchemaWrite)]
 pub enum OwnedCompactRecentBlockhash {
     Id(i32),
+    /// Raw inline fallback. The variant name is retained for wire compatibility.
     Nonce([u8; 32]),
 }
 

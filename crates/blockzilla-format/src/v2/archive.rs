@@ -24,6 +24,7 @@ pub const ARCHIVE_V2_FIRST_SEEN_REGISTRY_MANIFEST_FILE: &str = "registry-first-s
 pub const ARCHIVE_V2_PUBKEY_HOT_SEED_FILE: &str = "registry-hot-seed.bin";
 pub const ARCHIVE_V2_BLOCKHASH_REGISTRY_FILE: &str = "blockhash_registry.bin";
 pub const ARCHIVE_V2_BLOCKHASH_INDEX_V3_FILE: &str = "blockhash_index_v3.bin";
+/// Legacy compatibility sidecar. Current archives use blockhash registry record 0.
 pub const ARCHIVE_V2_PREV_BLOCKHASH_TAIL_FILE: &str = "prev_blockhash_tail.bin";
 pub const ARCHIVE_V2_BLOCK_ACCESS_FILE: &str = "archive-v2-block-access.wincode";
 pub const ARCHIVE_V2_BLOCK_ACCESS_INDEX_FILE: &str = "archive-v2-block-access.index";

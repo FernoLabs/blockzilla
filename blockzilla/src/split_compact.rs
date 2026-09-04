@@ -1,5 +1,7 @@
 use anyhow::{Context, Result, anyhow};
-use blockzilla_format::{write_registry_iter, write_u32_varint};
+use blockzilla_format::{
+    SkippedSlotMap, write_registry_iter, write_skipped_slot_map, write_u32_varint,
+};
 use gxhash::{GxBuildHasher, HashMap as GxHashMap};
 use of_car_reader::{
     CarBlockReader,
@@ -106,9 +108,14 @@ pub(crate) fn build_registry_and_blockhash_for_input(
     registry_path: &Path,
     registry_counts_path: Option<&Path>,
     blockhash_registry_path: &Path,
+    skipped_slot_map_path: Option<&Path>,
     external_blockhashes: &ExternalBlockhashOverrides,
     max_blocks: Option<u64>,
 ) -> Result<()> {
+    anyhow::ensure!(
+        skipped_slot_map_path.is_none() || max_blocks.is_none(),
+        "a partial registry scan cannot publish a full-epoch skipped-slot map"
+    );
     info!("Building registry + blockhash for {}", input.display());
 
     let mut blockhash_out: Vec<u8> = Vec::with_capacity(MAX_BLOCKHASHES_PER_EPOCH * 32);
@@ -117,6 +124,9 @@ pub(crate) fn build_registry_and_blockhash_for_input(
     let mut progress = ProgressTracker::new("Split Compact Registry");
     let mut timings = RegistryBuildTimings::from_env();
     let mut scratch = RegistryScanScratch::new();
+    let mut skipped_slots = skipped_slot_map_path
+        .map(|_| SkippedSlotMap::new(crate::SLOTS_PER_EPOCH as u32))
+        .transpose()?;
     let genesis = genesis_epoch0::maybe_load_for_input(input)?;
     if let Some(genesis) = &genesis {
         blockhash_out.extend_from_slice(&genesis.genesis_hash);
@@ -133,6 +143,9 @@ pub(crate) fn build_registry_and_blockhash_for_input(
     let stream_started = Instant::now();
     with_lossless_block_stream(input, |block| {
         let raw_block = require_block(block)?;
+        if let Some(skipped_slots) = skipped_slots.as_mut() {
+            skipped_slots.record_present(raw_block.slot)?;
+        }
         let blockhash = blockhash_for_block(block, external_blockhashes)?;
         blockhash_out.extend_from_slice(&blockhash);
 
@@ -148,6 +161,10 @@ pub(crate) fn build_registry_and_blockhash_for_input(
     timings.stream_total = stream_started.elapsed();
 
     progress.final_report();
+
+    if let (Some(path), Some(skipped_slots)) = (skipped_slot_map_path, skipped_slots.as_ref()) {
+        write_skipped_slot_map(path, skipped_slots)?;
+    }
 
     {
         let write_started = Instant::now();

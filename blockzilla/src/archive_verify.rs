@@ -675,19 +675,20 @@ pub(crate) fn verify_archive_v2_poh(
     );
 
     let blockhashes = read_exact_file(archive_dir.join(ARCHIVE_V2_BLOCKHASH_REGISTRY_FILE))?;
+    let blockhash_records = blockhashes.len() / 32;
+    let blockhash_offset = blockhash_records
+        .checked_sub(index.rows.len())
+        .filter(|offset| *offset <= 1)
+        .context("blockhash registry must have one boundary record plus one record per block")?;
     anyhow::ensure!(
-        blockhashes.len()
-            == index
-                .rows
-                .len()
-                .checked_mul(32)
-                .context("blockhash size overflow")?,
-        "blockhash registry has {} bytes for {} indexed blocks",
-        blockhashes.len(),
-        index.rows.len()
+        blockhashes.len().is_multiple_of(32),
+        "blockhash registry byte length is not a multiple of 32"
     );
-    let predecessor =
-        read_predecessor_hash(&archive_dir.join(ARCHIVE_V2_PREV_BLOCKHASH_TAIL_FILE))?;
+    let predecessor = if blockhash_offset == 1 {
+        blockhash_at(&blockhashes, 0)?
+    } else {
+        read_predecessor_hash(&archive_dir.join(ARCHIVE_V2_PREV_BLOCKHASH_TAIL_FILE))?
+    };
 
     let poh_file =
         File::open(archive_dir.join(ARCHIVE_V2_POH_FILE)).context("open compact PoH sidecar")?;
@@ -876,11 +877,11 @@ pub(crate) fn verify_archive_v2_poh(
             decompressed_this_block = true;
         }
 
-        let expected_blockhash = blockhash_at(&blockhashes, position)?;
+        let expected_blockhash = blockhash_at(&blockhashes, position + blockhash_offset)?;
         let block_start_hash = if position == 0 {
             predecessor
         } else {
-            blockhash_at(&blockhashes, position - 1)?
+            blockhash_at(&blockhashes, position - 1 + blockhash_offset)?
         };
         if poh.entries.is_empty() {
             external_blockhash_blocks += 1;
