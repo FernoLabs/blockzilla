@@ -177,11 +177,13 @@ pub mod car_stream;
 #[cfg(feature = "compact-index")]
 pub mod compact_index;
 mod convert_metadata;
+mod data_buffer_pool;
 pub mod error;
 #[cfg(feature = "genesis")]
 pub mod genesis;
 pub mod metadata_decoder;
 pub mod node;
+pub mod ordered_lossless;
 #[cfg(feature = "query-sdk")]
 pub mod query_sdk;
 #[cfg(feature = "query-sdk-http")]
@@ -195,7 +197,14 @@ pub mod versioned_transaction;
 
 pub use car_block_group::{CarBlockGroup, TransactionFrame};
 pub use car_stream::CarStream;
-pub use reader::{CarBlockReader, LosslessBlockReadLimits};
+pub use data_buffer_pool::LosslessDataBufferPoolStats;
+pub use ordered_lossless::{
+    OrderedBlockSummary, OrderedEntrySummary, OrderedLosslessCarBlock, OrderedRewardsRef,
+};
+pub use reader::{
+    CarBlockReader, DecodedNodeRecord, LosslessBlockRead, LosslessBlockReadLimits,
+    LosslessBlockReadStats,
+};
 
 pub mod confirmed_block {
     include!(concat!(
