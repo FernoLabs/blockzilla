@@ -453,6 +453,34 @@ impl<R: Read> CarBlockReader<R> {
         &mut self,
         out: &mut crate::ordered_lossless::OrderedLosslessCarBlock,
     ) -> CarReadResult<LosslessBlockRead> {
+        self.read_until_block_ordered_lossless_inner(out, None)
+    }
+
+    /// Read one canonical ordered block with explicit payload limits.
+    pub fn read_until_block_ordered_lossless_bounded(
+        &mut self,
+        out: &mut crate::ordered_lossless::OrderedLosslessCarBlock,
+        limits: LosslessBlockReadLimits,
+    ) -> CarReadResult<bool> {
+        if limits.max_entry_payload_bytes == 0
+            || limits.max_block_payload_bytes == 0
+            || limits.max_entries_per_block == 0
+            || limits.max_transactions_per_block == 0
+        {
+            return Err(CarReadError::InvalidData(
+                "ordered lossless block read limits must be nonzero".to_string(),
+            ));
+        }
+        Ok(self
+            .read_until_block_ordered_lossless_inner(out, Some(limits))?
+            .has_block)
+    }
+
+    fn read_until_block_ordered_lossless_inner(
+        &mut self,
+        out: &mut crate::ordered_lossless::OrderedLosslessCarBlock,
+        limits: Option<LosslessBlockReadLimits>,
+    ) -> CarReadResult<LosslessBlockRead> {
         out.clear();
         let mut stats = LosslessBlockReadStats::default();
 
@@ -497,6 +525,32 @@ impl<R: Read> CarBlockReader<R> {
                 record.payload_source,
                 record.value.kind(),
             )?;
+            if let Some(limits) = limits {
+                if record.payload_len > limits.max_entry_payload_bytes {
+                    return Err(CarReadError::InvalidData(format!(
+                        "CAR entry payload {} exceeds configured limit {}",
+                        record.payload_len, limits.max_entry_payload_bytes
+                    )));
+                }
+                if stats.payload_bytes > limits.max_block_payload_bytes as u64 {
+                    return Err(CarReadError::InvalidData(format!(
+                        "CAR block payload bytes {} exceed configured limit {}",
+                        stats.payload_bytes, limits.max_block_payload_bytes
+                    )));
+                }
+                if stats.car_entries > limits.max_entries_per_block as u64 {
+                    return Err(CarReadError::InvalidData(format!(
+                        "CAR block entry count {} exceeds configured limit {}",
+                        stats.car_entries, limits.max_entries_per_block
+                    )));
+                }
+                if stats.transactions > limits.max_transactions_per_block as u64 {
+                    return Err(CarReadError::InvalidData(format!(
+                        "CAR block transaction count {} exceeds configured limit {}",
+                        stats.transactions, limits.max_transactions_per_block
+                    )));
+                }
+            }
             let done = out.push_ordered_node(record.value)?;
             if done {
                 return Ok(LosslessBlockRead {

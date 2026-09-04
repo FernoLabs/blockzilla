@@ -64,10 +64,7 @@
 //! # }
 //! ```
 
-use std::{
-    collections::HashSet,
-    io::{self, Read},
-};
+use std::io::{self, Read};
 
 use crate::{
     CarBlockReader, LosslessBlockReadLimits,
@@ -76,7 +73,8 @@ use crate::{
     metadata_decoder::{
         MetadataDecodeError, ZstdReusableDecoder, decode_transaction_status_meta_from_frame,
     },
-    reconstruct::{Cid36, LosslessCarBlock, ReconstructError},
+    ordered_lossless::OrderedLosslessCarBlock,
+    reconstruct::{RawTransactionNode, ReconstructError},
     stored_transaction::StoredTransactionError,
     versioned_transaction::{
         CompiledInstruction, MessageHeader, VersionedMessage, VersionedTransaction,
@@ -324,9 +322,6 @@ impl<R: Read> Read for CountingRead<R> {
 struct ProjectionScratch {
     output_pool: blockzilla_query_sdk::projection_pool::ProjectionPool,
     block_counts: Option<blockzilla_query_sdk::BlockCounts>,
-    transaction_bytes: Vec<u8>,
-    metadata_bytes: Vec<u8>,
-    visited: HashSet<Cid36>,
     metadata: TransactionStatusMeta,
     metadata_zstd: ZstdReusableDecoder,
 }
@@ -341,7 +336,7 @@ pub struct CarInstructionSource<R: Read> {
     plan: CanonicalBlockPlan,
     limits: CarQueryLimits,
     scanned: bool,
-    block: LosslessCarBlock,
+    block: OrderedLosslessCarBlock,
     scratch: ProjectionScratch,
 }
 
@@ -410,7 +405,7 @@ impl<R: Read> CarInstructionSource<R> {
             plan,
             limits,
             scanned: false,
-            block: LosslessCarBlock::default(),
+            block: OrderedLosslessCarBlock::default(),
             scratch: ProjectionScratch::default(),
         })
     }
@@ -449,7 +444,7 @@ impl<R: Read> CarInstructionSource<R> {
             if !pending_real && !clean_eof {
                 pending_real = self
                     .reader
-                    .read_until_block_lossless_bounded(
+                    .read_until_block_ordered_lossless_bounded(
                         &mut self.block,
                         self.limits.block_read_limits(),
                     )
@@ -510,7 +505,7 @@ impl<R: Read> CarInstructionSource<R> {
             if !clean_eof {
                 let has_extra = self
                     .reader
-                    .read_until_block_lossless_bounded(
+                    .read_until_block_ordered_lossless_bounded(
                         &mut self.block,
                         self.limits.block_read_limits(),
                     )
@@ -635,7 +630,7 @@ fn publish_empty_row(
     })
 }
 
-fn block_slot(block: &LosslessCarBlock) -> CarQueryResult<u64> {
+fn block_slot(block: &OrderedLosslessCarBlock) -> CarQueryResult<u64> {
     block
         .block
         .as_ref()
@@ -669,7 +664,7 @@ fn validate_real_slot(
 }
 
 fn project_block(
-    block: &LosslessCarBlock,
+    block: &OrderedLosslessCarBlock,
     identity: &SourceIdentity,
     ordinal: u32,
     request: &ScanRequest,
@@ -733,8 +728,8 @@ fn project_block(
 }
 
 fn project_transaction(
-    block: &LosslessCarBlock,
-    raw: &crate::reconstruct::RawTransactionNode,
+    _block: &OrderedLosslessCarBlock,
+    raw: &RawTransactionNode,
     tx_index: u32,
     request: &ScanRequest,
     limits: CarQueryLimits,
@@ -743,38 +738,35 @@ fn project_transaction(
     let ProjectionScratch {
         output_pool,
         block_counts,
-        transaction_bytes,
-        metadata_bytes,
-        visited,
         metadata,
         metadata_zstd,
     } = scratch;
-    raw.transaction_bytes_into_bounded(
-        &block.dataframes,
-        transaction_bytes,
-        visited,
-        limits.max_transaction_bytes,
-    )
-    .map_err(CarQueryError::Reconstruct)?;
-    let transaction = wincode::deserialize_exact::<VersionedTransaction<'_>>(transaction_bytes)
+    if raw.data.data.len() > limits.max_transaction_bytes {
+        return Err(CarQueryError::InvalidArchive(format!(
+            "transaction frame has {} bytes, limit is {}",
+            raw.data.data.len(),
+            limits.max_transaction_bytes
+        )));
+    }
+    let transaction = wincode::deserialize_exact::<VersionedTransaction<'_>>(&raw.data.data)
         .map_err(|error| CarQueryError::TransactionDecode(error.to_string()))?;
     let message = message_view(&transaction.message)?;
     validate_message_geometry(&transaction, &message, limits)?;
 
-    raw.metadata_bytes_into_bounded(
-        &block.dataframes,
-        metadata_bytes,
-        visited,
-        limits.max_metadata_bytes,
-    )
-    .map_err(CarQueryError::Reconstruct)?;
-    let metadata = if metadata_bytes.is_empty() {
+    if raw.metadata.data.len() > limits.max_metadata_bytes {
+        return Err(CarQueryError::InvalidArchive(format!(
+            "transaction metadata frame has {} bytes, limit is {}",
+            raw.metadata.data.len(),
+            limits.max_metadata_bytes
+        )));
+    }
+    let metadata = if raw.metadata.data.is_empty() {
         None
     } else {
         *metadata = TransactionStatusMeta::default();
         decode_transaction_status_meta_from_frame(
             raw.slot,
-            metadata_bytes,
+            &raw.metadata.data,
             metadata,
             metadata_zstd,
         )
