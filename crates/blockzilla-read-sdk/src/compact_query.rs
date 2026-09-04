@@ -36,6 +36,7 @@ use blockzilla_query_sdk::{
 };
 use thiserror::Error;
 
+use crate::blockhash::blockhash_registry_offset;
 use crate::{
     ArchiveReader, ArchiveReaderSourceKind, BlockhashResolver, BlockhashResolverError,
     CompactV2ExecutionStatus, CompactV2MessageProjectionError, CompactV2MessageProjector,
@@ -3036,6 +3037,8 @@ impl ExactContext {
                     "blockhash registry size exceeds address space".into(),
                 )
             })?;
+            let registry_offset =
+                blockhash_registry_offset(current_size, reader.index().rows.len())?;
             if current_size > maximum {
                 return Err(CompactV2InstructionSourceError::Invalid(format!(
                     "blockhash registry is {current_size} bytes, above the {maximum}-byte block bound"
@@ -3047,7 +3050,7 @@ impl ExactContext {
                     .read_range(ARCHIVE_V2_BLOCKHASH_REGISTRY_FILE, 0, current_size)?;
             self.io.record(current.len())?;
 
-            let previous = if reader.epoch() == 0 {
+            let previous = if reader.epoch() == 0 || registry_offset == 1 {
                 PreviousBlockhashTail {
                     schema: PreviousBlockhashTailSchema::CurrentHashAndSlot,
                     entries: Vec::new(),
@@ -5330,6 +5333,35 @@ mod tests {
             receipt.io.source_read_bytes.map(|bytes| bytes > 0),
             Some(true)
         );
+    }
+
+    #[test]
+    fn boundary_registry_resolves_id_zero_without_a_previous_tail() {
+        let fixture = Fixture::build(vec![[72; 32]], vec![Vec::new()], None);
+        let boundary = [81; 32];
+        let first_block = [82; 32];
+        fs::write(
+            fixture
+                .directory
+                .path()
+                .join(ARCHIVE_V2_BLOCKHASH_REGISTRY_FILE),
+            [boundary, first_block].concat(),
+        )
+        .unwrap();
+        assert!(
+            !fixture
+                .directory
+                .path()
+                .join(ARCHIVE_V2_PREV_BLOCKHASH_TAIL_FILE)
+                .exists()
+        );
+
+        let reader = fixture.trusted_reader();
+        let mut context = ExactContext::default();
+        let resolver = context.load_blockhashes(&reader).unwrap();
+        assert_eq!(resolver.resolve(0).unwrap(), boundary);
+        assert_eq!(resolver.resolve_header_previous(1, 0).unwrap(), boundary);
+        assert_eq!(resolver.resolve(1).unwrap(), first_block);
     }
 
     #[test]

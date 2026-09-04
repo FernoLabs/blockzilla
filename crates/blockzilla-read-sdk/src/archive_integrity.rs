@@ -637,6 +637,7 @@ pub fn preflight_archive_v2_poh(
                 sequence,
                 &block,
                 registry_offset,
+                config.epoch,
                 None,
                 state.position,
                 state.previous_slot_and_id,
@@ -832,6 +833,7 @@ pub fn stream_preflighted_archive_v2_poh<O: ArchiveV2PohStructuralObserver>(
                 sequence,
                 &block,
                 registry_offset,
+                preflight.epoch,
                 None,
                 position,
                 previous_slot_and_id,
@@ -1388,6 +1390,7 @@ pub fn verify_archive_v2_blockhash_continuity<S: RangeSource>(
                 sequence,
                 &block,
                 registry_offset,
+                config.epoch,
                 predecessor_parent_slot,
                 state.position,
                 state.previous_slot_and_id,
@@ -1530,6 +1533,7 @@ pub fn verify_archive_v2_integrity_with_observer<O: ArchiveV2PohObserver>(
                 &mut poh_reader,
                 &blockhashes,
                 registry_offset,
+                config.epoch,
                 block_start_hash,
                 predecessor_parent_slot,
                 hashes_per_slot,
@@ -1759,6 +1763,7 @@ fn consume_integrity_block(
     poh_reader: &mut StrictFramedReader<BufReader<PositionedFileReader>>,
     blockhashes: &[u8],
     registry_offset: u64,
+    epoch: u64,
     first_start_hash: [u8; HASH_BYTES],
     predecessor_parent_slot: Option<u64>,
     hashes_per_slot: u64,
@@ -1773,6 +1778,7 @@ fn consume_integrity_block(
         sequence,
         &block,
         registry_offset,
+        epoch,
         predecessor_parent_slot,
         state.position,
         state.previous_slot_and_id,
@@ -1856,8 +1862,7 @@ fn consume_integrity_block(
     };
     let mut tx_cursor = 0usize;
     let mut effective_hashes = 0u64;
-    let slot_distance =
-        poh_slot_distance(sequence, registry_offset, block.row.slot, block.parent_slot)?;
+    let slot_distance = poh_slot_distance(sequence, epoch, block.row.slot, block.parent_slot)?;
     let block_hash_budget = hashes_per_slot.checked_mul(slot_distance).ok_or_else(|| {
         ArchiveIntegrityError::Invalid(format!(
             "PoH block {sequence} slot-gap hash budget overflow"
@@ -2046,6 +2051,7 @@ fn validate_chain_block(
     sequence: usize,
     block: &ProjectedIntegrityBlock,
     registry_offset: u64,
+    epoch: u64,
     predecessor_parent_slot: Option<u64>,
     ordered_position: usize,
     previous_slot_and_id: Option<(u64, u32)>,
@@ -2086,7 +2092,7 @@ fn validate_chain_block(
             "first block slot {} has parent_slot {}, predecessor tail ends at slot {expected_parent_slot}",
             block.row.slot, block.parent_slot
         )));
-    } else if registry_offset == 1 && block.parent_slot != 0 {
+    } else if epoch == 0 && block.parent_slot != 0 {
         return Err(ArchiveIntegrityError::Invalid(format!(
             "epoch-0 first block slot {} has parent_slot {}, expected genesis slot 0",
             block.row.slot, block.parent_slot
@@ -2128,11 +2134,11 @@ fn checked_poh_round_limits(
 
 fn poh_slot_distance(
     sequence: usize,
-    registry_offset: u64,
+    epoch: u64,
     slot: u64,
     parent_slot: u64,
 ) -> IntegrityResult<u64> {
-    if sequence == 0 && registry_offset == 1 {
+    if sequence == 0 && epoch == 0 {
         return slot.checked_add(1).ok_or_else(|| {
             ArchiveIntegrityError::Invalid("epoch-0 first block slot-distance overflow".to_owned())
         });
@@ -2206,8 +2212,7 @@ fn read_blockhash_registry<S: RangeSource>(
             "blockhash registry has {records} records for {rows} blocks"
         ))
     })?;
-    let valid_offset = (epoch == 0 && offset <= 1) || (epoch > 0 && offset == 0);
-    if !valid_offset {
+    if offset > 1 {
         return Err(ArchiveIntegrityError::Invalid(format!(
             "epoch {epoch} blockhash registry has {records} records for {rows} blocks (offset {offset})"
         )));
@@ -2257,12 +2262,141 @@ fn validate_predecessor_boundary<S: RangeSource>(
         ))
     })?;
     let expected_predecessor_epoch = epoch - 1;
+    if predecessor.manifest().epoch != expected_predecessor_epoch {
+        return Err(ArchiveIntegrityError::Invalid(format!(
+            "predecessor source declares epoch {}, expected {expected_predecessor_epoch}",
+            predecessor.manifest().epoch
+        )));
+    }
     if predecessor.manifest().slots_per_epoch != slots_per_epoch {
         return Err(ArchiveIntegrityError::Invalid(format!(
             "predecessor slots-per-epoch {} differs from current verifier {slots_per_epoch}",
             predecessor.manifest().slots_per_epoch
         )));
     }
+
+    if registry_offset == 1 {
+        let boundary_hash = blockhash_at(current_registry, 0, 0)?;
+        let predecessor_rows = &predecessor.index().rows;
+        let last_position = predecessor_rows.len().checked_sub(1).ok_or_else(|| {
+            ArchiveIntegrityError::Invalid(
+                "predecessor index has no produced block for the boundary hash".to_owned(),
+            )
+        })?;
+        let predecessor_size = predecessor
+            .source()
+            .size(ARCHIVE_V2_BLOCKHASH_REGISTRY_FILE)?
+            .ok_or_else(|| {
+                ArchiveIntegrityError::Invalid(
+                    "predecessor blockhash registry is missing".to_owned(),
+                )
+            })?;
+        if predecessor_size == 0 || predecessor_size % HASH_BYTES as u64 != 0 {
+            return Err(ArchiveIntegrityError::Invalid(format!(
+                "predecessor blockhash registry size {predecessor_size} is not a nonzero multiple of {HASH_BYTES}"
+            )));
+        }
+        let predecessor_records = predecessor_size / HASH_BYTES as u64;
+        let predecessor_offset = predecessor_records
+            .checked_sub(predecessor_rows.len() as u64)
+            .ok_or_else(|| {
+                ArchiveIntegrityError::Invalid(format!(
+                    "predecessor registry has {predecessor_records} records for {} rows",
+                    predecessor_rows.len()
+                ))
+            })?;
+        if predecessor_offset > 1 || (expected_predecessor_epoch == 0 && predecessor_offset != 1) {
+            return Err(ArchiveIntegrityError::Invalid(format!(
+                "predecessor registry has {predecessor_records} records for {} rows (offset {predecessor_offset})",
+                predecessor_rows.len()
+            )));
+        }
+        let predecessor_hash: [u8; HASH_BYTES] = predecessor
+            .source()
+            .read_range(
+                ARCHIVE_V2_BLOCKHASH_REGISTRY_FILE,
+                predecessor_size - HASH_BYTES as u64,
+                HASH_BYTES,
+            )?
+            .as_slice()
+            .try_into()
+            .map_err(|_| {
+                ArchiveIntegrityError::Invalid(
+                    "predecessor final blockhash range is not 32 bytes".to_owned(),
+                )
+            })?;
+        if predecessor_hash != boundary_hash {
+            return Err(ArchiveIntegrityError::Invalid(format!(
+                "boundary registry record 0 {} differs from predecessor final blockhash {}",
+                hex32(&boundary_hash),
+                hex32(&predecessor_hash)
+            )));
+        }
+
+        let expected_row = &predecessor_rows[last_position];
+        let mut predecessor_blocks =
+            predecessor.borrowed_blocks_without_rewards_range(last_position..last_position + 1)?;
+        let block = predecessor_blocks.next_block().ok_or_else(|| {
+            ArchiveIntegrityError::Invalid("predecessor final block is missing".to_owned())
+        })??;
+        if block.uses_owned_fallback()
+            || block.index_row.block_id != expected_row.block_id
+            || block.index_row.slot != expected_row.slot
+            || block.index_row.tx_count != expected_row.tx_count
+            || block.header().slot != expected_row.slot
+        {
+            return Err(ArchiveIntegrityError::Invalid(
+                "predecessor final block identity differs from its index row".to_owned(),
+            ));
+        }
+        let expected_id = u32::try_from(
+            u64::try_from(last_position)
+                .ok()
+                .and_then(|position| position.checked_add(predecessor_offset))
+                .ok_or_else(|| {
+                    ArchiveIntegrityError::Invalid(
+                        "predecessor final blockhash id overflow".to_owned(),
+                    )
+                })?,
+        )
+        .map_err(|_| {
+            ArchiveIntegrityError::Invalid("predecessor final blockhash id exceeds u32".to_owned())
+        })?;
+        if block.header().blockhash_id != expected_id {
+            return Err(ArchiveIntegrityError::Invalid(format!(
+                "predecessor final block has blockhash_id {}, expected {expected_id}",
+                block.header().blockhash_id
+            )));
+        }
+        let expected_previous_id = expected_id.saturating_sub(1);
+        if block.header().previous_blockhash_id != expected_previous_id {
+            return Err(ArchiveIntegrityError::Invalid(format!(
+                "predecessor final block has previous_blockhash_id {}, expected {expected_previous_id}",
+                block.header().previous_blockhash_id
+            )));
+        }
+        if last_position > 0 {
+            let expected_parent = predecessor_rows[last_position - 1].slot;
+            if block.header().parent_slot != expected_parent {
+                return Err(ArchiveIntegrityError::Invalid(format!(
+                    "predecessor final block has parent_slot {}, expected {expected_parent}",
+                    block.header().parent_slot
+                )));
+            }
+        } else if expected_predecessor_epoch == 0 && block.header().parent_slot != 0 {
+            return Err(ArchiveIntegrityError::Invalid(format!(
+                "epoch-0 predecessor first block has parent_slot {}, expected 0",
+                block.header().parent_slot
+            )));
+        }
+        if predecessor_blocks.next_block().is_some() {
+            return Err(ArchiveIntegrityError::Invalid(
+                "predecessor final-block range has extra rows".to_owned(),
+            ));
+        }
+        return Ok((boundary_hash, Some(expected_row.slot), 0));
+    }
+
     if predecessor.index().rows.len() < TAIL_RECORDS {
         return Err(ArchiveIntegrityError::Invalid(format!(
             "predecessor index has {} rows, fewer than required tail {TAIL_RECORDS}",
@@ -2295,10 +2429,9 @@ fn validate_predecessor_boundary<S: RangeSource>(
                 "predecessor registry has {predecessor_records} records for {predecessor_rows} rows"
             ))
         })?;
-    let expected_offset = u64::from(expected_predecessor_epoch == 0);
-    if predecessor_offset != expected_offset {
+    if predecessor_offset > 1 || (expected_predecessor_epoch == 0 && predecessor_offset != 1) {
         return Err(ArchiveIntegrityError::Invalid(format!(
-            "predecessor registry has {predecessor_records} records for {predecessor_rows} rows, expected offset {expected_offset}"
+            "predecessor registry has {predecessor_records} records for {predecessor_rows} rows (offset {predecessor_offset})"
         )));
     }
     let hash_span = (TAIL_RECORDS * HASH_BYTES) as u64;
@@ -2312,12 +2445,6 @@ fn validate_predecessor_boundary<S: RangeSource>(
         predecessor_size - hash_span,
         hash_span as usize,
     )?;
-    if predecessor.manifest().epoch != expected_predecessor_epoch {
-        return Err(ArchiveIntegrityError::Invalid(format!(
-            "predecessor source declares epoch {}, expected {expected_predecessor_epoch}",
-            predecessor.manifest().epoch
-        )));
-    }
     let first_slot = expected_predecessor_epoch
         .checked_mul(slots_per_epoch)
         .ok_or_else(|| {
@@ -2635,10 +2762,10 @@ mod tests {
 
     #[test]
     fn epoch_zero_first_produced_slot_distance_includes_genesis_interval() {
-        assert_eq!(poh_slot_distance(0, 1, 7, 0).unwrap(), 8);
-        assert_eq!(poh_slot_distance(0, 1, 0, 0).unwrap(), 1);
-        assert_eq!(poh_slot_distance(0, 0, 7, 3).unwrap(), 4);
-        assert!(poh_slot_distance(1, 0, 2, 3).is_err());
+        assert_eq!(poh_slot_distance(0, 0, 7, 0).unwrap(), 8);
+        assert_eq!(poh_slot_distance(0, 0, 0, 0).unwrap(), 1);
+        assert_eq!(poh_slot_distance(0, 2, 7, 3).unwrap(), 4);
+        assert!(poh_slot_distance(1, 2, 2, 3).is_err());
     }
 
     #[test]
@@ -2840,6 +2967,16 @@ mod tests {
     }
 
     fn write_test_blocks(root: &Path, slots: &[u64], first_parent: u64, with_transaction: bool) {
+        write_test_blocks_with_registry_offset(root, slots, first_parent, with_transaction, 0);
+    }
+
+    fn write_test_blocks_with_registry_offset(
+        root: &Path,
+        slots: &[u64],
+        first_parent: u64,
+        with_transaction: bool,
+        registry_offset: u32,
+    ) {
         let mut compressed_blocks = Vec::new();
         let mut rows = Vec::new();
         let mut compressed_offset = 0u64;
@@ -2870,8 +3007,12 @@ mod tests {
                     } else {
                         slots[position - 1]
                     },
-                    blockhash_id: position as u32,
-                    previous_blockhash_id: position.saturating_sub(1) as u32,
+                    blockhash_id: position as u32 + registry_offset,
+                    previous_blockhash_id: if position == 0 {
+                        0
+                    } else {
+                        position as u32 - 1 + registry_offset
+                    },
                     block_time: None,
                     block_height: None,
                     rewards: None,
@@ -3523,6 +3664,55 @@ mod tests {
             TAIL_RECORDS as u64
         );
         assert_eq!(report.chain_blocks_verified, 2);
+    }
+
+    #[test]
+    fn boundary_prefixed_nonzero_epoch_needs_no_tail_and_keeps_poh_ids_zero_based() {
+        const SLOTS_PER_EPOCH: u64 = 1_000;
+        let predecessor = TempDir::new().unwrap();
+        let predecessor_boundary = [31; HASH_BYTES];
+        let predecessor_final_hash = [32; HASH_BYTES];
+        write_test_blocks_with_registry_offset(predecessor.path(), &[1_299], 1_298, false, 1);
+        fs::write(
+            predecessor.path().join(ARCHIVE_V2_BLOCKHASH_REGISTRY_FILE),
+            [predecessor_boundary, predecessor_final_hash].concat(),
+        )
+        .unwrap();
+        let predecessor_reader = open_test_archive(predecessor.path(), 1, SLOTS_PER_EPOCH);
+
+        let current = TempDir::new().unwrap();
+        write_test_blocks_with_registry_offset(current.path(), &[2_000], 1_299, true, 1);
+        let current_hash = write_current_poh(
+            current.path(),
+            PohSidecarSchema::Current,
+            predecessor_final_hash,
+            2_000,
+        );
+        fs::write(
+            current.path().join(ARCHIVE_V2_BLOCKHASH_REGISTRY_FILE),
+            [predecessor_final_hash, current_hash].concat(),
+        )
+        .unwrap();
+        assert!(
+            !current
+                .path()
+                .join(ARCHIVE_V2_PREV_BLOCKHASH_TAIL_FILE)
+                .exists()
+        );
+        let current_reader = open_test_archive(current.path(), 2, SLOTS_PER_EPOCH);
+
+        let preflight = preflight_archive_v2_poh(&current_reader, preflight_test_config()).unwrap();
+        assert_eq!(preflight.blockhash_registry_offset, 1);
+        let report = verify_archive_v2_integrity(
+            &current_reader,
+            Some(&predecessor_reader),
+            integrity_test_config(PohSidecarSchema::Current),
+        )
+        .unwrap();
+        assert!(report.complete_source);
+        assert_eq!(report.blockhash_registry_offset, 1);
+        assert_eq!(report.predecessor_tail_records_verified, 0);
+        assert_eq!(report.poh_blocks_verified, 1);
     }
 
     #[test]

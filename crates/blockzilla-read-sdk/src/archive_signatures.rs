@@ -15,6 +15,7 @@ use blockzilla_format::{
 use serde::Serialize;
 use thiserror::Error;
 
+use crate::blockhash::blockhash_registry_offset;
 use crate::{
     ArchiveReader, BlockhashResolver, BlockhashResolverError, BorrowedDecodedBlock,
     Error as ReaderError, OrderedParallelBlockConfig, PreviousBlockhashTail,
@@ -93,11 +94,15 @@ fn load_blockhash_resolver<S: RangeSource>(
     let maximum_bytes = maximum_records.checked_mul(HASH_BYTES).ok_or_else(|| {
         ArchiveSignatureError::Invalid("blockhash registry bound overflow".to_owned())
     })?;
+    let current_size = usize::try_from(current_size).map_err(|_| {
+        ArchiveSignatureError::Invalid("blockhash registry size exceeds address space".to_owned())
+    })?;
+    let registry_offset = blockhash_registry_offset(current_size, reader.index().rows.len())?;
     let current = reader
         .source()
         .read_all_bounded(ARCHIVE_V2_BLOCKHASH_REGISTRY_FILE, maximum_bytes)?;
 
-    let previous = if reader.manifest().epoch == 0 {
+    let previous = if reader.manifest().epoch == 0 || registry_offset == 1 {
         PreviousBlockhashTail {
             schema: PreviousBlockhashTailSchema::CurrentHashAndSlot,
             entries: Vec::new(),
@@ -660,7 +665,7 @@ mod tests {
             version: SignedMessageVersion::Legacy,
             header,
             static_account_keys: &keys,
-            recent_blockhash: [3; 32],
+            recent_blockhash: [2; 32],
             instructions: &signed_instruction,
         })
         .unwrap();
@@ -673,7 +678,7 @@ mod tests {
         let payload = ArchiveV2HotMessagePayload::Legacy(ArchiveV2HotLegacyMessage {
             header,
             account_keys: keys.into_iter().map(CompactPubkey::Raw).collect(),
-            recent_blockhash: OwnedCompactRecentBlockhash::Nonce([3; 32]),
+            recent_blockhash: OwnedCompactRecentBlockhash::Id(0),
             instructions: vec![ArchiveV2HotInstruction {
                 program_id_index: 2,
                 accounts: instruction_accounts.to_vec(),
@@ -683,9 +688,9 @@ mod tests {
         let message_bytes = wincode::config::serialize(&payload, wincode_leb128_config()).unwrap();
         let block = ArchiveV2HotBlockBlob {
             header: ArchiveV2HotBlockHeader {
-                slot: 0,
-                parent_slot: 0,
-                blockhash_id: 0,
+                slot: 100,
+                parent_slot: 99,
+                blockhash_id: 1,
                 previous_blockhash_id: 0,
                 block_time: None,
                 block_height: None,
@@ -715,7 +720,7 @@ mod tests {
             0,
             &[ArchiveV2HotBlockIndexRow {
                 block_id: 0,
-                slot: 0,
+                slot: 100,
                 compressed_offset: 0,
                 compressed_len: compressed.len() as u32,
                 uncompressed_len: uncompressed.len() as u32,
@@ -759,8 +764,8 @@ mod tests {
             PinnedLocalRangeSource::new(root),
             TrustedGenerationIdentity {
                 cluster_id: "signature-test".to_owned(),
-                epoch: 0,
-                generation_id: "signature-test-0".to_owned(),
+                epoch: 1,
+                generation_id: "signature-test-1".to_owned(),
                 slots_per_epoch: 100,
             },
             OpenOptions {

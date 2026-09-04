@@ -1,4 +1,4 @@
-//! Exact Compact V2 blockhash-registry and predecessor-tail resolution.
+//! Exact Compact V2 blockhash-registry and legacy predecessor-tail resolution.
 
 use thiserror::Error;
 
@@ -30,7 +30,8 @@ pub struct PreviousBlockhashTail {
     pub entries: Vec<PreviousBlockhash>,
 }
 
-/// Exact signed-ID resolver for current and previous-epoch blockhashes.
+/// Exact signed-ID resolver for boundary-prefixed, current, and legacy
+/// previous-epoch blockhashes.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct BlockhashResolver {
     current: Vec<[u8; 32]>,
@@ -56,8 +57,9 @@ impl BlockhashResolver {
         &self.previous
     }
 
-    /// Resolve `>= 0` in the current registry and `< 0` from the previous
-    /// tail, where `-1` is the newest previous hash.
+    /// Resolve `>= 0` in the registry and `< 0` from the legacy previous tail,
+    /// where `-1` is the newest previous hash. In a boundary-prefixed
+    /// registry, ID 0 resolves to the epoch boundary hash.
     pub fn resolve(&self, id: i32) -> Result<[u8; 32], BlockhashResolverError> {
         if id >= 0 {
             return self
@@ -90,8 +92,10 @@ impl BlockhashResolver {
     }
 
     /// Resolve the unsigned header representation of the previous blockhash.
-    /// Compact V2 uses `(blockhash_id=0, previous_id=0)` for the first current
-    /// block and obtains its predecessor from the newest previous-tail row.
+    /// Legacy Compact V2 uses `(blockhash_id=0, previous_id=0)` for the first
+    /// current block and obtains its predecessor from the newest previous-tail
+    /// row. The boundary-prefixed layout uses `(1, 0)`, which resolves ID 0
+    /// directly from the registry.
     pub fn resolve_header_previous(
         &self,
         blockhash_id: u32,
@@ -121,6 +125,10 @@ pub enum BlockhashResolverError {
     BlockhashRegistryLength { actual: usize },
     #[error("blockhash registry has {records} records, above the i32 ID range")]
     BlockhashRegistryTooLarge { records: usize },
+    #[error(
+        "blockhash registry has {records} records for {blocks} archive blocks; expected {blocks} or {blocks} + 1"
+    )]
+    BlockhashRegistryBlockCount { records: usize, blocks: usize },
     #[error("cannot reserve {records} blockhash registry records")]
     BlockhashRegistryAllocation { records: usize },
     #[error(
@@ -282,7 +290,36 @@ pub fn parse_previous_blockhash_tail(
     Ok(PreviousBlockhashTail { schema, entries })
 }
 
-/// Parse the zero-based current-epoch blockhash registry.
+/// Return the number of leading boundary records in a registry.
+///
+/// Legacy registries contain one record for each archive block and return 0.
+/// Current registries contain boundary record 0 followed by one record for
+/// each archive block and return 1.
+pub(crate) fn blockhash_registry_offset(
+    byte_len: usize,
+    block_count: usize,
+) -> Result<usize, BlockhashResolverError> {
+    if byte_len > MAX_BLOCKHASH_REGISTRY_BYTES {
+        return Err(BlockhashResolverError::BlockhashRegistryByteLimit {
+            actual: byte_len,
+            maximum: MAX_BLOCKHASH_REGISTRY_BYTES,
+        });
+    }
+    if !byte_len.is_multiple_of(BLOCKHASH_RECORD_LEN) {
+        return Err(BlockhashResolverError::BlockhashRegistryLength { actual: byte_len });
+    }
+    let records = byte_len / BLOCKHASH_RECORD_LEN;
+    match records.checked_sub(block_count) {
+        Some(offset @ 0..=1) => Ok(offset),
+        _ => Err(BlockhashResolverError::BlockhashRegistryBlockCount {
+            records,
+            blocks: block_count,
+        }),
+    }
+}
+
+/// Parse the registry in ID order. In the current layout, record 0 is the
+/// epoch boundary and produced blocks start at record 1.
 pub fn parse_blockhash_registry(bytes: &[u8]) -> Result<Vec<[u8; 32]>, BlockhashResolverError> {
     if bytes.len() > MAX_BLOCKHASH_REGISTRY_BYTES {
         return Err(BlockhashResolverError::BlockhashRegistryByteLimit {
@@ -342,6 +379,38 @@ mod tests {
         assert!(matches!(
             resolver.resolve(-3),
             Err(BlockhashResolverError::PreviousBlockhashIdOutOfRange { .. })
+        ));
+    }
+
+    #[test]
+    fn boundary_prefixed_registry_resolves_id_zero_without_a_tail() {
+        let boundary = [7; 32];
+        let first_block = [8; 32];
+        let resolver = BlockhashResolver::from_bytes(
+            &[boundary, first_block].concat(),
+            PreviousBlockhashTail {
+                schema: PreviousBlockhashTailSchema::CurrentHashAndSlot,
+                entries: Vec::new(),
+            },
+        )
+        .unwrap();
+
+        assert_eq!(blockhash_registry_offset(64, 1).unwrap(), 1);
+        assert_eq!(resolver.resolve(0).unwrap(), boundary);
+        assert_eq!(resolver.resolve_header_previous(1, 0).unwrap(), boundary);
+        assert_eq!(resolver.resolve(1).unwrap(), first_block);
+    }
+
+    #[test]
+    fn registry_offset_accepts_only_legacy_or_one_boundary_record() {
+        assert_eq!(blockhash_registry_offset(64, 2).unwrap(), 0);
+        assert_eq!(blockhash_registry_offset(96, 2).unwrap(), 1);
+        assert!(matches!(
+            blockhash_registry_offset(128, 2),
+            Err(BlockhashResolverError::BlockhashRegistryBlockCount {
+                records: 4,
+                blocks: 2
+            })
         ));
     }
 
