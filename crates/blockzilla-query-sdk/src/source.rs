@@ -91,6 +91,13 @@ pub enum InstructionDataRequirement {
 }
 
 impl InstructionDataRequirement {
+    fn requires_optional(&self, program_id: Option<&[u8; 32]>) -> bool {
+        match self {
+            Self::All => true,
+            Self::Programs(_) => program_id.is_none_or(|key| self.requires(key)),
+            Self::None => false,
+        }
+    }
     fn requires(&self, program_id: &[u8; 32]) -> bool {
         match self {
             Self::All => true,
@@ -130,6 +137,12 @@ impl TokenBalanceRequirement {
 /// One source-neutral ordered scan request.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct ScanRequest {
+    /// Return per-block instruction counts instead of transaction objects.
+    #[serde(default)]
+    pub counts_only: bool,
+    /// Permit omission of signatures for complete, non-matching program queries.
+    #[serde(default)]
+    pub primary_signatures_for_matches: bool,
     pub range: Option<ScanRange>,
     pub require_verified_source: bool,
     pub require_complete_instructions: bool,
@@ -153,6 +166,14 @@ pub struct ScanRequest {
     /// `true` for compatibility.
     #[serde(default = "default_true")]
     pub include_instruction_accounts: bool,
+    /// Program keys to materialize. Other instructions keep their coordinates
+    /// and coverage, but have no program key. Compact readers match IDs first.
+    #[serde(default = "default_instruction_programs")]
+    pub instruction_programs: InstructionDataRequirement,
+    /// Restrict signer keys and program-key materialization to this signer.
+    /// Transactions and instruction coordinates are still reported in full.
+    #[serde(default)]
+    pub required_signer: Option<[u8; 32]>,
     /// Include required signer public keys in message order.
     #[serde(default = "default_true")]
     pub include_required_signers: bool,
@@ -172,13 +193,62 @@ const fn default_true() -> bool {
     true
 }
 
+const fn default_instruction_programs() -> InstructionDataRequirement {
+    InstructionDataRequirement::All
+}
+
 const fn default_token_balance_requirement() -> TokenBalanceRequirement {
     TokenBalanceRequirement::None
 }
 
 impl ScanRequest {
+    pub fn with_selected_primary_signatures(mut self) -> Self {
+        self.primary_signatures_for_matches = true;
+        self
+    }
+
+    pub fn needs_primary_signature(&self, transaction: &crate::CanonicalTransaction) -> bool {
+        if !self.include_primary_signatures {
+            return false;
+        }
+        if !self.primary_signatures_for_matches {
+            return true;
+        }
+        if !matches!(
+            transaction.header.instruction_coverage,
+            InstructionCoverage::Complete
+        ) || !matches!(transaction.header.cpi_coverage, CpiCoverage::Complete)
+        {
+            return true;
+        }
+        match &self.instruction_programs {
+            InstructionDataRequirement::Programs(programs) => {
+                transaction.instructions.iter().any(|instruction| {
+                    instruction
+                        .program_id
+                        .is_some_and(|key| programs.contains(&key))
+                })
+            }
+            _ => true,
+        }
+    }
+    /// Decode instructions for counts, without keys, signatures, or owned records.
+    pub fn count_instructions_only(mut self) -> Self {
+        self = self
+            .without_primary_signatures()
+            .without_instruction_programs()
+            .without_required_signers()
+            .without_execution_status();
+        self.include_instructions = true;
+        self.token_balances = TokenBalanceRequirement::None;
+        self.counts_only = true;
+        self
+    }
+
     pub const fn all() -> Self {
         Self {
+            counts_only: false,
+            primary_signatures_for_matches: false,
             range: None,
             require_verified_source: true,
             require_complete_instructions: true,
@@ -189,6 +259,8 @@ impl ScanRequest {
             instruction_data: InstructionDataRequirement::All,
             include_instructions: true,
             include_instruction_accounts: true,
+            instruction_programs: InstructionDataRequirement::All,
+            required_signer: None,
             include_required_signers: true,
             include_execution_status: true,
             require_complete_token_balances: true,
@@ -198,6 +270,8 @@ impl ScanRequest {
 
     pub const fn bounded(range: ScanRange) -> Self {
         Self {
+            counts_only: false,
+            primary_signatures_for_matches: false,
             range: Some(range),
             require_verified_source: true,
             require_complete_instructions: true,
@@ -208,6 +282,8 @@ impl ScanRequest {
             instruction_data: InstructionDataRequirement::All,
             include_instructions: true,
             include_instruction_accounts: true,
+            instruction_programs: InstructionDataRequirement::All,
+            required_signer: None,
             include_required_signers: true,
             include_execution_status: true,
             require_complete_token_balances: true,
@@ -291,6 +367,31 @@ impl ScanRequest {
     pub const fn without_instruction_accounts(mut self) -> Self {
         self.include_instruction_accounts = false;
         self
+    }
+
+    /// Keep instruction coordinates without reading program public keys.
+    pub fn without_instruction_programs(mut self) -> Self {
+        self.instruction_programs = InstructionDataRequirement::None;
+        self.without_instruction_accounts()
+            .without_instruction_data()
+    }
+
+    /// Match selected program keys using archive-local IDs when available.
+    pub fn with_instruction_programs_for(
+        mut self,
+        programs: impl IntoIterator<Item = [u8; 32]>,
+    ) -> Self {
+        self.instruction_programs =
+            InstructionDataRequirement::Programs(programs.into_iter().collect());
+        self.without_instruction_accounts()
+            .without_instruction_data()
+    }
+
+    /// Select one signer without expanding every transaction's signer keys.
+    pub fn with_required_signer(mut self, signer: [u8; 32]) -> Self {
+        self.required_signer = Some(signer);
+        self.without_instruction_accounts()
+            .without_instruction_data()
     }
 
     /// Omit required signer public keys from canonical output.
@@ -556,6 +657,64 @@ impl<'a> OrderedBlockPublisher<'a> {
         }
         block.validate()?;
 
+        if let Some(counts) = block.counts {
+            if !self.request.counts_only
+                || !block.transactions.is_empty()
+                || counts.recorded_inner_instructions > counts.instructions
+                || counts.incomplete_instructions > counts.transactions
+                || counts.incomplete_cpi > counts.transactions
+            {
+                return Err(Error::InvalidStream(
+                    "invalid count-only block projection".into(),
+                ));
+            }
+            if (self.request.require_complete_instructions && counts.incomplete_instructions != 0)
+                || (self.request.require_complete_cpi && counts.incomplete_cpi != 0)
+            {
+                return Err(Error::InvalidTransaction(
+                    "count scan has incomplete instruction coverage".into(),
+                ));
+            }
+            increment(&mut self.receipt.blocks, 1, "block count")?;
+            increment(
+                &mut self.receipt.transactions,
+                counts.transactions,
+                "transaction count",
+            )?;
+            increment(
+                &mut self.receipt.instructions,
+                counts.instructions,
+                "instruction count",
+            )?;
+            increment(
+                &mut self.receipt.instructions_not_requested,
+                counts.instructions,
+                "instruction data count",
+            )?;
+            increment(
+                &mut self.receipt.transactions_with_incomplete_instructions,
+                counts.incomplete_instructions,
+                "instruction coverage",
+            )?;
+            increment(
+                &mut self.receipt.transactions_with_incomplete_cpi,
+                counts.incomplete_cpi,
+                "CPI coverage",
+            )?;
+            increment(
+                &mut self.receipt.transactions_with_unknown_execution,
+                counts.transactions,
+                "execution coverage",
+            )?;
+            self.sink.visit_block(block.as_view())?;
+            self.previous_slot = Some(block.header.slot);
+            self.next_block = self
+                .next_block
+                .checked_add(1)
+                .ok_or_else(|| Error::InvalidStream("block ordinal overflow".into()))?;
+            return Ok(());
+        }
+
         for transaction in &block.transactions {
             if !matches!(
                 transaction.header.instruction_coverage,
@@ -597,7 +756,7 @@ impl<'a> OrderedBlockPublisher<'a> {
                     && self
                         .request
                         .instruction_data
-                        .requires(&instruction.program_id)
+                        .requires_optional(instruction.program_id.as_ref())
                     && self.request.require_complete_instruction_data
                 {
                     return Err(Error::InvalidTransaction(format!(
@@ -696,6 +855,25 @@ impl<'a> OrderedBlockPublisher<'a> {
 
 /// Apply request-level gates which are common to all adapters.
 pub fn validate_request(identity: &SourceIdentity, request: &ScanRequest) -> Result<()> {
+    if request.counts_only
+        && (!request.include_instructions
+            || request.include_primary_signatures
+            || request.include_required_signers
+            || request.include_execution_status
+            || request.require_known_execution
+            || request.include_instruction_accounts
+            || request.required_signer.is_some()
+            || !matches!(
+                request.instruction_programs,
+                InstructionDataRequirement::None
+            )
+            || !matches!(request.instruction_data, InstructionDataRequirement::None)
+            || request.token_balances.is_requested())
+    {
+        return Err(Error::InvalidRequest(
+            "count-only request cannot select transaction fields".into(),
+        ));
+    }
     if identity.label.is_empty() {
         return Err(Error::InvalidRequest("source label is empty".into()));
     }
@@ -732,6 +910,25 @@ pub fn validate_request(identity: &SourceIdentity, request: &ScanRequest) -> Res
             "{} source {} does not have an accepted stable binding",
             identity.format, identity.label
         )));
+    }
+    if (!matches!(
+        request.instruction_programs,
+        InstructionDataRequirement::All
+    ) || request.required_signer.is_some())
+        && (request.include_instruction_accounts
+            || !matches!(request.instruction_data, InstructionDataRequirement::None))
+    {
+        return Err(Error::InvalidRequest(
+            "selective program identities require accounts and instruction data to be disabled"
+                .into(),
+        ));
+    }
+    if let InstructionDataRequirement::Programs(programs) = &request.instruction_programs {
+        if programs.is_empty() || programs.len() > MAX_INSTRUCTION_DATA_PROGRAMS {
+            return Err(Error::InvalidRequest(
+                "invalid program-identity filter length".into(),
+            ));
+        }
     }
     if let InstructionDataRequirement::Programs(programs) = &request.instruction_data {
         if programs.is_empty() || programs.len() > MAX_INSTRUCTION_DATA_PROGRAMS {
@@ -855,6 +1052,7 @@ mod tests {
             },
             blocks: vec![
                 CanonicalBlock {
+                    counts: None,
                     header: crate::BlockHeader {
                         epoch: 7,
                         block_ordinal: 0,
@@ -863,6 +1061,7 @@ mod tests {
                     transactions: Vec::new(),
                 },
                 CanonicalBlock {
+                    counts: None,
                     header: crate::BlockHeader {
                         epoch: 7,
                         block_ordinal: 1,
@@ -885,7 +1084,7 @@ mod tests {
                                 inner_index: None,
                                 stack_height: None,
                             },
-                            program_id: [1; 32],
+                            program_id: Some([1; 32]),
                             accounts: vec![[2; 32]],
                             data_coverage: InstructionDataCoverage::Exact,
                             data: vec![3],
@@ -1232,6 +1431,7 @@ mod tests {
         let mut sink = NoopSink;
         let mut publisher = OrderedBlockPublisher::new(&identity, &request, &mut sink).unwrap();
         let mut wrong = CanonicalBlock {
+            counts: None,
             header: BlockHeader {
                 epoch: 8,
                 block_ordinal: 0,

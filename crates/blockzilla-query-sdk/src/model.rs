@@ -113,12 +113,14 @@ pub struct InstructionCoordinate {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct ResolvedInstruction {
     pub coordinate: InstructionCoordinate,
-    pub program_id: [u8; 32],
+    /// None when program identity was not selected by the request. This is
+    /// deliberately not a zero public key (which identifies System Program).
+    pub program_id: Option<[u8; 32]>,
     /// Account public keys in the instruction account-index order.
     ///
     /// Compact V2, Indexer V3, and CAR leave this empty when
     /// `ScanRequest::include_instruction_accounts` is false. Program identity
-    /// and coordinates remain exact in that mode.
+    /// is separately selected; coordinates always remain exact.
     pub accounts: Vec<[u8; 32]>,
     pub data_coverage: InstructionDataCoverage,
     pub data: Vec<u8>,
@@ -317,13 +319,28 @@ impl CanonicalTransaction {
 }
 
 /// One owned block projection. Empty blocks are valid and are published.
+#[derive(Debug, Default, Clone, Copy, PartialEq, Eq)]
+pub struct BlockCounts {
+    pub transactions: u64,
+    pub instructions: u64,
+    pub recorded_inner_instructions: u64,
+    pub incomplete_instructions: u64,
+    pub incomplete_cpi: u64,
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct CanonicalBlock {
+    /// Set only for an explicit count request; the transaction vector stays empty.
+    pub counts: Option<BlockCounts>,
     pub header: BlockHeader,
     pub transactions: Vec<CanonicalTransaction>,
 }
 
 impl CanonicalBlock {
+    pub fn transaction_count(&self) -> u64 {
+        self.counts
+            .map_or(self.transactions.len() as u64, |c| c.transactions)
+    }
     /// Validate dense transaction indexes and canonical instruction order.
     pub fn validate(&self) -> Result<()> {
         for (position, transaction) in self.transactions.iter().enumerate() {
@@ -336,6 +353,7 @@ impl CanonicalBlock {
 
     pub fn as_view(&self) -> BlockView<'_> {
         BlockView {
+            counts: self.counts,
             header: self.header,
             transactions: &self.transactions,
         }
@@ -345,6 +363,7 @@ impl CanonicalBlock {
 /// Borrowed block projection passed to an application sink.
 #[derive(Debug, Clone, Copy)]
 pub struct BlockView<'a> {
+    pub counts: Option<BlockCounts>,
     pub header: BlockHeader,
     pub transactions: &'a [CanonicalTransaction],
 }
@@ -385,7 +404,7 @@ mod tests {
                 inner_index: inner,
                 stack_height: inner.map(|_| 2),
             },
-            program_id: [7; 32],
+            program_id: Some([7; 32]),
             accounts: vec![[8; 32]],
             data_coverage: InstructionDataCoverage::Exact,
             data: vec![3],
@@ -394,6 +413,7 @@ mod tests {
 
     fn block(instructions: Vec<ResolvedInstruction>) -> CanonicalBlock {
         CanonicalBlock {
+            counts: None,
             header: BlockHeader {
                 epoch: 1,
                 block_ordinal: 2,
@@ -514,6 +534,7 @@ mod tests {
     #[test]
     fn publishes_empty_blocks() {
         let candidate = CanonicalBlock {
+            counts: None,
             header: BlockHeader {
                 epoch: 1,
                 block_ordinal: 0,

@@ -16,6 +16,7 @@ default = []
 http = ["dep:reqwest", "dep:url"]
 
 [dependencies]
+anyhow = "1.0.100"
 blockzilla-format = { version = "0.2.0", path = "../blockzilla-format" }
 blockzilla-index-archive-format = { version = "0.2.0", path = "../blockzilla-index-archive-format" }
 blockzilla-query-sdk = { version = "0.2.0", path = "../blockzilla-query-sdk" }

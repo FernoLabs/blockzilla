@@ -2923,7 +2923,8 @@ impl Reader {
         };
         for plane in &mut planes {
             plane.offset = 0;
-            plane.bytes.clear();
+            // Retain initialized bytes for the next source read. The helper
+            // below truncates or grows each selected plane to its exact length.
         }
         let mut aggregate_stored = 0_usize;
         for object in SEMANTIC_OBJECTS
@@ -4003,9 +4004,8 @@ fn read_source_exact_bounded_into(
         bytes.clear();
         return Ok(());
     }
-    bytes.clear();
     bytes
-        .try_reserve_exact(length)
+        .try_reserve_exact(length.saturating_sub(bytes.len()))
         .with_context(|| format!("reserve bounded {label}"))?;
     bytes.resize(length, 0);
     let mut read = 0_usize;

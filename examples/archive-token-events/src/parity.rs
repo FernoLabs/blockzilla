@@ -915,6 +915,7 @@ mod tests {
         database
             .track_and_commit_block(
                 CanonicalBlock {
+                    counts: None,
                     header: BlockHeader {
                         epoch: 0,
                         block_ordinal: 0,

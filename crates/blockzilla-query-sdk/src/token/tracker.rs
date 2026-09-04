@@ -87,6 +87,9 @@ fn preflight_transaction(
     // Check all direct source geometry before a decoder can clone bytes or
     // account keys from any instruction.
     for instruction in transaction.instructions {
+        if instruction.program_id.is_none() {
+            return Err(TargetMintTrackerError::ProgramIdentityNotRequested);
+        }
         if instruction.accounts.len() > MAX_TOKEN_INSTRUCTION_ACCOUNTS {
             return Err(TargetMintTrackerError::InstructionGeometry {
                 coordinate: instruction.coordinate,
@@ -518,7 +521,9 @@ impl TargetMintTracker {
                         &mut working_revision,
                         source_instruction.coordinate,
                         Some(child.batch_index),
-                        source_instruction.program_id,
+                        source_instruction
+                            .program_id
+                            .ok_or(TargetMintTrackerError::ProgramIdentityNotRequested)?,
                         &child.accounts,
                         &child.data,
                         immutable_owner_target_hints.contains(&(
@@ -560,7 +565,9 @@ impl TargetMintTracker {
                 &mut working_revision,
                 source_instruction.coordinate,
                 None,
-                source_instruction.program_id,
+                source_instruction
+                    .program_id
+                    .ok_or(TargetMintTrackerError::ProgramIdentityNotRequested)?,
                 &source_instruction.accounts,
                 &source_instruction.data,
                 immutable_owner_target_hints.contains(&(source_instruction.coordinate.order, None)),
@@ -1530,7 +1537,9 @@ fn raw_unknown_event(
         instruction.coordinate,
         None,
         transaction_header,
-        instruction.program_id,
+        instruction
+            .program_id
+            .ok_or(TargetMintTrackerError::ProgramIdentityNotRequested)?,
         &instruction.accounts,
         instruction.data_coverage,
         &instruction.data,

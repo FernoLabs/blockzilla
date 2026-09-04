@@ -314,6 +314,7 @@ pub struct IndexerV3InstructionSource {
 struct TransactionProjectionScratch {
     account_keys: Vec<[u8; 32]>,
     selected_references: Vec<CompactPubkey>,
+    token_balances: blockzilla_read_sdk::ProjectedCompactV2TokenBalances,
 }
 
 impl TransactionProjectionScratch {
@@ -325,6 +326,10 @@ impl TransactionProjectionScratch {
                 self.selected_references
                     .capacity()
                     .checked_mul(std::mem::size_of::<CompactPubkey>())?,
+            )?
+            .checked_add(
+                (self.token_balances.pre.capacity() + self.token_balances.post.capacity())
+                    .checked_mul(std::mem::size_of::<CompactTokenBalance>())?,
             )
     }
 
@@ -337,6 +342,7 @@ impl TransactionProjectionScratch {
         }
         self.account_keys = Vec::new();
         self.selected_references = Vec::new();
+        self.token_balances = Default::default();
         true
     }
 }
@@ -675,6 +681,7 @@ impl Drop for ParallelOwnedPayloadLease {
 fn reclaim_parallel_worker_output(
     pool: &mut Vec<Vec<CanonicalTransaction>>,
     recycle: ParallelWorkerRecycle,
+    context: &mut blockzilla_query_sdk::projection_pool::ProjectionPool,
 ) {
     let ParallelWorkerRecycle {
         blocks,
@@ -684,7 +691,8 @@ fn reclaim_parallel_worker_output(
     for buffer in unused_transaction_buffers {
         recycle_parallel_transaction_buffer(pool, buffer);
     }
-    for block in blocks {
+    for mut block in blocks {
+        context.recycle_block(&mut block);
         recycle_parallel_transaction_buffer(pool, block.transactions);
     }
     // Release the measured owned-payload lease only after every inner Vec was
@@ -975,6 +983,18 @@ impl IndexerV3InstructionSource {
         self.context.registry_entries
     }
 
+    /// Reuse the same epoch-bound filter IDs for candidate lookup and scan.
+    pub fn filter_key_id(
+        &mut self,
+        request: &ScanRequest,
+        key: &[u8; 32],
+    ) -> blockzilla_query_sdk::Result<Option<Option<u32>>> {
+        self.context
+            .prepare_query_keys(request)
+            .map_err(source_error)?;
+        Ok(self.context.query_keys.registry_id(key))
+    }
+
     /// Release a complete registry image retained by an earlier dense scan.
     pub fn release_full_registry(&mut self) -> bool {
         self.context.full_registry.take().is_some()
@@ -1109,6 +1129,7 @@ impl IndexerV3InstructionSource {
         let registry_stats_before = self.context.registry_stats;
         self.context
             .prepare_registry_for_selective_scan(
+                request,
                 registry_policy,
                 requested_transactions,
                 candidate_transactions,
@@ -1234,6 +1255,7 @@ impl IndexerV3InstructionSource {
         let registry_stats_before = context.registry_stats;
         context
             .prepare_registry_for_selective_scan(
+                request,
                 registry_policy,
                 requested_transactions,
                 candidate_transactions,
@@ -1355,6 +1377,7 @@ impl IndexerV3InstructionSource {
                 let mut publisher =
                     OrderedBlockPublisher::new(&identity, &one_block_request, sink)?;
                 let mut block = CanonicalBlock {
+                    counts: None,
                     header: BlockHeader {
                         epoch: identity.epoch,
                         block_ordinal: row.block_id,
@@ -1364,6 +1387,7 @@ impl IndexerV3InstructionSource {
                 };
                 publisher.publish(&block)?;
                 accumulate_scan_receipt(&mut scan_receipt, publisher.finish()?)?;
+                context.output_pool.recycle_block(&mut block);
                 transactions = std::mem::take(&mut block.transactions);
             }
             semantic_scan
@@ -1438,6 +1462,7 @@ impl IndexerV3InstructionSource {
         let registry_stats_before = self.context.registry_stats;
         self.context
             .prepare_registry_for_selective_scan(
+                request,
                 registry_policy,
                 requested_transactions,
                 requested_transactions,
@@ -1497,6 +1522,16 @@ impl IndexerV3InstructionSource {
         registry_policy: IndexerV3RegistryReadPolicy,
         sink: &mut dyn BlockSink,
     ) -> blockzilla_query_sdk::Result<ScanReceipt> {
+        if request.counts_only {
+            return self
+                .scan_ordered_parallel_with_registry_policy(
+                    request,
+                    registry_policy,
+                    NonZeroUsize::new(1).unwrap(),
+                    sink,
+                )
+                .map(|receipt| receipt.scan);
+        }
         let identity = self.identity.clone();
         let mut publisher = OrderedBlockPublisher::new(&identity, request, sink)?;
         let start = request
@@ -1521,6 +1556,7 @@ impl IndexerV3InstructionSource {
             transaction_count_for_blocks(reader, start..end).map_err(source_error)?;
         context
             .prepare_registry_for_selective_scan(
+                request,
                 registry_policy,
                 requested_transactions,
                 requested_transactions,
@@ -1606,6 +1642,7 @@ impl IndexerV3InstructionSource {
                 })?;
 
             let mut block = CanonicalBlock {
+                counts: None,
                 header: BlockHeader {
                     epoch: identity.epoch,
                     block_ordinal: row.block_id,
@@ -1614,6 +1651,7 @@ impl IndexerV3InstructionSource {
                 transactions: std::mem::take(&mut transactions),
             };
             publisher.publish(&block)?;
+            context.output_pool.recycle_block(&mut block);
             transactions = std::mem::take(&mut block.transactions);
         }
         scan.finish()
@@ -1728,9 +1766,14 @@ impl IndexerV3InstructionSource {
                 })?;
                 let mut transactions = transaction_buffers.pop().unwrap_or_default();
                 transactions.clear();
+                let mut counts = blockzilla_query_sdk::BlockCounts::default();
                 reserve_exact(
                     &mut transactions,
-                    transaction_capacity,
+                    if request.counts_only {
+                        0
+                    } else {
+                        transaction_capacity
+                    },
                     "parallel canonical V3 block transactions",
                 )
                 .map_err(source_error)?;
@@ -1744,6 +1787,51 @@ impl IndexerV3InstructionSource {
                             block_signatures,
                             &mut signature_cursor,
                         )?;
+                        if request.counts_only {
+                            use blockzilla_read_sdk::count_projection::{
+                                CountMetadata, count_transaction,
+                            };
+                            anyhow::ensure!(
+                                transaction.tx_index as u64 == counts.transactions,
+                                "transaction order differs from block"
+                            );
+                            let flags = u32::from(transaction.source_flags);
+                            let metadata = if flags & ARCHIVE_V2_TX_FLAG_HAS_METADATA != 0
+                                && flags
+                                    & (ARCHIVE_V2_TX_FLAG_METADATA_RAW_FALLBACK
+                                        | ARCHIVE_V2_TX_FLAG_TX_RAW_FALLBACK)
+                                    == 0
+                            {
+                                CountMetadata::Split {
+                                    outcome: required_plane(transaction.outcome, "outcome")?,
+                                    loaded: required_plane(
+                                        transaction.loaded_addresses,
+                                        "loaded-addresses",
+                                    )?,
+                                    inner: required_plane(
+                                        transaction.inner_instructions,
+                                        "inner-instructions",
+                                    )?,
+                                    effect_state: transaction.effect_state,
+                                }
+                            } else {
+                                CountMetadata::Unavailable
+                            };
+                            count_transaction(
+                                &mut counts,
+                                flags,
+                                usize::try_from(
+                                    transaction.signature_ordinals.end
+                                        - transaction.signature_ordinals.start,
+                                )?,
+                                transaction.message,
+                                metadata,
+                                message_schema,
+                                metadata_schema,
+                                context.registry_entries,
+                            )?;
+                            return Ok(());
+                        }
                         let projected = Self::project_transaction(
                             context,
                             request,
@@ -1778,6 +1866,7 @@ impl IndexerV3InstructionSource {
                     canonical_block_owned_payload_bytes(&transactions, transactions.capacity())?;
                 owned_payload.add_block(block_owned_payload)?;
                 blocks.push(CanonicalBlock {
+                    counts: request.counts_only.then_some(counts),
                     header: BlockHeader {
                         epoch: self.identity.epoch,
                         block_ordinal: row.block_id,
@@ -1908,7 +1997,11 @@ impl IndexerV3InstructionSource {
                         };
                         let work = match command {
                             ParallelWorkerCommand::Recycle(recycle) => {
-                                reclaim_parallel_worker_output(&mut transaction_buffers, recycle);
+                                reclaim_parallel_worker_output(
+                                    &mut transaction_buffers,
+                                    recycle,
+                                    &mut source.context.output_pool,
+                                );
                                 continue;
                             }
                             ParallelWorkerCommand::Shutdown => break,
@@ -2529,15 +2622,24 @@ impl IndexerV3InstructionSource {
         }
 
         let projector = CompactV2MessageProjector::new(message_schema, context.registry_entries);
-        let message = Self::project_requested_message(
-            context,
-            projector,
-            transaction.message,
-            &request.instruction_data,
-            !request.require_complete_instruction_data,
-            scratch,
-            request.include_instructions && request.include_instruction_accounts,
-        )?;
+        let message = if !request.include_instructions
+            && !request.include_execution_status
+            && !request.include_required_signers
+            && request.required_signer.is_none()
+        {
+            CompactV2MessageProjector::new(message_schema, context.registry_entries)
+                .count_message(transaction.message)?
+        } else {
+            Self::project_requested_message(
+                context,
+                projector,
+                transaction.message,
+                &request.instruction_data,
+                !request.require_complete_instruction_data,
+                scratch,
+                request.include_instructions && request.include_instruction_accounts,
+            )?
+        };
         let is_v0 = matches!(
             message.version(),
             ProjectedCompactV2MessageVersion::V0 { .. }
@@ -2724,39 +2826,56 @@ impl IndexerV3InstructionSource {
             CpiCoverage::Unknown(CoverageReason::ProjectionNotRequested)
         };
 
-        let required_signers = if request.include_required_signers {
-            let required = usize::from(message.header().num_required_signatures);
-            let mut required_signers = Vec::new();
-            reserve_exact(
-                &mut required_signers,
-                required,
-                "resolved V3 required signers",
-            )?;
-            if request.include_instruction_accounts {
-                let signer_keys = scratch.account_keys.get(..required).ok_or_else(|| {
-                    IndexerV3InstructionSourceError::Invalid(
-                        "required signer prefix exceeds projected static keys".into(),
-                    )
-                })?;
-                required_signers.extend_from_slice(signer_keys);
-            } else {
-                let references =
-                    message
-                        .static_account_keys()
-                        .get(..required)
-                        .ok_or_else(|| {
-                            IndexerV3InstructionSourceError::Invalid(
-                                "required signer prefix exceeds projected static keys".into(),
-                            )
-                        })?;
-                for reference in references {
-                    required_signers.push(context.resolve_pubkey(*reference)?);
+        let signer_matches = request.required_signer.is_none_or(|key| {
+            message
+                .static_account_keys()
+                .iter()
+                .take(usize::from(message.header().num_required_signatures))
+                .any(|reference| context.query_keys.matches(*reference, &key))
+        });
+        let include_programs = signer_matches
+            && (request.required_signer.is_none()
+                || matches!(recorded_status, ExecutionStatus::Succeeded));
+        let required_signers =
+            if request.include_required_signers && request.required_signer.is_some() {
+                request
+                    .required_signer
+                    .filter(|_| signer_matches)
+                    .into_iter()
+                    .collect()
+            } else if request.include_required_signers {
+                let required = usize::from(message.header().num_required_signatures);
+                let mut required_signers = Vec::new();
+                reserve_exact(
+                    &mut required_signers,
+                    required,
+                    "resolved V3 required signers",
+                )?;
+                if request.include_instruction_accounts {
+                    let signer_keys = scratch.account_keys.get(..required).ok_or_else(|| {
+                        IndexerV3InstructionSourceError::Invalid(
+                            "required signer prefix exceeds projected static keys".into(),
+                        )
+                    })?;
+                    required_signers.extend_from_slice(signer_keys);
+                } else {
+                    let references =
+                        message
+                            .static_account_keys()
+                            .get(..required)
+                            .ok_or_else(|| {
+                                IndexerV3InstructionSourceError::Invalid(
+                                    "required signer prefix exceeds projected static keys".into(),
+                                )
+                            })?;
+                    for reference in references {
+                        required_signers.push(context.resolve_pubkey(*reference)?);
+                    }
                 }
-            }
-            required_signers
-        } else {
-            Vec::new()
-        };
+                required_signers
+            } else {
+                Vec::new()
+            };
 
         let loaded_key_count = match &metadata {
             ProjectedMetadata::Exact(metadata) => {
@@ -2825,6 +2944,7 @@ impl IndexerV3InstructionSource {
                 &scratch.account_keys,
                 account_key_count,
                 signatures,
+                include_programs,
             )?;
             (InstructionCoverage::Complete, instructions)
         } else {
@@ -2844,17 +2964,17 @@ impl IndexerV3InstructionSource {
             requirement => match &metadata {
                 ProjectedMetadata::Exact(_) | ProjectedMetadata::ExactUnprojected => {
                     let plane = required_plane(transaction.token_balances, "token-balances")?;
-                    let projected =
-                        CompactV2MetadataProjector::new(metadata_schema, context.registry_entries)
-                            .project_split_token_balances(
-                                plane,
-                                CompactV2MetadataProjectionLimits::for_message(&message),
-                            )?;
+                    CompactV2MetadataProjector::new(metadata_schema, context.registry_entries)
+                        .project_split_token_balances_reusing(
+                            plane,
+                            CompactV2MetadataProjectionLimits::for_message(&message),
+                            &mut scratch.token_balances,
+                        )?;
                     let balances = Self::resolve_token_balances(
                         context,
                         requirement,
-                        projected.pre,
-                        projected.post,
+                        &scratch.token_balances.pre,
+                        &scratch.token_balances.post,
                     )?;
                     (TokenBalanceCoverage::Complete, balances)
                 }
@@ -2888,10 +3008,10 @@ impl IndexerV3InstructionSource {
     fn resolve_token_balances(
         context: &mut ExactContext,
         requirement: &TokenBalanceRequirement,
-        pre: Vec<CompactTokenBalance>,
-        post: Vec<CompactTokenBalance>,
+        pre: &[CompactTokenBalance],
+        post: &[CompactTokenBalance],
     ) -> IndexerV3InstructionSourceResult<Vec<RecordedTokenBalance>> {
-        let mut output = Vec::new();
+        let mut output = context.output_pool.balances();
         if matches!(requirement, TokenBalanceRequirement::All) {
             reserve_exact(
                 &mut output,
@@ -2900,11 +3020,18 @@ impl IndexerV3InstructionSource {
             )?;
         }
         for (side, balances) in [(TokenBalanceSide::Pre, pre), (TokenBalanceSide::Post, post)] {
-            for (balance_index, balance) in balances.into_iter().enumerate() {
-                let mint = balance
-                    .mint
-                    .map(|reference| context.resolve_pubkey(reference))
-                    .transpose()?;
+            for (balance_index, balance) in balances.iter().enumerate() {
+                let mint = match (balance.mint, requirement) {
+                    (Some(reference), TokenBalanceRequirement::Mints(keys)) => {
+                        let Some(key) = context.query_keys.selected(reference, keys) else {
+                            continue;
+                        };
+                        Some(key)
+                    }
+                    (reference, _) => reference
+                        .map(|reference| context.resolve_pubkey(reference))
+                        .transpose()?,
+                };
                 if !requirement.selects(mint.as_ref()) {
                     continue;
                 }
@@ -2987,8 +3114,7 @@ impl IndexerV3InstructionSource {
                                 "projected V3 program index is outside static keys".into(),
                             )
                         })?;
-                    let program = context.resolve_pubkey(reference)?;
-                    if programs.contains(&program)
+                    if context.query_keys.selected(reference, programs).is_some()
                         && !scratch.selected_references.contains(&reference)
                     {
                         scratch.selected_references.push(reference);
@@ -3110,6 +3236,7 @@ impl IndexerV3InstructionSource {
         account_keys: &[[u8; 32]],
         account_key_count: usize,
         signatures: Option<&[[u8; 64]]>,
+        include_programs: bool,
     ) -> IndexerV3InstructionSourceResult<Vec<ResolvedInstruction>> {
         let has_selected_ambiguity = message.instructions().iter().any(|instruction| {
             instruction
@@ -3179,20 +3306,27 @@ impl IndexerV3InstructionSource {
                     "V3 canonical instruction count overflow".into(),
                 )
             })?;
-        let mut output = Vec::new();
+        let mut output = context.output_pool.instructions();
         reserve_exact(&mut output, output_count, "canonical V3 instructions")?;
         let mut next_group = inner_groups.into_iter().flatten().peekable();
 
         for (outer_index, instruction) in message.instructions().iter().enumerate() {
-            let program_id = if request.include_instruction_accounts {
-                resolve_index(account_keys, instruction.program_id_index())?
+            if usize::from(instruction.program_id_index()) >= account_key_count {
+                return Err(IndexerV3InstructionSourceError::Invalid(
+                    "program index exceeds account count".into(),
+                ));
+            }
+            let program_id = if !include_programs {
+                None
+            } else if request.include_instruction_accounts {
+                Some(resolve_index(account_keys, instruction.program_id_index())?)
             } else {
                 let reference = projected_account_reference(
                     message,
                     metadata,
                     usize::from(instruction.program_id_index()),
                 )?;
-                context.resolve_pubkey(reference)?
+                context.project_program(reference, &request.instruction_programs)?
             };
             let accounts = project_instruction_accounts(
                 request.include_instruction_accounts,
@@ -3249,8 +3383,15 @@ impl IndexerV3InstructionSource {
             {
                 let group = next_group.next().expect("peek proved a V3 CPI group");
                 for (inner_index, inner) in group.instructions.iter().enumerate() {
-                    let program_id = if request.include_instruction_accounts {
-                        resolve_index_u32(account_keys, inner.program_id_index)?
+                    if u64::from(inner.program_id_index) >= account_key_count as u64 {
+                        return Err(IndexerV3InstructionSourceError::Invalid(
+                            "CPI program index exceeds account count".into(),
+                        ));
+                    }
+                    let program_id = if !include_programs {
+                        None
+                    } else if request.include_instruction_accounts {
+                        Some(resolve_index_u32(account_keys, inner.program_id_index)?)
                     } else {
                         let index = usize::try_from(inner.program_id_index).map_err(|_| {
                             IndexerV3InstructionSourceError::Invalid(
@@ -3258,7 +3399,7 @@ impl IndexerV3InstructionSource {
                             )
                         })?;
                         let reference = projected_account_reference(message, metadata, index)?;
-                        context.resolve_pubkey(reference)?
+                        context.project_program(reference, &request.instruction_programs)?
                     };
                     let accounts = project_instruction_accounts(
                         request.include_instruction_accounts,
@@ -3266,8 +3407,9 @@ impl IndexerV3InstructionSource {
                         account_key_count,
                         inner.accounts,
                     )?;
-                    let selected =
-                        instruction_data_required(&request.instruction_data, &program_id);
+                    let selected = program_id.as_ref().is_some_and(|key| {
+                        instruction_data_required(&request.instruction_data, key)
+                    });
                     let (data_coverage, data) = if selected {
                         let mut data = Vec::new();
                         reserve_exact(&mut data, inner.data.len(), "selected V3 CPI data")?;
@@ -3431,21 +3573,13 @@ fn validate_parallel_job_output(
                 "parallel V3 result block {index} differs from its assignment"
             )));
         }
-        if block.transactions.len()
-            != usize::try_from(descriptor.transaction_counts[index]).map_err(|_| {
-                QueryError::InvalidStream(
-                    "parallel V3 assigned transaction count exceeds address space".into(),
-                )
-            })?
-        {
+        if block.transaction_count() != u64::from(descriptor.transaction_counts[index]) {
             return Err(QueryError::InvalidStream(format!(
                 "parallel V3 result block {index} transaction count differs from its assignment"
             )));
         }
         transactions = transactions
-            .checked_add(u64::try_from(block.transactions.len()).map_err(|_| {
-                QueryError::InvalidStream("parallel V3 result transaction count exceeds u64".into())
-            })?)
+            .checked_add(block.transaction_count())
             .ok_or_else(|| {
                 QueryError::InvalidStream("parallel V3 result transaction count overflow".into())
             })?;
@@ -3953,6 +4087,7 @@ fn local_source_objects() -> Vec<&'static str> {
     objects.extend(indexer_v3_required_ledger_objects());
     objects.extend(INDEXER_V3_REQUIRED_RETAINED_SIDECARS);
     objects.extend(INDEXER_V3_OPTIONAL_RETAINED_SIDECARS);
+    objects.push(blockzilla_format::ARCHIVE_V2_PUBKEY_REGISTRY_INDEX_FILE);
     objects
 }
 
@@ -4429,12 +4564,13 @@ impl<'a> SelectedBlockSignatureReader<'a> {
                     "V3 signature batch record count overflow".into(),
                 )
             })?;
-        let mut signatures = Vec::new();
-        reserve_exact(
-            &mut signatures,
-            signature_count,
-            "V3 signature batch records",
-        )?;
+        let mut signatures = self
+            .batch
+            .take()
+            .map_or_else(Vec::new, |batch| batch.signatures);
+        let additional = signature_count.saturating_sub(signatures.len());
+        reserve_exact(&mut signatures, additional, "V3 signature batch records")?;
+        signatures.resize(signature_count, [0; SIGNATURE_BYTES]);
         let total_bytes = signature_count
             .checked_mul(SIGNATURE_BYTES)
             .ok_or_else(|| {
@@ -4453,22 +4589,11 @@ impl<'a> SelectedBlockSignatureReader<'a> {
                         "V3 signature batch read offset overflow".into(),
                     )
                 })?;
-            let bytes = read_exact(
-                self.source.as_ref(),
+            self.source.read_range_into_slice(
                 ARCHIVE_V2_SIGNATURES_FILE,
                 offset,
-                length,
+                &mut signatures.as_flattened_mut()[read_bytes..read_bytes + length],
             )?;
-            if !bytes.len().is_multiple_of(SIGNATURE_BYTES) {
-                return Err(IndexerV3InstructionSourceError::Invalid(
-                    "V3 signature batch has a partial signature".into(),
-                ));
-            }
-            signatures.extend(bytes.chunks_exact(SIGNATURE_BYTES).map(|bytes| {
-                let mut signature = [0u8; SIGNATURE_BYTES];
-                signature.copy_from_slice(bytes);
-                signature
-            }));
             read_bytes += length;
         }
         if signatures.len() != signature_count {
@@ -4575,6 +4700,8 @@ struct SharedExactSidecars {
 }
 
 struct ExactContext {
+    output_pool: blockzilla_query_sdk::projection_pool::ProjectionPool,
+    query_keys: Arc<blockzilla_read_sdk::query_keys::BoundQueryKeys>,
     source: Arc<dyn RangeSource>,
     registry_entries: u32,
     sidecars: SidecarGeometry,
@@ -4624,6 +4751,8 @@ impl ExactContext {
             source,
             registry_entries,
             sidecars,
+            query_keys: Arc::default(),
+            output_pool: Default::default(),
             full_registry: None,
             registry_chunks: HashMap::new(),
             registry_lru: VecDeque::new(),
@@ -4639,6 +4768,8 @@ impl ExactContext {
     fn fork_for_parallel_scan(&self) -> Self {
         Self {
             source: Arc::clone(&self.source),
+            query_keys: Arc::clone(&self.query_keys),
+            output_pool: Default::default(),
             registry_entries: self.registry_entries,
             sidecars: self.sidecars,
             full_registry: self.full_registry.clone(),
@@ -4650,6 +4781,20 @@ impl ExactContext {
             vote_hashes: None,
             blockhashes: None,
             message_schema: self.message_schema,
+        }
+    }
+
+    fn project_program(
+        &mut self,
+        reference: CompactPubkey,
+        requirement: &InstructionDataRequirement,
+    ) -> IndexerV3InstructionSourceResult<Option<[u8; 32]>> {
+        match requirement {
+            InstructionDataRequirement::None => Ok(None),
+            InstructionDataRequirement::Programs(keys) => {
+                Ok(self.query_keys.selected(reference, keys))
+            }
+            InstructionDataRequirement::All => self.resolve_pubkey(reference).map(Some),
         }
     }
 
@@ -4806,8 +4951,8 @@ impl ExactContext {
         } else {
             Vec::new()
         };
-        bytes.clear();
-        reserve_exact(&mut bytes, length, "V3 registry chunk bytes")?;
+        let additional = length.saturating_sub(bytes.len());
+        reserve_exact(&mut bytes, additional, "V3 registry chunk bytes")?;
         bytes.resize(length, 0);
         self.source
             .read_range_into_slice(ARCHIVE_V2_PUBKEY_REGISTRY_FILE, offset, &mut bytes)?;
@@ -4828,12 +4973,44 @@ impl ExactContext {
         Ok(())
     }
 
+    fn prepare_query_keys(
+        &mut self,
+        request: &ScanRequest,
+    ) -> IndexerV3InstructionSourceResult<()> {
+        if !self.query_keys.covers(request) {
+            self.query_keys = Arc::new(
+                blockzilla_read_sdk::query_keys::BoundQueryKeys::bind_with_registry(
+                    self.source.as_ref(),
+                    self.registry_entries,
+                    request,
+                    self.full_registry.as_deref(),
+                )
+                .map_err(|error| IndexerV3InstructionSourceError::Invalid(error.to_string()))?,
+            );
+        }
+        Ok(())
+    }
+
     fn prepare_registry_for_selective_scan(
         &mut self,
+        request: &ScanRequest,
         policy: IndexerV3RegistryReadPolicy,
         requested_transactions: u64,
         candidate_transactions: u64,
     ) -> IndexerV3InstructionSourceResult<()> {
+        let needs_full_registry = (request.include_instructions
+            && request.include_instruction_accounts)
+            || (request.include_instructions
+                && matches!(
+                    request.instruction_programs,
+                    InstructionDataRequirement::All
+                )
+                && request.required_signer.is_none())
+            || (request.include_required_signers && request.required_signer.is_none())
+            || request.token_balances.is_requested();
+        if !needs_full_registry {
+            return self.prepare_query_keys(request);
+        }
         if self.full_registry.is_some()
             || !should_prefetch_full_registry(
                 policy,
@@ -4842,9 +5019,10 @@ impl ExactContext {
                 self.sidecars.registry_size,
             )
         {
-            return Ok(());
+            return self.prepare_query_keys(request);
         }
-        self.prefetch_full_registry()
+        self.prefetch_full_registry()?;
+        self.prepare_query_keys(request)
     }
 
     fn prefetch_full_registry(&mut self) -> IndexerV3InstructionSourceResult<()> {
@@ -5442,7 +5620,7 @@ fn push_instruction(
     outer_index: usize,
     inner_index: Option<usize>,
     stack_height: Option<u32>,
-    program_id: [u8; 32],
+    program_id: Option<[u8; 32]>,
     accounts: Vec<[u8; 32]>,
     data_coverage: InstructionDataCoverage,
     data: Vec<u8>,
@@ -6057,6 +6235,55 @@ mod tests {
     }
 
     #[test]
+    fn count_and_program_filters_do_not_expand_registry_keys() {
+        let fixture = Fixture::new();
+        for target in [None, Some(PROGRAM), Some([99; 32])] {
+            let mut source = fixture.open("id-only-query");
+            let base = ScanRequest::all()
+                .allow_unverified_source()
+                .without_primary_signatures()
+                .without_required_signers()
+                .without_execution_status()
+                .without_instruction_programs();
+            let request = target.map_or(base.clone(), |key| {
+                base.with_instruction_programs_for([key])
+            });
+            if let Some(key) = target {
+                source.filter_key_id(&request, &key).unwrap();
+            }
+            let bound = Arc::clone(&source.context.query_keys);
+            let mut observed = Vec::new();
+            let mut sink = blockzilla_query_sdk::FnBlockSink::new(
+                |block: blockzilla_query_sdk::BlockView<'_>| {
+                    for tx in block.transactions {
+                        observed.extend(
+                            tx.instructions
+                                .iter()
+                                .map(|instruction| instruction.program_id),
+                        );
+                    }
+                    Ok(())
+                },
+            );
+            let result = source
+                .scan_ordered_parallel_with_registry_policy(
+                    &request,
+                    IndexerV3RegistryReadPolicy::for_test(64, 1),
+                    NonZeroUsize::new(12).unwrap(),
+                    &mut sink,
+                )
+                .unwrap();
+            assert_eq!(result.scan.transactions, 1);
+            assert_eq!(result.scan.instructions, 2);
+            assert_eq!(result.registry.prefetch_read_bytes, 0);
+            assert_eq!(result.registry.resolutions, 0);
+            assert!(Arc::ptr_eq(&bound, &source.context.query_keys));
+            let expected = (target == Some(PROGRAM)).then_some(PROGRAM);
+            assert_eq!(observed, vec![expected; 2]);
+        }
+    }
+
+    #[test]
     fn local_v3_fixture_projects_empty_block_outer_cpi_and_exact_io() {
         let fixture = Fixture::new();
         let mut source = fixture.open("fixture-binding-a");
@@ -6090,7 +6317,7 @@ mod tests {
         assert_eq!(transaction.primary_signature, Some([9; 64]));
         assert_eq!(transaction.required_signers, [SIGNER]);
         assert_eq!(transaction.instructions.len(), 2);
-        assert_eq!(transaction.instructions[0].program_id, PROGRAM);
+        assert_eq!(transaction.instructions[0].program_id, Some(PROGRAM));
         assert_eq!(transaction.instructions[0].data, [4, 5]);
         assert_eq!(
             transaction.instructions[0].data_coverage,
@@ -7181,6 +7408,7 @@ mod tests {
                 .send(ParallelScanJobOutput {
                     worker: 0,
                     blocks: vec![CanonicalBlock {
+                        counts: None,
                         header: BlockHeader {
                             epoch: 7,
                             block_ordinal: 0,
@@ -7199,7 +7427,7 @@ mod tests {
             let ParallelWorkerCommand::Recycle(recycle) = command_receiver.recv().unwrap() else {
                 panic!("worker expected its populated output for reclamation");
             };
-            reclaim_parallel_worker_output(&mut pool, recycle);
+            reclaim_parallel_worker_output(&mut pool, recycle, &mut Default::default());
             observation_sender
                 .send((
                     pool.len(),
@@ -7241,7 +7469,7 @@ mod tests {
     }
 
     #[test]
-    fn parallel_no_resolution_scan_counts_and_releases_a_lowered_shared_registry() {
+    fn parallel_no_resolution_scan_does_not_load_a_shared_registry() {
         const BLOCKS: usize = 400;
         let fixture = Fixture::build(
             &[SIGNER, PROGRAM],
@@ -7273,18 +7501,15 @@ mod tests {
             )
             .unwrap();
 
-        assert_eq!(
-            receipt.registry.mode,
-            IndexerV3RegistryReadMode::FullRegistry
-        );
-        assert_eq!(receipt.registry.prefetch_read_calls, 1);
-        assert_eq!(receipt.registry.prefetch_read_bytes, 64);
+        assert_eq!(receipt.registry.mode, IndexerV3RegistryReadMode::Unused);
+        assert_eq!(receipt.registry.prefetch_read_calls, 0);
+        assert_eq!(receipt.registry.prefetch_read_bytes, 0);
         assert_eq!(receipt.registry.resolutions, 0);
-        assert_eq!(receipt.registry.resident_payload_bytes, 64);
+        assert_eq!(receipt.registry.resident_payload_bytes, 0);
         assert_eq!(receipt.parallel.unwrap().jobs, 100);
         assert!(!source.release_full_registry_above(64));
-        assert!(source.context.full_registry.is_some());
-        assert!(source.release_full_registry_above(63));
+        assert!(source.context.full_registry.is_none());
+        assert!(!source.release_full_registry_above(63));
         assert!(source.context.full_registry.is_none());
     }
 
@@ -7729,7 +7954,7 @@ mod tests {
         let transaction = observed.unwrap();
         assert_eq!(transaction.required_signers, [SIGNER]);
         assert_eq!(transaction.instructions.len(), 2);
-        assert_eq!(transaction.instructions[0].program_id, PROGRAM);
+        assert_eq!(transaction.instructions[0].program_id, Some(PROGRAM));
         assert_eq!(
             transaction.instructions[0].accounts,
             [LOADED_WRITABLE, LOADED_READONLY]
@@ -7739,7 +7964,10 @@ mod tests {
             transaction.instructions[0].data_coverage,
             InstructionDataCoverage::Exact
         );
-        assert_eq!(transaction.instructions[1].program_id, LOADED_READONLY);
+        assert_eq!(
+            transaction.instructions[1].program_id,
+            Some(LOADED_READONLY)
+        );
         assert_eq!(transaction.instructions[1].accounts, [LOADED_WRITABLE]);
         assert_eq!(transaction.instructions[1].coordinate.inner_index, Some(0));
 

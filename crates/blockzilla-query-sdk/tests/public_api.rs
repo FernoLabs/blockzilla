@@ -40,6 +40,7 @@ fn fixture() -> PublicFixture {
             binding: Some("fixture-cid".into()),
         },
         block: CanonicalBlock {
+            counts: None,
             header: BlockHeader {
                 epoch: 0,
                 block_ordinal: 0,

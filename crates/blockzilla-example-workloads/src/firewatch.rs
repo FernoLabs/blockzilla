@@ -152,7 +152,12 @@ impl<W: Write> FirewatchSink<W> {
             )?;
         }
         for instruction in transaction.instructions {
-            self.programs.insert(instruction.program_id);
+            let program = instruction.program_id.ok_or_else(|| {
+                crate::Error::InvalidInput(
+                    "FireWatch needs program keys for successful signer transactions".into(),
+                )
+            })?;
+            self.programs.insert(program);
         }
         add(
             &mut self.reached_instructions,
@@ -240,7 +245,7 @@ mod tests {
                     inner_index: None,
                     stack_height: None,
                 },
-                program_id: *program,
+                program_id: Some(*program),
                 accounts: vec![],
                 data_coverage: InstructionDataCoverage::NotRequested,
                 data: vec![],
@@ -276,6 +281,7 @@ mod tests {
     fn writes_sorted_distinct_programs_from_successful_signer_transactions() {
         let wallet = [0x11; 32];
         let source = CanonicalBlock {
+            counts: None,
             header: BlockHeader {
                 epoch: 8,
                 block_ordinal: 0,
@@ -334,6 +340,7 @@ mod tests {
     fn omitting_instruction_accounts_preserves_firewatch_output() {
         let wallet = [0x11; 32];
         let mut with_accounts = CanonicalBlock {
+            counts: None,
             header: BlockHeader {
                 epoch: 8,
                 block_ordinal: 0,
@@ -371,6 +378,7 @@ mod tests {
     fn keeps_confirmed_programs_and_records_coverage_gaps() {
         let wallet = [0x11; 32];
         let source = CanonicalBlock {
+            counts: None,
             header: BlockHeader {
                 epoch: 8,
                 block_ordinal: 0,

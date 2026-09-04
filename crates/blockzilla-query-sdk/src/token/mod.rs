@@ -482,6 +482,7 @@ pub enum TokenTrackerBuffer {
 /// A tracker input, allocation, or state error.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum TargetMintTrackerError {
+    ProgramIdentityNotRequested,
     TransactionInstructionLimit {
         limit: usize,
         actual: usize,
@@ -524,6 +525,9 @@ pub enum TargetMintTrackerError {
 impl std::fmt::Display for TargetMintTrackerError {
     fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
+            Self::ProgramIdentityNotRequested => {
+                formatter.write_str("token tracking requires instruction program identities")
+            }
             Self::TransactionInstructionLimit { limit, actual } => write!(
                 formatter,
                 "the transaction has {actual} instructions, above the limit {limit}"
@@ -863,7 +867,7 @@ pub fn track_transaction(
 }
 
 fn is_classic_token_instruction(instruction: &ResolvedInstruction) -> bool {
-    instruction.program_id == CLASSIC_SPL_TOKEN_PROGRAM_ID
+    instruction.program_id == Some(CLASSIC_SPL_TOKEN_PROGRAM_ID)
 }
 
 #[cfg(test)]

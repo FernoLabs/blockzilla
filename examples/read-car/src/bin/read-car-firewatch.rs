@@ -1,3 +1,5 @@
+use blockzilla_example_workloads::ProgressSink;
+
 use std::{error::Error, time::Instant};
 
 use blockzilla_car_read_sdk::{ArchiveInstructionSource, CarArchive, ScanRequest};
@@ -36,12 +38,15 @@ fn main() -> Result<(), Box<dyn Error>> {
     let bound_source_size_bytes = archive.bound_source_size_bytes();
     let base_request = ScanRequest::all();
     let requested_blocks = archive.identity().block_count;
-    let request = firewatch_scan_request(base_request);
+    let request = firewatch_scan_request(base_request).with_required_signer(wallet);
 
     let mut sink = FirewatchSink::new(create_output(&arguments.output)?, wallet)?;
     let setup_io = archive.io_snapshot();
     let scan_started = Instant::now();
-    let receipt = archive.scan_ordered(&request, &mut sink)?;
+    let receipt = archive.scan_ordered(
+        &request,
+        &mut ProgressSink::new(&mut sink, u64::from(requested_blocks)),
+    )?;
     let scan_seconds = scan_started.elapsed().as_secs_f64();
     let scan_io = archive.io_snapshot().saturating_sub(setup_io);
     let finished = sink.finish()?;

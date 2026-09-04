@@ -1,7 +1,10 @@
+use blockzilla_example_workloads::ProgressSink;
+
 use std::{error::Error, time::Instant};
 
 use blockzilla_compact_v2_read_sdk::{
-    CompactV2Archive, CompactV2LocalDescriptor, CompactV2ParallelScanConfig, ScanRequest,
+    ArchiveInstructionSource, CompactV2Archive, CompactV2LocalDescriptor,
+    CompactV2ParallelScanConfig, ScanRequest,
 };
 use blockzilla_example_workloads::{FirewatchSink, firewatch_scan_request};
 use blockzilla_read_compact_v2::{
@@ -30,11 +33,16 @@ fn main() -> Result<(), Box<dyn Error>> {
     let timing = RunTiming::after_open(started, &archive);
 
     // Shared workload code maps this signer wallet to every reached program.
-    let request = firewatch_scan_request(ScanRequest::all());
+    let request = firewatch_scan_request(ScanRequest::all()).with_required_signer(wallet);
     let mut sink = FirewatchSink::new(output_file(&args.output)?, wallet)?;
     let config = CompactV2ParallelScanConfig::new(args.threads);
     let scan = Instant::now();
-    let parallel = archive.scan_ordered_parallel(&request, &mut sink, config)?;
+    let expected_blocks = u64::from(archive.identity().block_count);
+    let parallel = archive.scan_ordered_parallel(
+        &request,
+        &mut ProgressSink::new(&mut sink, expected_blocks),
+        config,
+    )?;
     let elapsed = scan.elapsed().as_secs_f64();
     let finished = sink.finish()?;
 

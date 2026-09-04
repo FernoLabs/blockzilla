@@ -1,3 +1,5 @@
+use blockzilla_example_workloads::ReadProgress;
+
 use std::{error::Error, time::Instant};
 
 use blockzilla_example_workloads::{FirewatchSink, firewatch_scan_request};
@@ -29,17 +31,23 @@ fn main() -> Result<(), Box<dyn Error>> {
         }
     };
     let timing = RunTiming::after_open(started, &archive);
-    let request = firewatch_scan_request(ScanRequest::all());
+    let request = firewatch_scan_request(ScanRequest::all()).with_required_signer(wallet);
     let mut sink = FirewatchSink::new(output_file(&arguments.output)?, wallet)?;
 
     // Reverse lookup returns sound candidates. The sink confirms exact matches.
     let scan = Instant::now();
+    let mut progress = ReadProgress::new(None);
     let targeted = archive.for_each_signer_wallet_candidate_block_parallel(
         &wallet,
         &request,
         arguments.threads,
-        |block| sink.process_block(block).map_err(QueryError::sink),
+        |block| {
+            sink.process_block(block).map_err(QueryError::sink)?;
+            progress.observe(block);
+            Ok(())
+        },
     )?;
+    drop(progress);
     let scan_seconds = scan.elapsed().as_secs_f64();
     let finished = sink.finish()?;
 

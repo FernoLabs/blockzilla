@@ -1,3 +1,5 @@
+use blockzilla_example_workloads::ReadProgress;
+
 use std::{error::Error, time::Instant};
 
 use blockzilla_example_workloads::{MAINNET_PUMP_FUN_PROGRAM, PumpSink, pump_scan_request};
@@ -23,12 +25,18 @@ fn main() -> Result<(), Box<dyn Error>> {
 
     // Reverse lookup returns sound candidates. The sink confirms exact matches.
     let scan = Instant::now();
+    let mut progress = ReadProgress::new(None);
     let targeted = archive.for_each_reached_program_candidate_block_parallel(
         &MAINNET_PUMP_FUN_PROGRAM,
         &request,
         arguments.threads,
-        |block| sink.process_block(block).map_err(QueryError::sink),
+        |block| {
+            sink.process_block(block).map_err(QueryError::sink)?;
+            progress.observe(block);
+            Ok(())
+        },
     )?;
+    drop(progress);
     let scan_seconds = scan.elapsed().as_secs_f64();
     let finished = sink.finish()?;
 

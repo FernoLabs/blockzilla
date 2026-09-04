@@ -7,6 +7,7 @@
 mod error;
 mod firewatch;
 mod output;
+mod progress;
 mod pump;
 pub mod transaction_identity;
 mod usdc;
@@ -18,6 +19,7 @@ pub use firewatch::{
     FirewatchReport, FirewatchSink, firewatch_scan_request,
 };
 pub use output::{CoverageReport, FinishedOutput, OutputReport};
+pub use progress::{ProgressSink, ReadProgress};
 pub use pump::{
     MAINNET_PUMP_FUN_PROGRAM, MAINNET_PUMP_FUN_PROGRAM_BASE58, PUMP_COVERAGE_INCOMPLETE_CPI,
     PUMP_COVERAGE_INCOMPLETE_INSTRUCTIONS, PUMP_COVERAGE_PRIMARY_SIGNATURE_UNAVAILABLE,

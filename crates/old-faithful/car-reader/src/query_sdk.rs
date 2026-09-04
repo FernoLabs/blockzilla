@@ -322,6 +322,8 @@ impl<R: Read> Read for CountingRead<R> {
 
 #[derive(Default)]
 struct ProjectionScratch {
+    output_pool: blockzilla_query_sdk::projection_pool::ProjectionPool,
+    block_counts: Option<blockzilla_query_sdk::BlockCounts>,
     transaction_bytes: Vec<u8>,
     metadata_bytes: Vec<u8>,
     visited: HashSet<Cid36>,
@@ -481,7 +483,7 @@ impl<R: Read> CarInstructionSource<R> {
             }
 
             if real_slot == Some(planned_slot) {
-                let block = project_block(
+                let mut block = project_block(
                     &self.block,
                     &identity,
                     ordinal,
@@ -491,6 +493,7 @@ impl<R: Read> CarInstructionSource<R> {
                 )
                 .map_err(source_error)?;
                 publisher.publish(&block)?;
+                self.scratch.output_pool.recycle_block(&mut block);
                 pending_real = false;
             } else {
                 publish_empty_row(&mut publisher, &identity, ordinal, planned_slot)?;
@@ -622,6 +625,7 @@ fn publish_empty_row(
     slot: u64,
 ) -> blockzilla_query_sdk::Result<()> {
     publisher.publish(&CanonicalBlock {
+        counts: None,
         header: BlockHeader {
             epoch: identity.epoch,
             block_ordinal: ordinal,
@@ -684,7 +688,17 @@ fn project_block(
             limits.max_transactions_per_block
         )));
     }
-    let mut transactions = reserved_vec(block.transactions.len(), "block transactions")?;
+    scratch.block_counts = request
+        .counts_only
+        .then(blockzilla_query_sdk::BlockCounts::default);
+    let mut transactions = reserved_vec(
+        if request.counts_only {
+            0
+        } else {
+            block.transactions.len()
+        },
+        "block transactions",
+    )?;
     for (position, raw) in block.transactions.iter().enumerate() {
         let tx_index = u32::try_from(position)
             .map_err(|_| CarQueryError::InvalidArchive("transaction index exceeds u32".into()))?;
@@ -701,11 +715,14 @@ fn project_block(
                 "transaction frame index {declared} differs from canonical referenced position {tx_index}"
             )));
         }
-        transactions.push(project_transaction(
-            block, raw, tx_index, request, limits, scratch,
-        )?);
+        if let Some(transaction) =
+            project_transaction(block, raw, tx_index, request, limits, scratch)?
+        {
+            transactions.push(transaction);
+        }
     }
     Ok(CanonicalBlock {
+        counts: scratch.block_counts,
         header: BlockHeader {
             epoch: identity.epoch,
             block_ordinal: ordinal,
@@ -722,8 +739,10 @@ fn project_transaction(
     request: &ScanRequest,
     limits: CarQueryLimits,
     scratch: &mut ProjectionScratch,
-) -> CarQueryResult<CanonicalTransaction> {
+) -> CarQueryResult<Option<CanonicalTransaction>> {
     let ProjectionScratch {
+        output_pool,
+        block_counts,
         transaction_bytes,
         metadata_bytes,
         visited,
@@ -768,10 +787,24 @@ fn project_transaction(
     } else {
         None
     };
-    let required_signers = if request.include_required_signers {
+    let signer_matches = request.required_signer.is_none_or(|key| {
+        message
+            .static_keys
+            .iter()
+            .take(usize::from(message.header.num_required_signatures))
+            .any(|candidate| **candidate == key)
+    });
+    let required_signers = if request.include_required_signers && request.required_signer.is_some()
+    {
+        request
+            .required_signer
+            .filter(|_| signer_matches)
+            .into_iter()
+            .collect()
+    } else if request.include_required_signers {
         let required = usize::from(message.header.num_required_signatures);
         let mut required_signers = reserved_vec(required, "required signer keys")?;
-        required_signers.extend_from_slice(&message.static_keys[..required]);
+        required_signers.extend(message.static_keys[..required].iter().map(|key| **key));
         required_signers
     } else {
         Vec::new()
@@ -817,11 +850,63 @@ fn project_transaction(
         None
     } else {
         match metadata {
-            Some(metadata) => Some(resolve_loaded_keys(&message, metadata, limits)?),
-            None if message.expected_loaded == (0, 0) => Some(Vec::new()),
+            Some(metadata) => Some(AccountKeys::new(&message, Some(metadata))?),
+            None if message.expected_loaded == (0, 0) => Some(AccountKeys::new(&message, None)?),
             None => None,
         }
     };
+    if let Some(counts) = block_counts {
+        counts.transactions += 1;
+        counts.incomplete_cpi += u64::from(!matches!(recorded_cpi, CpiCoverage::Complete));
+        if let Some(keys) = loaded_keys {
+            let check = |program: u32, accounts: &[u8], data: &[u8]| -> CarQueryResult<()> {
+                if program as usize >= keys.len()
+                    || accounts
+                        .iter()
+                        .any(|index| usize::from(*index) >= keys.len())
+                    || data.len() > MAX_CANONICAL_SHORT_VEC_ITEMS
+                {
+                    return Err(CarQueryError::InvalidArchive(
+                        "invalid instruction geometry in count scan".into(),
+                    ));
+                }
+                Ok(())
+            };
+            for instruction in message.instructions {
+                check(
+                    u32::from(instruction.program_id_index),
+                    &instruction.accounts,
+                    &instruction.data,
+                )?;
+            }
+            let mut inner_count = 0usize;
+            if let Some(metadata) = metadata {
+                for group in &metadata.inner_instructions {
+                    for instruction in &group.instructions {
+                        check(
+                            instruction.program_id_index,
+                            &instruction.accounts,
+                            &instruction.data,
+                        )?;
+                        inner_count += 1;
+                    }
+                }
+            }
+            let total = message.instructions.len() + inner_count;
+            if total > limits.max_instructions_per_transaction
+                || total > MAX_CANONICAL_SHORT_VEC_ITEMS
+            {
+                return Err(CarQueryError::InvalidArchive(
+                    "instruction count exceeds limit".into(),
+                ));
+            }
+            counts.instructions += total as u64;
+            counts.recorded_inner_instructions += inner_count as u64;
+        } else {
+            counts.incomplete_instructions += 1;
+        }
+        return Ok(None);
+    }
     let (instruction_coverage, instructions) = if !request.include_instructions {
         (
             InstructionCoverage::Unknown(CoverageReason::ProjectionNotRequested),
@@ -829,24 +914,17 @@ fn project_transaction(
         )
     } else {
         match loaded_keys {
-            Some(loaded) => {
-                let capacity = message
-                    .static_keys
-                    .len()
-                    .checked_add(loaded.len())
-                    .ok_or_else(|| {
-                        CarQueryError::InvalidArchive("resolved account count overflow".into())
-                    })?;
-                let mut account_keys = reserved_vec(capacity, "resolved account keys")?;
-                account_keys.extend_from_slice(&message.static_keys);
-                account_keys.extend(loaded);
+            Some(account_keys) => {
                 let instructions = project_instructions(
                     &message,
                     metadata,
                     &account_keys,
-                    &request.instruction_data,
-                    request.include_instruction_accounts,
+                    request,
+                    signer_matches
+                        && (request.required_signer.is_none()
+                            || matches!(recorded_status, ExecutionStatus::Succeeded)),
                     limits,
+                    output_pool,
                 )?;
                 (InstructionCoverage::Complete, instructions)
             }
@@ -862,7 +940,7 @@ fn project_transaction(
         requirement => match metadata {
             Some(metadata) => (
                 TokenBalanceCoverage::Complete,
-                project_token_balances(metadata, requirement)?,
+                project_token_balances(metadata, requirement, output_pool)?,
             ),
             None => (
                 TokenBalanceCoverage::Unknown(CoverageReason::MetadataAbsent),
@@ -871,7 +949,7 @@ fn project_transaction(
         },
     };
 
-    Ok(CanonicalTransaction {
+    Ok(Some(CanonicalTransaction {
         header: TransactionHeader {
             tx_index,
             status,
@@ -884,19 +962,25 @@ fn project_transaction(
         instructions,
         token_balance_coverage,
         token_balances,
-    })
+    }))
 }
 
 fn project_token_balances(
     metadata: &TransactionStatusMeta,
     requirement: &TokenBalanceRequirement,
+    pool: &mut blockzilla_query_sdk::projection_pool::ProjectionPool,
 ) -> CarQueryResult<Vec<RecordedTokenBalance>> {
     let capacity = metadata
         .pre_token_balances
         .len()
         .checked_add(metadata.post_token_balances.len())
         .ok_or_else(|| CarQueryError::InvalidArchive("token-balance count overflow".into()))?;
-    let mut output = reserved_vec(capacity, "recorded token balances")?;
+    let mut output = pool.balances();
+    if matches!(requirement, TokenBalanceRequirement::All) {
+        output
+            .try_reserve(capacity)
+            .map_err(|_| CarQueryError::InvalidArchive("token-balance allocation failed".into()))?;
+    }
     for (side, balances) in [
         (TokenBalanceSide::Pre, &metadata.pre_token_balances),
         (TokenBalanceSide::Post, &metadata.post_token_balances),
@@ -939,13 +1023,13 @@ fn parse_optional_pubkey(value: &str) -> Option<[u8; 32]> {
     if value.is_empty() {
         return None;
     }
-    let decoded = bs58::decode(value).into_vec().ok()?;
-    decoded.as_slice().try_into().ok()
+    let mut decoded = [0_u8; 32];
+    (bs58::decode(value).onto(&mut decoded).ok()? == 32).then_some(decoded)
 }
 
 struct MessageView<'a> {
     header: MessageHeader,
-    static_keys: Vec<[u8; 32]>,
+    static_keys: &'a [&'a [u8; 32]],
     instructions: &'a [CompiledInstruction],
     expected_loaded: (usize, usize),
 }
@@ -954,7 +1038,7 @@ fn message_view<'a>(message: &'a VersionedMessage<'_>) -> CarQueryResult<Message
     match message {
         VersionedMessage::Legacy(message) => Ok(MessageView {
             header: message.header,
-            static_keys: copy_account_keys(&message.account_keys)?,
+            static_keys: &message.account_keys,
             instructions: &message.instructions,
             expected_loaded: (0, 0),
         }),
@@ -975,14 +1059,14 @@ fn message_view<'a>(message: &'a VersionedMessage<'_>) -> CarQueryResult<Message
             }
             Ok(MessageView {
                 header: message.header,
-                static_keys: copy_account_keys(&message.account_keys)?,
+                static_keys: &message.account_keys,
                 instructions: &message.instructions,
                 expected_loaded: (writable, readonly),
             })
         }
         VersionedMessage::V1(message) => Ok(MessageView {
             header: message.header,
-            static_keys: copy_account_keys(&message.account_keys)?,
+            static_keys: &message.account_keys,
             instructions: &message.instructions,
             expected_loaded: (0, 0),
         }),
@@ -1092,42 +1176,50 @@ fn validate_metadata_geometry(
     Ok(())
 }
 
-fn resolve_loaded_keys(
-    message: &MessageView<'_>,
-    metadata: &TransactionStatusMeta,
-    limits: CarQueryLimits,
-) -> CarQueryResult<Vec<[u8; 32]>> {
-    let capacity = metadata
-        .loaded_writable_addresses
-        .len()
-        .checked_add(metadata.loaded_readonly_addresses.len())
-        .ok_or_else(|| CarQueryError::InvalidArchive("loaded account count overflow".into()))?;
-    let mut loaded = reserved_vec(capacity, "loaded account keys")?;
-    for bytes in metadata
-        .loaded_writable_addresses
-        .iter()
-        .chain(&metadata.loaded_readonly_addresses)
-    {
-        let key: [u8; 32] = bytes.as_slice().try_into().map_err(|_| {
-            CarQueryError::InvalidArchive(format!(
-                "loaded address has {} bytes instead of 32",
-                bytes.len()
-            ))
-        })?;
-        loaded.push(key);
+/// Borrow the three key lanes; do not concatenate them per transaction.
+struct AccountKeys<'a> {
+    static_keys: &'a [&'a [u8; 32]],
+    writable: &'a [Vec<u8>],
+    readonly: &'a [Vec<u8>],
+}
+
+impl<'a> AccountKeys<'a> {
+    fn new(
+        message: &MessageView<'a>,
+        metadata: Option<&'a TransactionStatusMeta>,
+    ) -> CarQueryResult<Self> {
+        let writable = metadata.map_or(&[][..], |meta| meta.loaded_writable_addresses.as_slice());
+        let readonly = metadata.map_or(&[][..], |meta| meta.loaded_readonly_addresses.as_slice());
+        if writable
+            .iter()
+            .chain(readonly)
+            .any(|bytes| bytes.len() != 32)
+        {
+            return Err(CarQueryError::InvalidArchive(
+                "loaded address is not 32 bytes".into(),
+            ));
+        }
+        Ok(Self {
+            static_keys: message.static_keys,
+            writable,
+            readonly,
+        })
     }
-    let total = message
-        .static_keys
-        .len()
-        .checked_add(loaded.len())
-        .ok_or_else(|| CarQueryError::InvalidArchive("resolved account count overflow".into()))?;
-    if total > limits.max_resolved_accounts {
-        return Err(CarQueryError::InvalidArchive(format!(
-            "resolved account count {total} exceeds limit {}",
-            limits.max_resolved_accounts
-        )));
+    fn len(&self) -> usize {
+        self.static_keys.len() + self.writable.len() + self.readonly.len()
     }
-    Ok(loaded)
+    fn get(&self, index: usize) -> Option<&[u8; 32]> {
+        if let Some(key) = self.static_keys.get(index) {
+            return Some(*key);
+        }
+        let index = index.checked_sub(self.static_keys.len())?;
+        let bytes = if index < self.writable.len() {
+            &self.writable[index]
+        } else {
+            self.readonly.get(index - self.writable.len())?
+        };
+        bytes.as_slice().try_into().ok()
+    }
 }
 
 fn decode_failed_outer_index(metadata: &TransactionStatusMeta) -> CarQueryResult<Option<u32>> {
@@ -1173,10 +1265,11 @@ fn decode_legacy_unit_borsh_io_error_index(bytes: &[u8]) -> Option<u32> {
 fn project_instructions(
     message: &MessageView<'_>,
     metadata: Option<&TransactionStatusMeta>,
-    account_keys: &[[u8; 32]],
-    requirement: &InstructionDataRequirement,
-    include_accounts: bool,
+    account_keys: &AccountKeys<'_>,
+    request: &ScanRequest,
+    include_programs: bool,
     limits: CarQueryLimits,
+    pool: &mut blockzilla_query_sdk::projection_pool::ProjectionPool,
 ) -> CarQueryResult<Vec<ResolvedInstruction>> {
     let groups = metadata
         .filter(|metadata| !metadata.inner_instructions_none)
@@ -1198,7 +1291,10 @@ fn project_instructions(
         )));
     }
 
-    let mut output = reserved_vec(total, "canonical instructions")?;
+    let mut output = pool.instructions();
+    output
+        .try_reserve(total)
+        .map_err(|_| CarQueryError::InvalidArchive("instruction allocation failed".into()))?;
     let mut next_group = groups.iter().peekable();
     for (outer_index, instruction) in message.instructions.iter().enumerate() {
         push_instruction(
@@ -1210,8 +1306,8 @@ fn project_instructions(
             &instruction.accounts,
             &instruction.data,
             account_keys,
-            requirement,
-            include_accounts,
+            request,
+            include_programs,
         )?;
         if next_group
             .peek()
@@ -1228,8 +1324,8 @@ fn project_instructions(
                     &instruction.accounts,
                     &instruction.data,
                     account_keys,
-                    requirement,
-                    include_accounts,
+                    request,
+                    include_programs,
                 )?;
             }
         }
@@ -1251,19 +1347,33 @@ fn push_instruction(
     program_id_index: u32,
     account_indexes: &[u8],
     data: &[u8],
-    account_keys: &[[u8; 32]],
-    requirement: &InstructionDataRequirement,
-    include_accounts: bool,
+    account_keys: &AccountKeys<'_>,
+    request: &ScanRequest,
+    include_programs: bool,
 ) -> CarQueryResult<()> {
     let program_index = usize::try_from(program_id_index)
         .map_err(|_| CarQueryError::InvalidArchive("program index exceeds usize".into()))?;
-    let program_id = *account_keys.get(program_index).ok_or_else(|| {
-        CarQueryError::InvalidArchive(format!(
-            "program index {program_id_index} is outside {} resolved accounts",
-            account_keys.len()
-        ))
-    })?;
-    let accounts = if include_accounts {
+    if program_index >= account_keys.len() {
+        return Err(CarQueryError::InvalidArchive(
+            "program index exceeds account count".into(),
+        ));
+    }
+    let program_id = if !include_programs
+        || matches!(
+            request.instruction_programs,
+            InstructionDataRequirement::None
+        ) {
+        None
+    } else {
+        let key = *account_keys
+            .get(program_index)
+            .expect("validated account geometry");
+        match &request.instruction_programs {
+            InstructionDataRequirement::Programs(keys) => keys.contains(&key).then_some(key),
+            _ => Some(key),
+        }
+    };
+    let accounts = if request.include_instruction_accounts {
         let mut accounts = reserved_vec(account_indexes.len(), "instruction account keys")?;
         for index in account_indexes {
             accounts.push(*account_keys.get(usize::from(*index)).ok_or_else(|| {
@@ -1291,7 +1401,9 @@ fn push_instruction(
             data.len()
         )));
     }
-    let selected = instruction_data_required(requirement, &program_id);
+    let selected = program_id
+        .as_ref()
+        .is_some_and(|key| instruction_data_required(&request.instruction_data, key));
     let (data_coverage, data) = if selected {
         let mut selected_data = reserved_vec(data.len(), "selected instruction data")?;
         selected_data.extend_from_slice(data);
@@ -1329,12 +1441,6 @@ fn instruction_data_required(
         InstructionDataRequirement::Programs(programs) => programs.contains(program_id),
         InstructionDataRequirement::None => false,
     }
-}
-
-fn copy_account_keys(keys: &[&[u8; 32]]) -> CarQueryResult<Vec<[u8; 32]>> {
-    let mut output = reserved_vec(keys.len(), "static account keys")?;
-    output.extend(keys.iter().map(|key| **key));
-    Ok(output)
 }
 
 fn reserved_vec<T>(capacity: usize, label: &str) -> CarQueryResult<Vec<T>> {
@@ -1413,6 +1519,7 @@ mod tests {
         let mut blocks = Vec::new();
         let receipt = source.for_each_block(request, |block| {
             blocks.push(CanonicalBlock {
+                counts: None,
                 header: block.header,
                 transactions: block.transactions.to_vec(),
             });
@@ -2056,7 +2163,7 @@ mod tests {
         assert_eq!(transaction.required_signers, vec![signer]);
         assert_eq!(transaction.header.cpi_coverage, CpiCoverage::Complete);
         assert_eq!(transaction.instructions.len(), 5);
-        assert_eq!(transaction.instructions[0].program_id, loaded_program);
+        assert_eq!(transaction.instructions[0].program_id, Some(loaded_program));
         assert_eq!(
             transaction.instructions[0].accounts,
             vec![signer, readonly_program]
@@ -2078,17 +2185,23 @@ mod tests {
         assert_eq!(transaction.instructions[2].coordinate.outer_index, 0);
         assert_eq!(transaction.instructions[2].coordinate.inner_index, Some(1));
         assert_eq!(transaction.instructions[2].coordinate.stack_height, Some(4));
-        assert_eq!(transaction.instructions[2].program_id, readonly_program);
+        assert_eq!(
+            transaction.instructions[2].program_id,
+            Some(readonly_program)
+        );
         assert_eq!(transaction.instructions[3].coordinate.outer_index, 1);
         assert_eq!(
             transaction.instructions[3].data_coverage,
             InstructionDataCoverage::NotRequested
         );
-        assert_eq!(transaction.instructions[3].program_id, readonly_program);
+        assert_eq!(
+            transaction.instructions[3].program_id,
+            Some(readonly_program)
+        );
         assert_eq!(transaction.instructions[4].coordinate.outer_index, 1);
         assert_eq!(transaction.instructions[4].coordinate.inner_index, Some(0));
         assert_eq!(transaction.instructions[4].coordinate.stack_height, Some(2));
-        assert_eq!(transaction.instructions[4].program_id, loaded_program);
+        assert_eq!(transaction.instructions[4].program_id, Some(loaded_program));
         assert_eq!(transaction.instructions[4].accounts, vec![readonly_program]);
         assert_eq!(transaction.instructions[4].data, vec![35]);
     }
@@ -2140,12 +2253,15 @@ mod tests {
         assert_eq!(receipt.transactions_with_incomplete_cpi, 0);
         assert_eq!(transaction.header.cpi_coverage, CpiCoverage::Complete);
         assert_eq!(transaction.instructions.len(), 2);
-        assert_eq!(transaction.instructions[0].program_id, loaded_program);
+        assert_eq!(transaction.instructions[0].program_id, Some(loaded_program));
         assert!(transaction.instructions[0].accounts.is_empty());
         assert_eq!(transaction.instructions[0].coordinate.order, 0);
         assert_eq!(transaction.instructions[0].coordinate.outer_index, 0);
         assert_eq!(transaction.instructions[0].coordinate.inner_index, None);
-        assert_eq!(transaction.instructions[1].program_id, readonly_program);
+        assert_eq!(
+            transaction.instructions[1].program_id,
+            Some(readonly_program)
+        );
         assert!(transaction.instructions[1].accounts.is_empty());
         assert_eq!(transaction.instructions[1].coordinate.order, 1);
         assert_eq!(transaction.instructions[1].coordinate.outer_index, 0);
@@ -2170,7 +2286,7 @@ mod tests {
         assert_eq!(transaction.primary_signature, Some([0x33; 64]));
         assert_eq!(transaction.required_signers, vec![signer]);
         assert_eq!(transaction.instructions.len(), 1);
-        assert_eq!(transaction.instructions[0].program_id, program);
+        assert_eq!(transaction.instructions[0].program_id, Some(program));
         assert_eq!(transaction.instructions[0].accounts, vec![signer]);
         assert_eq!(transaction.instructions[0].data, vec![44]);
     }

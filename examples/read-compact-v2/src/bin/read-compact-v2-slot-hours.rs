@@ -1,3 +1,5 @@
+use blockzilla_example_workloads::ProgressSink;
+
 use std::{error::Error, io, time::Instant};
 
 use blockzilla_compact_v2_read_sdk::{
@@ -38,11 +40,17 @@ fn main() -> Result<(), Box<dyn Error>> {
         .without_primary_signatures()
         .without_instruction_data()
         .without_instruction_accounts()
+        .without_instruction_programs()
         .without_required_signers()
-        .without_execution_status();
+        .without_execution_status()
+        .count_instructions_only();
     let config = CompactV2ParallelScanConfig::new(args.threads);
     let scan = Instant::now();
-    let parallel = archive.scan_ordered_parallel(&request, &mut counts, config)?;
+    let parallel = archive.scan_ordered_parallel(
+        &request,
+        &mut ProgressSink::new(&mut counts, expected_blocks),
+        config,
+    )?;
     let scan_seconds = scan.elapsed().as_secs_f64();
     let receipt = parallel.scan;
 
@@ -155,6 +163,12 @@ impl BlockSink for ApproximateHourCounts {
         })?;
 
         bucket.blocks += 1;
+        if let Some(counts) = block.counts {
+            bucket.transactions += counts.transactions;
+            bucket.recorded_inner_instructions += counts.recorded_inner_instructions;
+            self.last_slot = Some(slot);
+            return Ok(());
+        }
         for transaction in block.transaction_views() {
             bucket.transactions += 1;
             bucket.recorded_inner_instructions += transaction

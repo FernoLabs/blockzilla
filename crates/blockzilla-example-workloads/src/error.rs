@@ -1,6 +1,8 @@
 /// A canonical workload rejected incomplete input or could not write output.
 #[derive(Debug, thiserror::Error)]
 pub enum Error {
+    #[error("{0}")]
+    InvalidInput(String),
     #[error("write canonical workload output")]
     Io(#[from] std::io::Error),
 

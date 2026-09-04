@@ -65,13 +65,7 @@ impl CompactV2MetadataProjectionLimits {
     /// Bind metadata limits to an already validated message projection.
     /// Legacy and V1 messages supply zero for both loaded-address counts.
     pub fn for_message(message: &ProjectedCompactV2Message<'_>) -> Self {
-        Self {
-            total_message_accounts: message.static_account_keys().len()
-                + message.expected_loaded_addresses(),
-            top_level_instruction_count: message.instructions().len(),
-            expected_loaded_writable: message.expected_loaded_writable(),
-            expected_loaded_readonly: message.expected_loaded_readonly(),
-        }
+        message.count_limits()
     }
 }
 
@@ -127,7 +121,7 @@ pub struct ProjectedCompactV2Metadata<'de> {
 }
 
 /// Recorded token-balance rows selected from one transaction metadata record.
-#[derive(Debug, Clone)]
+#[derive(Debug, Default, Clone)]
 pub struct ProjectedCompactV2TokenBalances {
     pub pre: Vec<CompactTokenBalance>,
     pub post: Vec<CompactTokenBalance>,
@@ -138,6 +132,13 @@ pub struct ProjectedCompactV2TokenBalances {
 pub struct CompactV2MetadataProjector {
     schema: CompactV2MetadataSchema,
     registry_entries: u32,
+}
+
+/// Counts from validated metadata, without a retained CPI or loaded-key graph.
+#[derive(Debug, Clone, Copy)]
+pub struct MetadataCounts {
+    pub execution_status: CompactV2ExecutionStatus,
+    pub inner: Option<(u64, u64)>, // groups, instructions; None means not recorded
 }
 
 impl CompactV2MetadataProjector {
@@ -162,6 +163,29 @@ impl CompactV2MetadataProjector {
         bytes: &'de [u8],
         limits: CompactV2MetadataProjectionLimits,
     ) -> CompactV2MetadataProjectionResult<ProjectedCompactV2Metadata<'de>> {
+        self.project_impl(bytes, limits, None)
+    }
+
+    pub fn count(
+        &self,
+        bytes: &[u8],
+        limits: CompactV2MetadataProjectionLimits,
+    ) -> CompactV2MetadataProjectionResult<MetadataCounts> {
+        let mut inner = None;
+        let metadata = self.project_impl(bytes, limits, Some(&mut inner))?;
+        Ok(MetadataCounts {
+            execution_status: metadata.execution_status,
+            inner,
+        })
+    }
+
+    fn project_impl<'de>(
+        self,
+        bytes: &'de [u8],
+        limits: CompactV2MetadataProjectionLimits,
+        counts: Option<&mut Option<(u64, u64)>>,
+    ) -> CompactV2MetadataProjectionResult<ProjectedCompactV2Metadata<'de>> {
+        let count_only = counts.is_some();
         validate_limits(limits)?;
         let mut cursor = bytes;
         let execution_status = match self.schema {
@@ -185,7 +209,12 @@ impl CompactV2MetadataProjector {
             .into());
         }
 
-        let inner_instructions = read_inner_instruction_groups(&mut cursor, limits)?;
+        let inner_instructions = if let Some(counts) = counts {
+            *counts = skip_inner_instruction_groups(&mut cursor, limits)?;
+            None
+        } else {
+            read_inner_instruction_groups(&mut cursor, limits)?
+        };
         skip_logs(&mut cursor, self.registry_entries)?;
         skip_token_balances(
             &mut cursor,
@@ -199,16 +228,34 @@ impl CompactV2MetadataProjector {
         )?;
         skip_rewards(&mut cursor, self.registry_entries)?;
 
-        let loaded_writable_addresses = read_loaded_addresses(
-            &mut cursor,
-            limits.expected_loaded_writable,
-            self.registry_entries,
-        )?;
-        let loaded_readonly_addresses = read_loaded_addresses(
-            &mut cursor,
-            limits.expected_loaded_readonly,
-            self.registry_entries,
-        )?;
+        let loaded_writable_addresses = if count_only {
+            skip_loaded_addresses(
+                &mut cursor,
+                limits.expected_loaded_writable,
+                self.registry_entries,
+            )?;
+            Vec::new()
+        } else {
+            read_loaded_addresses(
+                &mut cursor,
+                limits.expected_loaded_writable,
+                self.registry_entries,
+            )?
+        };
+        let loaded_readonly_addresses = if count_only {
+            skip_loaded_addresses(
+                &mut cursor,
+                limits.expected_loaded_readonly,
+                self.registry_entries,
+            )?;
+            Vec::new()
+        } else {
+            read_loaded_addresses(
+                &mut cursor,
+                limits.expected_loaded_readonly,
+                self.registry_entries,
+            )?
+        };
 
         skip_return_data(&mut cursor, self.registry_entries)?;
         get::<Option<u64>>(&mut cursor)?; // compute_units_consumed
@@ -237,6 +284,19 @@ impl CompactV2MetadataProjector {
         bytes: &[u8],
         limits: CompactV2MetadataProjectionLimits,
     ) -> CompactV2MetadataProjectionResult<ProjectedCompactV2TokenBalances> {
+        let mut output = ProjectedCompactV2TokenBalances::default();
+        self.project_token_balances_reusing(bytes, limits, &mut output)?;
+        Ok(output)
+    }
+
+    /// Retain bounded worker-owned storage, not a new pair of lists per transaction.
+    /// Read `output` only after this method returns successfully.
+    pub fn project_token_balances_reusing(
+        self,
+        bytes: &[u8],
+        limits: CompactV2MetadataProjectionLimits,
+        output: &mut ProjectedCompactV2TokenBalances,
+    ) -> CompactV2MetadataProjectionResult<()> {
         validate_limits(limits)?;
         let mut cursor = bytes;
         match self.schema {
@@ -262,15 +322,17 @@ impl CompactV2MetadataProjector {
 
         skip_inner_instruction_groups(&mut cursor, limits)?;
         skip_logs(&mut cursor, self.registry_entries)?;
-        let pre = read_token_balances(
+        read_token_balances_into(
             &mut cursor,
             limits.total_message_accounts,
             self.registry_entries,
+            &mut output.pre,
         )?;
-        let post = read_token_balances(
+        read_token_balances_into(
             &mut cursor,
             limits.total_message_accounts,
             self.registry_entries,
+            &mut output.post,
         )?;
         skip_rewards(&mut cursor, self.registry_entries)?;
         skip_loaded_addresses(
@@ -292,7 +354,7 @@ impl CompactV2MetadataProjector {
                 cursor.len(),
             ));
         }
-        Ok(ProjectedCompactV2TokenBalances { pre, post })
+        Ok(())
     }
 
     /// Project the exact token-balance plane retained by Indexer V3.
@@ -301,20 +363,33 @@ impl CompactV2MetadataProjector {
         token_balances: &[u8],
         limits: CompactV2MetadataProjectionLimits,
     ) -> CompactV2MetadataProjectionResult<ProjectedCompactV2TokenBalances> {
+        let mut output = ProjectedCompactV2TokenBalances::default();
+        self.project_split_token_balances_reusing(token_balances, limits, &mut output)?;
+        Ok(output)
+    }
+
+    pub fn project_split_token_balances_reusing(
+        self,
+        token_balances: &[u8],
+        limits: CompactV2MetadataProjectionLimits,
+        output: &mut ProjectedCompactV2TokenBalances,
+    ) -> CompactV2MetadataProjectionResult<()> {
         validate_limits(limits)?;
         let mut cursor = token_balances;
-        let pre = read_token_balances(
+        read_token_balances_into(
             &mut cursor,
             limits.total_message_accounts,
             self.registry_entries,
+            &mut output.pre,
         )?;
-        let post = read_token_balances(
+        read_token_balances_into(
             &mut cursor,
             limits.total_message_accounts,
             self.registry_entries,
+            &mut output.post,
         )?;
         require_split_plane_consumed("token-balances", cursor)?;
-        Ok(ProjectedCompactV2TokenBalances { pre, post })
+        Ok(())
     }
 
     /// Project the three semantic metadata planes retained by Indexer V3.
@@ -373,6 +448,49 @@ impl CompactV2MetadataProjector {
             inner_instructions,
             loaded_writable_addresses,
             loaded_readonly_addresses,
+        })
+    }
+
+    pub fn count_split_planes(
+        self,
+        outcome: &[u8],
+        loaded: &[u8],
+        inner: &[u8],
+        limits: CompactV2MetadataProjectionLimits,
+    ) -> CompactV2MetadataProjectionResult<MetadataCounts> {
+        validate_limits(limits)?;
+        let mut cursor = outcome;
+        let execution_status = match self.schema {
+            CompactV2MetadataSchema::CurrentTypedError => {
+                read_current_execution_status(&mut cursor, limits)?
+            }
+            CompactV2MetadataSchema::LegacyRawError => {
+                read_legacy_execution_status(&mut cursor, limits)?
+            }
+        };
+        get::<u64>(&mut cursor)?;
+        skip_return_data(&mut cursor, self.registry_entries)?;
+        get::<Option<u64>>(&mut cursor)?;
+        get::<Option<u64>>(&mut cursor)?;
+        require_split_plane_consumed("outcome", cursor)?;
+        let mut cursor = loaded;
+        skip_loaded_addresses(
+            &mut cursor,
+            limits.expected_loaded_writable,
+            self.registry_entries,
+        )?;
+        skip_loaded_addresses(
+            &mut cursor,
+            limits.expected_loaded_readonly,
+            self.registry_entries,
+        )?;
+        require_split_plane_consumed("loaded-addresses", cursor)?;
+        let mut cursor = inner;
+        let inner = skip_inner_instruction_groups(&mut cursor, limits)?;
+        require_split_plane_consumed("inner-instructions", cursor)?;
+        Ok(MetadataCounts {
+            execution_status,
+            inner,
         })
     }
 }
@@ -720,9 +838,9 @@ fn read_inner_instruction_groups<'de>(
 fn skip_inner_instruction_groups(
     cursor: &mut &[u8],
     limits: CompactV2MetadataProjectionLimits,
-) -> ReadResult<()> {
+) -> ReadResult<Option<(u64, u64)>> {
     match get::<u8>(cursor)? {
-        0 => Ok(()),
+        0 => Ok(None),
         1 => {
             let group_maximum = limits.top_level_instruction_count.min(cursor.len() / 2);
             let group_count = read_bounded_len(
@@ -760,7 +878,7 @@ fn skip_inner_instruction_groups(
                     read_inner_instruction(cursor, limits.total_message_accounts)?;
                 }
             }
-            Ok(())
+            Ok(Some((group_count as u64, total_instructions as u64)))
         }
         other => Err(invalid_tag_encoding(other as usize)),
     }
@@ -842,17 +960,19 @@ fn skip_token_balances(
     Ok(())
 }
 
-fn read_token_balances(
+fn read_token_balances_into(
     cursor: &mut &[u8],
     maximum: usize,
     registry_entries: u32,
-) -> ReadResult<Vec<CompactTokenBalance>> {
+    balances: &mut Vec<CompactTokenBalance>,
+) -> ReadResult<()> {
     let count = read_bounded_len(
         cursor,
         maximum.min(cursor.len() / 6),
         "token-balance count exceeds its semantic or input bound",
     )?;
-    let mut balances = Vec::with_capacity(count);
+    balances.clear();
+    balances.reserve(count);
     for _ in 0..count {
         let account_index = get::<u32>(cursor)?;
         let account_position = usize::try_from(account_index)
@@ -871,7 +991,7 @@ fn read_token_balances(
             decimals: get::<u8>(cursor)?,
         });
     }
-    Ok(balances)
+    Ok(())
 }
 
 fn skip_rewards(cursor: &mut &[u8], registry_entries: u32) -> ReadResult<()> {
@@ -1785,6 +1905,32 @@ mod tests {
             assert_eq!(projected.post[0].amount, 9);
             assert_eq!(projected.post[0].decimals, 6);
         }
+    }
+
+    #[test]
+    fn token_balance_storage_is_reused_and_empty_rows_do_not_keep_old_values() {
+        let mut value = full_metadata(None, Some(cpi_groups()));
+        let projector = projector(CompactV2MetadataSchema::CurrentTypedError);
+        let mut output = ProjectedCompactV2TokenBalances::default();
+        projector
+            .project_token_balances_reusing(&current_bytes(&value), LIMITS, &mut output)
+            .unwrap();
+        let capacities = (output.pre.capacity(), output.post.capacity());
+        value.pre_token_balances.clear();
+        value.post_token_balances[0].amount = 123;
+        projector
+            .project_split_token_balances_reusing(&token_split_bytes(&value), LIMITS, &mut output)
+            .unwrap();
+        assert!(output.pre.is_empty());
+        assert_eq!(output.post.len(), 1);
+        assert_eq!(output.post[0].amount, 123);
+        assert_eq!(capacities, (output.pre.capacity(), output.post.capacity()));
+        projector
+            .project_token_balances_reusing(&current_bytes(&value), LIMITS, &mut output)
+            .unwrap();
+        assert!(output.pre.is_empty());
+        assert_eq!(output.post[0].amount, 123);
+        assert_eq!(capacities, (output.pre.capacity(), output.post.capacity()));
     }
 
     #[test]

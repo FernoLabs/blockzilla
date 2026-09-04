@@ -8,6 +8,7 @@ pub mod archive_integrity;
 pub mod archive_signatures;
 pub mod blockhash;
 mod compact_query;
+pub mod count_projection;
 pub mod descriptor;
 mod error;
 #[cfg(feature = "http")]
@@ -19,6 +20,7 @@ mod message_projection;
 mod message_schema;
 mod metadata_projection;
 mod metadata_schema;
+pub mod query_keys;
 mod reader;
 pub mod signed_message;
 mod source;

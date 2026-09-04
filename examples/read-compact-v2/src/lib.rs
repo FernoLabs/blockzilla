@@ -358,6 +358,7 @@ pub fn finish_count(
     recorded_inner_instructions: u64,
 ) -> Result<(), Box<dyn Error>> {
     let receipt = parallel.scan;
+    print_pipeline(&parallel);
     let total_io = finish_archive(archive)?;
     let total_seconds = timing.total_started.elapsed().as_secs_f64();
     let scan_seconds_nonzero = scan_seconds.max(f64::MIN_POSITIVE);
@@ -558,6 +559,7 @@ pub struct RunReport<'a> {
 }
 
 pub fn print_run(report: RunReport<'_>) {
+    print_pipeline(&report.parallel);
     debug_assert_eq!(report.arguments.threads, report.parallel.requested_workers);
     let scan_seconds = report.scan_seconds.max(f64::MIN_POSITIVE);
     let total_seconds = report.total_seconds.max(f64::MIN_POSITIVE);
@@ -617,6 +619,25 @@ pub fn print_run(report: RunReport<'_>) {
         report.output_complete,
         report.coverage.indeterminate_transactions,
         report.coverage.sha256_hex(),
+    );
+}
+
+fn print_pipeline(receipt: &CompactV2ParallelScanReceipt) {
+    let p = &receipt.pipeline;
+    println!(
+        "pipeline=compact-v2 pipeline_read_s={:.6} pipeline_input_wait_s={:.6} pipeline_buffer_wait_s={:.6} pipeline_decode_project_wall_s={:.6} pipeline_worker_decode_sum_s={:.6} pipeline_worker_projection_sum_s={:.6} pipeline_consume_s={:.6} pipeline_projection_buffer_wait_s={:.6} pipeline_result_send_wait_s={:.6} pipeline_signature_read_s={:.6} pipeline_signature_assign_s={:.6} pipeline_publish_s={:.6}",
+        p.producer_read_wall_time.as_secs_f64(),
+        p.coordinator_wait_for_ready_batch_time.as_secs_f64(),
+        p.producer_wait_for_free_buffer_time.as_secs_f64(),
+        p.coordinator_decode_project_wall_time.as_secs_f64(),
+        p.worker_decompress_decode_sum_time.as_secs_f64(),
+        p.worker_projection_sum_time.as_secs_f64(),
+        p.coordinator_consume_wall_time.as_secs_f64(),
+        p.coordinator_wait_for_projection_buffer_time.as_secs_f64(),
+        p.coordinator_wait_to_send_result_time.as_secs_f64(),
+        receipt.signature_read_wall_time.as_secs_f64(),
+        receipt.signature_assign_wall_time.as_secs_f64(),
+        receipt.publish_wall_time.as_secs_f64()
     );
 }
 

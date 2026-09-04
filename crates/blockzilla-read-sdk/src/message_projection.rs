@@ -76,6 +76,13 @@ pub struct CompactV2MessageProjector {
 }
 
 impl CompactV2MessageProjector {
+    /// Validate the message using borrowed bytes and retain only count geometry.
+    pub fn count_message(
+        self,
+        bytes: &[u8],
+    ) -> CompactV2MessageProjectionResult<ProjectedCompactV2Message<'_>> {
+        self.project_with_policy(bytes, None, InstructionDataPolicy::Counts)
+    }
     /// Bind one projector to the schema and public-key registry admitted by an
     /// [`crate::ArchiveReader`].
     pub const fn new(schema: CompactV2MessageSchema, registry_entries: u32) -> Self {
@@ -305,16 +312,26 @@ impl<'de> ProjectedCompactV2Instruction<'de> {
 /// later signature-based candidate selection.
 #[derive(Debug, Clone)]
 pub struct ProjectedCompactV2Message<'de> {
+    static_account_count: usize,
+    instruction_count: usize,
     version: ProjectedCompactV2MessageVersion<'de>,
     header: CompactMessageHeader,
-    static_account_keys: Vec<CompactPubkey>,
+    static_account_keys: smallvec::SmallVec<[CompactPubkey; 8]>,
     recent_blockhash: OwnedCompactRecentBlockhash,
-    instructions: Vec<ProjectedCompactV2Instruction<'de>>,
+    instructions: smallvec::SmallVec<[ProjectedCompactV2Instruction<'de>; 4]>,
     expected_loaded_writable: usize,
     expected_loaded_readonly: usize,
 }
 
 impl ProjectedCompactV2Message<'_> {
+    pub fn count_limits(&self) -> crate::CompactV2MetadataProjectionLimits {
+        crate::CompactV2MetadataProjectionLimits {
+            total_message_accounts: self.static_account_count + self.expected_loaded_addresses(),
+            top_level_instruction_count: self.instruction_count,
+            expected_loaded_writable: self.expected_loaded_writable,
+            expected_loaded_readonly: self.expected_loaded_readonly,
+        }
+    }
     pub const fn version(&self) -> &ProjectedCompactV2MessageVersion<'_> {
         &self.version
     }
@@ -364,6 +381,7 @@ enum MessageKind {
 
 #[derive(Debug, Clone, Copy)]
 enum InstructionDataPolicy<'a> {
+    Counts,
     All {
         relaxed: bool,
     },
@@ -376,6 +394,7 @@ enum InstructionDataPolicy<'a> {
 impl InstructionDataPolicy<'_> {
     fn includes(self, program: CompactPubkey) -> bool {
         match self {
+            Self::Counts => false,
             Self::All { .. } => true,
             Self::Programs { programs, .. } => programs.contains(&program),
         }
@@ -383,6 +402,7 @@ impl InstructionDataPolicy<'_> {
 
     fn relaxed(self) -> bool {
         match self {
+            Self::Counts => false,
             Self::All { relaxed } | Self::Programs { relaxed, .. } => relaxed,
         }
     }
@@ -472,6 +492,7 @@ fn decode_message<'de, const MAY24: bool>(
     vote_hashes: Option<&dyn VoteHashResolver>,
     data_policy: InstructionDataPolicy<'_>,
 ) -> CompactV2MessageProjectionResult<ProjectedCompactV2Message<'de>> {
+    let count_only = matches!(data_policy, InstructionDataPolicy::Counts);
     let kind = match get::<u32>(cursor)? {
         0 => MessageKind::Legacy,
         1 => MessageKind::V0,
@@ -501,12 +522,17 @@ fn decode_message<'de, const MAY24: bool>(
         maximum_static_accounts.min(cursor.len()),
         "static account count exceeds its message bound or remaining input",
     )?;
-    let mut static_account_keys = Vec::with_capacity(static_account_count);
+    let mut static_account_keys =
+        smallvec::SmallVec::<[CompactPubkey; 8]>::with_capacity(if count_only {
+            0
+        } else {
+            static_account_count
+        });
     for _ in 0..static_account_count {
-        static_account_keys.push(validate_pubkey(
-            get::<CompactPubkey>(cursor)?,
-            registry_entries,
-        )?);
+        let key = validate_pubkey(get::<CompactPubkey>(cursor)?, registry_entries)?;
+        if !count_only {
+            static_account_keys.push(key);
+        }
     }
     validate_header(kind, header, static_account_count)?;
     let recent_blockhash = get::<OwnedCompactRecentBlockhash>(cursor)?;
@@ -521,13 +547,18 @@ fn decode_message<'de, const MAY24: bool>(
         maximum_instructions.min(cursor.len()),
         "top-level instruction count exceeds its signed-message bound or remaining input",
     )?;
-    let mut instructions = Vec::with_capacity(instruction_count);
+    let mut instructions =
+        smallvec::SmallVec::<[ProjectedCompactV2Instruction<'_>; 4]>::with_capacity(
+            if count_only { 0 } else { instruction_count },
+        );
+    let mut maximum_account_index = None::<u8>;
     let mut candidate_combinations = 1_usize;
     for _ in 0..instruction_count {
         let instruction = read_instruction::<MAY24>(
             cursor,
             kind,
             &static_account_keys,
+            static_account_count,
             vote_hashes,
             data_policy,
         )?;
@@ -545,7 +576,14 @@ fn decode_message<'de, const MAY24: bool>(
                 return Err(CompactV2MessageProjectionError::CandidateCombinationLimit);
             }
         }
-        instructions.push(instruction);
+        if count_only {
+            for &index in instruction.accounts {
+                maximum_account_index =
+                    Some(maximum_account_index.map_or(index, |value| value.max(index)));
+            }
+        } else {
+            instructions.push(instruction);
+        }
     }
 
     let mut expected_loaded_writable = 0_usize;
@@ -561,7 +599,8 @@ fn decode_message<'de, const MAY24: bool>(
                 MAX_COMPACT_V2_MESSAGE_ACCOUNTS.min(cursor.len()),
                 "address-table lookup count exceeds its message bound or remaining input",
             )?;
-            let mut address_table_lookups = Vec::with_capacity(lookup_count);
+            let mut address_table_lookups =
+                Vec::with_capacity(if count_only { 0 } else { lookup_count });
             for _ in 0..lookup_count {
                 let account_key = validate_pubkey(get::<CompactPubkey>(cursor)?, registry_entries)?;
                 let writable_indexes = read_bytes_bounded(
@@ -602,11 +641,13 @@ fn decode_message<'de, const MAY24: bool>(
                     )
                     .into());
                 }
-                address_table_lookups.push(ProjectedCompactV2AddressTableLookup {
-                    account_key,
-                    writable_indexes,
-                    readonly_indexes,
-                });
+                if !count_only {
+                    address_table_lookups.push(ProjectedCompactV2AddressTableLookup {
+                        account_key,
+                        writable_indexes,
+                        readonly_indexes,
+                    });
+                }
             }
             ProjectedCompactV2MessageVersion::V0 {
                 address_table_lookups,
@@ -631,7 +672,16 @@ fn decode_message<'de, const MAY24: bool>(
         }
     }
 
+    if maximum_account_index.is_some_and(|index| usize::from(index) >= total_accounts) {
+        return Err(wincode::error::invalid_value(
+            "instruction account index is outside the resolved message accounts",
+        )
+        .into());
+    }
+
     Ok(ProjectedCompactV2Message {
+        static_account_count,
+        instruction_count,
         version,
         header,
         static_account_keys,
@@ -646,11 +696,12 @@ fn read_instruction<'de, const MAY24: bool>(
     cursor: &mut &'de [u8],
     kind: MessageKind,
     static_account_keys: &[CompactPubkey],
+    static_account_count: usize,
     vote_hashes: Option<&dyn VoteHashResolver>,
     data_policy: InstructionDataPolicy<'_>,
 ) -> CompactV2MessageProjectionResult<ProjectedCompactV2Instruction<'de>> {
     let program_id_index = get::<u8>(cursor)?;
-    if program_id_index == 0 || usize::from(program_id_index) >= static_account_keys.len() {
+    if program_id_index == 0 || usize::from(program_id_index) >= static_account_count {
         return Err(wincode::error::invalid_value(
             "instruction program ID is not a non-payer static account",
         )
@@ -666,28 +717,29 @@ fn read_instruction<'de, const MAY24: bool>(
         account_limit,
         "instruction account count exceeds its signed-message bound or remaining input",
     )?;
-    let data_candidates =
-        if data_policy.includes(static_account_keys[usize::from(program_id_index)]) {
-            let candidates = match read_instruction_data::<MAY24>(cursor, vote_hashes) {
-                Ok(candidates) => candidates,
-                Err(error) if data_policy.relaxed() && is_missing_vote_proof(&error) => Vec::new(),
-                Err(error) => return Err(error),
-            };
-            let data_limit = u16::MAX as usize;
-            if candidates
-                .iter()
-                .any(|candidate| candidate.bytes.len() > data_limit)
-            {
-                return Err(wincode::error::invalid_value(
-                    "instruction data exceeds its signed-message bound",
-                )
-                .into());
-            }
-            Some(candidates)
-        } else {
-            skip_instruction_data::<MAY24>(cursor)?;
-            None
+    let data_candidates = if !matches!(data_policy, InstructionDataPolicy::Counts)
+        && data_policy.includes(static_account_keys[usize::from(program_id_index)])
+    {
+        let candidates = match read_instruction_data::<MAY24>(cursor, vote_hashes) {
+            Ok(candidates) => candidates,
+            Err(error) if data_policy.relaxed() && is_missing_vote_proof(&error) => Vec::new(),
+            Err(error) => return Err(error),
         };
+        let data_limit = u16::MAX as usize;
+        if candidates
+            .iter()
+            .any(|candidate| candidate.bytes.len() > data_limit)
+        {
+            return Err(wincode::error::invalid_value(
+                "instruction data exceeds its signed-message bound",
+            )
+            .into());
+        }
+        Some(candidates)
+    } else {
+        skip_instruction_data::<MAY24>(cursor)?;
+        None
+    };
     Ok(ProjectedCompactV2Instruction {
         program_id_index,
         accounts,

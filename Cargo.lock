@@ -973,6 +973,7 @@ dependencies = [
 name = "blockzilla-read-sdk"
 version = "0.2.0"
 dependencies = [
+ "anyhow",
  "blockzilla-format",
  "blockzilla-index-archive-format",
  "blockzilla-query-sdk",
@@ -990,6 +991,21 @@ dependencies = [
  "url",
  "wincode 0.6.1",
  "zstd",
+]
+
+[[package]]
+name = "blockzilla-reader-profile"
+version = "0.2.0"
+dependencies = [
+ "anyhow",
+ "blockzilla-compact-v2-read-sdk",
+ "blockzilla-example-workloads",
+ "blockzilla-indexer-v3-read-sdk",
+ "blockzilla-query-sdk",
+ "bs58",
+ "clap 4.6.5",
+ "pprof",
+ "serde_json",
 ]
 
 [[package]]

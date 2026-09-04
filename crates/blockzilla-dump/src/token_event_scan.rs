@@ -274,6 +274,7 @@ mod tests {
             identity: identity(verification),
             blocks: vec![
                 CanonicalBlock {
+                    counts: None,
                     header: BlockHeader {
                         epoch: 0,
                         block_ordinal: 0,
@@ -282,6 +283,7 @@ mod tests {
                     transactions: Vec::new(),
                 },
                 CanonicalBlock {
+                    counts: None,
                     header: BlockHeader {
                         epoch: 0,
                         block_ordinal: 1,
@@ -304,7 +306,7 @@ mod tests {
                                 inner_index: None,
                                 stack_height: None,
                             },
-                            program_id: CLASSIC_SPL_TOKEN_PROGRAM_ID,
+                            program_id: Some(CLASSIC_SPL_TOKEN_PROGRAM_ID),
                             accounts: vec![TOKEN_ACCOUNT],
                             data_coverage: InstructionDataCoverage::Unknown(
                                 CoverageReason::AmbiguousInstructionData,

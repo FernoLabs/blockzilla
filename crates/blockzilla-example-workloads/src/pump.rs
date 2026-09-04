@@ -36,6 +36,8 @@ pub fn pump_scan_request(request: ScanRequest) -> ScanRequest {
         .without_execution_status()
         .without_instruction_accounts()
         .without_instruction_data()
+        .with_instruction_programs_for([MAINNET_PUMP_FUN_PROGRAM])
+        .with_selected_primary_signatures()
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -130,7 +132,7 @@ impl<W: Write> PumpSink<W> {
         let mut direct_count = 0_u32;
         let mut cpi_count = 0_u32;
         for instruction in transaction.instructions {
-            if instruction.program_id != self.program {
+            if instruction.program_id != Some(self.program) {
                 continue;
             }
             let counter = if instruction.coordinate.inner_index.is_some() {
@@ -263,7 +265,7 @@ mod tests {
                 inner_index: inner,
                 stack_height: inner.map(|_| 2),
             },
-            program_id: program,
+            program_id: Some(program),
             accounts: vec![],
             data_coverage: InstructionDataCoverage::NotRequested,
             data: vec![],
@@ -278,6 +280,7 @@ mod tests {
         instructions: Vec<ResolvedInstruction>,
     ) -> CanonicalBlock {
         CanonicalBlock {
+            counts: None,
             header: BlockHeader {
                 epoch: 7,
                 block_ordinal: 0,

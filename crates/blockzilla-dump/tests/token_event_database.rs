@@ -47,7 +47,7 @@ fn source(block_count: u32) -> SourceIdentity {
         first_slot: 100,
         slots_per_epoch: 32,
         block_count,
-        verification: SourceVerification::PublishedManifest,
+        verification: SourceVerification::ObjectSetBound,
         binding: Some("sha256:test-binding".into()),
     }
 }
@@ -76,6 +76,7 @@ fn sqlite_sidecar(path: &Path, suffix: &str) -> std::path::PathBuf {
 
 fn empty_block(block_ordinal: u32) -> CanonicalBlock {
     CanonicalBlock {
+        counts: None,
         header: BlockHeader {
             epoch: 7,
             block_ordinal,
@@ -92,6 +93,7 @@ fn token_block(
     data: Vec<u8>,
 ) -> CanonicalBlock {
     CanonicalBlock {
+        counts: None,
         header: BlockHeader {
             epoch: 7,
             block_ordinal,
@@ -107,6 +109,8 @@ fn token_block(
                 cpi_coverage: CpiCoverage::Complete,
             },
             primary_signature: Some([block_ordinal as u8 + 10; 64]),
+            token_balance_coverage: blockzilla_query_sdk::TokenBalanceCoverage::NotRequested,
+            token_balances: Vec::new(),
             required_signers: vec![AUTHORITY],
             instructions: vec![ResolvedInstruction {
                 coordinate: InstructionCoordinate {
@@ -115,7 +119,7 @@ fn token_block(
                     inner_index: None,
                     stack_height: None,
                 },
-                program_id: CLASSIC_SPL_TOKEN_PROGRAM_ID,
+                program_id: Some(CLASSIC_SPL_TOKEN_PROGRAM_ID),
                 accounts,
                 data_coverage: InstructionDataCoverage::Exact,
                 data,
@@ -482,7 +486,7 @@ fn exact_materialization_rejects_an_extra_lifetime_without_correlated_sql() {
         matches!(
             &error,
             TokenEventDatabaseError::InvalidCheckpoint(reason)
-                if reason.contains("has no opening row or tracker update")
+                if reason.contains("has no opening row, lifecycle effect, or tracker update")
         ),
         "unexpected audit error: {error:?}"
     );
@@ -1458,6 +1462,7 @@ fn large_block_streams_many_transactions_into_one_atomic_commit() {
         })
         .collect();
     let block = CanonicalBlock {
+        counts: None,
         header: BlockHeader {
             epoch: 7,
             block_ordinal: 0,
@@ -1596,7 +1601,7 @@ fn outer_and_inner_instruction_coordinates_keep_runtime_order() {
                 inner_index: None,
                 stack_height: None,
             },
-            program_id: [99; 32],
+            program_id: Some([99; 32]),
             accounts: Vec::new(),
             data_coverage: InstructionDataCoverage::Exact,
             data: Vec::new(),
@@ -1608,7 +1613,7 @@ fn outer_and_inner_instruction_coordinates_keep_runtime_order() {
                 inner_index: Some(0),
                 stack_height: Some(2),
             },
-            program_id: CLASSIC_SPL_TOKEN_PROGRAM_ID,
+            program_id: Some(CLASSIC_SPL_TOKEN_PROGRAM_ID),
             accounts: vec![SOURCE_ACCOUNT, DESTINATION_ACCOUNT, AUTHORITY],
             data_coverage: InstructionDataCoverage::Exact,
             data: transfer_data(3),
@@ -1620,7 +1625,7 @@ fn outer_and_inner_instruction_coordinates_keep_runtime_order() {
                 inner_index: None,
                 stack_height: None,
             },
-            program_id: CLASSIC_SPL_TOKEN_PROGRAM_ID,
+            program_id: Some(CLASSIC_SPL_TOKEN_PROGRAM_ID),
             accounts: vec![DESTINATION_ACCOUNT, SOURCE_ACCOUNT, AUTHORITY],
             data_coverage: InstructionDataCoverage::Exact,
             data: transfer_data(2),

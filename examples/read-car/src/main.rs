@@ -1,3 +1,5 @@
+use blockzilla_example_workloads::ProgressSink;
+
 use std::{error::Error, io, time::Instant};
 
 use blockzilla_car_read_sdk::{
@@ -26,14 +28,19 @@ fn main() -> Result<(), Box<dyn Error>> {
         .without_primary_signatures()
         .without_instruction_data()
         .without_instruction_accounts()
+        .without_instruction_programs()
         .without_required_signers()
-        .without_execution_status();
+        .without_execution_status()
+        .count_instructions_only();
 
     let verification = archive.identity().verification;
     let bound_source_size_bytes = archive.bound_source_size_bytes();
     let setup_io = archive.io_snapshot();
     let scan_started = Instant::now();
-    let receipt = archive.scan_ordered(&request, &mut counts)?;
+    let receipt = archive.scan_ordered(
+        &request,
+        &mut ProgressSink::new(&mut counts, expected_blocks),
+    )?;
     let scan_seconds = scan_started.elapsed().as_secs_f64();
     let total_io = archive.finish_io();
     let total_seconds = total_started.elapsed().as_secs_f64();
@@ -186,6 +193,13 @@ impl ApproximateHourCounts {
 
 impl BlockSink for ApproximateHourCounts {
     fn visit_block(&mut self, block: BlockView<'_>) -> QueryResult<()> {
+        if let Some(counts) = block.counts {
+            return self.add(
+                block.header.slot,
+                counts.transactions,
+                counts.recorded_inner_instructions,
+            );
+        }
         let transactions = u64::try_from(block.transactions.len())
             .map_err(|error| sink_error(error.to_string()))?;
         let recorded_inner_instructions =

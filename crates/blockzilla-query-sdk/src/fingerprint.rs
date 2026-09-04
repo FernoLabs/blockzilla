@@ -86,6 +86,7 @@ mod tests {
             })
             .collect();
         CanonicalBlock {
+            counts: None,
             header: BlockHeader {
                 epoch: 9,
                 block_ordinal,

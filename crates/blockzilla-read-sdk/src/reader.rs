@@ -191,6 +191,11 @@ pub struct OrderedParallelBlockStats {
     pub compressed_bytes: u64,
     pub producer_read_wall_time: Duration,
     pub coordinator_decode_project_wall_time: Duration,
+    /// Ordered sink time; overlaps decode/projection on the next bounded group.
+    pub coordinator_consume_wall_time: Duration,
+    /// Decoder waits for the ordered consumer to return reusable output storage.
+    pub coordinator_wait_for_projection_buffer_time: Duration,
+    pub coordinator_wait_to_send_result_time: Duration,
     /// Sum of worker time spent in zstd expansion and the exact outer block
     /// decode. This can exceed wall time because workers run in parallel.
     pub worker_decompress_decode_sum_time: Duration,
@@ -1565,241 +1570,287 @@ impl<S: RangeSource> ArchiveReader<S> {
             let producer = scope.spawn(|| {
                 produce_ordered_compressed_batches(self, &plans, free_receiver, ready_sender)
             });
-            let mut coordinator: OrderedParallelCoordinator<E> =
-                OrderedParallelCoordinator::default();
-            let mut projected = Vec::new();
+            let (decoded_sender, decoded_receiver) = sync_channel(1);
+            let (projection_free_sender, projection_free_receiver) = sync_channel(2);
+            let _ = projection_free_sender.send(Vec::new());
+            let _ = projection_free_sender.send(Vec::new());
+            let plans = &plans;
+            let decoder = scope.spawn(move || {
+                let mut coordinator: OrderedParallelCoordinator<E> =
+                    OrderedParallelCoordinator::default();
 
-            'batches: for expected in &plans {
-                let wait_started = Instant::now();
-                let ready = match ready_receiver.recv() {
-                    Ok(ready) => ready,
-                    Err(_) => {
-                        coordinator.producer_disconnected = true;
+                'batches: for expected in plans {
+                    let wait_started = Instant::now();
+                    let ready = match ready_receiver.recv() {
+                        Ok(ready) => ready,
+                        Err(_) => {
+                            coordinator.producer_disconnected = true;
+                            break;
+                        }
+                    };
+                    coordinator.stats.coordinator_wait_for_ready_batch_time = coordinator
+                        .stats
+                        .coordinator_wait_for_ready_batch_time
+                        .saturating_add(wait_started.elapsed());
+                    if ready.plan != *expected {
+                        coordinator.error = Some(E::from(Error::InvalidIndex(format!(
+                            "ordered block producer returned rows {}..{}, expected {}..{}",
+                            ready.plan.row_start,
+                            ready.plan.row_end,
+                            expected.row_start,
+                            expected.row_end,
+                        ))));
                         break;
                     }
-                };
-                coordinator.stats.coordinator_wait_for_ready_batch_time = coordinator
-                    .stats
-                    .coordinator_wait_for_ready_batch_time
-                    .saturating_add(wait_started.elapsed());
-                if ready.plan != *expected {
-                    coordinator.error = Some(E::from(Error::InvalidIndex(format!(
-                        "ordered block producer returned rows {}..{}, expected {}..{}",
-                        ready.plan.row_start,
-                        ready.plan.row_end,
-                        expected.row_start,
-                        expected.row_end,
-                    ))));
-                    break;
-                }
 
-                coordinator.stats.batch_count = match coordinator.stats.batch_count.checked_add(1) {
-                    Some(value) => value,
-                    None => {
-                        coordinator.error = Some(E::from(Error::Overflow("parallel batch count")));
-                        break;
-                    }
-                };
-                let batch_blocks = match u64::try_from(expected.row_end - expected.row_start) {
-                    Ok(value) => value,
-                    Err(_) => {
-                        coordinator.error = Some(E::from(Error::Overflow("parallel block count")));
-                        break;
-                    }
-                };
-                coordinator.stats.block_count =
-                    match coordinator.stats.block_count.checked_add(batch_blocks) {
-                        Some(value) => value,
-                        None => {
+                    coordinator.stats.batch_count =
+                        match coordinator.stats.batch_count.checked_add(1) {
+                            Some(value) => value,
+                            None => {
+                                coordinator.error =
+                                    Some(E::from(Error::Overflow("parallel batch count")));
+                                break;
+                            }
+                        };
+                    let batch_blocks = match u64::try_from(expected.row_end - expected.row_start) {
+                        Ok(value) => value,
+                        Err(_) => {
                             coordinator.error =
                                 Some(E::from(Error::Overflow("parallel block count")));
                             break;
                         }
                     };
+                    coordinator.stats.block_count =
+                        match coordinator.stats.block_count.checked_add(batch_blocks) {
+                            Some(value) => value,
+                            None => {
+                                coordinator.error =
+                                    Some(E::from(Error::Overflow("parallel block count")));
+                                break;
+                            }
+                        };
 
-                for wave_start in
-                    (ready.plan.row_start..ready.plan.row_end).step_by(config.decode_workers)
-                {
-                    let wave_end = wave_start
-                        .saturating_add(config.decode_workers)
-                        .min(ready.plan.row_end);
-                    let decode_started = Instant::now();
-                    decode_pool.install(|| {
-                        self.index.rows[wave_start..wave_end]
-                            .par_iter()
-                            .enumerate()
-                            .map(|(wave_row, row)| {
-                                let row_number = wave_start + wave_row;
-                                let relative_offset = row
-                                    .compressed_offset
-                                    .checked_sub(ready.plan.compressed_offset)
-                                    .ok_or_else(|| {
-                                        Error::InvalidIndex(
-                                            "parallel block frame offset underflow".into(),
-                                        )
-                                    })?;
-                                let relative_offset = usize::try_from(relative_offset)
-                                    .map_err(|_| Error::Overflow("parallel block frame offset"))?;
-                                let frame_end = relative_offset
-                                    .checked_add(row.compressed_len as usize)
-                                    .ok_or(Error::Overflow("parallel block frame range"))?;
-                                let compressed = ready
-                                    .bytes
-                                    .get(relative_offset..frame_end)
-                                    .ok_or_else(|| {
-                                        Error::InvalidIndex(
+                    for wave_start in (ready.plan.row_start..ready.plan.row_end)
+                        .step_by(config.decode_workers.saturating_mul(4))
+                    {
+                        let wave_end = wave_start
+                            .saturating_add(config.decode_workers.saturating_mul(4))
+                            .min(ready.plan.row_end);
+                        let wait_started = Instant::now();
+                        let Ok(mut projected) = projection_free_receiver.recv() else {
+                            break 'batches;
+                        };
+                        coordinator
+                            .stats
+                            .coordinator_wait_for_projection_buffer_time += wait_started.elapsed();
+                        let decode_started = Instant::now();
+                        decode_pool.install(|| {
+                            self.index.rows[wave_start..wave_end]
+                                .par_iter()
+                                .enumerate()
+                                .map(|(wave_row, row)| {
+                                    let row_number = wave_start + wave_row;
+                                    let relative_offset = row
+                                        .compressed_offset
+                                        .checked_sub(ready.plan.compressed_offset)
+                                        .ok_or_else(|| {
+                                            Error::InvalidIndex(
+                                                "parallel block frame offset underflow".into(),
+                                            )
+                                        })?;
+                                    let relative_offset = usize::try_from(relative_offset)
+                                        .map_err(|_| {
+                                            Error::Overflow("parallel block frame offset")
+                                        })?;
+                                    let frame_end = relative_offset
+                                        .checked_add(row.compressed_len as usize)
+                                        .ok_or(Error::Overflow("parallel block frame range"))?;
+                                    let compressed =
+                                        ready.bytes.get(relative_offset..frame_end).ok_or_else(
+                                            || {
+                                                Error::InvalidIndex(
                                             "parallel block frame is outside its read batch".into(),
                                         )
-                                    })?;
-                                let worker_number =
-                                    rayon::current_thread_index().ok_or_else(|| {
+                                            },
+                                        )?;
+                                    let worker_number =
+                                        rayon::current_thread_index().ok_or_else(|| {
+                                            Error::InvalidIndex(
+                                                "parallel block task ran outside its decode pool"
+                                                    .into(),
+                                            )
+                                        })?;
+                                    let mut worker_guard =
+                                        workers[worker_number].lock().map_err(|_| {
+                                            Error::InvalidIndex(
+                                                "parallel block worker state is poisoned".into(),
+                                            )
+                                        })?;
+                                    let mut worker = worker_guard.take().ok_or_else(|| {
                                         Error::InvalidIndex(
-                                            "parallel block task ran outside its decode pool"
+                                            "parallel block worker was re-entered by nested work"
                                                 .into(),
                                         )
                                     })?;
-                                let mut worker_guard =
-                                    workers[worker_number].lock().map_err(|_| {
-                                        Error::InvalidIndex(
-                                            "parallel block worker state is poisoned".into(),
-                                        )
-                                    })?;
-                                let mut worker = worker_guard.take().ok_or_else(|| {
-                                    Error::InvalidIndex(
-                                        "parallel block worker was re-entered by nested work"
-                                            .into(),
-                                    )
-                                })?;
-                                drop(worker_guard);
-                                worker.used = true;
-                                let active = active_workers.fetch_add(1, Ordering::AcqRel) + 1;
-                                max_active_workers.fetch_max(active, Ordering::Relaxed);
-                                let result = worker.decode_and_project(
-                                    self,
-                                    *row,
-                                    compressed,
-                                    row_number,
-                                    config.discard_rewards,
-                                    config.retained_decompressed_bytes_per_worker,
-                                    &project,
-                                );
-                                let previous = active_workers.fetch_sub(1, Ordering::AcqRel);
-                                debug_assert!(previous > 0);
-                                let mut worker_guard =
-                                    workers[worker_number].lock().map_err(|_| {
-                                        Error::InvalidIndex(
-                                            "parallel block worker state is poisoned".into(),
-                                        )
-                                    })?;
-                                *worker_guard = Some(worker);
-                                result
+                                    drop(worker_guard);
+                                    worker.used = true;
+                                    let active = active_workers.fetch_add(1, Ordering::AcqRel) + 1;
+                                    max_active_workers.fetch_max(active, Ordering::Relaxed);
+                                    let result = worker.decode_and_project(
+                                        self,
+                                        *row,
+                                        compressed,
+                                        row_number,
+                                        config.discard_rewards,
+                                        config.retained_decompressed_bytes_per_worker,
+                                        &project,
+                                    );
+                                    let previous = active_workers.fetch_sub(1, Ordering::AcqRel);
+                                    debug_assert!(previous > 0);
+                                    let mut worker_guard =
+                                        workers[worker_number].lock().map_err(|_| {
+                                            Error::InvalidIndex(
+                                                "parallel block worker state is poisoned".into(),
+                                            )
+                                        })?;
+                                    *worker_guard = Some(worker);
+                                    result
+                                })
+                                .collect_into_vec(&mut projected)
+                        });
+                        coordinator.stats.coordinator_decode_project_wall_time = coordinator
+                            .stats
+                            .coordinator_decode_project_wall_time
+                            .saturating_add(decode_started.elapsed());
+                        coordinator.stats.max_blocks_per_batch = coordinator
+                            .stats
+                            .max_blocks_per_batch
+                            .max(wave_end - wave_start);
+                        let wave_transactions = self.index.rows[wave_start..wave_end]
+                            .iter()
+                            .try_fold(0_u64, |total, row| {
+                                total
+                                    .checked_add(u64::from(row.tx_count))
+                                    .ok_or(Error::Overflow("parallel transaction wave count"))
                             })
-                            .collect_into_vec(&mut projected)
-                    });
-                    coordinator.stats.coordinator_decode_project_wall_time = coordinator
-                        .stats
-                        .coordinator_decode_project_wall_time
-                        .saturating_add(decode_started.elapsed());
-                    coordinator.stats.max_blocks_per_batch = coordinator
-                        .stats
-                        .max_blocks_per_batch
-                        .max(wave_end - wave_start);
-                    let wave_transactions = self.index.rows[wave_start..wave_end]
-                        .iter()
-                        .try_fold(0_u64, |total, row| {
-                            total
-                                .checked_add(u64::from(row.tx_count))
-                                .ok_or(Error::Overflow("parallel transaction wave count"))
-                        })
-                        .map_err(E::from)?;
-                    coordinator.stats.max_transactions_per_batch = coordinator
-                        .stats
-                        .max_transactions_per_batch
-                        .max(wave_transactions);
+                            .map_err(E::from)?;
+                        coordinator.stats.max_transactions_per_batch = coordinator
+                            .stats
+                            .max_transactions_per_batch
+                            .max(wave_transactions);
 
-                    for (wave_row, result) in projected.drain(..).enumerate() {
-                        let row_number = wave_start + wave_row;
-                        let output = match result {
-                            Ok(output) => output,
-                            Err(error) => {
-                                coordinator.error = Some(error);
-                                break 'batches;
-                            }
-                        };
-                        if let Err(error) = consume_ordered(row_number, output) {
-                            coordinator.error = Some(error);
+                        let wait_started = Instant::now();
+                        let sent = decoded_sender.send((wave_start, projected));
+                        coordinator.stats.coordinator_wait_to_send_result_time +=
+                            wait_started.elapsed();
+                        if sent.is_err() {
                             break 'batches;
                         }
                     }
+
+                    // Projection outputs are consumed wave by wave and cannot
+                    // borrow this compressed source batch. Recycle it now.
+                    let _ = free_sender.send(ready.bytes);
                 }
 
-                // Projection outputs are consumed wave by wave and cannot
-                // borrow this compressed source batch. Recycle it now.
-                let _ = free_sender.send(ready.bytes);
+                // Closing both directions wakes a producer blocked on either a
+                // ready batch or a recycled allocation token.
+                drop(ready_receiver);
+                drop(free_sender);
+                let producer_result = producer.join().map_err(|_| {
+                    Error::InvalidIndex("ordered block producer thread panicked".into())
+                });
+
+                if let Some(error) = coordinator.error {
+                    return Err(error);
+                }
+                let producer_stats = match producer_result {
+                    Ok(result) => result.map_err(E::from)?,
+                    Err(error) => return Err(E::from(error)),
+                };
+                if coordinator.producer_disconnected {
+                    return Err(E::from(Error::InvalidIndex(
+                        "ordered block producer stopped before the requested range was complete"
+                            .into(),
+                    )));
+                }
+                coordinator.stats.read_call_count = producer_stats.read_call_count;
+                coordinator.stats.compressed_bytes = producer_stats.compressed_bytes;
+                coordinator.stats.producer_read_wall_time = producer_stats.read_wall_time;
+                coordinator.stats.producer_wait_for_free_buffer_time =
+                    producer_stats.wait_for_free_buffer_time;
+                coordinator.stats.max_compressed_batch_bytes =
+                    producer_stats.max_compressed_batch_bytes;
+                coordinator.stats.max_declared_uncompressed_batch_bytes =
+                    producer_stats.max_declared_uncompressed_batch_bytes;
+                coordinator.stats.max_active_workers = max_active_workers.load(Ordering::Relaxed);
+                for worker in &workers {
+                    let worker = worker.lock().map_err(|_| {
+                        E::from(Error::InvalidIndex(
+                            "parallel block worker state is poisoned".into(),
+                        ))
+                    })?;
+                    let worker = worker.as_ref().ok_or_else(|| {
+                        E::from(Error::InvalidIndex(
+                            "parallel block worker state was not restored".into(),
+                        ))
+                    })?;
+                    if worker.used {
+                        coordinator.stats.effective_workers = coordinator
+                            .stats
+                            .effective_workers
+                            .checked_add(1)
+                            .ok_or_else(|| E::from(Error::Overflow("effective worker count")))?;
+                    }
+                    coordinator.stats.max_retained_decompressed_buffer_bytes = coordinator
+                        .stats
+                        .max_retained_decompressed_buffer_bytes
+                        .max(worker.max_retained_decompressed_buffer_bytes);
+                    coordinator.stats.worker_decompress_decode_sum_time = coordinator
+                        .stats
+                        .worker_decompress_decode_sum_time
+                        .saturating_add(worker.decompress_decode_sum_time);
+                    coordinator.stats.worker_projection_sum_time = coordinator
+                        .stats
+                        .worker_projection_sum_time
+                        .saturating_add(worker.projection_sum_time);
+                }
+                Ok(coordinator.stats)
+            });
+
+            let mut consumer_error = None;
+            let mut consume_time = Duration::ZERO;
+            'delivery: while let Ok((first_row, mut projected)) = decoded_receiver.recv() {
+                let started = Instant::now();
+                for (offset, result) in projected.drain(..).enumerate() {
+                    let result =
+                        result.and_then(|output| consume_ordered(first_row + offset, output));
+                    if let Err(error) = result {
+                        consumer_error = Some(error);
+                        break 'delivery;
+                    }
+                }
+                consume_time += started.elapsed();
+                // The decoder can send its final result and then close the
+                // recycle receiver before this result is returned. Recycling
+                // is optional at that point: continue draining decoded results
+                // so the final ordered wave is never dropped.
+                let _ = projection_free_sender.send(projected);
             }
-
-            // Closing both directions wakes a producer blocked on either a
-            // ready batch or a recycled allocation token.
-            drop(ready_receiver);
-            drop(free_sender);
-            let producer_result = producer
-                .join()
-                .map_err(|_| Error::InvalidIndex("ordered block producer thread panicked".into()));
-
-            if let Some(error) = coordinator.error {
+            // Closing both queues releases a decoder blocked on either direction.
+            drop(decoded_receiver);
+            drop(projection_free_sender);
+            let decoded = decoder.join();
+            if let Some(error) = consumer_error {
                 return Err(error);
             }
-            let producer_stats = match producer_result {
-                Ok(result) => result.map_err(E::from)?,
-                Err(error) => return Err(E::from(error)),
-            };
-            if coordinator.producer_disconnected {
-                return Err(E::from(Error::InvalidIndex(
-                    "ordered block producer stopped before the requested range was complete".into(),
-                )));
-            }
-            coordinator.stats.read_call_count = producer_stats.read_call_count;
-            coordinator.stats.compressed_bytes = producer_stats.compressed_bytes;
-            coordinator.stats.producer_read_wall_time = producer_stats.read_wall_time;
-            coordinator.stats.producer_wait_for_free_buffer_time =
-                producer_stats.wait_for_free_buffer_time;
-            coordinator.stats.max_compressed_batch_bytes =
-                producer_stats.max_compressed_batch_bytes;
-            coordinator.stats.max_declared_uncompressed_batch_bytes =
-                producer_stats.max_declared_uncompressed_batch_bytes;
-            coordinator.stats.max_active_workers = max_active_workers.load(Ordering::Relaxed);
-            for worker in &workers {
-                let worker = worker.lock().map_err(|_| {
-                    E::from(Error::InvalidIndex(
-                        "parallel block worker state is poisoned".into(),
-                    ))
-                })?;
-                let worker = worker.as_ref().ok_or_else(|| {
-                    E::from(Error::InvalidIndex(
-                        "parallel block worker state was not restored".into(),
-                    ))
-                })?;
-                if worker.used {
-                    coordinator.stats.effective_workers = coordinator
-                        .stats
-                        .effective_workers
-                        .checked_add(1)
-                        .ok_or_else(|| E::from(Error::Overflow("effective worker count")))?;
-                }
-                coordinator.stats.max_retained_decompressed_buffer_bytes = coordinator
-                    .stats
-                    .max_retained_decompressed_buffer_bytes
-                    .max(worker.max_retained_decompressed_buffer_bytes);
-                coordinator.stats.worker_decompress_decode_sum_time = coordinator
-                    .stats
-                    .worker_decompress_decode_sum_time
-                    .saturating_add(worker.decompress_decode_sum_time);
-                coordinator.stats.worker_projection_sum_time = coordinator
-                    .stats
-                    .worker_projection_sum_time
-                    .saturating_add(worker.projection_sum_time);
-            }
-            Ok(coordinator.stats)
+            let mut stats = decoded.map_err(|_| {
+                E::from(Error::InvalidIndex(
+                    "ordered decoder thread panicked".into(),
+                ))
+            })??;
+            stats.coordinator_consume_wall_time = consume_time;
+            Ok(stats)
         })
     }
 
@@ -5122,6 +5173,39 @@ mod tests {
         assert_eq!(stats.block_count, BLOCKS as u64);
         assert_eq!(stats.effective_workers, WORKERS);
         assert_eq!(stats.max_active_workers, WORKERS);
+    }
+
+    #[test]
+    fn ordered_parallel_drains_final_wave_after_recycle_receiver_closes() {
+        const BLOCKS: usize = 5;
+        let fixture = Fixture::parallel_blocks(BLOCKS);
+        let archive = ArchiveReader::open(fixture.source()).unwrap();
+        let mut consumed = Vec::new();
+
+        archive
+            .process_borrowed_blocks_parallel_ordered(
+                0..BLOCKS,
+                OrderedParallelBlockConfig {
+                    decode_workers: 1,
+                    max_blocks_per_batch: BLOCKS,
+                    ..OrderedParallelBlockConfig::default()
+                },
+                |_| Ok(()),
+                |_, row_number, _| -> Result<usize> { Ok(row_number) },
+                |row_number, projected_row| {
+                    if row_number == 0 {
+                        // Let the decoder queue its short final wave and close
+                        // the optional projection-buffer recycle receiver.
+                        std::thread::sleep(Duration::from_millis(50));
+                    }
+                    assert_eq!(projected_row, row_number);
+                    consumed.push(row_number);
+                    Ok(())
+                },
+            )
+            .unwrap();
+
+        assert_eq!(consumed, (0..BLOCKS).collect::<Vec<_>>());
     }
 
     #[test]

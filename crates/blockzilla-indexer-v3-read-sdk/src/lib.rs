@@ -623,7 +623,15 @@ impl IndexerV3Archive {
     ) -> Result<IndexerV3TargetedScanReceipt> {
         let io_before = self.io_snapshot();
         let transport_before = self.transport_snapshot();
-        let key = match self.resolve_pubkey_id(pubkey)? {
+        let id = match self
+            .source
+            .filter_key_id(request, pubkey)
+            .map_err(Error::Query)?
+        {
+            Some(id) => id,
+            None => self.resolve_pubkey_id(pubkey)?,
+        };
+        let key = match id {
             Some(account_id) => IndexerV3CandidateKey::RegistryId(account_id),
             None => IndexerV3CandidateKey::RegistryAbsent,
         };
@@ -664,7 +672,15 @@ impl IndexerV3Archive {
         validate_worker_count(workers)?;
         let io_before = self.io_snapshot();
         let transport_before = self.transport_snapshot();
-        let key = match self.resolve_pubkey_id(pubkey)? {
+        let id = match self
+            .source
+            .filter_key_id(request, pubkey)
+            .map_err(Error::Query)?
+        {
+            Some(id) => id,
+            None => self.resolve_pubkey_id(pubkey)?,
+        };
+        let key = match id {
             Some(account_id) => IndexerV3CandidateKey::RegistryId(account_id),
             None => IndexerV3CandidateKey::RegistryAbsent,
         };

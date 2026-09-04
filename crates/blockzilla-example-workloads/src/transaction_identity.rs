@@ -250,6 +250,7 @@ mod tests {
 
     fn block(epoch: u64, slot: u64, transactions: Vec<CanonicalTransaction>) -> CanonicalBlock {
         CanonicalBlock {
+            counts: None,
             header: BlockHeader {
                 epoch,
                 block_ordinal: 0,

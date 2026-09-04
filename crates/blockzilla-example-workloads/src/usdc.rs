@@ -281,6 +281,7 @@ mod tests {
         coverage: TokenBalanceCoverage,
     ) -> CanonicalBlock {
         CanonicalBlock {
+            counts: None,
             header: BlockHeader {
                 epoch: 9,
                 block_ordinal: 0,

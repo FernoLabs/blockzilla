@@ -21,6 +21,7 @@ members = [
     "crates/blockzilla-log-parser",
     "crates/blockzilla-query-sdk",
     "crates/blockzilla-example-workloads",
+    "crates/blockzilla-reader-profile",
     "crates/blockzilla-archive-sdk",
     "crates/blockzilla-car-read-sdk",
     "crates/blockzilla-compact-v2-read-sdk",

@@ -1282,7 +1282,11 @@ fn source_block_digest(block: BlockView<'_>) -> Result<[u8; DIGEST_BYTES]> {
             digest.u32(instruction.coordinate.outer_index);
             digest.optional_u32(instruction.coordinate.inner_index);
             digest.optional_u32(instruction.coordinate.stack_height);
-            digest.bytes(&instruction.program_id);
+            digest.bytes(&instruction.program_id.ok_or_else(|| {
+                TokenEventDatabaseError::InvalidBlock(
+                    "token replay requires instruction program identities".into(),
+                )
+            })?);
             digest.u64(usize_as_u64(
                 instruction.accounts.len(),
                 "instruction account count",
@@ -5230,7 +5234,7 @@ fn validate_source_token_input(source: TransactionView<'_>) -> Result<()> {
     for instruction in source
         .instructions
         .iter()
-        .filter(|instruction| instruction.program_id == CLASSIC_SPL_TOKEN_PROGRAM_ID)
+        .filter(|instruction| instruction.program_id == Some(CLASSIC_SPL_TOKEN_PROGRAM_ID))
     {
         let account_bytes = instruction.accounts.len().checked_mul(32).ok_or_else(|| {
             TokenEventDatabaseError::InvalidBlock(
@@ -5316,7 +5320,7 @@ fn validate_event_raw(
     event: &TrackedTokenEvent,
     decoded_batch: Option<&DecodedClassicTokenBatch>,
 ) -> Result<()> {
-    if source.program_id != CLASSIC_SPL_TOKEN_PROGRAM_ID {
+    if source.program_id != Some(CLASSIC_SPL_TOKEN_PROGRAM_ID) {
         return Err(TokenEventDatabaseError::InvalidBlock(
             "a token event has a non-Token source program".into(),
         ));
@@ -5346,7 +5350,7 @@ fn validate_event_raw(
         match decode_classic_token_instruction(&child.accounts, &child.data) {
             Ok(decoded) => ObservedTokenInstruction::Classic(decoded),
             Err(_) => ObservedTokenInstruction::Unknown(RawUnknownTokenInstruction {
-                program_id: source.program_id,
+                program_id: CLASSIC_SPL_TOKEN_PROGRAM_ID,
                 accounts: child.accounts.clone(),
                 data_coverage: InstructionDataCoverage::Exact,
                 data: child.data.clone(),
@@ -5358,7 +5362,7 @@ fn validate_event_raw(
         match decode_classic_token_instruction(&source.accounts, &source.data) {
             Ok(decoded) => ObservedTokenInstruction::Classic(decoded),
             Err(_) => ObservedTokenInstruction::Unknown(RawUnknownTokenInstruction {
-                program_id: source.program_id,
+                program_id: CLASSIC_SPL_TOKEN_PROGRAM_ID,
                 accounts: source.accounts.clone(),
                 data_coverage: source.data_coverage,
                 data: source.data.clone(),
@@ -5366,7 +5370,7 @@ fn validate_event_raw(
         }
     } else {
         ObservedTokenInstruction::Unknown(RawUnknownTokenInstruction {
-            program_id: source.program_id,
+            program_id: CLASSIC_SPL_TOKEN_PROGRAM_ID,
             accounts: source.accounts.clone(),
             data_coverage: source.data_coverage,
             data: source.data.clone(),

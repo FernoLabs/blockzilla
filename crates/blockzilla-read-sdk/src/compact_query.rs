@@ -10,12 +10,14 @@ use std::{
     mem::size_of,
     ops::Range,
     sync::{
-        Arc,
+        Arc, Mutex,
         atomic::{AtomicU64, Ordering},
     },
     thread,
+    time::{Duration, Instant},
 };
 
+use crate::query_keys::BoundQueryKeys;
 use blockzilla_format::{
     ARCHIVE_V2_BLOCKHASH_REGISTRY_FILE, ARCHIVE_V2_PREV_BLOCKHASH_TAIL_FILE,
     ARCHIVE_V2_TX_FLAG_HAS_ERROR, ARCHIVE_V2_TX_FLAG_HAS_INNER_IX,
@@ -199,6 +201,10 @@ pub struct CompactV2ParallelScanReceipt {
     /// Largest owned canonical payload waiting for ordered delivery.
     pub max_projected_batch_bytes: u64,
     pub registry: CompactV2ParallelRegistryReceipt,
+    pub signature_read_wall_time: Duration,
+    pub signature_assign_wall_time: Duration,
+    /// Canonical validation and the application sink, excluding signature reads.
+    pub publish_wall_time: Duration,
 }
 
 #[derive(Debug, Error)]
@@ -436,6 +442,16 @@ impl<S: RangeSource> CompactV2InstructionSource<S> {
                 })?;
         let requested_transactions =
             requested_transaction_count(&self.reader, start..end).map_err(source_error)?;
+        let query_keys = Arc::new(
+            BoundQueryKeys::bind(
+                self.reader.source(),
+                self.reader.registry_entries(),
+                request,
+            )
+            .map_err(|error| {
+                source_error(CompactV2InstructionSourceError::Invalid(error.to_string()))
+            })?,
+        );
         let (shared_registry, mut registry_receipt) = prepare_parallel_registry(
             &self.reader,
             start,
@@ -449,29 +465,99 @@ impl<S: RangeSource> CompactV2InstructionSource<S> {
         let mut signature_scan =
             ContiguousSignatureScan::new(&self.reader, start..end, read_signatures);
         let mut context_io = ContextIo {
-            calls: registry_receipt.prefetch_read_calls,
-            bytes: registry_receipt.prefetch_read_bytes,
+            calls: registry_receipt.prefetch_read_calls + query_keys.read_calls,
+            bytes: registry_receipt.prefetch_read_bytes + query_keys.read_bytes,
         };
         let reader = &self.reader;
         let projected_bytes_current = AtomicU64::new(0);
         let max_projected_block_bytes = AtomicU64::new(0);
         let max_projected_batch_bytes = AtomicU64::new(0);
+        let mut signature_read_wall_time = Duration::ZERO;
+        let mut signature_assign_wall_time = Duration::ZERO;
+        let mut publish_wall_time = Duration::ZERO;
 
         let pipeline = reader
             .process_borrowed_blocks_parallel_ordered(
                 start..end,
                 parallel,
                 |_| {
-                    Ok::<_, CompactV2ParallelScanError>(ParallelProjectionWorker::new(
-                        shared_registry.clone(),
-                    ))
+                    let mut worker = ParallelProjectionWorker::new(shared_registry.clone());
+                    worker.context.query_keys = Arc::clone(&query_keys);
+                    Ok::<_, CompactV2ParallelScanError>(worker)
                 },
                 |worker, _row_number, block| {
+                    if request.counts_only {
+                        let source_row = block.index_row;
+                        let mut counts = blockzilla_query_sdk::BlockCounts::default();
+                        for (index, row) in block.tx_rows().enumerate() {
+                            if row.tx_index as usize != index {
+                                return Err(CompactV2InstructionSourceError::Invalid(
+                                    "transaction order differs from block".into(),
+                                )
+                                .into());
+                            }
+                            crate::count_projection::count_transaction(
+                                &mut counts,
+                                row.flags,
+                                usize::from(row.signature_count),
+                                lane_region(
+                                    block.message_bytes(),
+                                    row.message_offset,
+                                    row.message_len,
+                                )?,
+                                crate::count_projection::CountMetadata::Full(lane_region(
+                                    block.metadata_bytes(),
+                                    row.metadata_offset,
+                                    row.metadata_len,
+                                )?),
+                                reader.message_schema(),
+                                reader.metadata_schema(),
+                                reader.registry_entries(),
+                            )
+                            .map_err(|error| {
+                                CompactV2InstructionSourceError::Invalid(error.to_string())
+                            })?;
+                        }
+                        return Ok(ParallelProjectedBlock {
+                            canonical: CanonicalBlock {
+                                counts: Some(counts),
+                                header: BlockHeader {
+                                    epoch: identity.epoch,
+                                    block_ordinal: source_row.block_id,
+                                    slot: source_row.slot,
+                                },
+                                transactions: Vec::new(),
+                            },
+                            signature_counts: None,
+                            context_io: ContextIo::default(),
+                            owned_payload_bytes: 0,
+                            recycle: None,
+                        });
+                    }
                     let context_io_before = worker.context.io;
+                    for mut block in worker
+                        .recycle
+                        .lock()
+                        .map_err(|_| {
+                            CompactV2InstructionSourceError::Invalid(
+                                "projection recycle queue poisoned".into(),
+                            )
+                        })?
+                        .drain(..)
+                    {
+                        worker.context.output_pool.recycle_block(&mut block);
+                        if worker.transaction_buffers.len() < 8
+                            && block.transactions.capacity() * size_of::<CanonicalTransaction>()
+                                <= 8 << 20
+                        {
+                            worker.transaction_buffers.push(block.transactions);
+                        }
+                    }
                     let source_row = block.index_row;
                     let mut signature_counts =
                         read_signatures.then(|| Vec::with_capacity(block.tx_rows_len()));
-                    let mut transactions = Vec::with_capacity(block.tx_rows_len());
+                    let mut transactions = worker.transaction_buffers.pop().unwrap_or_default();
+                    transactions.reserve(block.tx_rows_len());
                     for row in block.tx_rows() {
                         if let Some(counts) = &mut signature_counts {
                             counts.push(row.signature_count);
@@ -503,7 +589,9 @@ impl<S: RangeSource> CompactV2InstructionSource<S> {
                     max_projected_batch_bytes.fetch_max(current, Ordering::Relaxed);
                     let context_io = worker.context.io.difference(context_io_before)?;
                     Ok(ParallelProjectedBlock {
+                        recycle: Some(Arc::clone(&worker.recycle)),
                         canonical: CanonicalBlock {
+                            counts: None,
                             header: BlockHeader {
                                 epoch: identity.epoch,
                                 block_ordinal: source_row.block_id,
@@ -522,15 +610,27 @@ impl<S: RangeSource> CompactV2InstructionSource<S> {
                             "parallel ordered result is outside the archive index".into(),
                         )
                     })?;
-                    let signatures = signature_scan.read_block(source_row)?;
+                    let needs_signatures = projected
+                        .canonical
+                        .transactions
+                        .iter()
+                        .any(|transaction| request.needs_primary_signature(transaction));
+                    let started = Instant::now();
+                    let signatures =
+                        signature_scan.read_block_selected(source_row, needs_signatures)?;
+                    signature_read_wall_time += started.elapsed();
+                    let started = Instant::now();
                     assign_primary_signatures(
                         source_row.slot,
                         &mut projected.canonical.transactions,
                         projected.signature_counts.as_deref(),
                         signatures,
                     )?;
+                    signature_assign_wall_time += started.elapsed();
                     context_io.checked_add(projected.context_io)?;
+                    let started = Instant::now();
                     publisher.publish(&projected.canonical)?;
+                    publish_wall_time += started.elapsed();
                     let previous = projected_bytes_current
                         .fetch_sub(projected.owned_payload_bytes, Ordering::AcqRel);
                     if previous < projected.owned_payload_bytes {
@@ -538,6 +638,16 @@ impl<S: RangeSource> CompactV2InstructionSource<S> {
                             "parallel projected output byte accounting underflow".into(),
                         )
                         .into());
+                    }
+                    if let Some(recycle) = projected.recycle {
+                        recycle
+                            .lock()
+                            .map_err(|_| {
+                                CompactV2InstructionSourceError::Invalid(
+                                    "projection recycle queue poisoned".into(),
+                                )
+                            })?
+                            .push(projected.canonical);
                     }
                     Ok(())
                 },
@@ -590,6 +700,9 @@ impl<S: RangeSource> CompactV2InstructionSource<S> {
         Ok(CompactV2ParallelScanReceipt {
             scan,
             pipeline,
+            signature_read_wall_time,
+            signature_assign_wall_time,
+            publish_wall_time,
             requested_workers: config.workers,
             effective_workers: pipeline.effective_workers,
             max_active_workers: pipeline.max_active_workers,
@@ -606,6 +719,11 @@ impl<S: RangeSource> CompactV2InstructionSource<S> {
         registry_policy: CompactV2RegistryReadPolicy,
         sink: &mut dyn BlockSink,
     ) -> blockzilla_query_sdk::Result<ScanReceipt> {
+        if request.counts_only {
+            return self
+                .scan_ordered_parallel(request, sink, CompactV2ParallelScanConfig::new(1))
+                .map(|receipt| receipt.scan);
+        }
         let identity = self.identity.clone();
         let mut publisher = OrderedBlockPublisher::new(&identity, request, sink)?;
         let start = request
@@ -636,6 +754,9 @@ impl<S: RangeSource> CompactV2InstructionSource<S> {
                 requested_transactions,
                 registry_policy,
             )
+            .map_err(source_error)?;
+        context
+            .prepare_query_keys(reader, request)
             .map_err(source_error)?;
         let read_signatures = request.include_primary_signatures
             || !matches!(request.instruction_data, InstructionDataRequirement::None);
@@ -697,7 +818,8 @@ impl<S: RangeSource> CompactV2InstructionSource<S> {
                 )));
             }
 
-            let canonical = CanonicalBlock {
+            let mut canonical = CanonicalBlock {
+                counts: None,
                 header: BlockHeader {
                     epoch: identity.epoch,
                     block_ordinal: source_row.block_id,
@@ -706,6 +828,7 @@ impl<S: RangeSource> CompactV2InstructionSource<S> {
                 transactions,
             };
             publisher.publish(&canonical)?;
+            context.output_pool.recycle_block(&mut canonical);
         }
 
         let block_io = blocks.io_stats();
@@ -825,16 +948,24 @@ impl<S: RangeSource> CompactV2InstructionSource<S> {
         let message_bytes = lane_region(message_lane, row.message_offset, row.message_len)?;
         let projector =
             CompactV2MessageProjector::new(reader.message_schema(), reader.registry_entries());
-        let message = Self::project_requested_message(
-            reader,
-            context,
-            scratch,
-            projector,
-            message_bytes,
-            &request.instruction_data,
-            !request.require_complete_instruction_data,
-            request.include_instructions && request.include_instruction_accounts,
-        )?;
+        let message = if !request.include_instructions
+            && !request.include_execution_status
+            && !request.include_required_signers
+            && request.required_signer.is_none()
+        {
+            projector.count_message(message_bytes)?
+        } else {
+            Self::project_requested_message(
+                reader,
+                context,
+                scratch,
+                projector,
+                message_bytes,
+                &request.instruction_data,
+                !request.require_complete_instruction_data,
+                request.include_instructions && request.include_instruction_accounts,
+            )?
+        };
         let message_is_v0 = matches!(
             message.version(),
             ProjectedCompactV2MessageVersion::V0 { .. }
@@ -986,7 +1117,22 @@ impl<S: RangeSource> CompactV2InstructionSource<S> {
             }
         };
 
-        let (instruction_coverage, instructions) = if !request.include_instructions {
+        let signer_matches = request.required_signer.is_none_or(|key| {
+            message
+                .static_account_keys()
+                .iter()
+                .take(usize::from(message.header().num_required_signatures))
+                .any(|reference| context.query_keys.matches(*reference, &key))
+        });
+        let include_programs = signer_matches
+            && (request.required_signer.is_none()
+                || matches!(recorded_status, ExecutionStatus::Succeeded));
+        // A signer-targeted query does not consume instructions from unrelated
+        // or failed transactions. Do not project and validate those instruction
+        // rows. Full instruction scans keep the strict validation path below.
+        let project_instructions =
+            request.include_instructions && (request.required_signer.is_none() || include_programs);
+        let (instruction_coverage, instructions) = if !project_instructions {
             (
                 InstructionCoverage::Unknown(CoverageReason::ProjectionNotRequested),
                 Vec::new(),
@@ -1032,6 +1178,7 @@ impl<S: RangeSource> CompactV2InstructionSource<S> {
                 &scratch.account_keys,
                 account_key_count,
                 signatures,
+                include_programs,
             )?;
             (InstructionCoverage::Complete, instructions)
         } else {
@@ -1046,28 +1193,35 @@ impl<S: RangeSource> CompactV2InstructionSource<S> {
             (InstructionCoverage::Unknown(reason), Vec::new())
         };
 
-        let required_signers = if request.include_required_signers {
-            let required = usize::from(message.header().num_required_signatures);
-            let references = static_keys_prefix(&message, required)?;
-            if request.include_instruction_accounts {
-                scratch
-                    .account_keys
-                    .get(..required)
-                    .ok_or_else(|| {
-                        CompactV2InstructionSourceError::Invalid(
-                            "required signer range exceeds resolved static account keys".into(),
-                        )
-                    })?
-                    .to_vec()
+        let required_signers =
+            if request.include_required_signers && request.required_signer.is_some() {
+                request
+                    .required_signer
+                    .filter(|_| signer_matches)
+                    .into_iter()
+                    .collect()
+            } else if request.include_required_signers {
+                let required = usize::from(message.header().num_required_signatures);
+                let references = static_keys_prefix(&message, required)?;
+                if request.include_instruction_accounts {
+                    scratch
+                        .account_keys
+                        .get(..required)
+                        .ok_or_else(|| {
+                            CompactV2InstructionSourceError::Invalid(
+                                "required signer range exceeds resolved static account keys".into(),
+                            )
+                        })?
+                        .to_vec()
+                } else {
+                    references
+                        .iter()
+                        .map(|reference| context.resolve_pubkey(reader, *reference))
+                        .collect::<CompactV2InstructionSourceResult<Vec<_>>>()?
+                }
             } else {
-                references
-                    .iter()
-                    .map(|reference| context.resolve_pubkey(reader, *reference))
-                    .collect::<CompactV2InstructionSourceResult<Vec<_>>>()?
-            }
-        } else {
-            Vec::new()
-        };
+                Vec::new()
+            };
 
         let (token_balance_coverage, token_balances) = match &request.token_balances {
             TokenBalanceRequirement::None => (TokenBalanceCoverage::NotRequested, Vec::new()),
@@ -1076,20 +1230,21 @@ impl<S: RangeSource> CompactV2InstructionSource<S> {
                     ProjectedMetadata::Exact(_) | ProjectedMetadata::ExactUnprojected,
                     Some(bytes),
                 ) => {
-                    let projected = CompactV2MetadataProjector::new(
+                    CompactV2MetadataProjector::new(
                         reader.metadata_schema(),
                         reader.registry_entries(),
                     )
-                    .project_token_balances(
+                    .project_token_balances_reusing(
                         bytes,
                         CompactV2MetadataProjectionLimits::for_message(&message),
+                        &mut scratch.token_balances,
                     )?;
                     let balances = Self::resolve_token_balances(
                         reader,
                         context,
                         requirement,
-                        projected.pre,
-                        projected.post,
+                        &scratch.token_balances.pre,
+                        &scratch.token_balances.post,
                     )?;
                     (TokenBalanceCoverage::Complete, balances)
                 }
@@ -1128,23 +1283,32 @@ impl<S: RangeSource> CompactV2InstructionSource<S> {
         reader: &ArchiveReader<S>,
         context: &mut ExactContext,
         requirement: &TokenBalanceRequirement,
-        pre: Vec<CompactTokenBalance>,
-        post: Vec<CompactTokenBalance>,
+        pre: &[CompactTokenBalance],
+        post: &[CompactTokenBalance],
     ) -> CompactV2InstructionSourceResult<Vec<RecordedTokenBalance>> {
-        let mut output = Vec::new();
-        output
-            .try_reserve(pre.len().saturating_add(post.len()))
-            .map_err(|_| {
-                CompactV2InstructionSourceError::Invalid(
-                    "failed to reserve projected token balances".into(),
-                )
-            })?;
+        let mut output = context.output_pool.balances();
+        if matches!(requirement, TokenBalanceRequirement::All) {
+            output
+                .try_reserve(pre.len().saturating_add(post.len()))
+                .map_err(|_| {
+                    CompactV2InstructionSourceError::Invalid(
+                        "failed to reserve projected token balances".into(),
+                    )
+                })?;
+        }
         for (side, balances) in [(TokenBalanceSide::Pre, pre), (TokenBalanceSide::Post, post)] {
-            for (balance_index, balance) in balances.into_iter().enumerate() {
-                let mint = balance
-                    .mint
-                    .map(|reference| context.resolve_pubkey(reader, reference))
-                    .transpose()?;
+            for (balance_index, balance) in balances.iter().enumerate() {
+                let mint = match (balance.mint, requirement) {
+                    (Some(reference), TokenBalanceRequirement::Mints(keys)) => {
+                        let Some(key) = context.query_keys.selected(reference, keys) else {
+                            continue;
+                        };
+                        Some(key)
+                    }
+                    (reference, _) => reference
+                        .map(|reference| context.resolve_pubkey(reader, reference))
+                        .transpose()?,
+                };
                 if !requirement.selects(mint.as_ref()) {
                     continue;
                 }
@@ -1226,8 +1390,7 @@ impl<S: RangeSource> CompactV2InstructionSource<S> {
                                 "projected program index is outside static keys".into(),
                             )
                         })?;
-                    let program = context.resolve_pubkey(reader, reference)?;
-                    if programs.contains(&program)
+                    if context.query_keys.selected(reference, programs).is_some()
                         && !scratch.selected_references.contains(&reference)
                     {
                         scratch.selected_references.push(reference);
@@ -1359,6 +1522,7 @@ impl<S: RangeSource> CompactV2InstructionSource<S> {
         account_keys: &[[u8; 32]],
         account_key_count: usize,
         signatures: Option<&[[u8; 64]]>,
+        include_programs: bool,
     ) -> CompactV2InstructionSourceResult<Vec<ResolvedInstruction>> {
         let has_selected_ambiguity = message.instructions().iter().any(|instruction| {
             instruction
@@ -1411,18 +1575,25 @@ impl<S: RangeSource> CompactV2InstructionSource<S> {
             | ProjectedMetadata::ExactUnprojected => None,
         };
         let mut next_group = inner_groups.into_iter().flatten().peekable();
-        let mut output = Vec::new();
+        let mut output = context.output_pool.instructions();
 
         for (outer_index, instruction) in message.instructions().iter().enumerate() {
-            let program_id = if request.include_instruction_accounts {
-                resolve_index(account_keys, instruction.program_id_index())?
+            if usize::from(instruction.program_id_index()) >= account_key_count {
+                return Err(CompactV2InstructionSourceError::Invalid(
+                    "program index exceeds account count".into(),
+                ));
+            }
+            let program_id = if !include_programs {
+                None
+            } else if request.include_instruction_accounts {
+                Some(resolve_index(account_keys, instruction.program_id_index())?)
             } else {
                 let reference = projected_account_reference(
                     message,
                     metadata,
                     usize::from(instruction.program_id_index()),
                 )?;
-                context.resolve_pubkey(reader, reference)?
+                context.project_program(reader, reference, &request.instruction_programs)?
             };
             let accounts = project_instruction_accounts(
                 request.include_instruction_accounts,
@@ -1478,8 +1649,15 @@ impl<S: RangeSource> CompactV2InstructionSource<S> {
             {
                 let group = next_group.next().expect("peek proved a CPI group");
                 for (inner_index, inner) in group.instructions.iter().enumerate() {
-                    let program_id = if request.include_instruction_accounts {
-                        resolve_index_u32(account_keys, inner.program_id_index)?
+                    if u64::from(inner.program_id_index) >= account_key_count as u64 {
+                        return Err(CompactV2InstructionSourceError::Invalid(
+                            "CPI program index exceeds account count".into(),
+                        ));
+                    }
+                    let program_id = if !include_programs {
+                        None
+                    } else if request.include_instruction_accounts {
+                        Some(resolve_index_u32(account_keys, inner.program_id_index)?)
                     } else {
                         let index = usize::try_from(inner.program_id_index).map_err(|_| {
                             CompactV2InstructionSourceError::Invalid(
@@ -1487,7 +1665,7 @@ impl<S: RangeSource> CompactV2InstructionSource<S> {
                             )
                         })?;
                         let reference = projected_account_reference(message, metadata, index)?;
-                        context.resolve_pubkey(reader, reference)?
+                        context.project_program(reader, reference, &request.instruction_programs)?
                     };
                     let accounts = project_instruction_accounts(
                         request.include_instruction_accounts,
@@ -1495,8 +1673,9 @@ impl<S: RangeSource> CompactV2InstructionSource<S> {
                         account_key_count,
                         inner.accounts,
                     )?;
-                    let selected =
-                        instruction_data_required(&request.instruction_data, &program_id);
+                    let selected = program_id.as_ref().is_some_and(|key| {
+                        instruction_data_required(&request.instruction_data, key)
+                    });
                     let (data_coverage, data) = if selected {
                         (InstructionDataCoverage::Exact, inner.data.to_vec())
                     } else {
@@ -1625,6 +1804,7 @@ impl<S: RangeSource> ArchiveInstructionSource for CompactV2InstructionSource<S> 
 }
 
 struct ParallelProjectedBlock {
+    recycle: Option<Arc<Mutex<Vec<CanonicalBlock>>>>,
     canonical: CanonicalBlock,
     signature_counts: Option<Vec<u8>>,
     context_io: ContextIo,
@@ -1632,6 +1812,8 @@ struct ParallelProjectedBlock {
 }
 
 struct ParallelProjectionWorker {
+    recycle: Arc<Mutex<Vec<CanonicalBlock>>>,
+    transaction_buffers: Vec<Vec<CanonicalTransaction>>,
     context: ExactContext,
     scratch: TransactionProjectionScratch,
 }
@@ -1639,6 +1821,8 @@ struct ParallelProjectionWorker {
 impl ParallelProjectionWorker {
     fn new(shared_registry: Option<Arc<SharedRegistry>>) -> Self {
         Self {
+            recycle: Arc::new(Mutex::new(Vec::new())),
+            transaction_buffers: Vec::new(),
             context: ExactContext::with_shared_registry(shared_registry),
             scratch: TransactionProjectionScratch::default(),
         }
@@ -1649,6 +1833,8 @@ impl ParallelProjectionWorker {
 struct TransactionProjectionScratch {
     account_keys: Vec<[u8; REGISTRY_KEY_BYTES]>,
     selected_references: Vec<CompactPubkey>,
+    // Each list is bounded by the 256-account metadata limit.
+    token_balances: crate::ProjectedCompactV2TokenBalances,
 }
 
 impl TransactionProjectionScratch {
@@ -1858,8 +2044,11 @@ fn prefetch_shared_registry<S: RangeSource>(
 }
 
 fn request_needs_registry(request: &ScanRequest) -> bool {
-    request.include_instructions
-        || request.include_required_signers
+    (request.include_instructions && request.include_instruction_accounts)
+        || (request.include_instructions && matches!(request.instruction_programs, InstructionDataRequirement::All) && request.required_signer.is_none())
+        || (request.include_required_signers && request.required_signer.is_none())
+        // Balance output includes owner/program keys. Keep the shared dense
+        // read policy for these output fields; mint filtering itself uses IDs.
         || request.token_balances.is_requested()
 }
 
@@ -2181,7 +2370,7 @@ fn push_instruction(
     outer_index: usize,
     inner_index: Option<usize>,
     stack_height: Option<u32>,
-    program_id: [u8; 32],
+    program_id: Option<[u8; 32]>,
     accounts: Vec<[u8; 32]>,
     data_coverage: InstructionDataCoverage,
     data: Vec<u8>,
@@ -2330,6 +2519,14 @@ impl<S: RangeSource> ContiguousSignatureScan<'_, S> {
         &mut self,
         row: &blockzilla_format::ArchiveV2HotBlockIndexRow,
     ) -> CompactV2InstructionSourceResult<Option<&[[u8; SIGNATURE_BYTES]]>> {
+        self.read_block_selected(row, true)
+    }
+
+    fn read_block_selected(
+        &mut self,
+        row: &blockzilla_format::ArchiveV2HotBlockIndexRow,
+        selected: bool,
+    ) -> CompactV2InstructionSourceResult<Option<&[[u8; SIGNATURE_BYTES]]>> {
         if self.next_block >= self.requested_range.end {
             return Err(CompactV2InstructionSourceError::Invalid(
                 "signature scan received too many blocks".into(),
@@ -2355,7 +2552,7 @@ impl<S: RangeSource> ContiguousSignatureScan<'_, S> {
                 row.block_id, self.next_block
             )));
         }
-        if !self.read_signatures {
+        if !self.read_signatures || !selected {
             self.next_block += 1;
             return Ok(None);
         }
@@ -2374,6 +2571,9 @@ impl<S: RangeSource> ContiguousSignatureScan<'_, S> {
                 self.next_block,
                 self.requested_range.end,
                 &mut self.io,
+                self.batch
+                    .take()
+                    .map_or_else(Vec::new, |batch| batch.signatures),
             )?);
         }
         let batch = self.batch.as_ref().ok_or_else(|| {
@@ -2428,6 +2628,7 @@ fn load_signature_batch<S: RangeSource>(
     start: usize,
     requested_end: usize,
     io: &mut ContextIo,
+    mut signatures: Vec<[u8; SIGNATURE_BYTES]>,
 ) -> CompactV2InstructionSourceResult<SignatureBatch> {
     let rows = &reader.index().rows;
     let first = rows.get(start).ok_or_else(|| {
@@ -2489,12 +2690,14 @@ fn load_signature_batch<S: RangeSource>(
         .ok_or_else(|| {
             CompactV2InstructionSourceError::Invalid("signature batch record count overflow".into())
         })?;
-    let mut signatures = Vec::new();
-    signatures.try_reserve_exact(signature_count).map_err(|_| {
-        CompactV2InstructionSourceError::Invalid(
-            "cannot reserve the bounded signature batch".into(),
-        )
-    })?;
+    signatures
+        .try_reserve_exact(signature_count.saturating_sub(signatures.len()))
+        .map_err(|_| {
+            CompactV2InstructionSourceError::Invalid(
+                "cannot reserve the bounded signature batch".into(),
+            )
+        })?;
+    signatures.resize(signature_count, [0; SIGNATURE_BYTES]);
     let total_bytes = signature_count
         .checked_mul(SIGNATURE_BYTES)
         .ok_or_else(|| {
@@ -2511,21 +2714,12 @@ fn load_signature_batch<S: RangeSource>(
                     "signature batch read offset overflow".into(),
                 )
             })?;
-        let bytes = reader
-            .source()
-            .read_range(crate::manifest::SIGNATURES_FILE, offset, length)?;
-        if bytes.len() != length || !bytes.len().is_multiple_of(SIGNATURE_BYTES) {
-            return Err(CompactV2InstructionSourceError::Invalid(format!(
-                "signature batch returned {} bytes; expected {length}",
-                bytes.len()
-            )));
-        }
-        io.record(bytes.len())?;
-        signatures.extend(bytes.chunks_exact(SIGNATURE_BYTES).map(|bytes| {
-            let mut signature = [0u8; SIGNATURE_BYTES];
-            signature.copy_from_slice(bytes);
-            signature
-        }));
+        reader.source().read_range_into_slice(
+            crate::manifest::SIGNATURES_FILE,
+            offset,
+            &mut signatures.as_flattened_mut()[read_bytes..read_bytes + length],
+        )?;
+        io.record(length)?;
         read_bytes += length;
     }
     if signatures.len() != signature_count {
@@ -2566,6 +2760,8 @@ fn validate_signature_row(
 
 #[derive(Debug, Default)]
 struct ExactContext {
+    output_pool: blockzilla_query_sdk::projection_pool::ProjectionPool,
+    query_keys: Arc<BoundQueryKeys>,
     shared_registry: Option<Arc<SharedRegistry>>,
     registry_chunks: HashMap<u32, Vec<[u8; 32]>>,
     registry_lru: VecDeque<u32>,
@@ -2617,6 +2813,45 @@ impl ExactContext {
         self.registry_lru.clear();
         self.shared_registry = Some(registry);
         Ok(())
+    }
+
+    fn prepare_query_keys<S: RangeSource>(
+        &mut self,
+        reader: &ArchiveReader<S>,
+        request: &ScanRequest,
+    ) -> CompactV2InstructionSourceResult<()> {
+        if !self.query_keys.covers(request) {
+            let keys = BoundQueryKeys::bind_with_registry(
+                reader.source(),
+                reader.registry_entries(),
+                request,
+                self.shared_registry
+                    .as_ref()
+                    .map(|registry| registry.bytes.as_slice()),
+            )
+            .map_err(|error| CompactV2InstructionSourceError::Invalid(error.to_string()))?;
+            self.io.checked_add(ContextIo {
+                calls: keys.read_calls,
+                bytes: keys.read_bytes,
+            })?;
+            self.query_keys = Arc::new(keys);
+        }
+        Ok(())
+    }
+
+    fn project_program<S: RangeSource>(
+        &mut self,
+        reader: &ArchiveReader<S>,
+        reference: CompactPubkey,
+        requirement: &InstructionDataRequirement,
+    ) -> CompactV2InstructionSourceResult<Option<[u8; 32]>> {
+        match requirement {
+            InstructionDataRequirement::None => Ok(None),
+            InstructionDataRequirement::Programs(keys) => {
+                Ok(self.query_keys.selected(reference, keys))
+            }
+            InstructionDataRequirement::All => self.resolve_pubkey(reader, reference).map(Some),
+        }
     }
 
     fn resolve_pubkey<S: RangeSource>(
@@ -2699,28 +2934,23 @@ impl ExactContext {
         let length = key_count.checked_mul(REGISTRY_KEY_BYTES).ok_or_else(|| {
             CompactV2InstructionSourceError::Invalid("registry chunk length overflow".into())
         })?;
-        let bytes = reader
-            .source()
-            .read_range(crate::manifest::REGISTRY_FILE, offset, length)?;
-        self.io.record(bytes.len())?;
-        let keys = bytes
-            .chunks_exact(REGISTRY_KEY_BYTES)
-            .map(|bytes| {
-                let mut key = [0u8; 32];
-                key.copy_from_slice(bytes);
-                key
-            })
-            .collect::<Vec<_>>();
-        if keys.len() != key_count {
-            return Err(CompactV2InstructionSourceError::Invalid(
-                "registry chunk has a partial public key".into(),
-            ));
-        }
-        if self.registry_chunks.len() == REGISTRY_CACHE_CHUNKS
-            && let Some(evicted) = self.registry_lru.pop_front()
-        {
-            self.registry_chunks.remove(&evicted);
-        }
+        let mut keys = if self.registry_chunks.len() == REGISTRY_CACHE_CHUNKS {
+            let evicted = self.registry_lru.pop_front().ok_or_else(|| {
+                CompactV2InstructionSourceError::Invalid("registry LRU is empty".into())
+            })?;
+            self.registry_chunks.remove(&evicted).ok_or_else(|| {
+                CompactV2InstructionSourceError::Invalid("registry LRU differs from cache".into())
+            })?
+        } else {
+            Vec::new()
+        };
+        keys.resize(key_count, [0; REGISTRY_KEY_BYTES]);
+        reader.source().read_range_into_slice(
+            crate::manifest::REGISTRY_FILE,
+            offset,
+            keys.as_flattened_mut(),
+        )?;
+        self.io.record(length)?;
         self.registry_chunks.insert(chunk_id, keys);
         self.registry_lru.push_back(chunk_id);
         Ok(())
@@ -3692,6 +3922,92 @@ mod tests {
     }
 
     #[test]
+    fn count_projection_never_reads_registry_with_one_or_twelve_workers() {
+        let fixture = Fixture::main();
+        for workers in [1, 12] {
+            let input = FailingRegistrySource::new(LocalRangeSource::new(fixture.directory.path()));
+            let reader = open_trusted_test_reader(input.clone());
+            input.arm();
+            let mut source = CompactV2InstructionSource::new(reader, FIRST_SLOT).unwrap();
+            let request = ScanRequest::all()
+                .allow_incomplete_instructions()
+                .allow_incomplete_cpi()
+                .without_primary_signatures()
+                .without_required_signers()
+                .without_execution_status()
+                .without_instruction_programs();
+            let mut inner = 0;
+            let mut sink = blockzilla_query_sdk::FnBlockSink::new(|block: BlockView<'_>| {
+                for tx in block.transactions {
+                    for instruction in &tx.instructions {
+                        assert_eq!(instruction.program_id, None);
+                        inner += u64::from(instruction.coordinate.inner_index.is_some());
+                    }
+                }
+                Ok(())
+            });
+            let result = source
+                .scan_ordered_parallel(
+                    &request,
+                    &mut sink,
+                    CompactV2ParallelScanConfig::new(workers),
+                )
+                .unwrap();
+            assert_eq!(
+                (
+                    result.scan.blocks,
+                    result.scan.transactions,
+                    result.scan.instructions
+                ),
+                (2, 7, 10)
+            );
+            assert_eq!(inner, 2);
+            assert_eq!(result.registry.prefetch_read_bytes, 0);
+            assert_eq!(
+                result.scan.io.source_read_bytes,
+                Some(fixture.compressed_bytes)
+            );
+        }
+    }
+
+    #[test]
+    fn program_filter_binds_once_before_parallel_projection() {
+        let fixture = Fixture::main();
+        let input = CountingSource::new(LocalRangeSource::new(fixture.directory.path()));
+        let mut source =
+            CompactV2InstructionSource::new(open_trusted_test_reader(input.clone()), FIRST_SLOT)
+                .unwrap();
+        input.clear();
+        let request = ScanRequest::all()
+            .allow_incomplete_instructions()
+            .allow_incomplete_cpi()
+            .without_primary_signatures()
+            .without_required_signers()
+            .without_execution_status()
+            .with_instruction_programs_for([TOKEN_PROGRAM]);
+        let mut matched = 0;
+        let mut sink = blockzilla_query_sdk::FnBlockSink::new(|block: BlockView<'_>| {
+            for tx in block.transactions {
+                for instruction in &tx.instructions {
+                    assert!(
+                        instruction.program_id.is_none()
+                            || instruction.program_id == Some(TOKEN_PROGRAM)
+                    );
+                    matched += usize::from(instruction.program_id.is_some());
+                }
+            }
+            Ok(())
+        });
+        let result = source
+            .scan_ordered_parallel(&request, &mut sink, CompactV2ParallelScanConfig::new(12))
+            .unwrap();
+        assert!(matched > 0);
+        assert_eq!(result.scan.instructions, 10);
+        assert_eq!(input.reads_for(REGISTRY_FILE).len(), 1);
+        assert_eq!(result.registry.prefetch_read_bytes, 0);
+    }
+
+    #[test]
     fn publishes_exact_order_loaded_keys_cpi_failure_coverage_and_io() {
         let fixture = Fixture::main();
         let mut source =
@@ -3749,7 +4065,7 @@ mod tests {
         let v0 = &transactions[1];
         assert_eq!(v0.instructions.len(), 2);
         assert_eq!(v0.instructions[0].accounts, [LOADED_ACCOUNT]);
-        assert_eq!(v0.instructions[1].program_id, CPI_PROGRAM);
+        assert_eq!(v0.instructions[1].program_id, Some(CPI_PROGRAM));
         assert_eq!(v0.instructions[1].accounts, [LOADED_ACCOUNT]);
         assert_eq!(v0.instructions[1].coordinate.order, 1);
         assert_eq!(v0.instructions[1].coordinate.outer_index, 0);
@@ -3809,10 +4125,11 @@ mod tests {
         assert_eq!(receipt.transactions_with_incomplete_instructions, 1);
         assert_eq!(receipt.transactions_with_incomplete_cpi, 4);
         assert_eq!(receipt.transactions_with_unknown_execution, 3);
-        assert_eq!(receipt.io.source_read_calls, Some(3));
+        // This fixture has no MPHF: bind query IDs with one registry pass.
+        assert_eq!(receipt.io.source_read_calls, Some(4));
         assert_eq!(
             receipt.io.source_read_bytes,
-            Some(fixture.compressed_bytes + 6 * 32 + 7 * 64)
+            Some(fixture.compressed_bytes + 2 * 6 * 32 + 7 * 64)
         );
         assert_eq!(receipt.io.decoded_bytes, Some(fixture.decoded_bytes));
     }
@@ -3930,12 +4247,89 @@ mod tests {
         let transaction = observed.unwrap();
         assert_eq!(transaction.required_signers, [fixture.signer]);
         assert_eq!(transaction.instructions.len(), 2);
-        assert_eq!(transaction.instructions[0].program_id, TOKEN_PROGRAM);
-        assert_eq!(transaction.instructions[1].program_id, CPI_PROGRAM);
+        assert_eq!(transaction.instructions[0].program_id, Some(TOKEN_PROGRAM));
+        assert_eq!(transaction.instructions[1].program_id, Some(CPI_PROGRAM));
         assert_eq!(transaction.instructions[1].coordinate.inner_index, Some(0));
         assert!(transaction.instructions.iter().all(|instruction| {
             instruction.accounts.is_empty() && instruction.accounts.capacity() == 0
         }));
+    }
+
+    #[test]
+    fn signer_query_does_not_project_instructions_from_failed_transactions() {
+        let signer = [0x31; 32];
+        let program = [0x32; 32];
+        let message = legacy_message((0..5).map(|_| raw_instruction(1, &[0], &[])).collect());
+        let metadata = metadata(
+            2,
+            Some(CompactTransactionError::InstructionError(
+                3,
+                CompactInstructionError::Custom(42),
+            )),
+            Some(vec![CompactInnerInstructions {
+                index: 4,
+                instructions: vec![CompactInnerInstruction {
+                    program_id_index: 1,
+                    accounts: vec![0],
+                    data: Vec::new(),
+                    stack_height: Some(2),
+                }],
+            }]),
+            Vec::new(),
+            Vec::new(),
+        );
+        let fixture = Fixture::build(
+            vec![signer, program],
+            vec![vec![TxFixture::exact(
+                message,
+                metadata,
+                ARCHIVE_V2_TX_FLAG_HAS_ERROR | ARCHIVE_V2_TX_FLAG_HAS_INNER_IX,
+            )]],
+            None,
+        );
+        let mut source =
+            CompactV2InstructionSource::new(fixture.trusted_reader(), FIRST_SLOT).unwrap();
+        let request = ScanRequest::all()
+            .allow_incomplete_instructions()
+            .allow_incomplete_cpi()
+            .without_primary_signatures()
+            .without_instruction_accounts()
+            .without_instruction_data()
+            .with_required_signer(signer);
+        let mut observed = None;
+
+        source
+            .for_each_block(&request, |block| {
+                observed = block.transactions.first().cloned();
+                Ok(())
+            })
+            .unwrap();
+
+        let transaction = observed.unwrap();
+        assert_eq!(transaction.header.status, ExecutionStatus::Failed);
+        assert_eq!(transaction.required_signers, [signer]);
+        assert!(transaction.instructions.is_empty());
+        assert_eq!(
+            transaction.header.instruction_coverage,
+            InstructionCoverage::Unknown(CoverageReason::ProjectionNotRequested)
+        );
+
+        // A complete instruction scan still exposes the contradictory source
+        // metadata instead of silently accepting it.
+        let mut strict =
+            CompactV2InstructionSource::new(fixture.trusted_reader(), FIRST_SLOT).unwrap();
+        let error = strict
+            .for_each_block(
+                &ScanRequest::all()
+                    .allow_incomplete_instructions()
+                    .allow_incomplete_cpi()
+                    .without_primary_signatures()
+                    .without_instruction_accounts()
+                    .without_instruction_data(),
+                |_| Ok(()),
+            )
+            .unwrap_err();
+        assert!(error.to_string().contains("after failed outer index 3"));
     }
 
     #[test]
@@ -4157,13 +4551,17 @@ mod tests {
         assert_eq!(source.context.registry_chunks.len(), 1);
         assert_eq!(
             observed.reads_for(REGISTRY_FILE),
-            vec![(0, REGISTRY_KEYS_PER_CHUNK * REGISTRY_KEY_BYTES)]
+            vec![
+                (0, registry_entries * REGISTRY_KEY_BYTES),
+                (0, REGISTRY_KEYS_PER_CHUNK * REGISTRY_KEY_BYTES)
+            ]
         );
-        assert_eq!(receipt.io.source_read_calls, Some(2));
+        assert_eq!(receipt.io.source_read_calls, Some(3));
         assert_eq!(
             receipt.io.source_read_bytes,
             Some(
                 selected_compressed_bytes
+                    + u64::try_from(registry_entries * REGISTRY_KEY_BYTES).unwrap()
                     + u64::try_from(REGISTRY_KEYS_PER_CHUNK * REGISTRY_KEY_BYTES).unwrap()
             )
         );
@@ -4233,6 +4631,7 @@ mod tests {
         let sequential_receipt = sequential
             .for_each_block(&request, |block| {
                 expected.push(CanonicalBlock {
+                    counts: None,
                     header: block.header,
                     transactions: block.transactions.to_vec(),
                 });
@@ -4247,6 +4646,7 @@ mod tests {
         impl BlockSink for CollectSink<'_> {
             fn visit_block(&mut self, block: BlockView<'_>) -> blockzilla_query_sdk::Result<()> {
                 self.0.push(CanonicalBlock {
+                    counts: None,
                     header: block.header,
                     transactions: block.transactions.to_vec(),
                 });
@@ -4319,6 +4719,7 @@ mod tests {
                     block: BlockView<'_>,
                 ) -> blockzilla_query_sdk::Result<()> {
                     self.0.push(CanonicalBlock {
+                        counts: None,
                         header: block.header,
                         transactions: block.transactions.to_vec(),
                     });
@@ -4728,10 +5129,10 @@ mod tests {
         assert_eq!((balances[1].amount, balances[1].decimals), (33, 6));
         assert_eq!(receipt.instructions, 0);
         assert_eq!(receipt.transactions_with_incomplete_token_balances, 0);
-        assert_eq!(receipt.io.source_read_calls, Some(2));
+        assert_eq!(receipt.io.source_read_calls, Some(3));
         assert_eq!(
             receipt.io.source_read_bytes,
-            Some(fixture.compressed_bytes + 5 * 32)
+            Some(fixture.compressed_bytes + 2 * 5 * 32)
         );
     }
 

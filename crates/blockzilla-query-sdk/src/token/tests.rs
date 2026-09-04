@@ -29,7 +29,7 @@ fn outer(order: u32, accounts: Vec<PubkeyBytes>, data: Vec<u8>) -> ResolvedInstr
             inner_index: None,
             stack_height: None,
         },
-        program_id: CLASSIC_SPL_TOKEN_PROGRAM_ID,
+        program_id: Some(CLASSIC_SPL_TOKEN_PROGRAM_ID),
         accounts,
         data_coverage: InstructionDataCoverage::Exact,
         data,
@@ -51,7 +51,7 @@ fn inner(
             inner_index: Some(inner_index),
             stack_height: Some(stack_height),
         },
-        program_id: CLASSIC_SPL_TOKEN_PROGRAM_ID,
+        program_id: Some(CLASSIC_SPL_TOKEN_PROGRAM_ID),
         accounts,
         data_coverage: InstructionDataCoverage::Exact,
         data,
@@ -60,7 +60,7 @@ fn inner(
 
 fn non_token_outer(order: u32) -> ResolvedInstruction {
     let mut instruction = outer(order, vec![key(200)], vec![99]);
-    instruction.program_id = key(201);
+    instruction.program_id = Some(key(201));
     instruction
 }
 
@@ -817,7 +817,7 @@ fn tracker_rejects_too_many_direct_instructions_atomically() {
                 inner_index: None,
                 stack_height: None,
             },
-            program_id: key(201),
+            program_id: Some(key(201)),
             accounts: Vec::new(),
             data_coverage: InstructionDataCoverage::Exact,
             data: Vec::new(),

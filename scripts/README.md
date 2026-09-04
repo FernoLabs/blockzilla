@@ -20,6 +20,9 @@ review every artifact before publishing it.
 
 | Script | Mode | Purpose |
 | --- | --- | --- |
+| `run-archive-sample-read-matrix.sh` | NAS/Mac, local + network | Run 12 dedicated examples on all 11 sample epochs; use `--check-only` before launch. |
+| `build-archive-sample-bundle.sh` | Mac cross-build | Package the 12 Linux readers and runner without starting them. |
+| `prepare-nas-sample-mirror.sh` | NAS, path setup | Hard-link the existing repaired samples and retained CARs into the public folder layout. |
 | `run-rpc-correctness-matrix.sh` | Maintainer-only | Run the standard multi-provider correctness matrix. |
 | `sync-replay-compact.sh` | SSH transfer + local validation | Resume the replay-minimal Compact epoch-0/1 files from the NAS and publish local Archive V2 manifests. |
 | `run-replay-marathon.sh` | Local/NAS, bounded | Resume a sealed Compact chain for several hours with boundary checkpoints, replay metrics, and `pidstat` telemetry. |
@@ -31,6 +34,9 @@ Historical and one-off helpers are now intentionally stored locally outside git 
 - `scripts/personal/reference/` (`fetch-replay-runtime-references.sh`)
 
 Use `--help` where available for prerequisites, inputs, and output paths.
+
+See [the sample reader run guide](../docs/benchmarks/sample-reader-matrix.md)
+for metrics, output parity, cache rules, resume, and article comparison limits.
 
 ## Production predecessor-tail seeding
 
