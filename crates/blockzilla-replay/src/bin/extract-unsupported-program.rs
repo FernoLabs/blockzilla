@@ -116,8 +116,8 @@ struct GenerationEvidence {
     cluster_id: String,
     epoch: u64,
     generation_id: String,
-    generation_digest: String,
-    registry_sha256: String,
+    first_slot: Option<u64>,
+    slots_per_epoch: u64,
 }
 
 #[derive(Debug, Serialize)]
@@ -600,8 +600,8 @@ fn main() -> Result<()> {
             cluster_id: generation.cluster_id.clone(),
             epoch: generation.epoch,
             generation_id: generation.generation_id.clone(),
-            generation_digest: hex(&generation.binding.generation_digest),
-            registry_sha256: hex(&generation.binding.registry_sha256),
+            first_slot: generation.first_slot,
+            slots_per_epoch: generation.slots_per_epoch,
         },
         coordinate: CoordinateEvidence {
             slot,
@@ -1018,9 +1018,14 @@ fn capture_exact_compact_instruction(
         },
         |event| match event {
             CompactVisitEvent::Generation(context) => {
-                if context.binding.generation_digest != generation.binding.generation_digest {
+                if context.cluster_id != generation.cluster_id
+                    || context.epoch != generation.epoch
+                    || context.generation_id != generation.generation_id
+                    || context.slots_per_epoch != generation.slots_per_epoch
+                    || context.first_slot != generation.first_slot
+                {
                     return Err(blockzilla_replay::CompactProbeError::Visitor(
-                        "generation digest changed between replay and evidence scan".to_owned(),
+                        "generation identity changed between replay and evidence scan".to_owned(),
                     ));
                 }
                 observed_generation = true;

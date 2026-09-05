@@ -1,0 +1,13 @@
+[package]
+name = "blockzilla-dex-parser"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+description = "Allocation-free instruction classifiers for Solana DEX programs"
+
+[dependencies]
+
+[lints.rust]
+unsafe_code = "forbid"

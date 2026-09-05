@@ -6,6 +6,7 @@ rust-version.workspace = true
 license.workspace = true
 repository.workspace = true
 publish = false
+autobins = false
 
 [[bin]]
 name = "blockzilla-token-api"

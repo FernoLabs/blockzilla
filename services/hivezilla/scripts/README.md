@@ -17,14 +17,12 @@ complete node-owned cloud-overflow lifecycle.
 | `run-grpc-receiver-bridge.sh` | Copy a receiver's durable prefix into a standard raw generation without mutating the receiver tree |
 | `generate-grpc-replication-pki.sh` | Create an offline CA and push-replication identities |
 | `generate-grpc-pull-pki.sh` | Add pull identities to an existing replication trust bundle |
-| `s3_multipart_upload.py` | Upload and verify bounded generations in an S3-compatible store; includes provider-specific retention support |
-| `pull_ack_telegram_monitor.py` | Alert when signed receiver acknowledgements stop advancing |
 | `ingest_status_server.py` | Serve a bounded, secret-free capture and signed-ACK status snapshot for the watcher UI |
 
-The production shred-status collector is now the Rust command
-`hivezilla serve-shred-status`. `shred_status_server.py` is frozen and retained
-only as a differential test oracle until the first live Rust-container rollout
-is verified; no Docker or Compose entrypoint executes it.
+The production shred-status collector is the Rust command
+`hivezilla serve-shred-status`. Its Python predecessor was retired once its
+exact-byte output was captured as a test oracle in
+`services/hivezilla/src/shred_status.rs`.
 
 The launch wrappers expect a dedicated UID and file-backed secrets. Override
 their documented `BLOCKZILLA_*` environment variables for your deployment; do
@@ -92,11 +90,7 @@ Build both native operational binaries before running the shell suites. The
 object-store and shell tests use local fixtures only:
 
 ```bash
-python3 -m pip install -r services/hivezilla/scripts/requirements.txt
-python3 services/hivezilla/scripts/test_s3_multipart_upload.py
-python3 services/hivezilla/scripts/test_pull_ack_telegram_monitor.py
 python3 services/hivezilla/scripts/test_ingest_status_server.py
-python3 services/hivezilla/scripts/test_shred_status_server.py
 bash services/hivezilla/scripts/test-linux-raw-grpc-cache-supervisor.sh
 bash services/hivezilla/scripts/test-linux-raw-grpc-recorder-alerts.sh
 bash services/hivezilla/scripts/test-run-grpc-raw-wrappers.sh

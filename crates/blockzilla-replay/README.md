@@ -1,7 +1,7 @@
 # Blockzilla replay POC
 
 This crate is the first POC for Blockzilla's replay-first runtime. It has now
-completed a manifest-bound Compact Archive V2 mutation replay across mainnet
+completed a fixed-identity Compact Archive V2 mutation replay across mainnet
 epochs 0 through 33 on a native x86-64 Linux NAS. The first epoch-34 attempt
 stopped at the first legacy BPF-loader `Write`; support is now implemented but
 the full epoch-34 retry has not completed. This POC does not claim to be an SVM
@@ -27,7 +27,7 @@ Implemented now:
 - mainnet genesis fingerprint/epoch-window inspection;
 - owner/executable/rent/data byte-range account diffs at nested instruction
   boundaries, with lamport output disabled by default;
-- manifest-bound Blockzilla Compact Archive V2 decoding with exact
+- Blockzilla Compact Archive V2 decoding with exact
   `genesis.bin`, registry, blockhash, slot, transaction, and instruction
   ordering, including a lending, borrowed current-schema hot-block path that
   reuses decompression storage and exposes checked message and metadata slices;
@@ -66,7 +66,7 @@ Implemented now:
   transaction batches and deterministic pubkey-sorted state hashing;
 - byte-range account writes for the 131,097-byte SlotHistory sysvar, avoiding
   a full-value rewrite for each Bank freeze; and
-- portable frozen-Bank checkpoint V2, with strict migration of exhausted
+- portable frozen-Bank checkpoint V3, with strict migration of exhausted
   pre-activation V1 checkpoints and deliberate exclusion of the host-native
   derivative program cache.
 
@@ -109,22 +109,11 @@ cargo run -p blockzilla-replay --bin blockzilla-replay-poc -- \
   probe-compact /path/to/compact-generation --max-slots 10
 ```
 
-Compact generations encoded before the `UnknownSystem` and `UnknownVote`
-instruction fallbacks were inserted can opt into that historical message schema
-by copying
-`assets/archive-v2-message-schema-may24-pre-unknown-fallbacks-v1.marker` into
-the generation and listing this exact tuple in `archive-v2-generation.json`:
-
-```text
-name   archive-v2-message-schema-may24-pre-unknown-fallbacks-v1.marker
-size   87
-sha256 2a3aa5808085bc7b869c7536508227f19e6b9d9e3f5fb34b65ebda9936bf0206
-```
-
-The generation digest must bind that file entry. The replay reader rejects the
-reserved marker filename with any other size or digest. Existing mainnet epoch
-0 and 1 manifests remain supported through their exact pinned blocks/index
-identities, while an unmarked, unpinned generation uses the current schema.
+Compact generations are opened through fixed required object bindings and explicit
+runtime identity fields. There is no schema marker file and no digest sidecar
+for input selection. Keep `--start-slot` and `--end-slot-exclusive` stable
+when replaying exact windows, and rely on the generation's immutable cluster,
+epoch, generation ID, first-slot, and slots-per-epoch identity for resume safety.
 
 Run the bounded launch Config/System/Stake/Vote mutation path:
 
@@ -144,10 +133,9 @@ cargo run --release -p blockzilla-replay --bin blockzilla-replay-poc -- \
 ```
 
 The checkpoint path is atomically refreshed only after a sealed generation's
-final bound index row completes. Preserve the printed
-`checkpoint_file_sha256` in trusted job metadata. Resume with the checkpointed
-generation as the explicit anchor and only successor generations as positional
-inputs:
+final bound index row completes. Preserve the printed `checkpoint_file_sha256`
+in trusted job metadata. Resume with the checkpointed generation as the explicit
+anchor and only successor generations as positional inputs:
 
 ```bash
 cargo run --release -p blockzilla-replay --bin blockzilla-replay-poc -- \
@@ -206,7 +194,7 @@ commits. One Authorize and five Withdraws then commit; replay reaches slot
 generation contains no Config call, so Config behavior is covered by exact ABI
 fixtures and transaction-rollback tests rather than ledger execution evidence.
 
-Manifest-bound Compact Archive V2 is the POC's only executable ledger input.
+Schema-stable Compact Archive V2 is the POC's only executable ledger input.
 Replay never opens or converts another ledger container and has no shred or RPC
 fallback. Replay Projection V1 is a non-operational design draft, not an
 accepted input. The Config/System/Stake/Vote POC is not Bank parity: it does
@@ -244,7 +232,7 @@ The first observed release run took 733.31 seconds wall time (664.66 user,
 721.79 seconds (644.57 user, 50.76 system) and reproduced every counter and the
 same final state hash. These runs are execution and determinism evidence, not a
 comparative throughput benchmark.
-The run consumed only the two complete, manifest-bound Compact Archive V2
+The run consumed only the two complete Compact Archive V2
 generations; no CAR file was opened, converted, or used as a fallback.
 
 After the 2026-07-29 hot-path pass, two exact release replays of epoch 0 alone
@@ -270,15 +258,15 @@ exited zero with identical counters. It completed all 862,065 present rows and
 state SHA-256
 `9e0cf0dde2432719682de7b44cf4314e042c19f95ffd969bd58559439553ec32`.
 That is 7.27x faster than the previously documented 721.79-second full-chain
-run. Only manifest-bound Blockzilla Compact V2 input was used.
+run. Only schema-stable Compact Archive V2 input was used.
 
 ## Earlier native x86-64 NAS replay milestone — 2026-07-29
 
 The release replay binary was built and run directly on an x86-64 Linux NAS
 with `RUSTFLAGS="-C target-cpu=native"`. It completed the 11 ordered Compact
-Archive V2 generations from epoch 0 through epoch 10. All inputs were
-manifest-bound; no CAR file was opened, converted, copied into the replay set,
-or used as a fallback.
+Archive V2 generations from epoch 0 through epoch 10. All inputs were schema-stable
+and bound by local identity checks; no CAR file was opened, converted, copied into
+the replay set, or used as a fallback.
 
 The run first exposed two bounded launch-runtime gaps: Stake `Deactivate` at
 slot 882,928 and System `AdvanceNonceAccount` at slot 4,185,036. After adding
@@ -312,8 +300,9 @@ hashes remain unavailable.
 
 The replay hot path validates Compact control files and bounds/decompresses
 each indexed frame, but deliberately does not SHA-256 the entire blocks object
-on every open. Full payload authentication belongs at generation admission;
-the local generation must remain immutable afterwards.
+on every open. Full payload authentication belongs at generation admission:
+the local generation must remain immutable afterwards and explicit pinned
+identity checks must succeed.
 
 `replay-compact-chain` keeps one Bank across ordered generation directories.
 A deterministic portable V2 frozen-Bank checkpoint codec round-trips accounts,
@@ -331,16 +320,17 @@ Bank predates epoch 34 and has no BPF-loader builtin, then emits V2 on the next
 capture; in-progress, loader-containing, and epoch-34-or-later V1 states fail
 closed.
 
-Resume is boundary-only and fail-closed. It requires a trusted standard SHA-256
-over the complete checkpoint file, reopens the completed source generation,
-and matches its generation digest, registry digest, row count, and final index
-slot before clearing the restored cursor guard. The successor must then begin
-at physical row zero and pass the normal parent-slot and previous-PoH-hash Bank
-checks. The embedded codec checksum remains corruption detection, not an
-authenticity boundary; a digest sidecar stored beside a mutable checkpoint is
-not trusted metadata. These guarantees preserve this runtime's deterministic
-mutation state, not Solana Bank parity: signatures, CU, fees, rent, SlotHashes,
-and historical Bank hashes remain outside the current POC.
+Resume is boundary-only and fail-closed. It requires a trusted standard
+SHA-256 over the complete checkpoint file, reopens the completed source
+generation, and matches its source cluster/epoch/generation identity,
+row count, and final index slot before clearing the restored cursor guard.
+The successor must then begin at physical row zero and pass the normal
+parent-slot and previous-PoH-hash Bank checks. The embedded codec checksum
+remains corruption detection, not an authenticity boundary; a digest sidecar
+stored beside a mutable checkpoint is not trusted metadata. These guarantees
+preserve this runtime's deterministic mutation state, not Solana Bank parity:
+signatures, CU, fees, rent, SlotHashes, and historical Bank hashes remain
+outside the current POC.
 
 The recorded epoch-33 V1 checkpoint has trusted whole-file SHA-256
 `e02520615763e3e16dc3815a75fd903cdc90a2f6116c264903ad18983c8e9f25`.
@@ -388,7 +378,7 @@ The allocation figures are identical to the preceding path and the timing
 difference is noise. Reward discard is retained as protection against future
 reward-heavy decode spikes, not claimed as an epoch-0 speedup.
 
-The preceding borrowed-runtime revision completed all 31 manifest-bound Compact
+The preceding borrowed-runtime revision completed all 31 Compact
 V2 generations from epoch 0 through epoch 30:
 
 ```text

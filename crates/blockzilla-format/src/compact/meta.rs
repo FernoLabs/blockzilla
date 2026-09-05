@@ -301,10 +301,14 @@ impl From<StoredInstructionError> for CompactInstructionError {
 }
 
 fn decode_stored_transaction_error_bytes(bytes: &[u8]) -> Result<StoredTransactionError> {
-    match wincode::deserialize::<StoredTransactionError>(bytes) {
+    match wincode::deserialize_exact::<StoredTransactionError>(bytes) {
         Ok(err) => Ok(err),
-        Err(err) => decode_unit_borsh_io_instruction_error(bytes)
-            .map_err(|_| anyhow::anyhow!("decode transaction error: {err}")),
+        Err(err) => decode_unit_borsh_io_instruction_error(bytes).map_err(|_| {
+            anyhow::anyhow!(
+                "decode transaction error from {} exact bytes: {err}",
+                bytes.len()
+            )
+        }),
     }
 }
 
@@ -1028,6 +1032,18 @@ mod tests {
             compact,
             CompactTransactionError::InstructionError(0, CompactInstructionError::Custom(0))
         ));
+    }
+
+    #[test]
+    fn compact_transaction_error_rejects_trailing_stored_wincode_bytes() {
+        let mut bytes = wincode::serialize(&StoredTransactionError::InstructionError(
+            0,
+            StoredInstructionError::Custom(0),
+        ))
+        .expect("serialize stored transaction error");
+        bytes.push(0xaa);
+
+        assert!(CompactTransactionError::from_stored_wincode_bytes(&bytes).is_err());
     }
 
     #[test]

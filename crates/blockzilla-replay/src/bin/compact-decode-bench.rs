@@ -490,7 +490,6 @@ fn update_optional_u64(hasher: &mut Sha256, value: Option<u64>) {
 struct OpenFingerprint {
     epoch: u64,
     generation_id: String,
-    generation_digest: String,
     index_rows: usize,
     registry_entries: u32,
 }
@@ -523,7 +522,6 @@ fn run_open(config: &BenchConfig, count_allocations: bool) -> Result<OpenRun> {
         fingerprint: OpenFingerprint {
             epoch: archive.manifest().epoch,
             generation_id: archive.manifest().generation_id.clone(),
-            generation_digest: archive.manifest().generation_digest.clone(),
             index_rows: archive.index().rows.len(),
             registry_entries: archive.registry_entries(),
         },
@@ -920,7 +918,7 @@ fn main() -> Result<()> {
         config.prefetch_bytes,
     )?;
     println!(
-        "benchmark=compact-decode-v1 format=blockzilla-compact-archive-v2 car=false generation={} cluster={} epoch={} generation_id={} start_row={} end_row_exclusive={} first_slot={} last_slot={} blocks={} transactions={} compressed_bytes={} uncompressed_bytes={} compression_ratio={:.3} wire_prefetch_bytes={} full_public_visit_prefetch_bytes={} batches={} warmups={} rounds={} hash_verification=control-files os_cache=uncontrolled",
+        "benchmark=compact-decode-v1 format=blockzilla-compact-archive-v2 car=false generation={} cluster={} epoch={} generation_id={} start_row={} end_row_exclusive={} first_slot={} last_slot={} blocks={} transactions={} compressed_bytes={} uncompressed_bytes={} compression_ratio={:.3} wire_prefetch_bytes={} full_public_visit_prefetch_bytes={} batches={} warmups={} rounds={} os_cache=uncontrolled",
         config.generation.display(),
         admitted.manifest().cluster_id,
         admitted.manifest().epoch,

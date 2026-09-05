@@ -74,6 +74,9 @@ impl<'a> DexTxContext<'a> {
 }
 
 pub trait DexDecoder: Send + Sync {
+    /// Decode one instruction stream and push swap rows when a match is found.
+    ///
+    /// This is the main place to add new parser logic for a new venue.
     fn name(&self) -> &'static str;
     fn decode(&self, registry: &DexRegistry, ctx: DexTxContext<'_>, out: &mut Vec<SwapRecord>);
 }
@@ -84,6 +87,10 @@ pub struct DexRegistry {
 }
 
 impl DexRegistry {
+    /// Build the default decoder stack.
+    ///
+    /// Keep the decoder list small in examples. For many custom decoders,
+    /// prefer one decoder per venue with clear early filters.
     pub fn new(programs: Vec<ResolvedDexProgram>) -> Self {
         let programs_by_id = programs
             .into_iter()

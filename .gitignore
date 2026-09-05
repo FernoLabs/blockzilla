@@ -41,12 +41,17 @@ epochs/
 Thumbs.db
 
 # Generated outputs
+/apps/spyx-authority-portfolio-history-by-prefix/
+/librust_out.rlib
+/*.html
+/HANDOFF-*.md
 /tmp/
 /dist/
 /.codex-tmp/
 /debug/
 /reports/
 /outputs/
+/benchmark-results/
 docs/personal/
 scripts/personal/
 **/node_modules/

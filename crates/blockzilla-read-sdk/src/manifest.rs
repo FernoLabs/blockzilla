@@ -3,11 +3,13 @@ use std::collections::HashSet;
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 
-use crate::{ArchiveV2WireProfile, Error, Result};
+use crate::{ArchiveV2MetadataWireProfile, ArchiveV2WireProfile, Error, Result};
 
 pub const GENERATION_MANIFEST_FILE: &str = "archive-v2-generation.json";
 pub const GENERATION_MANIFEST_SCHEMA_VERSION: u32 = 1;
 pub const GENERATION_DIGEST_DOMAIN: &[u8] = b"blockzilla/archive-v2-generation\0";
+const TRUSTED_FILE_SIZE_BINDING_DOMAIN: &[u8] =
+    b"blockzilla/archive-v2-trusted-local-file-size-binding\0";
 
 pub const BLOCKS_FILE: &str = blockzilla_format::ARCHIVE_V2_BLOCKS_FILE;
 pub const BLOCK_INDEX_FILE: &str = blockzilla_format::ARCHIVE_V2_BLOCK_INDEX_FILE;
@@ -182,24 +184,30 @@ pub struct TrustedGenerationIdentity {
 }
 
 /// Build a self-consistent [`GenerationManifest`] from real file sizes but
-/// placeholder (all-zero) content hashes.
+/// synthetic, non-content hashes.
 ///
 /// Only safe to open with [`crate::HashVerification::SizesOnly`], which never
 /// compares a file's declared hash against its actual bytes;
-/// [`crate::ArchiveReader::open_trusted`] enforces this.
+/// [`crate::ArchiveReader::open_trusted`] enforces this. Each synthetic hash
+/// binds the file name, size, and both explicitly asserted wire profiles.
+/// Therefore, the resulting generation digest changes when any admitted file
+/// size or either trusted wire profile changes. It does not authenticate file
+/// contents and never synthesizes a fixed marker binding.
 pub(crate) fn synthesize_trusted_manifest(
     identity: TrustedGenerationIdentity,
+    metadata_wire_profile: ArchiveV2MetadataWireProfile,
     files: Vec<(String, u64)>,
 ) -> Result<GenerationManifest> {
-    let placeholder = "0".repeat(64);
+    let wire_profile = identity.wire_profile;
     let files = files
         .into_iter()
         .map(|(name, size)| GenerationFile {
+            sha256: trusted_file_size_binding(&name, size, wire_profile, metadata_wire_profile),
             name,
             size,
-            sha256: placeholder.clone(),
         })
         .collect();
+    let placeholder = "0".repeat(64);
     let mut manifest = GenerationManifest {
         schema_version: GENERATION_MANIFEST_SCHEMA_VERSION,
         cluster_id: identity.cluster_id,
@@ -212,6 +220,32 @@ pub(crate) fn synthesize_trusted_manifest(
     };
     manifest.generation_digest = compute_generation_digest(&manifest)?;
     Ok(manifest)
+}
+
+fn trusted_file_size_binding(
+    name: &str,
+    size: u64,
+    wire_profile: ArchiveV2WireProfile,
+    metadata_wire_profile: ArchiveV2MetadataWireProfile,
+) -> String {
+    let mut hasher = Sha256::new();
+    hasher.update(TRUSTED_FILE_SIZE_BINDING_DOMAIN);
+    let wire_profile = match wire_profile {
+        ArchiveV2WireProfile::PostUnknownInstructionFallbacksV1 => {
+            ArchiveV2WireProfile::POST_UNKNOWN_NAME
+        }
+        ArchiveV2WireProfile::PreUnknownInstructionFallbacksV1 => {
+            ArchiveV2WireProfile::PRE_UNKNOWN_NAME
+        }
+    };
+    hasher.update(wire_profile.as_bytes());
+    hasher.update([0]);
+    hasher.update(metadata_wire_profile.stable_name().as_bytes());
+    hasher.update([0]);
+    hasher.update((name.len() as u64).to_le_bytes());
+    hasher.update(name.as_bytes());
+    hasher.update(size.to_le_bytes());
+    hex_lower(&hasher.finalize())
 }
 
 pub(crate) fn validate_object_name(name: &str) -> std::result::Result<(), &'static str> {

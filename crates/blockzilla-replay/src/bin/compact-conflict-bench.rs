@@ -909,10 +909,6 @@ fn main() -> Result<()> {
     println!("epoch={}", context.epoch);
     println!("generation_id={}", context.generation_id);
     println!(
-        "generation_digest={}",
-        lowercase_hex(&context.binding.generation_digest)
-    );
-    println!(
         "selection_rows={}..{}",
         selection.start_row, selection.end_row
     );

@@ -48,7 +48,8 @@ use blockzilla_format::{
     OwnedCompactRecentBlockhash,
 };
 use blockzilla_read_sdk::{
-    ArchiveReader, ArchiveV2MessageProjector, ArchiveV2WireProfile, HashVerification,
+    ArchiveReader, ArchiveV2MessageProjector, ArchiveV2MetadataProfileAdmission,
+    ArchiveV2MetadataWireProfile, ArchiveV2WireProfile, HashVerification,
     OpenOptions as ReaderOpenOptions, POST_UNKNOWN_INSTRUCTION_FALLBACKS_MARKER_FILE,
     PRE_UNKNOWN_INSTRUCTION_FALLBACKS_MARKER_FILE, PinnedLocalRangeSource,
     UnprovenWireProfileDecision, audit_full_generation_wire_profile,
@@ -3813,9 +3814,14 @@ fn audit_admitted_source_wire_profile(
                 ..ReaderOpenOptions::default()
             };
             (
-                ArchiveReader::open_candidate(pinned_source, manifest.clone(), options)
-                    .map_err(|error| anyhow!(error))
-                    .context("authenticate and validate the published source generation")?,
+                ArchiveReader::open_candidate_with_metadata_admission(
+                    pinned_source,
+                    manifest.clone(),
+                    options,
+                    ArchiveV2MetadataProfileAdmission::AllowUnmarkedHistorical,
+                )
+                .map_err(|error| anyhow!(error))
+                .context("authenticate and validate the published source generation")?,
                 None,
             )
         }
@@ -3839,7 +3845,7 @@ fn audit_admitted_source_wire_profile(
                 ..ReaderOpenOptions::default()
             };
             (
-                ArchiveReader::open_trusted(
+                ArchiveReader::open_trusted_with_metadata_profile(
                     pinned_source.clone(),
                     TrustedGenerationIdentity {
                         cluster_id: "mainnet-beta".to_owned(),
@@ -3848,6 +3854,7 @@ fn audit_admitted_source_wire_profile(
                         slots_per_epoch: crate::SLOTS_PER_EPOCH,
                         wire_profile: selected,
                     },
+                    ArchiveV2MetadataWireProfile::UnmarkedHistoricalCompatibility,
                     options,
                 )
                 .map_err(|error| anyhow!(error))

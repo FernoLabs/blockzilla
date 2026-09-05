@@ -6,6 +6,7 @@ rust-version.workspace = true
 license.workspace = true
 repository.workspace = true
 publish = false
+autobins = false
 
 [lib]
 crate-type = ["rlib", "cdylib"]
@@ -72,3 +73,7 @@ wasm-bindgen-futures = { version = "0.4.71", optional = true }
 worker = { version = "0.8.3", features = ["http"], optional = true }
 wincode = "=0.5.5"
 zstd = { version = "0.13.3", optional = true }
+
+[[bin]]
+name = "inspect_hot_rewards"
+path = "src/bin/inspect_hot_rewards.rs"

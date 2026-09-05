@@ -4,6 +4,7 @@ Cloudflare Workers deployed independently of the NAS-hosted services.
 
 ## Current workers
 
+- [`workers/blockzilla-archive-samples-v1/`](blockzilla-archive-samples-v1/README.md): public, read-only gateway for the eleven CAR, Compact V2, and Indexer V3 sample epochs at `/<format>/<epoch>/<name>`.
 - [`workers/blockzilla-get-block/`](blockzilla-get-block/README.md): read-only Archive V2 edge API/Worker.
 - [`workers/old-faithful-get-block/`](old-faithful-get-block/README.md): read-only Old Faithful compatibility edge API/Worker.
 

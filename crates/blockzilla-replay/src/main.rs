@@ -781,18 +781,12 @@ fn print_launch_replay_report(
     println!("replay_status={replay_status}");
     if let [context] = contexts {
         println!("generation_id={}", context.generation_id);
-        println!(
-            "generation_digest={}",
-            hex(&context.binding.generation_digest)
-        );
     } else {
         println!("generation_count={}", contexts.len());
         for (index, context) in contexts.iter().enumerate() {
             println!(
-                "generation index={index} epoch={} generation_id={} generation_digest={}",
-                context.epoch,
-                context.generation_id,
-                hex(&context.binding.generation_digest)
+                "generation index={index} epoch={} generation_id={}",
+                context.epoch, context.generation_id
             );
         }
     }
@@ -938,20 +932,16 @@ fn print_checkpoint_report(
 ) {
     if let Some(source) = checkpoint_source {
         println!(
-            "checkpoint_source epoch={} generation_id={} generation_digest={} final_slot={:?}",
-            source.epoch,
-            source.generation_id,
-            hex(&source.binding.generation_digest),
-            source.last_slot,
+            "checkpoint_source epoch={} generation_id={} final_slot={:?}",
+            source.epoch, source.generation_id, source.last_slot,
         );
     }
     for publication in checkpoint_publications {
         println!(
-            "checkpoint_published path={} epoch={} last_slot={} generation_digest={} account_state_sha256={} checkpoint_file_sha256={}",
+            "checkpoint_published path={} epoch={} last_slot={} account_state_sha256={} checkpoint_file_sha256={}",
             publication.path.display(),
             publication.epoch,
             publication.last_slot,
-            hex(&publication.generation_digest),
             hex(&publication.account_state_sha256),
             hex(&publication.checkpoint_file_sha256),
         );
@@ -986,10 +976,9 @@ fn format_generation_metrics(metrics: &LaunchGenerationMetrics) -> String {
     let changed_accounts_delta =
         metrics.changed_accounts_end as i128 - metrics.changed_accounts_start as i128;
     format!(
-        "generation_metrics epoch={} generation_id={} generation_digest={} slot_range={}..={} slots={} blocks_present={} transactions={} instructions={} compact_compressed_payload_bytes={} compressed_payload_scope=visited_blocks_bin_frames throughput_basis=compact_visit blocks_per_s={:.3} transactions_per_s={:.3} instructions_per_s={:.3} compressed_payload_gb_per_s={:.6} account_registry_start={} account_registry_end={} account_registry_delta={} changed_accounts_start={} changed_accounts_end={} changed_accounts_delta={} committed_transactions={} failed_transactions={} committed_instructions={} rolled_back_instructions={} account_batch_commits={} account_batch_inserted={} account_batch_updated={} account_batch_deleted={} account_batch_patched={} account_batch_commit_ms={:.3} checkpoint_published={} wall_ms={:.3} compact_visit_ms={:.3} compact_decode_visit_ms={:.3} replay_ms={:.3} checkpoint_total_ms={:.3} checkpoint_encode_ms={:.3} checkpoint_publish_ms={:.3} checkpoint_state_hash_ms={:.3}",
+        "generation_metrics epoch={} generation_id={} slot_range={}..={} slots={} blocks_present={} transactions={} instructions={} compact_compressed_payload_bytes={} compressed_payload_scope=visited_blocks_bin_frames throughput_basis=compact_visit blocks_per_s={:.3} transactions_per_s={:.3} instructions_per_s={:.3} compressed_payload_gb_per_s={:.6} account_registry_start={} account_registry_end={} account_registry_delta={} changed_accounts_start={} changed_accounts_end={} changed_accounts_delta={} committed_transactions={} failed_transactions={} committed_instructions={} rolled_back_instructions={} account_batch_commits={} account_batch_inserted={} account_batch_updated={} account_batch_deleted={} account_batch_patched={} account_batch_commit_ms={:.3} checkpoint_published={} wall_ms={:.3} compact_visit_ms={:.3} compact_decode_visit_ms={:.3} replay_ms={:.3} checkpoint_total_ms={:.3} checkpoint_encode_ms={:.3} checkpoint_publish_ms={:.3} checkpoint_state_hash_ms={:.3}",
         metrics.epoch,
         metrics.generation_id,
-        hex(&metrics.generation_digest),
         metrics.first_slot,
         metrics.last_slot,
         metrics.slots_visited,
@@ -1146,11 +1135,6 @@ fn print_compact_probe(path: &PathBuf, config: CompactProbeConfig) -> Result<()>
     println!(
         "cluster={} epoch={} generation_id={} slots_per_epoch={}",
         probe.cluster_id, probe.epoch, probe.generation_id, probe.slots_per_epoch
-    );
-    println!(
-        "generation_digest={} registry_sha256={}",
-        hex(&probe.binding.generation_digest),
-        hex(&probe.binding.registry_sha256)
     );
     if let Some(genesis) = &probe.genesis {
         println!(
@@ -1687,7 +1671,6 @@ mod tests {
         let metrics = LaunchGenerationMetrics {
             epoch: 7,
             generation_id: "epoch-7".to_owned(),
-            generation_digest: [7; 32],
             first_slot: 70,
             last_slot: 79,
             slots_visited: 10,

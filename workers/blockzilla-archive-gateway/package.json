@@ -1,0 +1,12 @@
+{
+  "name": "blockzilla-archive-gateway",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "check": "node --check src/benchmark-entry.js",
+    "test": "node --test test/benchmark-entry.test.mjs"
+  },
+  "devDependencies": {
+    "wrangler": "^4.127.1"
+  }
+}

@@ -9,13 +9,17 @@ const RAYDIUM_SWAP_BASE_IN: u8 = 9;
 const RAYDIUM_SWAP_BASE_OUT: u8 = 11;
 const SOLFI_SWAP_V1: u8 = 6;
 const SOLFI_SWAP_V2: u8 = 7;
-const ZEROFI_SWAP: u8 = 6;
-const GAVEL_SWAP: u8 = 0;
+const ZEROFI_SWAP_LEGACY: u8 = 6;
+const ZEROFI_SWAP_V4: u8 = 16;
+const PLASMA_GAVEL_SWAP: u8 = 0;
 
 const SWAP_EVIDENCE: Evidence = Evidence::ACCOUNT_LAYOUT
     .union(Evidence::AMOUNTS)
     .union(Evidence::TOKEN_FLOW_REQUIRED);
 const LAYOUT_EVIDENCE: Evidence = Evidence::ACCOUNT_LAYOUT.union(Evidence::TOKEN_FLOW_REQUIRED);
+const STRUCTURAL_EVIDENCE: Evidence =
+    Evidence::TOKEN_FLOW_REQUIRED.union(Evidence::STRUCTURAL_ONLY);
+const AMOUNT_EVIDENCE: Evidence = Evidence::AMOUNTS.union(Evidence::TOKEN_FLOW_REQUIRED);
 
 #[inline]
 pub(crate) fn decode(program: Program, data: &[u8], accounts: &[CompactId]) -> DecodeOutcome {
@@ -30,7 +34,7 @@ pub(crate) fn decode(program: Program, data: &[u8], accounts: &[CompactId]) -> D
         Program::Saber => decode_saber(data, accounts),
         Program::SolFi => decode_solfi(data, accounts),
         Program::ZeroFi => decode_zerofi(data, accounts),
-        Program::Gavel => decode_gavel(data, accounts),
+        Program::PlasmaGavel => decode_plasma_gavel(data, accounts),
         _ => DecodeOutcome::UnknownProgram,
     }
 }
@@ -130,8 +134,6 @@ fn decode_spl_token_swap(program: Program, data: &[u8], accounts: &[CompactId]) 
                 user_authority: Some(account(accounts, 2)?),
                 user_source: Some(account(accounts, 3)?),
                 user_destination: Some(account(accounts, 6)?),
-                vault_a: Some(account(accounts, 4)?),
-                vault_b: Some(account(accounts, 5)?),
                 input_vault: Some(account(accounts, 4)?),
                 output_vault: Some(account(accounts, 5)?),
                 fee_account: Some(account(accounts, 8)?),
@@ -170,8 +172,6 @@ fn decode_fluxbeam(data: &[u8], accounts: &[CompactId]) -> DecodeOutcome {
                 user_authority: Some(account(accounts, 2)?),
                 user_source: Some(account(accounts, 3)?),
                 user_destination: Some(account(accounts, 6)?),
-                vault_a: Some(account(accounts, 4)?),
-                vault_b: Some(account(accounts, 5)?),
                 input_vault: Some(account(accounts, 4)?),
                 output_vault: Some(account(accounts, 5)?),
                 input_mint: Some(account(accounts, 9)?),
@@ -208,14 +208,9 @@ fn decode_step_finance(data: &[u8], accounts: &[CompactId]) -> DecodeOutcome {
             name: "swap",
             class: InstructionClass::Swap(SwapKind::Unspecified),
             discriminator,
-            accounts: AccountRoles {
-                pool: Some(account(accounts, 0)?),
-                vault_a: Some(account(accounts, 4)?),
-                vault_b: Some(account(accounts, 5)?),
-                ..AccountRoles::default()
-            },
+            accounts: AccountRoles::default(),
             amounts: Amounts::Unknown,
-            evidence: LAYOUT_EVIDENCE,
+            evidence: STRUCTURAL_EVIDENCE,
         })
     })())
 }
@@ -244,8 +239,6 @@ fn decode_saber(data: &[u8], accounts: &[CompactId]) -> DecodeOutcome {
                 user_authority: Some(account(accounts, 2)?),
                 user_source: Some(account(accounts, 3)?),
                 user_destination: Some(account(accounts, 6)?),
-                vault_a: Some(account(accounts, 4)?),
-                vault_b: Some(account(accounts, 5)?),
                 input_vault: Some(account(accounts, 4)?),
                 output_vault: Some(account(accounts, 5)?),
                 fee_account: Some(account(accounts, 7)?),
@@ -277,14 +270,9 @@ fn decode_solfi(data: &[u8], accounts: &[CompactId]) -> DecodeOutcome {
                 name: "swap_v1",
                 class: InstructionClass::Swap(SwapKind::Unspecified),
                 discriminator,
-                accounts: AccountRoles {
-                    pool: Some(account(accounts, 1)?),
-                    vault_a: Some(account(accounts, 2)?),
-                    vault_b: Some(account(accounts, 3)?),
-                    ..AccountRoles::default()
-                },
+                accounts: AccountRoles::default(),
                 amounts: Amounts::Unknown,
-                evidence: LAYOUT_EVIDENCE,
+                evidence: STRUCTURAL_EVIDENCE,
             })
         })()),
         SOLFI_SWAP_V2 => outcome((|| {
@@ -330,44 +318,61 @@ fn decode_zerofi(data: &[u8], accounts: &[CompactId]) -> DecodeOutcome {
         Ok(discriminator) => discriminator,
         Err(reason) => return DecodeOutcome::Malformed(reason),
     };
-    if discriminator.bytes[0] != ZEROFI_SWAP {
-        return DecodeOutcome::Unsupported { discriminator };
-    }
-
+    let (name, required_accounts, has_named_v4_layout) = match discriminator.bytes[0] {
+        ZEROFI_SWAP_LEGACY => ("swap", 10, false),
+        ZEROFI_SWAP_V4 => ("swap_v4", 14, true),
+        _ => return DecodeOutcome::Unsupported { discriminator },
+    };
     outcome((|| {
-        require_data(data, 17)?;
-        require_accounts(accounts, 10)?;
+        if has_named_v4_layout {
+            // Successful swap_v4 bodies exist in both the 17-byte base form
+            // and a 57-byte extended form.
+            require_data(data, 17)?;
+        } else {
+            require_exact_data(data, 17)?;
+        }
+        require_accounts(accounts, required_accounts)?;
+        let (decoded_accounts, evidence) = if has_named_v4_layout {
+            (
+                AccountRoles {
+                    pool: Some(account(accounts, 0)?),
+                    user_authority: Some(account(accounts, 8)?),
+                    user_source: Some(account(accounts, 6)?),
+                    user_destination: Some(account(accounts, 7)?),
+                    input_vault: Some(account(accounts, 3)?),
+                    output_vault: Some(account(accounts, 5)?),
+                    ..AccountRoles::default()
+                },
+                SWAP_EVIDENCE,
+            )
+        } else {
+            // The historical payload and amount pair are verified by a real
+            // epoch-810 fixture. No named schema proves its numeric account
+            // indexes, so token flow must resolve every role.
+            (AccountRoles::default(), AMOUNT_EVIDENCE)
+        };
         Ok(DecodedInstruction {
             program: Program::ZeroFi,
             role: Program::ZeroFi.role(),
-            name: "swap",
+            name,
             class: InstructionClass::Swap(SwapKind::ExactIn),
             discriminator,
-            accounts: AccountRoles {
-                user_authority: Some(account(accounts, 7)?),
-                user_source: Some(account(accounts, 5)?),
-                user_destination: Some(account(accounts, 6)?),
-                vault_a: Some(account(accounts, 2)?),
-                vault_b: Some(account(accounts, 4)?),
-                input_vault: Some(account(accounts, 2)?),
-                output_vault: Some(account(accounts, 4)?),
-                ..AccountRoles::default()
-            },
+            accounts: decoded_accounts,
             amounts: Amounts::ExactIn {
                 amount_in: amount(data, 1)?,
                 minimum_amount_out: amount(data, 9)?,
             },
-            evidence: SWAP_EVIDENCE,
+            evidence,
         })
     })())
 }
 
-fn decode_gavel(data: &[u8], accounts: &[CompactId]) -> DecodeOutcome {
+fn decode_plasma_gavel(data: &[u8], accounts: &[CompactId]) -> DecodeOutcome {
     let discriminator = match one_byte_discriminator(data) {
         Ok(discriminator) => discriminator,
         Err(reason) => return DecodeOutcome::Malformed(reason),
     };
-    if discriminator.bytes[0] != GAVEL_SWAP {
+    if discriminator.bytes[0] != PLASMA_GAVEL_SWAP {
         return DecodeOutcome::Unsupported { discriminator };
     }
 
@@ -411,8 +416,8 @@ fn decode_gavel(data: &[u8], accounts: &[CompactId]) -> DecodeOutcome {
             )
         };
         Ok(DecodedInstruction {
-            program: Program::Gavel,
-            role: Program::Gavel.role(),
+            program: Program::PlasmaGavel,
+            role: Program::PlasmaGavel.role(),
             name: "swap",
             class,
             discriminator,
@@ -636,10 +641,7 @@ impl<'a> PhoenixCursor<'a> {
                 actual: self.data.len(),
             });
         }
-        let value = match self.data.get(self.position).copied() {
-            Some(value) => value,
-            None => 0,
-        };
+        let value = self.data.get(self.position).copied().unwrap_or_default();
         self.position += 1;
         Ok(value)
     }
@@ -791,7 +793,7 @@ mod tests {
 
     fn gavel(side: u8, swap_type: u8, first: u64, second: u64) -> [u8; 19] {
         let mut data = [0_u8; 19];
-        data[0] = GAVEL_SWAP;
+        data[0] = PLASMA_GAVEL_SWAP;
         data[1] = side;
         data[2] = swap_type;
         data[3..11].copy_from_slice(&first.to_le_bytes());
@@ -842,7 +844,8 @@ mod tests {
         let step = two_amounts(CLASSIC_SWAP, 17, 13);
         let saber = two_amounts(CLASSIC_SWAP, 18, 14);
         let solfi = solfi_v2(19, 15, 0);
-        let zerofi = two_amounts(ZEROFI_SWAP, 20, 16);
+        let zerofi = two_amounts(ZEROFI_SWAP_LEGACY, 20, 16);
+        let zerofi_v4 = two_amounts(ZEROFI_SWAP_V4, 20, 16);
         let gavel = gavel(0, 0, 21, 17);
         let cases = [
             Case {
@@ -901,7 +904,12 @@ mod tests {
                 account_count: 10,
             },
             Case {
-                program: Program::Gavel,
+                program: Program::ZeroFi,
+                data: &zerofi_v4,
+                account_count: 14,
+            },
+            Case {
+                program: Program::PlasmaGavel,
                 data: &gavel,
                 account_count: 9,
             },
@@ -954,19 +962,44 @@ mod tests {
             other => assert!(matches!(other, DecodeOutcome::Decoded(_))),
         }
 
-        let zerofi = two_amounts(ZEROFI_SWAP, 73, 64);
+        let zerofi = two_amounts(ZEROFI_SWAP_LEGACY, 73, 64);
         match decode(Program::ZeroFi, &zerofi, &accounts[..10]) {
             DecodeOutcome::Decoded(decoded) => {
-                assert_eq!(decoded.accounts.pool, None);
-                assert_eq!(decoded.accounts.user_authority, Some(107));
-                assert_eq!(decoded.accounts.user_source, Some(105));
-                assert_eq!(decoded.accounts.user_destination, Some(106));
+                assert_eq!(decoded.accounts, AccountRoles::default());
+                assert!(decoded.evidence.contains(Evidence::AMOUNTS));
+                assert!(!decoded.evidence.contains(Evidence::ACCOUNT_LAYOUT));
             }
             other => assert!(matches!(other, DecodeOutcome::Decoded(_))),
         }
 
+        let zerofi_v4 = two_amounts(ZEROFI_SWAP_V4, 91, 88);
+        match decode(Program::ZeroFi, &zerofi_v4, &accounts[..14]) {
+            DecodeOutcome::Decoded(decoded) => {
+                assert_eq!(decoded.name, "swap_v4");
+                assert_eq!(decoded.accounts.pool, Some(100));
+                assert_eq!(decoded.accounts.user_authority, Some(108));
+                assert_eq!(decoded.accounts.user_source, Some(106));
+                assert_eq!(decoded.accounts.user_destination, Some(107));
+                assert_eq!(decoded.accounts.input_vault, Some(103));
+                assert_eq!(decoded.accounts.output_vault, Some(105));
+                assert_eq!(decoded.accounts.vault_a, None);
+                assert!(decoded.evidence.contains(Evidence::ACCOUNT_LAYOUT));
+            }
+            other => assert!(matches!(other, DecodeOutcome::Decoded(_))),
+        }
+
+        let mut extended_zerofi_v4 = [0_u8; 57];
+        extended_zerofi_v4[..17].copy_from_slice(&zerofi_v4);
+        assert!(matches!(
+            decode(Program::ZeroFi, &extended_zerofi_v4, &accounts[..14]),
+            DecodeOutcome::Decoded(DecodedInstruction {
+                name: "swap_v4",
+                ..
+            })
+        ));
+
         let exact_out = gavel(1, 1, 55, 66);
-        match decode(Program::Gavel, &exact_out, &accounts[..9]) {
+        match decode(Program::PlasmaGavel, &exact_out, &accounts[..9]) {
             DecodeOutcome::Decoded(decoded) => {
                 assert_eq!(decoded.class, InstructionClass::Swap(SwapKind::ExactOut));
                 assert_eq!(decoded.accounts.user_source, Some(104));
@@ -1024,11 +1057,11 @@ mod tests {
         let invalid_side = gavel(2, 0, 1, 0);
         let invalid_type = gavel(0, 2, 1, 0);
         assert!(matches!(
-            decode(Program::Gavel, &invalid_side, &accounts[..9]),
+            decode(Program::PlasmaGavel, &invalid_side, &accounts[..9]),
             DecodeOutcome::Malformed(MalformedReason::InvalidInstructionData { offset: 1 })
         ));
         assert!(matches!(
-            decode(Program::Gavel, &invalid_type, &accounts[..9]),
+            decode(Program::PlasmaGavel, &invalid_type, &accounts[..9]),
             DecodeOutcome::Malformed(MalformedReason::InvalidInstructionData { offset: 2 })
         ));
 
@@ -1049,22 +1082,32 @@ mod tests {
     fn private_or_closed_formats_remain_structural_only() {
         let accounts = account_ids();
         let v1 = [SOLFI_SWAP_V1, 1, 2, 3, 4];
+        let solfi = decode(Program::SolFi, &v1, &accounts[..4]);
         assert!(matches!(
-            decode(Program::SolFi, &v1, &accounts[..4]),
+            solfi,
             DecodeOutcome::Decoded(DecodedInstruction {
                 class: InstructionClass::Swap(SwapKind::Unspecified),
                 amounts: Amounts::Unknown,
                 ..
             })
         ));
+        let DecodeOutcome::Decoded(solfi) = solfi else {
+            panic!("structural SolFi v1 must decode");
+        };
+        assert!(solfi.evidence.contains(Evidence::STRUCTURAL_ONLY));
         let step = two_amounts(CLASSIC_SWAP, 1, 0);
+        let step = decode(Program::StepFinanceSwap, &step, &accounts[..6]);
         assert!(matches!(
-            decode(Program::StepFinanceSwap, &step, &accounts[..6]),
+            step,
             DecodeOutcome::Decoded(DecodedInstruction {
                 class: InstructionClass::Swap(SwapKind::Unspecified),
                 amounts: Amounts::Unknown,
                 ..
             })
         ));
+        let DecodeOutcome::Decoded(step) = step else {
+            panic!("structural Step Finance swap must decode");
+        };
+        assert!(step.evidence.contains(Evidence::STRUCTURAL_ONLY));
     }
 }

@@ -1,13 +1,15 @@
 use std::{
     collections::HashMap,
+    ffi::OsString,
     fs::File,
     io::{self, Read},
+    os::unix::ffi::OsStringExt,
     os::unix::fs::{FileExt, MetadataExt},
-    path::{Path, PathBuf},
+    path::{Component, Path, PathBuf},
     sync::{Arc, Mutex},
 };
 
-use rustix::fs::{Mode, OFlags};
+use rustix::fs::{AtFlags, FileType, Mode, OFlags};
 
 use crate::{SourceError, manifest::validate_object_name};
 
@@ -234,6 +236,65 @@ struct PinnedFile {
     identity: UnixFileIdentity,
 }
 
+/// Stable Unix identity for a descriptor-pinned local directory.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct PinnedLocalDirectoryIdentity {
+    pub device: u64,
+    pub inode: u64,
+}
+
+impl PinnedLocalDirectoryIdentity {
+    fn from_metadata(metadata: &std::fs::Metadata) -> Self {
+        Self {
+            device: metadata.dev(),
+            inode: metadata.ino(),
+        }
+    }
+}
+
+/// Type of one entry returned by a descriptor-relative local inventory.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum PinnedLocalEntryKind {
+    RegularFile,
+    Directory,
+    Symlink,
+    Fifo,
+    Socket,
+    CharacterDevice,
+    BlockDevice,
+    Unknown,
+}
+
+impl From<FileType> for PinnedLocalEntryKind {
+    fn from(value: FileType) -> Self {
+        match value {
+            FileType::RegularFile => Self::RegularFile,
+            FileType::Directory => Self::Directory,
+            FileType::Symlink => Self::Symlink,
+            FileType::Fifo => Self::Fifo,
+            FileType::Socket => Self::Socket,
+            FileType::CharacterDevice => Self::CharacterDevice,
+            FileType::BlockDevice => Self::BlockDevice,
+            FileType::Unknown => Self::Unknown,
+        }
+    }
+}
+
+/// One flat root entry observed without following a symbolic link.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct PinnedLocalInventoryEntry {
+    pub name: OsString,
+    pub kind: PinnedLocalEntryKind,
+    pub device: u64,
+    pub inode: u64,
+    pub bytes: u64,
+    pub mode: u32,
+    pub modified_seconds: i64,
+    pub modified_nanoseconds: i64,
+    pub changed_seconds: i64,
+    pub changed_nanoseconds: i64,
+}
+
 /// Random-access source that pins every opened object to one file descriptor.
 ///
 /// This is intended for long-running local archive scans. The first lookup of
@@ -243,19 +304,151 @@ struct PinnedFile {
 #[derive(Debug, Clone)]
 pub struct PinnedLocalRangeSource {
     root: PathBuf,
+    directory: Option<Arc<File>>,
+    directory_identity: Option<PinnedLocalDirectoryIdentity>,
     files: Arc<Mutex<HashMap<String, Option<PinnedFile>>>>,
 }
 
 impl PinnedLocalRangeSource {
+    /// Build the legacy path-rooted source.
+    ///
+    /// New migration and publication code should use [`Self::open_directory`]
+    /// or [`Self::from_directory_file`] to retain a root directory capability.
     pub fn new(root: impl Into<PathBuf>) -> Self {
         Self {
             root: root.into(),
+            directory: None,
+            directory_identity: None,
             files: Arc::new(Mutex::new(HashMap::new())),
         }
     }
 
+    /// Open an absolute local root as a directory capability.
+    ///
+    /// Every path component is opened relative to the preceding directory
+    /// descriptor with `O_NOFOLLOW`. Object lookup then uses `openat` relative
+    /// to the retained root descriptor. This prevents a later pathname swap
+    /// from changing the generation view used by this source.
+    pub fn open_directory(root: impl Into<PathBuf>) -> SourceResult<Self> {
+        let root = root.into();
+        let directory =
+            open_absolute_directory_nofollow(&root).map_err(|source| SourceError::Io {
+                object: root.display().to_string(),
+                source,
+            })?;
+        Self::from_directory_file(root, directory)
+    }
+
+    /// Build a descriptor-rooted source from an already pinned directory.
+    ///
+    /// `root` is retained only for diagnostics and final pathname identity
+    /// revalidation. All object access starts from `directory`.
+    pub fn from_directory_file(root: impl Into<PathBuf>, directory: File) -> SourceResult<Self> {
+        let root = root.into();
+        if !root.is_absolute() {
+            return Err(SourceError::Protocol(
+                "descriptor-rooted local source path must be absolute".to_owned(),
+            ));
+        }
+        let metadata = directory.metadata().map_err(|source| SourceError::Io {
+            object: root.display().to_string(),
+            source,
+        })?;
+        if !metadata.is_dir() {
+            return Err(SourceError::Protocol(format!(
+                "{} is not a directory",
+                root.display()
+            )));
+        }
+        let directory_identity = PinnedLocalDirectoryIdentity::from_metadata(&metadata);
+        Ok(Self {
+            root,
+            directory: Some(Arc::new(directory)),
+            directory_identity: Some(directory_identity),
+            files: Arc::new(Mutex::new(HashMap::new())),
+        })
+    }
+
     pub fn root(&self) -> &Path {
         &self.root
+    }
+
+    /// Return the stable device/inode identity of a descriptor-rooted source.
+    pub fn directory_identity(&self) -> SourceResult<PinnedLocalDirectoryIdentity> {
+        self.directory_identity.ok_or_else(|| {
+            SourceError::Protocol(
+                "local source was not opened with a descriptor-rooted constructor".to_owned(),
+            )
+        })
+    }
+
+    /// Return a cloned descriptor for the pinned source root directory.
+    pub fn directory_file(&self) -> SourceResult<File> {
+        self.descriptor_root()?
+            .try_clone()
+            .map_err(|source| SourceError::Io {
+                object: self.root.display().to_string(),
+                source,
+            })
+    }
+
+    /// Enumerate the flat root through the retained directory descriptor.
+    ///
+    /// Entry metadata comes from `fstatat(..., AT_SYMLINK_NOFOLLOW)`. This
+    /// method does not open or read entry contents and does not add entries to
+    /// the pinned object cache.
+    pub fn inventory(&self) -> SourceResult<Vec<PinnedLocalInventoryEntry>> {
+        let directory = self.descriptor_root()?;
+        let mut stream =
+            rustix::fs::Dir::read_from(directory.as_ref()).map_err(|source| SourceError::Io {
+                object: self.root.display().to_string(),
+                source: io::Error::from(source),
+            })?;
+        let mut entries = Vec::new();
+        for entry in &mut stream {
+            let entry = entry.map_err(|source| SourceError::Io {
+                object: self.root.display().to_string(),
+                source: io::Error::from(source),
+            })?;
+            let name_bytes = entry.file_name().to_bytes();
+            if name_bytes == b"." || name_bytes == b".." {
+                continue;
+            }
+            let name = OsString::from_vec(name_bytes.to_vec());
+            let stat = rustix::fs::statat(
+                directory.as_ref(),
+                name.as_os_str(),
+                AtFlags::SYMLINK_NOFOLLOW,
+            )
+            .map_err(|source| SourceError::Io {
+                object: name.to_string_lossy().into_owned(),
+                source: io::Error::from(source),
+            })?;
+            let bytes = u64::try_from(stat.st_size).map_err(|_| {
+                SourceError::Protocol(format!(
+                    "inventory entry {} has a negative size",
+                    name.to_string_lossy()
+                ))
+            })?;
+            entries.push(PinnedLocalInventoryEntry {
+                name,
+                kind: FileType::from_raw_mode(stat.st_mode).into(),
+                device: stat.st_dev as u64,
+                inode: stat.st_ino as u64,
+                bytes,
+                mode: stat.st_mode as u32,
+                modified_seconds: stat.st_mtime as i64,
+                modified_nanoseconds: stat.st_mtime_nsec as i64,
+                changed_seconds: stat.st_ctime as i64,
+                changed_nanoseconds: stat.st_ctime_nsec as i64,
+            });
+        }
+        entries.sort_by(|left, right| {
+            left.name
+                .as_encoded_bytes()
+                .cmp(right.name.as_encoded_bytes())
+        });
+        Ok(entries)
     }
 
     /// Return a cloned descriptor for one object from this source's pinned
@@ -278,16 +471,39 @@ impl PinnedLocalRangeSource {
         Ok(self.root.join(object))
     }
 
-    fn pinned_file(&self, object: &str) -> SourceResult<Option<PinnedFile>> {
-        self.pinned_file_with(object, |path| {
-            rustix::fs::open(
-                path,
-                OFlags::RDONLY | OFlags::CLOEXEC | OFlags::NOFOLLOW | OFlags::NONBLOCK,
-                Mode::empty(),
+    fn descriptor_root(&self) -> SourceResult<&Arc<File>> {
+        self.directory.as_ref().ok_or_else(|| {
+            SourceError::Protocol(
+                "local source was not opened with a descriptor-rooted constructor".to_owned(),
             )
-            .map(File::from)
-            .map_err(io::Error::from)
         })
+    }
+
+    fn pinned_file(&self, object: &str) -> SourceResult<Option<PinnedFile>> {
+        if let Some(directory) = &self.directory {
+            validate_object_name(object)
+                .map_err(|_| SourceError::InvalidName(object.to_owned()))?;
+            self.pinned_file_with(object, |_| {
+                rustix::fs::openat(
+                    directory.as_ref(),
+                    object,
+                    OFlags::RDONLY | OFlags::CLOEXEC | OFlags::NOFOLLOW | OFlags::NONBLOCK,
+                    Mode::empty(),
+                )
+                .map(File::from)
+                .map_err(io::Error::from)
+            })
+        } else {
+            self.pinned_file_with(object, |path| {
+                rustix::fs::open(
+                    path,
+                    OFlags::RDONLY | OFlags::CLOEXEC | OFlags::NOFOLLOW | OFlags::NONBLOCK,
+                    Mode::empty(),
+                )
+                .map(File::from)
+                .map_err(io::Error::from)
+            })
+        }
     }
 
     fn pinned_file_with(
@@ -352,6 +568,30 @@ impl PinnedLocalRangeSource {
     /// identity, size, and modification/change timestamps, and that its path
     /// still names that same file.
     pub fn verify_unchanged(&self) -> SourceResult<()> {
+        if let (Some(directory), Some(identity)) = (&self.directory, self.directory_identity) {
+            let pinned_metadata = directory.metadata().map_err(|source| SourceError::Io {
+                object: self.root.display().to_string(),
+                source,
+            })?;
+            let reopened =
+                open_absolute_directory_nofollow(&self.root).map_err(|source| SourceError::Io {
+                    object: self.root.display().to_string(),
+                    source,
+                })?;
+            let reopened_metadata = reopened.metadata().map_err(|source| SourceError::Io {
+                object: self.root.display().to_string(),
+                source,
+            })?;
+            if !pinned_metadata.is_dir()
+                || !reopened_metadata.is_dir()
+                || PinnedLocalDirectoryIdentity::from_metadata(&pinned_metadata) != identity
+                || PinnedLocalDirectoryIdentity::from_metadata(&reopened_metadata) != identity
+            {
+                return Err(SourceError::Protocol(
+                    "local source root changed after it was opened".to_owned(),
+                ));
+            }
+        }
         let files: Vec<(String, Option<PinnedFile>)> = self
             .files
             .lock()
@@ -363,18 +603,13 @@ impl PinnedLocalRangeSource {
             .collect();
 
         for (object, pinned) in files {
-            let path = self.path(&object)?;
-            let current = match rustix::fs::open(
-                &path,
-                OFlags::RDONLY | OFlags::CLOEXEC | OFlags::NOFOLLOW | OFlags::NONBLOCK,
-                Mode::empty(),
-            ) {
-                Ok(file) => Some(File::from(file)),
-                Err(error) if error == rustix::io::Errno::NOENT => None,
-                Err(error) => {
+            let current = match self.open_current(&object) {
+                Ok(file) => Some(file),
+                Err(error) if error.kind() == io::ErrorKind::NotFound => None,
+                Err(source) => {
                     return Err(SourceError::Io {
                         object: object.clone(),
-                        source: io::Error::from(error),
+                        source,
                     });
                 }
             };
@@ -411,6 +646,52 @@ impl PinnedLocalRangeSource {
         }
         Ok(())
     }
+
+    fn open_current(&self, object: &str) -> io::Result<File> {
+        validate_object_name(object)
+            .map_err(|message| io::Error::new(io::ErrorKind::InvalidInput, message))?;
+        let flags = OFlags::RDONLY | OFlags::CLOEXEC | OFlags::NOFOLLOW | OFlags::NONBLOCK;
+        if let Some(directory) = &self.directory {
+            rustix::fs::openat(directory.as_ref(), object, flags, Mode::empty())
+                .map(File::from)
+                .map_err(io::Error::from)
+        } else {
+            rustix::fs::open(self.root.join(object), flags, Mode::empty())
+                .map(File::from)
+                .map_err(io::Error::from)
+        }
+    }
+}
+
+fn open_absolute_directory_nofollow(path: &Path) -> io::Result<File> {
+    if !path.is_absolute() {
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidInput,
+            "descriptor-rooted local source path must be absolute",
+        ));
+    }
+    let flags = OFlags::RDONLY | OFlags::DIRECTORY | OFlags::NOFOLLOW | OFlags::CLOEXEC;
+    let mut directory = File::from(
+        rustix::fs::open(Path::new("/"), flags, Mode::empty()).map_err(io::Error::from)?,
+    );
+    for component in path.components() {
+        match component {
+            Component::RootDir => {}
+            Component::Normal(name) => {
+                directory = File::from(
+                    rustix::fs::openat(&directory, name, flags, Mode::empty())
+                        .map_err(io::Error::from)?,
+                );
+            }
+            Component::CurDir | Component::ParentDir | Component::Prefix(_) => {
+                return Err(io::Error::new(
+                    io::ErrorKind::InvalidInput,
+                    "descriptor-rooted local source path must be normalized",
+                ));
+            }
+        }
+    }
+    Ok(directory)
 }
 
 impl RangeSource for PinnedLocalRangeSource {
@@ -671,6 +952,128 @@ mod tests {
         fs::write(&path, b"after!").unwrap();
 
         assert!(source.verify_unchanged().is_err());
+    }
+
+    #[test]
+    fn descriptor_root_rejects_symlink_path_components() {
+        use std::os::unix::fs::symlink;
+
+        let temporary = tempdir().unwrap();
+        let parent = temporary.path().canonicalize().unwrap();
+        let real = parent.join("real");
+        let root = real.join("root");
+        fs::create_dir_all(&root).unwrap();
+        symlink(&real, parent.join("linked-parent")).unwrap();
+        symlink(&root, parent.join("linked-root")).unwrap();
+
+        assert!(PinnedLocalRangeSource::open_directory(parent.join("linked-parent/root")).is_err());
+        assert!(PinnedLocalRangeSource::open_directory(parent.join("linked-root")).is_err());
+    }
+
+    #[test]
+    fn descriptor_root_detects_final_root_swap() {
+        let temporary = tempdir().unwrap();
+        let parent = temporary.path().canonicalize().unwrap();
+        let root = parent.join("root");
+        let moved = parent.join("moved-root");
+        fs::create_dir(&root).unwrap();
+        fs::write(root.join("object.bin"), b"original").unwrap();
+        let source = PinnedLocalRangeSource::open_directory(&root).unwrap();
+        assert_eq!(source.read_range("object.bin", 0, 8).unwrap(), b"original");
+
+        fs::rename(&root, &moved).unwrap();
+        fs::create_dir(&root).unwrap();
+        fs::write(root.join("object.bin"), b"replaced").unwrap();
+
+        assert_eq!(source.read_range("object.bin", 0, 8).unwrap(), b"original");
+        assert!(source.verify_unchanged().is_err());
+    }
+
+    #[test]
+    fn descriptor_root_detects_object_replacement() {
+        let temporary = tempdir().unwrap();
+        let root = temporary.path().canonicalize().unwrap();
+        let object = root.join("object.bin");
+        fs::write(&object, b"original").unwrap();
+        let source = PinnedLocalRangeSource::open_directory(&root).unwrap();
+        let first = source.open_file("object.bin").unwrap();
+        let first_identity = UnixFileIdentity::from_metadata(&first.metadata().unwrap());
+
+        fs::rename(&object, root.join("old.bin")).unwrap();
+        fs::write(&object, b"replaced").unwrap();
+
+        let mut cached = source.open_file("object.bin").unwrap();
+        let cached_identity = UnixFileIdentity::from_metadata(&cached.metadata().unwrap());
+        assert_eq!(
+            (cached_identity.device, cached_identity.inode),
+            (first_identity.device, first_identity.inode)
+        );
+        let mut cached_bytes = Vec::new();
+        cached.read_to_end(&mut cached_bytes).unwrap();
+        assert_eq!(cached_bytes, b"original");
+        assert!(source.verify_unchanged().is_err());
+    }
+
+    #[test]
+    fn descriptor_root_is_the_only_authority_for_late_object_opens() {
+        let temporary = tempdir().unwrap();
+        let parent = temporary.path().canonicalize().unwrap();
+        let root = parent.join("root");
+        let moved = parent.join("moved-root");
+        fs::create_dir(&root).unwrap();
+        fs::write(root.join("late.bin"), b"retained").unwrap();
+        let source = PinnedLocalRangeSource::open_directory(&root).unwrap();
+        let identity = source.directory_identity().unwrap();
+
+        fs::rename(&root, &moved).unwrap();
+        fs::create_dir(&root).unwrap();
+        fs::write(root.join("late.bin"), b"new-root").unwrap();
+
+        assert_eq!(source.directory_identity().unwrap(), identity);
+        assert_eq!(source.read_range("late.bin", 0, 8).unwrap(), b"retained");
+        assert!(source.verify_unchanged().is_err());
+    }
+
+    #[test]
+    fn descriptor_root_inventory_is_flat_and_does_not_follow_symlinks() {
+        use std::os::unix::fs::symlink;
+
+        let temporary = tempdir().unwrap();
+        let root = temporary.path().canonicalize().unwrap();
+        fs::write(root.join("file.bin"), b"bytes").unwrap();
+        fs::create_dir(root.join("directory")).unwrap();
+        fs::write(root.join("directory/nested.bin"), b"nested").unwrap();
+        symlink(root.join("file.bin"), root.join("link.bin")).unwrap();
+        let source = PinnedLocalRangeSource::open_directory(&root).unwrap();
+
+        let inventory = source.inventory().unwrap();
+        let entries = inventory
+            .iter()
+            .map(|entry| (entry.name.to_string_lossy().into_owned(), entry.kind))
+            .collect::<Vec<_>>();
+        assert_eq!(
+            entries,
+            vec![
+                ("directory".to_owned(), PinnedLocalEntryKind::Directory),
+                ("file.bin".to_owned(), PinnedLocalEntryKind::RegularFile),
+                ("link.bin".to_owned(), PinnedLocalEntryKind::Symlink),
+            ]
+        );
+        assert!(inventory.iter().all(|entry| entry.inode != 0));
+        assert!(!entries.iter().any(|(name, _)| name == "nested.bin"));
+    }
+
+    #[test]
+    fn descriptor_root_can_be_built_from_an_existing_directory_file() {
+        let temporary = tempdir().unwrap();
+        let root = temporary.path().canonicalize().unwrap();
+        fs::write(root.join("object.bin"), b"object").unwrap();
+        let directory = File::open(&root).unwrap();
+        let source = PinnedLocalRangeSource::from_directory_file(&root, directory).unwrap();
+
+        assert_eq!(source.read_range("object.bin", 0, 6).unwrap(), b"object");
+        assert_eq!(source.inventory().unwrap().len(), 1);
+        source.verify_unchanged().unwrap();
     }
 
     #[test]

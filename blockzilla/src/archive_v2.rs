@@ -71,7 +71,7 @@ use gxhash::{GxBuildHasher, HashMap as GxHashMap, gxhash128};
 use hashbrown::HashTable;
 use memmap2::{Mmap, MmapOptions};
 use of_car_reader::{
-    CarBlockReader,
+    CarBlockReader, LosslessBlockRead, LosslessBlockReadStats,
     confirmed_block::{Rewards, TransactionStatusMeta},
     genesis::{GenesisAccountEntry, GenesisArchive},
     metadata_decoder::{
@@ -82,9 +82,8 @@ use of_car_reader::{
     node::{decode_entry_hash, is_block_node, is_entry_node},
     reader::CarPayloadRead,
     reconstruct::{
-        Cid36, RawBlockNode, RawDataFrame, RawEntryNode, RawNode, RawRewardsNode,
-        RawTransactionNode, StandaloneDataFrame, decode_raw_node,
-        decode_raw_node_with_data_buffers,
+        Cid36, LosslessCarBlock, RawBlockNode, RawDataFrame, RawEntryNode, RawNode, RawRewardsNode,
+        RawTransactionNode, StandaloneDataFrame,
     },
     versioned_transaction::{VersionedMessage, VersionedTransaction},
 };
@@ -144,17 +143,12 @@ const ARCHIVE_PRE_HOT_MAGIC: &[u8; 8] = b"BZPHOT01";
 const ARCHIVE_PRE_HOT_IO_BUFFER: usize = 8 << 20;
 const ARCHIVE_PRE_HOT_MAX_RECORD_BYTES: usize = 512 << 20;
 const DETAILED_TIMINGS_ENV: &str = "BLOCKZILLA_DETAILED_TIMINGS";
-const FIRST_SEEN_DECODE_WORKERS_MAX: usize = 8;
+const HOT_DECODE_WORKERS_MAX: usize = 8;
 const FIRST_SEEN_ZSTD_PREFETCH_MIB_MAX: usize = 64;
-const FIRST_SEEN_PARALLEL_MIN_TRANSACTIONS: usize = 64;
-const FIRST_SEEN_WORKER_SCRATCH_MAX_RETAINED_BYTES: usize = 32 << 20;
-const FIRST_SEEN_WORKER_TX_SCRATCH_INITIAL_BYTES: usize = 2 << 10;
-const FIRST_SEEN_WORKER_METADATA_SCRATCH_INITIAL_BYTES: usize = 8 << 10;
-const RAW_DATAFRAME_POOL_MAX_RETAINED_BYTES: usize = 256 << 20;
-const RAW_DATAFRAME_POOL_MAX_BUFFER_BYTES: usize = 32 << 20;
-const RAW_DATAFRAME_POOL_MAX_BUFFERS_PER_CLASS: usize = 8_192;
-const RAW_DATAFRAME_POOL_MAX_CLASS_ZERO_BUFFERS: usize = 4_096;
-const RAW_DATAFRAME_POOL_LARGER_CLASS_PROBES: usize = 2;
+const HOT_PARALLEL_MIN_TRANSACTIONS: usize = 64;
+const HOT_WORKER_SCRATCH_MAX_RETAINED_BYTES: usize = 32 << 20;
+const HOT_WORKER_TX_SCRATCH_INITIAL_BYTES: usize = 2 << 10;
+const HOT_WORKER_METADATA_SCRATCH_INITIAL_BYTES: usize = 8 << 10;
 const ARCHIVE_ZSTD_BLOCKS_FILE: &str = "archive-v2-blocks.zstd";
 const ARCHIVE_ZSTD_INDEX_FILE: &str = "archive-v2-blocks.index";
 const ARCHIVE_ZSTD_META_FILE: &str = "archive-v2-meta.wincode";
@@ -609,8 +603,10 @@ pub(crate) fn build(
             &registry_path,
             Some(&registry_counts_path),
             &blockhash_registry_path,
+            None,
             &external_blockhashes,
             None,
+            1,
         )?;
     }
 
@@ -655,125 +651,96 @@ pub(crate) fn build(
         rolling_blockhashes.insert(genesis.genesis_hash, 0, 0)?;
     }
 
-    while let Some(raw) = scanner
-        .next_node_timed(Some(&mut timings))
-        .with_context(|| {
-            format!(
-                "scan hot archive input {} after blocks={} car_entries={}",
-                input.display(),
-                footer.blocks,
-                footer.car_entries
-            )
-        })?
-    {
-        footer.car_entries += 1;
-        footer.car_payload_bytes += raw.payload_len as u64;
-        footer.decoded_node_payload_bytes += raw.payload_len as u64;
+    let mut lossless_block = LosslessCarBlock::default();
+    loop {
+        let read = scanner
+            .next_lossless_block_timed(&mut lossless_block, Some(&mut timings))
+            .with_context(|| {
+                format!(
+                    "scan hot archive input {} after blocks={} car_entries={}",
+                    input.display(),
+                    footer.blocks,
+                    footer.car_entries
+                )
+            })?;
+        add_lossless_read_stats(&mut footer, read.stats);
+        if !read.has_block {
+            break;
+        }
 
         let classify_started = timings.detail_timer();
-        match raw.node {
-            RawNode::Transaction(tx) => {
-                footer.transactions += 1;
-                pending.transactions.push(PendingTx {
-                    tx,
-                    payload_len: raw.payload_len,
-                });
-            }
-            RawNode::Entry(entry) => {
-                footer.entries += 1;
-                pending.entries.push(PendingEntry {
-                    entry,
-                    payload_len: raw.payload_len,
-                });
-            }
-            RawNode::Rewards(rewards) => {
-                footer.rewards += 1;
-                anyhow::ensure!(
-                    pending.rewards.is_none(),
-                    "duplicate rewards node before block"
-                );
-                pending.rewards = Some(PendingRewards {
-                    rewards,
-                    payload_len: raw.payload_len,
-                });
-            }
-            RawNode::DataFrame(frame) => {
-                footer.dataframes += 1;
-                pending.dataframes.insert(frame.cid, frame);
-            }
-            RawNode::Block(block) => {
-                footer.blocks += 1;
-                rolling_blockhashes.prune_for_slot(block.slot)?;
-                timings.classify += classify_started.elapsed();
-                let blockhash_index = block_id as usize + blockhash_id_offset as usize;
-                let previous_blockhash = blockhash_index
-                    .checked_sub(1)
-                    .and_then(|index| blockhashes.get(index))
-                    .copied();
-                let (record, tx_count, sidecar) = build_block_record(
-                    &mut pending,
-                    block,
-                    &key_index,
-                    &rolling_blockhashes,
-                    block_id.saturating_add(blockhash_id_offset),
-                    &mut footer,
-                    &mut timings,
-                    &external_blockhashes,
-                    previous_blockhash,
-                    &mut metadata_zstd,
-                    None,
-                    None,
-                )?;
-                let expected_blockhash = blockhashes.get(blockhash_index).with_context(|| {
-                    format!("missing blockhash registry entry for blockhash id {blockhash_index}")
-                })?;
-                anyhow::ensure!(
-                    sidecar.blockhash == *expected_blockhash,
-                    "blockhash registry mismatch at block_id {} slot {}",
-                    block_id,
-                    pending.last_slot
-                );
-                let encode_started = timings.detail_timer();
-                let record = WincodeArchiveV2Record::Block(record);
-                encode_with_scratch(&record, &mut block_scratch)?;
-                let block_len = u32::try_from(block_scratch.len())
-                    .context("archive v2 frame exceeds u32::MAX")?;
-                writer.write_bytes(&block_scratch)?;
-                writer.write(&WincodeArchiveV2Record::Index(SplitCompactIndexRecord {
-                    slot: pending.last_slot,
-                    block_id,
-                    block_offset,
-                    block_len,
-                    runtime_offset: 0,
-                    runtime_len: 0,
-                    tx_count,
-                }))?;
-                poh_writer.write(&WincodeArchiveV2PohRecord {
-                    block_id,
-                    slot: pending.last_slot,
-                    entries: sidecar.poh_entries,
-                })?;
-                timings.wincode_encode += encode_started.elapsed();
-                let current_block_id = i32::try_from(block_id.saturating_add(blockhash_id_offset))
-                    .context("blockhash id exceeds i32::MAX")?;
-                rolling_blockhashes.insert(
-                    sidecar.blockhash,
-                    current_block_id,
-                    pending.last_slot,
-                )?;
-                block_offset += block_len as u64;
-                block_id = block_id.wrapping_add(1);
-                progress.update_slot(pending.last_slot);
-                progress.update_input_bytes(footer.car_payload_bytes);
-                progress.update(1, tx_count as u64);
-                pending.clear();
-                continue;
-            }
-            RawNode::Subset(_) => footer.subset_nodes_ignored += 1,
-            RawNode::Epoch(_) => footer.epoch_nodes_ignored += 1,
-        }
+        let block = pending.take_lossless_block(&mut lossless_block)?;
+        rolling_blockhashes.prune_for_slot(block.slot)?;
         timings.classify += classify_started.elapsed();
+        let blockhash_index = block_id as usize + blockhash_id_offset as usize;
+        let previous_blockhash = blockhash_index
+            .checked_sub(1)
+            .and_then(|index| blockhashes.get(index))
+            .copied();
+        let (record, tx_count, mut sidecar) = build_block_record(
+            &mut pending,
+            block,
+            &key_index,
+            &rolling_blockhashes,
+            block_id.saturating_add(blockhash_id_offset),
+            &mut footer,
+            &mut timings,
+            &external_blockhashes,
+            previous_blockhash,
+            &mut metadata_zstd,
+            None,
+            None,
+        )?;
+        patch_poh_entry_signature_counts_from_indexed_transactions(
+            &mut sidecar.poh_entries,
+            &record.txs,
+            &mut pending.poh_signature_counts,
+            archive_transaction_index_and_signature_count,
+        )
+        .with_context(|| format!("slot {} PoH entry signature counts", pending.last_slot))?;
+        let expected_blockhash = blockhashes.get(blockhash_index).with_context(|| {
+            format!("missing blockhash registry entry for blockhash id {blockhash_index}")
+        })?;
+        anyhow::ensure!(
+            sidecar.blockhash == *expected_blockhash,
+            "blockhash registry mismatch at block_id {} slot {}",
+            block_id,
+            pending.last_slot
+        );
+        let encode_started = timings.detail_timer();
+        let record = WincodeArchiveV2Record::Block(record);
+        encode_with_scratch(&record, &mut block_scratch)?;
+        let block_len =
+            u32::try_from(block_scratch.len()).context("archive v2 frame exceeds u32::MAX")?;
+        writer.write_bytes(&block_scratch)?;
+        writer.write(&WincodeArchiveV2Record::Index(SplitCompactIndexRecord {
+            slot: pending.last_slot,
+            block_id,
+            block_offset,
+            block_len,
+            runtime_offset: 0,
+            runtime_len: 0,
+            tx_count,
+        }))?;
+        poh_writer.write(&WincodeArchiveV2PohRecord {
+            block_id,
+            slot: pending.last_slot,
+            entries: sidecar.poh_entries,
+        })?;
+        timings.wincode_encode += encode_started.elapsed();
+        let current_block_id = i32::try_from(block_id.saturating_add(blockhash_id_offset))
+            .context("blockhash id exceeds i32::MAX")?;
+        rolling_blockhashes.insert(sidecar.blockhash, current_block_id, pending.last_slot)?;
+        block_offset += block_len as u64;
+        block_id = block_id.wrapping_add(1);
+        progress.update_slot(pending.last_slot);
+        progress.update_input_bytes(footer.car_payload_bytes);
+        progress.update(1, tx_count as u64);
+        pending.return_lossless_block(&mut lossless_block)?;
     }
+
+    lossless_block.release_reusable_data_buffers();
+    drop(lossless_block);
 
     let encode_started = timings.detail_timer();
     writer.write(&WincodeArchiveV2Record::Footer(footer.clone()))?;
@@ -831,10 +798,15 @@ pub(crate) fn build_hot_blocks(
     max_blocks: Option<u64>,
     resume: bool,
     include_access: bool,
+    decode_workers: usize,
 ) -> Result<()> {
     anyhow::ensure!(
         level >= 0,
         "zstd compression level must be non-negative, got {level}"
+    );
+    anyhow::ensure!(
+        (1..=HOT_DECODE_WORKERS_MAX).contains(&decode_workers),
+        "hot-block decode workers must be in 1..={HOT_DECODE_WORKERS_MAX}, got {decode_workers}"
     );
     std::fs::create_dir_all(output_dir)
         .with_context(|| format!("create output dir {}", output_dir.display()))?;
@@ -879,8 +851,10 @@ pub(crate) fn build_hot_blocks(
             &registry_path,
             Some(&registry_counts_path),
             &blockhash_registry_path,
+            None,
             &external_blockhashes,
             max_blocks,
+            decode_workers,
         )?;
     }
 
@@ -967,7 +941,7 @@ pub(crate) fn build_hot_blocks(
     let mut footer = WincodeArchiveV2Footer::default();
     let mut timings = ArchiveV2Timings::from_env();
     info!(
-        "Archive V2 registry-reuse async ordered zstd writer enabled (two-buffer pipeline, include_access={include_access})"
+        "Archive V2 registry-reuse pipeline enabled (decode_workers={decode_workers}, ordered_zstd_buffers=2, include_access={include_access})"
     );
     let mut async_blocks_writer = Some(OrderedAsyncBlockWriter::start(
         blocks_file,
@@ -993,205 +967,177 @@ pub(crate) fn build_hot_blocks(
         GxHashMap::with_hasher(GxBuildHasher::default());
     let mut vote_hashes = VoteHashRegistryBuilder::default();
     let mut metadata_zstd = ZstdReusableDecoder::new();
+    let mut parallel_tx_decoder = if decode_workers > 1 {
+        Some(HotTxDecodePool::new(decode_workers)?)
+    } else {
+        None
+    };
     let started = Instant::now();
 
-    while let Some(raw) = scanner.next_node_timed(Some(&mut timings))? {
-        footer.car_entries += 1;
-        footer.car_payload_bytes += raw.payload_len as u64;
-        footer.decoded_node_payload_bytes += raw.payload_len as u64;
-
-        let classify_started = timings.detail_timer();
-        match raw.node {
-            RawNode::Transaction(tx) => {
-                footer.transactions += 1;
-                pending.transactions.push(PendingTx {
-                    tx,
-                    payload_len: raw.payload_len,
-                });
-            }
-            RawNode::Entry(entry) => {
-                footer.entries += 1;
-                pending.entries.push(PendingEntry {
-                    entry,
-                    payload_len: raw.payload_len,
-                });
-            }
-            RawNode::Rewards(rewards) => {
-                footer.rewards += 1;
-                anyhow::ensure!(
-                    pending.rewards.is_none(),
-                    "duplicate rewards node before block"
-                );
-                pending.rewards = Some(PendingRewards {
-                    rewards,
-                    payload_len: raw.payload_len,
-                });
-            }
-            RawNode::DataFrame(frame) => {
-                footer.dataframes += 1;
-                pending.dataframes.insert(frame.cid, frame);
-            }
-            RawNode::Block(block) => {
-                footer.blocks += 1;
-                rolling_blockhashes.prune_for_slot(block.slot)?;
-                timings.classify += classify_started.elapsed();
-                let blockhash_index = block_id as usize + blockhash_id_offset as usize;
-                let previous_blockhash = blockhash_index
-                    .checked_sub(1)
-                    .and_then(|index| blockhashes.get(index))
-                    .copied();
-                let (mut record, tx_count, sidecar) = build_block_record(
-                    &mut pending,
-                    block,
-                    &key_index,
-                    &rolling_blockhashes,
-                    block_id.saturating_add(blockhash_id_offset),
-                    &mut footer,
-                    &mut timings,
-                    &external_blockhashes,
-                    previous_blockhash,
-                    &mut metadata_zstd,
-                    None,
-                    None,
-                )?;
-                let slot = pending.last_slot;
-                let block_time = record.header.compact.block_time;
-                let expected_blockhash = blockhashes.get(blockhash_index).with_context(|| {
-                    format!("missing blockhash registry entry for blockhash id {blockhash_index}")
-                })?;
-                anyhow::ensure!(
-                    sidecar.blockhash == *expected_blockhash,
-                    "blockhash registry mismatch at block_id {} slot {}",
-                    block_id,
-                    slot
-                );
-
-                let encode_started = timings.detail_timer();
-                vote_hashes.ensure_block(block_id);
-                let block_shredding = std::mem::take(&mut record.header.compact.shredding);
-                access_signature_bytes.clear();
-                let block_signature_bytes = if include_access {
-                    Some(&mut access_signature_bytes)
-                } else {
-                    None
-                };
-                let (hot_block, block_signature_count) = hot_block_from_archive_block(
-                    record,
-                    &known_program_ids,
-                    &slot_to_block_id,
-                    &mut vote_hashes,
-                    Some(&mut signatures_writer as &mut dyn Write),
-                    block_signature_bytes,
-                    &mut hot_block_buffers,
-                    &mut timings,
-                )
-                .with_context(|| format!("slot {slot} hot block encode"))?;
-                block_bytes.clear();
-                let block_serialize_started = timings.detail_timer();
-                wincode::config::serialize_into(
-                    &mut block_bytes,
-                    &hot_block,
-                    wincode_leb128_config(),
-                )?;
-                timings.hot_block_serialize += block_serialize_started.elapsed();
-                block_bytes = async_blocks_writer
-                    .as_mut()
-                    .context("ordered hot-block writer is missing")?
-                    .submit(OrderedBlockWriteJob {
-                        block_bytes,
-                        block_id,
-                        slot,
-                        tx_count,
-                        first_tx_ordinal,
-                        first_signature_ordinal,
-                        signature_count: block_signature_count,
-                    })?;
-                let poh_started = timings.detail_timer();
-                poh_writer.write(&WincodeArchiveV2PohRecord {
-                    block_id,
-                    slot,
-                    entries: sidecar.poh_entries,
-                })?;
-                shredding_writer.write(&WincodeArchiveV2ShreddingRecord {
-                    block_id,
-                    slot,
-                    shredding: block_shredding,
-                })?;
-                if let Some(index) = blockhash_index_v3.as_mut() {
-                    index.push(slot, &sidecar.blockhash, block_time)?;
-                }
-                timings.hot_poh_write += poh_started.elapsed();
-                if let (Some(access_writer), Some(store)) =
-                    (access_writer.as_mut(), access_store.as_ref())
-                {
-                    access_bytes.clear();
-                    let access_blob = build_archive_v2_block_access_blob(
-                        &hot_block,
-                        &store.keys,
-                        &blockhashes,
-                        &previous_tail,
-                        &access_signature_bytes,
-                        &vote_hashes.rows,
-                    )
-                    .with_context(|| format!("slot {slot} block access sidecar"))?;
-                    wincode::config::serialize_into(
-                        &mut access_bytes,
-                        &access_blob,
-                        wincode_leb128_config(),
-                    )?;
-                    let access_len =
-                        checked_archive_v2_block_access_frame_len(access_bytes.len(), slot)?;
-                    access_writer
-                        .write_all(&access_bytes)
-                        .with_context(|| format!("write {}", access_path.display()))?;
-                    access_rows.push(ArchiveV2BlockAccessIndexRow {
-                        block_id,
-                        slot,
-                        access_offset,
-                        access_len,
-                        tx_count,
-                        signature_count: block_signature_count,
-                    });
-                    access_offset += access_len as u64;
-                    access_file_bytes += access_len as u64;
-                }
-                timings.wincode_encode += encode_started.elapsed();
-                hot_block_buffers.recycle(hot_block);
-
-                first_tx_ordinal += tx_count as u64;
-                first_signature_ordinal += block_signature_count as u64;
-
-                let current_block_id = i32::try_from(block_id.saturating_add(blockhash_id_offset))
-                    .context("blockhash id exceeds i32::MAX")?;
-                rolling_blockhashes.insert(sidecar.blockhash, current_block_id, slot)?;
-                slot_to_block_id.insert(slot, block_id);
-                block_id = block_id.wrapping_add(1);
-                progress.update_slot(slot);
-                progress.update_input_bytes(footer.car_payload_bytes);
-                progress.update(1, tx_count as u64);
-                pending.clear();
-                trim_hot_memory(
-                    block_id,
-                    &mut block_bytes,
-                    &mut compressed_buf,
-                    &mut access_bytes,
-                    include_access.then_some(&mut access_signature_bytes),
-                );
-                hot_block_buffers.trim();
-                if max_blocks.is_some_and(|limit| u64::from(block_id) >= limit) {
-                    break;
-                }
-                continue;
-            }
-            RawNode::Subset(_) => footer.subset_nodes_ignored += 1,
-            RawNode::Epoch(_) => footer.epoch_nodes_ignored += 1,
+    let mut lossless_block = LosslessCarBlock::default();
+    loop {
+        let read = scanner.next_lossless_block_timed(&mut lossless_block, Some(&mut timings))?;
+        add_lossless_read_stats(&mut footer, read.stats);
+        if !read.has_block {
+            break;
         }
+        let classify_started = timings.detail_timer();
+        let block = pending.take_lossless_block(&mut lossless_block)?;
+        rolling_blockhashes.prune_for_slot(block.slot)?;
         timings.classify += classify_started.elapsed();
+        let blockhash_index = block_id as usize + blockhash_id_offset as usize;
+        let previous_blockhash = blockhash_index
+            .checked_sub(1)
+            .and_then(|index| blockhashes.get(index))
+            .copied();
+        let (mut record, tx_count, mut sidecar) = build_block_record(
+            &mut pending,
+            block,
+            &key_index,
+            &rolling_blockhashes,
+            block_id.saturating_add(blockhash_id_offset),
+            &mut footer,
+            &mut timings,
+            &external_blockhashes,
+            previous_blockhash,
+            &mut metadata_zstd,
+            parallel_tx_decoder.as_mut(),
+            None,
+        )?;
+        let slot = pending.last_slot;
+        let block_time = record.header.compact.block_time;
+        let expected_blockhash = blockhashes.get(blockhash_index).with_context(|| {
+            format!("missing blockhash registry entry for blockhash id {blockhash_index}")
+        })?;
+        anyhow::ensure!(
+            sidecar.blockhash == *expected_blockhash,
+            "blockhash registry mismatch at block_id {} slot {}",
+            block_id,
+            slot
+        );
+
+        let encode_started = timings.detail_timer();
+        vote_hashes.ensure_block(block_id);
+        let block_shredding = std::mem::take(&mut record.header.compact.shredding);
+        access_signature_bytes.clear();
+        let block_signature_bytes = if include_access {
+            Some(&mut access_signature_bytes)
+        } else {
+            None
+        };
+        let (hot_block, block_signature_count) = hot_block_from_archive_block(
+            record,
+            &known_program_ids,
+            &slot_to_block_id,
+            &mut vote_hashes,
+            Some(&mut signatures_writer as &mut dyn Write),
+            block_signature_bytes,
+            &mut hot_block_buffers,
+            &mut timings,
+        )
+        .with_context(|| format!("slot {slot} hot block encode"))?;
+        patch_poh_entry_signature_counts(&mut sidecar.poh_entries, &hot_block.tx_rows)
+            .with_context(|| format!("slot {slot} PoH entry signature counts"))?;
+        block_bytes.clear();
+        let block_serialize_started = timings.detail_timer();
+        wincode::config::serialize_into(&mut block_bytes, &hot_block, wincode_leb128_config())?;
+        timings.hot_block_serialize += block_serialize_started.elapsed();
+        block_bytes = async_blocks_writer
+            .as_mut()
+            .context("ordered hot-block writer is missing")?
+            .submit(OrderedBlockWriteJob {
+                block_bytes,
+                block_id,
+                slot,
+                tx_count,
+                first_tx_ordinal,
+                first_signature_ordinal,
+                signature_count: block_signature_count,
+            })?;
+        let poh_started = timings.detail_timer();
+        poh_writer.write(&WincodeArchiveV2PohRecord {
+            block_id,
+            slot,
+            entries: sidecar.poh_entries,
+        })?;
+        shredding_writer.write(&WincodeArchiveV2ShreddingRecord {
+            block_id,
+            slot,
+            shredding: block_shredding,
+        })?;
+        if let Some(index) = blockhash_index_v3.as_mut() {
+            index.push(slot, &sidecar.blockhash, block_time)?;
+        }
+        timings.hot_poh_write += poh_started.elapsed();
+        if let (Some(access_writer), Some(store)) = (access_writer.as_mut(), access_store.as_ref())
+        {
+            access_bytes.clear();
+            let access_blob = build_archive_v2_block_access_blob(
+                &hot_block,
+                &store.keys,
+                &blockhashes,
+                &previous_tail,
+                &access_signature_bytes,
+                &vote_hashes.rows,
+            )
+            .with_context(|| format!("slot {slot} block access sidecar"))?;
+            wincode::config::serialize_into(
+                &mut access_bytes,
+                &access_blob,
+                wincode_leb128_config(),
+            )?;
+            let access_len = checked_archive_v2_block_access_frame_len(access_bytes.len(), slot)?;
+            access_writer
+                .write_all(&access_bytes)
+                .with_context(|| format!("write {}", access_path.display()))?;
+            access_rows.push(ArchiveV2BlockAccessIndexRow {
+                block_id,
+                slot,
+                access_offset,
+                access_len,
+                tx_count,
+                signature_count: block_signature_count,
+            });
+            access_offset += access_len as u64;
+            access_file_bytes += access_len as u64;
+        }
+        timings.wincode_encode += encode_started.elapsed();
+        hot_block_buffers.recycle(hot_block);
+
+        first_tx_ordinal += tx_count as u64;
+        first_signature_ordinal += block_signature_count as u64;
+
+        let current_block_id = i32::try_from(block_id.saturating_add(blockhash_id_offset))
+            .context("blockhash id exceeds i32::MAX")?;
+        rolling_blockhashes.insert(sidecar.blockhash, current_block_id, slot)?;
+        slot_to_block_id.insert(slot, block_id);
+        block_id = block_id.wrapping_add(1);
+        progress.update_slot(slot);
+        progress.update_input_bytes(footer.car_payload_bytes);
+        progress.update(1, tx_count as u64);
+        pending.return_lossless_block(&mut lossless_block)?;
+        trim_hot_memory(
+            block_id,
+            &mut block_bytes,
+            &mut compressed_buf,
+            &mut access_bytes,
+            include_access.then_some(&mut access_signature_bytes),
+        );
+        hot_block_buffers.trim();
+        if max_blocks.is_some_and(|limit| u64::from(block_id) >= limit) {
+            break;
+        }
     }
+
+    lossless_block.release_reusable_data_buffers();
+    drop(lossless_block);
 
     // Close the CAR before joining the writer so its input buffers are not
     // retained during output finalization.
     drop(scanner);
+    // Release decoder threads and their retained metadata/zstd scratch before
+    // output finalization.
+    drop(parallel_tx_decoder);
     let writer_summary = async_blocks_writer
         .take()
         .context("ordered hot-block writer is missing at finalization")?
@@ -1240,12 +1186,13 @@ pub(crate) fn build_hot_blocks(
         0.0
     };
     info!(
-        "Archive V2 hot-block build complete in {:.2}s: blocks={} txs={} signatures={} level={} max_blocks={:?} include_access={} uncompressed_bytes={} compressed_bytes={} access_bytes={} ratio_pct={:.2} compact_vote_ix={} vote_bank_hash_refs={} vote_bank_hash_raw={} vote_bank_hash_conflict_raw={} vote_block_id_refs={} vote_block_id_raw={} vote_block_id_zero={} vote_block_id_conflict_raw={} blocks_file={} index={} access={} access_index={} meta={} signatures={} vote_hash_registry={} poh={} shredding={}",
+        "Archive V2 hot-block build complete in {:.2}s: blocks={} txs={} signatures={} level={} decode_workers={} max_blocks={:?} include_access={} uncompressed_bytes={} compressed_bytes={} access_bytes={} ratio_pct={:.2} compact_vote_ix={} vote_bank_hash_refs={} vote_bank_hash_raw={} vote_bank_hash_conflict_raw={} vote_block_id_refs={} vote_block_id_raw={} vote_block_id_zero={} vote_block_id_conflict_raw={} blocks_file={} index={} access={} access_index={} meta={} signatures={} vote_hash_registry={} poh={} shredding={}",
         elapsed,
         rows.len(),
         first_tx_ordinal,
         first_signature_ordinal,
         level,
+        decode_workers,
         max_blocks,
         include_access,
         uncompressed_bytes,
@@ -1279,12 +1226,13 @@ pub(crate) fn build_hot_blocks(
         shredding_path.display()
     );
     info!(
-        "Archive V2 hot timings: scan/decode_node={:.3}s classify={:.3}s dataframe_assemble={:.3}s tx_decode_compact={:.3}s metadata_decode_compact={:.3}s rewards_decode_compact={:.3}s hot_message_build={:.3}s hot_message_encode={:.3}s hot_metadata_encode={:.3}s hot_signature_write={:.3}s hot_block_serialize={:.3}s hot_zstd_compress={:.3}s hot_block_write={:.3}s hot_poh_write={:.3}s total_hot_encode_scope={:.3}s",
+        "Archive V2 hot timings: scan/decode_node={:.3}s classify={:.3}s dataframe_assemble={:.3}s tx_decode_compact={:.3}s metadata_decode_compact={:.3}s parallel_decode_wall={:.3}s rewards_decode_compact={:.3}s hot_message_build={:.3}s hot_message_encode={:.3}s hot_metadata_encode={:.3}s hot_signature_write={:.3}s hot_block_serialize={:.3}s hot_zstd_compress={:.3}s hot_block_write={:.3}s hot_poh_write={:.3}s total_hot_encode_scope={:.3}s",
         timings.scan_decode_node.as_secs_f64(),
         timings.classify.as_secs_f64(),
         timings.dataframe_assemble.as_secs_f64(),
         timings.tx_decode_compact.as_secs_f64(),
         timings.metadata_decode_compact.as_secs_f64(),
+        timings.parallel_decode_wall.as_secs_f64(),
         timings.rewards_decode_compact.as_secs_f64(),
         timings.hot_message_build.as_secs_f64(),
         timings.hot_message_encode.as_secs_f64(),
@@ -1537,8 +1485,8 @@ pub(crate) fn build_hot_blocks_first_seen(
         "first-seen registry capacity must be non-zero"
     );
     anyhow::ensure!(
-        (1..=FIRST_SEEN_DECODE_WORKERS_MAX).contains(&decode_workers),
-        "first-seen decode workers must be in 1..={FIRST_SEEN_DECODE_WORKERS_MAX}, got {decode_workers}"
+        (1..=HOT_DECODE_WORKERS_MAX).contains(&decode_workers),
+        "first-seen decode workers must be in 1..={HOT_DECODE_WORKERS_MAX}, got {decode_workers}"
     );
     anyhow::ensure!(
         car_zstd_prefetch_mib <= FIRST_SEEN_ZSTD_PREFETCH_MIB_MAX,
@@ -1727,7 +1675,7 @@ pub(crate) fn build_hot_blocks_first_seen(
     let mut footer = WincodeArchiveV2Footer::default();
     let mut timings = ArchiveV2Timings::from_env();
     let mut parallel_tx_decoder = if decode_workers > 1 {
-        Some(FirstSeenTxDecodePool::new(decode_workers)?)
+        Some(HotTxDecodePool::new(decode_workers)?)
     } else {
         None
     };
@@ -1765,74 +1713,42 @@ pub(crate) fn build_hot_blocks_first_seen(
     let mut metadata_zstd = ZstdReusableDecoder::new();
     let started = Instant::now();
 
-    while let Some(raw) = scanner.next_node_timed_with_data_buffers(
-        &mut pending.raw_dataframe_payloads,
-        Some(&mut timings),
-    )? {
-        footer.car_entries += 1;
-        footer.car_payload_bytes += raw.payload_len as u64;
-        footer.decoded_node_payload_bytes += raw.payload_len as u64;
-
+    let mut lossless_block = LosslessCarBlock::default();
+    loop {
+        let read = scanner.next_lossless_block_timed(&mut lossless_block, Some(&mut timings))?;
+        add_lossless_read_stats(&mut footer, read.stats);
+        if !read.has_block {
+            break;
+        }
         let classify_started = timings.detail_timer();
-        match raw.node {
-            RawNode::Transaction(tx) => {
-                footer.transactions += 1;
-                pending.transactions.push(PendingTx {
-                    tx,
-                    payload_len: raw.payload_len,
-                });
-            }
-            RawNode::Entry(entry) => {
-                footer.entries += 1;
-                pending.entries.push(PendingEntry {
-                    entry,
-                    payload_len: raw.payload_len,
-                });
-            }
-            RawNode::Rewards(rewards) => {
-                footer.rewards += 1;
-                anyhow::ensure!(
-                    pending.rewards.is_none(),
-                    "duplicate rewards node before block"
-                );
-                pending.rewards = Some(PendingRewards {
-                    rewards,
-                    payload_len: raw.payload_len,
-                });
-            }
-            RawNode::DataFrame(frame) => {
-                footer.dataframes += 1;
-                pending.insert_dataframe_recycling(frame)?;
-            }
-            RawNode::Block(block) => {
-                footer.blocks += 1;
-                rolling_blockhashes.prune_for_slot(block.slot)?;
-                timings.classify += classify_started.elapsed();
-                let previous_blockhash =
-                    last_blockhash.or_else(|| previous_tail.last().map(|previous| previous.hash));
-                let (mut record, tx_count, mut sidecar) = build_block_record(
-                    &mut pending,
-                    block,
-                    &raw_key_index,
-                    &rolling_blockhashes,
-                    block_id,
-                    &mut footer,
-                    &mut timings,
-                    &external_blockhashes,
-                    previous_blockhash,
-                    &mut metadata_zstd,
-                    parallel_tx_decoder.as_mut(),
-                    Some(&mut first_seen_signatures),
-                )?;
-                let slot = pending.last_slot;
-                let block_time = record.header.compact.block_time;
+        let block = pending.take_lossless_block(&mut lossless_block)?;
+        rolling_blockhashes.prune_for_slot(block.slot)?;
+        timings.classify += classify_started.elapsed();
+        let previous_blockhash =
+            last_blockhash.or_else(|| previous_tail.last().map(|previous| previous.hash));
+        let (mut record, tx_count, mut sidecar) = build_block_record(
+            &mut pending,
+            block,
+            &raw_key_index,
+            &rolling_blockhashes,
+            block_id,
+            &mut footer,
+            &mut timings,
+            &external_blockhashes,
+            previous_blockhash,
+            &mut metadata_zstd,
+            parallel_tx_decoder.as_mut(),
+            Some(&mut first_seen_signatures),
+        )?;
+        let slot = pending.last_slot;
+        let block_time = record.header.compact.block_time;
 
-                let intern_started = timings.detail_timer();
-                first_seen_access_pubkeys.clear();
-                if include_access {
-                    first_seen_access_pubkey_seen.clear();
-                }
-                let intern_stats = crate::pre_hot::intern_block_pubkeys(&mut record, |key| {
+        let intern_started = timings.detail_timer();
+        first_seen_access_pubkeys.clear();
+        if include_access {
+            first_seen_access_pubkey_seen.clear();
+        }
+        let intern_stats = crate::pre_hot::intern_block_pubkeys(&mut record, |key| {
                     let id = registry.intern(key)?;
                     if include_access {
                         match first_seen_access_pubkey_seen.entry(id) {
@@ -1854,127 +1770,120 @@ pub(crate) fn build_hot_blocks_first_seen(
                     Ok(id)
                 })
                 .with_context(|| format!("slot {slot} intern first-seen pubkeys"))?;
-                anyhow::ensure!(
-                    intern_stats.raw_remaining == 0
-                        && intern_stats.rekeyed == intern_stats.raw_seen,
-                    "slot {slot} first-seen traversal left {} of {} pubkeys raw",
-                    intern_stats.raw_remaining,
-                    intern_stats.raw_seen
-                );
-                raw_pubkey_refs = raw_pubkey_refs
-                    .checked_add(intern_stats.raw_seen)
-                    .context("first-seen traversal reference count overflow")?;
-                if include_access {
-                    normalize_first_seen_access_pubkeys(&mut first_seen_access_pubkeys)
-                        .with_context(|| {
-                            format!("slot {slot} validate first-seen access pubkeys")
-                        })?;
-                }
-                timings.metadata_pubkey_compact += intern_started.elapsed();
+        anyhow::ensure!(
+            intern_stats.raw_remaining == 0 && intern_stats.rekeyed == intern_stats.raw_seen,
+            "slot {slot} first-seen traversal left {} of {} pubkeys raw",
+            intern_stats.raw_remaining,
+            intern_stats.raw_seen
+        );
+        raw_pubkey_refs = raw_pubkey_refs
+            .checked_add(intern_stats.raw_seen)
+            .context("first-seen traversal reference count overflow")?;
+        if include_access {
+            normalize_first_seen_access_pubkeys(&mut first_seen_access_pubkeys)
+                .with_context(|| format!("slot {slot} validate first-seen access pubkeys"))?;
+        }
+        timings.metadata_pubkey_compact += intern_started.elapsed();
 
-                known_program_ids.refresh_from_first_seen(&registry);
-                vote_hashes.ensure_block(block_id);
-                let block_shredding = std::mem::take(&mut record.header.compact.shredding);
-                let (hot_block, block_signature_count) = hot_block_from_first_seen_archive_block(
-                    record,
-                    &first_seen_signatures,
-                    &known_program_ids,
-                    &slot_to_block_id,
-                    &mut vote_hashes,
-                    Some(&mut signatures_writer as &mut dyn Write),
-                    &mut hot_block_buffers,
-                    &mut timings,
-                )
-                .with_context(|| format!("slot {slot} first-seen hot block encode"))?;
-                first_seen_signatures.record_block_write();
-                patch_poh_entry_signature_counts(&mut sidecar.poh_entries, &hot_block.tx_rows)
-                    .with_context(|| format!("slot {slot} PoH entry signature counts"))?;
+        known_program_ids.refresh_from_first_seen(&registry);
+        vote_hashes.ensure_block(block_id);
+        let block_shredding = std::mem::take(&mut record.header.compact.shredding);
+        let (hot_block, block_signature_count) = hot_block_from_first_seen_archive_block(
+            record,
+            &first_seen_signatures,
+            &known_program_ids,
+            &slot_to_block_id,
+            &mut vote_hashes,
+            Some(&mut signatures_writer as &mut dyn Write),
+            &mut hot_block_buffers,
+            &mut timings,
+        )
+        .with_context(|| format!("slot {slot} first-seen hot block encode"))?;
+        first_seen_signatures.record_block_write();
+        patch_poh_entry_signature_counts(&mut sidecar.poh_entries, &hot_block.tx_rows)
+            .with_context(|| format!("slot {slot} PoH entry signature counts"))?;
 
-                block_bytes.clear();
-                let serialize_started = timings.detail_timer();
-                wincode::config::serialize_into(
-                    &mut block_bytes,
-                    &hot_block,
-                    wincode_leb128_config(),
-                )?;
-                timings.hot_block_serialize += serialize_started.elapsed();
-                let uncompressed_len = u32::try_from(block_bytes.len())
-                    .context("first-seen hot archive block exceeds u32::MAX")?;
-                if let Some(async_writer) = async_blocks_writer.as_mut() {
-                    block_bytes = async_writer.submit(OrderedBlockWriteJob {
-                        block_bytes,
-                        block_id,
-                        slot,
-                        tx_count,
-                        first_tx_ordinal,
-                        first_signature_ordinal,
-                        signature_count: block_signature_count,
-                    })?;
-                } else {
-                    let compress_bound = zstd::zstd_safe::compress_bound(block_bytes.len());
-                    if compressed_buf.capacity() < compress_bound {
-                        compressed_buf.reserve(compress_bound.saturating_sub(compressed_buf.len()));
-                        timings.hot_zstd_buffer_reserves += 1;
-                    }
-                    timings.hot_zstd_buffer_capacity_max = timings
-                        .hot_zstd_buffer_capacity_max
-                        .max(compressed_buf.capacity());
-                    let compress_started = timings.detail_timer();
-                    compressor
-                        .as_mut()
-                        .context("missing synchronous first-seen zstd compressor")?
-                        .compress_to_buffer(&block_bytes, &mut compressed_buf)
-                        .with_context(|| format!("zstd compress first-seen block_id {block_id}"))?;
-                    timings.hot_zstd_compress += compress_started.elapsed();
-                    let compressed_len = u32::try_from(compressed_buf.len())
-                        .context("compressed first-seen hot block exceeds u32::MAX")?;
-                    let write_started = timings.detail_timer();
-                    blocks_writer
-                        .as_mut()
-                        .context("missing synchronous first-seen blocks writer")?
-                        .write_all(&compressed_buf)
-                        .with_context(|| format!("write {}", blocks_path.display()))?;
-                    timings.hot_block_write += write_started.elapsed();
+        block_bytes.clear();
+        let serialize_started = timings.detail_timer();
+        wincode::config::serialize_into(&mut block_bytes, &hot_block, wincode_leb128_config())?;
+        timings.hot_block_serialize += serialize_started.elapsed();
+        let uncompressed_len = u32::try_from(block_bytes.len())
+            .context("first-seen hot archive block exceeds u32::MAX")?;
+        if let Some(async_writer) = async_blocks_writer.as_mut() {
+            block_bytes = async_writer.submit(OrderedBlockWriteJob {
+                block_bytes,
+                block_id,
+                slot,
+                tx_count,
+                first_tx_ordinal,
+                first_signature_ordinal,
+                signature_count: block_signature_count,
+            })?;
+        } else {
+            let compress_bound = zstd::zstd_safe::compress_bound(block_bytes.len());
+            if compressed_buf.capacity() < compress_bound {
+                compressed_buf.reserve(compress_bound.saturating_sub(compressed_buf.len()));
+                timings.hot_zstd_buffer_reserves += 1;
+            }
+            timings.hot_zstd_buffer_capacity_max = timings
+                .hot_zstd_buffer_capacity_max
+                .max(compressed_buf.capacity());
+            let compress_started = timings.detail_timer();
+            compressor
+                .as_mut()
+                .context("missing synchronous first-seen zstd compressor")?
+                .compress_to_buffer(&block_bytes, &mut compressed_buf)
+                .with_context(|| format!("zstd compress first-seen block_id {block_id}"))?;
+            timings.hot_zstd_compress += compress_started.elapsed();
+            let compressed_len = u32::try_from(compressed_buf.len())
+                .context("compressed first-seen hot block exceeds u32::MAX")?;
+            let write_started = timings.detail_timer();
+            blocks_writer
+                .as_mut()
+                .context("missing synchronous first-seen blocks writer")?
+                .write_all(&compressed_buf)
+                .with_context(|| format!("write {}", blocks_path.display()))?;
+            timings.hot_block_write += write_started.elapsed();
 
-                    rows.push(ArchiveV2HotBlockIndexRow {
-                        block_id,
-                        slot,
-                        compressed_offset: blob_offset,
-                        compressed_len,
-                        uncompressed_len,
-                        tx_count,
-                        first_tx_ordinal,
-                        first_signature_ordinal,
-                        signature_count: block_signature_count,
-                    });
-                    blob_offset += u64::from(compressed_len);
-                    uncompressed_bytes += u64::from(uncompressed_len);
-                    compressed_bytes += u64::from(compressed_len);
-                }
+            rows.push(ArchiveV2HotBlockIndexRow {
+                block_id,
+                slot,
+                compressed_offset: blob_offset,
+                compressed_len,
+                uncompressed_len,
+                tx_count,
+                first_tx_ordinal,
+                first_signature_ordinal,
+                signature_count: block_signature_count,
+            });
+            blob_offset += u64::from(compressed_len);
+            uncompressed_bytes += u64::from(uncompressed_len);
+            compressed_bytes += u64::from(compressed_len);
+        }
 
-                let poh_started = timings.detail_timer();
-                poh_writer.write(&WincodeArchiveV2PohRecord {
-                    block_id,
-                    slot,
-                    entries: sidecar.poh_entries,
-                })?;
-                shredding_writer.write(&WincodeArchiveV2ShreddingRecord {
-                    block_id,
-                    slot,
-                    shredding: block_shredding,
-                })?;
-                blockhash_writer
-                    .write_all(&sidecar.blockhash)
-                    .with_context(|| format!("write {}", blockhash_tmp.display()))?;
-                if let Some(index) = blockhash_index_v3.as_mut() {
-                    index.push(slot, &sidecar.blockhash, block_time)?;
-                }
-                blockhashes.push(sidecar.blockhash);
-                timings.hot_poh_write += poh_started.elapsed();
+        let poh_started = timings.detail_timer();
+        poh_writer.write(&WincodeArchiveV2PohRecord {
+            block_id,
+            slot,
+            entries: sidecar.poh_entries,
+        })?;
+        shredding_writer.write(&WincodeArchiveV2ShreddingRecord {
+            block_id,
+            slot,
+            shredding: block_shredding,
+        })?;
+        blockhash_writer
+            .write_all(&sidecar.blockhash)
+            .with_context(|| format!("write {}", blockhash_tmp.display()))?;
+        if let Some(index) = blockhash_index_v3.as_mut() {
+            index.push(slot, &sidecar.blockhash, block_time)?;
+        }
+        blockhashes.push(sidecar.blockhash);
+        timings.hot_poh_write += poh_started.elapsed();
 
-                if let Some(access_writer) = access_writer.as_mut() {
-                    access_bytes.clear();
-                    let access_blob = build_archive_v2_block_access_blob_with_pubkey_resolver(
+        if let Some(access_writer) = access_writer.as_mut() {
+            access_bytes.clear();
+            let access_blob = build_archive_v2_block_access_blob_with_pubkey_resolver(
                         &hot_block,
                         |id| {
                             let index = first_seen_access_pubkeys
@@ -1992,62 +1901,66 @@ pub(crate) fn build_hot_blocks_first_seen(
                         &vote_hashes.rows,
                     )
                     .with_context(|| format!("slot {slot} first-seen block access sidecar"))?;
-                    wincode::config::serialize_into(
-                        &mut access_bytes,
-                        &access_blob,
-                        wincode_leb128_config(),
-                    )?;
-                    let access_len =
-                        checked_archive_v2_block_access_frame_len(access_bytes.len(), slot)?;
-                    access_writer
-                        .write_all(&access_bytes)
-                        .with_context(|| format!("write {}", access_path.display()))?;
-                    access_rows.push(ArchiveV2BlockAccessIndexRow {
-                        block_id,
-                        slot,
-                        access_offset,
-                        access_len,
-                        tx_count,
-                        signature_count: block_signature_count,
-                    });
-                    access_offset += u64::from(access_len);
-                    access_file_bytes += u64::from(access_len);
-                }
-                hot_block_buffers.recycle(hot_block);
-
-                first_tx_ordinal += u64::from(tx_count);
-                first_signature_ordinal += u64::from(block_signature_count);
-
-                let current_block_id =
-                    i32::try_from(block_id).context("first-seen blockhash id exceeds i32::MAX")?;
-                rolling_blockhashes.insert(sidecar.blockhash, current_block_id, slot)?;
-                last_blockhash = Some(sidecar.blockhash);
-                slot_to_block_id.insert(slot, block_id);
-                block_id = block_id
-                    .checked_add(1)
-                    .context("first-seen hot block id overflow")?;
-                progress.update_slot(slot);
-                progress.update_input_bytes(footer.car_payload_bytes);
-                progress.update(1, u64::from(tx_count));
-                pending.clear_recycling_frame_data();
-                trim_hot_memory(
-                    block_id,
-                    &mut block_bytes,
-                    &mut compressed_buf,
-                    &mut access_bytes,
-                    None,
-                );
-                hot_block_buffers.trim();
-                if max_blocks.is_some_and(|limit| u64::from(block_id) >= limit) {
-                    break;
-                }
-                continue;
-            }
-            RawNode::Subset(_) => footer.subset_nodes_ignored += 1,
-            RawNode::Epoch(_) => footer.epoch_nodes_ignored += 1,
+            wincode::config::serialize_into(
+                &mut access_bytes,
+                &access_blob,
+                wincode_leb128_config(),
+            )?;
+            let access_len = checked_archive_v2_block_access_frame_len(access_bytes.len(), slot)?;
+            access_writer
+                .write_all(&access_bytes)
+                .with_context(|| format!("write {}", access_path.display()))?;
+            access_rows.push(ArchiveV2BlockAccessIndexRow {
+                block_id,
+                slot,
+                access_offset,
+                access_len,
+                tx_count,
+                signature_count: block_signature_count,
+            });
+            access_offset += u64::from(access_len);
+            access_file_bytes += u64::from(access_len);
         }
-        timings.classify += classify_started.elapsed();
+        hot_block_buffers.recycle(hot_block);
+
+        first_tx_ordinal += u64::from(tx_count);
+        first_signature_ordinal += u64::from(block_signature_count);
+
+        let current_block_id =
+            i32::try_from(block_id).context("first-seen blockhash id exceeds i32::MAX")?;
+        rolling_blockhashes.insert(sidecar.blockhash, current_block_id, slot)?;
+        last_blockhash = Some(sidecar.blockhash);
+        slot_to_block_id.insert(slot, block_id);
+        block_id = block_id
+            .checked_add(1)
+            .context("first-seen hot block id overflow")?;
+        progress.update_slot(slot);
+        progress.update_input_bytes(footer.car_payload_bytes);
+        progress.update(1, u64::from(tx_count));
+        pending.return_lossless_block(&mut lossless_block)?;
+        trim_hot_memory(
+            block_id,
+            &mut block_bytes,
+            &mut compressed_buf,
+            &mut access_bytes,
+            None,
+        );
+        hot_block_buffers.trim();
+        if max_blocks.is_some_and(|limit| u64::from(block_id) >= limit) {
+            break;
+        }
     }
+
+    let raw_dataframe_pool_stats = lossless_block.data_buffer_pool_stats();
+    anyhow::ensure!(
+        raw_dataframe_pool_stats.current_buffers == 0
+            && raw_dataframe_pool_stats.current_capacity == 0,
+        "first-seen lossless CAR reader still has {} live buffers with capacity {} after the final block",
+        raw_dataframe_pool_stats.current_buffers,
+        raw_dataframe_pool_stats.current_capacity,
+    );
+    lossless_block.release_reusable_data_buffers();
+    drop(lossless_block);
 
     // Closing the scanner first joins the optional decompression worker and
     // releases both large prefetch buffers before peak-memory finalization.
@@ -2135,14 +2048,6 @@ pub(crate) fn build_hot_blocks_first_seen(
     )?;
     meta_writer.flush()?;
     let completed_blocks = rows.len();
-    let raw_dataframe_pool_stats = pending.raw_dataframe_payloads.stats();
-    anyhow::ensure!(
-        raw_dataframe_pool_stats.current_buffers == 0
-            && raw_dataframe_pool_stats.current_capacity == 0,
-        "first-seen RawDataFrame payload pool still has {} live buffers with capacity {} after the final block",
-        raw_dataframe_pool_stats.current_buffers,
-        raw_dataframe_pool_stats.current_capacity,
-    );
     drop(blocks_writer);
     drop(signatures_writer);
     drop(access_writer);
@@ -2342,7 +2247,7 @@ pub(crate) fn build_hot_blocks_first_seen(
         timings.dataframe_assemble.as_secs_f64(),
         timings.tx_decode_compact.as_secs_f64(),
         timings.metadata_decode_compact.as_secs_f64(),
-        timings.first_seen_parallel_decode_wall.as_secs_f64(),
+        timings.parallel_decode_wall.as_secs_f64(),
         timings.rewards_decode_compact.as_secs_f64(),
         timings.metadata_pubkey_compact.as_secs_f64(),
         timings.hot_message_build.as_secs_f64(),
@@ -2355,7 +2260,7 @@ pub(crate) fn build_hot_blocks_first_seen(
         timings.hot_poh_write.as_secs_f64(),
     );
     info!(
-        "Archive V2 first-seen RawDataFrame payload pool: retained_buffers={} retained_capacity={} current_buffers={} current_capacity={} peak_current_buffers={} peak_current_capacity={} takes={} reused_buffers={} fresh_buffers={} allocation_events={} growth_events={} discarded_buffers={} discarded_capacity={}",
+        "Archive V2 first-seen shared CAR SDK data-buffer pool: retained_buffers={} retained_capacity={} current_buffers={} current_capacity={} peak_current_buffers={} peak_current_capacity={} takes={} reused_buffers={} fresh_buffers={} allocation_events={} growth_events={} discarded_buffers={} discarded_capacity={}",
         raw_dataframe_pool_stats.retained_buffers,
         raw_dataframe_pool_stats.retained_capacity,
         raw_dataframe_pool_stats.current_buffers,
@@ -2585,6 +2490,7 @@ pub(crate) fn build_hot_blocks_pre_hot(
     pre_hot_dir: Option<&Path>,
     pre_hot_registry_capacity: usize,
     reuse_pre_hot: bool,
+    decode_workers: usize,
 ) -> Result<()> {
     anyhow::ensure!(
         registry_dir.is_none(),
@@ -2597,6 +2503,10 @@ pub(crate) fn build_hot_blocks_pre_hot(
     anyhow::ensure!(
         level >= 0,
         "zstd compression level must be non-negative, got {level}"
+    );
+    anyhow::ensure!(
+        (1..=HOT_DECODE_WORKERS_MAX).contains(&decode_workers),
+        "PreHot decode workers must be in 1..={HOT_DECODE_WORKERS_MAX}, got {decode_workers}"
     );
     std::fs::create_dir_all(output_dir)
         .with_context(|| format!("create output dir {}", output_dir.display()))?;
@@ -2642,6 +2552,7 @@ pub(crate) fn build_hot_blocks_pre_hot(
             &external_blockhashes,
             max_blocks,
             pre_hot_registry_capacity,
+            decode_workers,
         )?;
     }
 
@@ -2682,6 +2593,7 @@ fn build_pre_hot_spool(
     external_blockhashes: &ExternalBlockhashOverrides,
     max_blocks: Option<u64>,
     registry_capacity: usize,
+    decode_workers: usize,
 ) -> Result<()> {
     let started = Instant::now();
     let output_dir = blockhash_registry_path
@@ -2751,113 +2663,90 @@ fn build_pre_hot_spool(
     let mut progress = ProgressTracker::new("Archive V2 PreHot Extract");
     let mut block_id = 0u32;
     let mut metadata_zstd = ZstdReusableDecoder::new();
+    let mut parallel_tx_decoder = if decode_workers > 1 {
+        Some(HotTxDecodePool::new(decode_workers)?)
+    } else {
+        None
+    };
 
-    while let Some(raw) = scanner.next_node_timed(Some(&mut timings))? {
-        footer.car_entries += 1;
-        footer.car_payload_bytes += raw.payload_len as u64;
-        footer.decoded_node_payload_bytes += raw.payload_len as u64;
-
-        let classify_started = timings.detail_timer();
-        match raw.node {
-            RawNode::Transaction(tx) => {
-                footer.transactions += 1;
-                pending.transactions.push(PendingTx {
-                    tx,
-                    payload_len: raw.payload_len,
-                });
-            }
-            RawNode::Entry(entry) => {
-                footer.entries += 1;
-                pending.entries.push(PendingEntry {
-                    entry,
-                    payload_len: raw.payload_len,
-                });
-            }
-            RawNode::Rewards(rewards) => {
-                footer.rewards += 1;
-                anyhow::ensure!(
-                    pending.rewards.is_none(),
-                    "duplicate rewards node before block"
-                );
-                pending.rewards = Some(PendingRewards {
-                    rewards,
-                    payload_len: raw.payload_len,
-                });
-            }
-            RawNode::DataFrame(frame) => {
-                footer.dataframes += 1;
-                pending.dataframes.insert(frame.cid, frame);
-            }
-            RawNode::Block(block) => {
-                footer.blocks += 1;
-                timings.classify += classify_started.elapsed();
-                let archive_block_id = block_id.saturating_add(blockhash_id_offset);
-                let previous_blockhash = (archive_block_id > 0).then_some(last_blockhash).flatten();
-                rolling_blockhashes.prune_for_slot(block.slot)?;
-                let (record, tx_count, sidecar) = build_block_record(
-                    &mut pending,
-                    block,
-                    &raw_key_index,
-                    &rolling_blockhashes,
-                    archive_block_id,
-                    &mut footer,
-                    &mut timings,
-                    external_blockhashes,
-                    previous_blockhash,
-                    &mut metadata_zstd,
-                    None,
-                    None,
-                )?;
-                let slot = pending.last_slot;
-                let block_time = record.header.compact.block_time;
-                let raw_pubkey_refs =
-                    crate::pre_hot::count_pubkeys(&record, |key| counter.add32(key))
-                        .with_context(|| format!("slot {slot} count PreHot pubkeys"))?;
-                let raw_pubkey_refs_u32 = u32::try_from(raw_pubkey_refs)
-                    .context("PreHot block raw pubkey reference count exceeds u32::MAX")?;
-                writer.write(&LivePreHotRecord::Block(LivePreHotBlock::new(
-                    block_id,
-                    record,
-                    raw_pubkey_refs_u32,
-                )))?;
-                writer.stats.blocks = writer.stats.blocks.saturating_add(1);
-                writer.stats.txs = writer.stats.txs.saturating_add(u64::from(tx_count));
-                writer.stats.raw_pubkey_refs =
-                    writer.stats.raw_pubkey_refs.saturating_add(raw_pubkey_refs);
-                poh_writer.write(&WincodeArchiveV2PohRecord {
-                    block_id,
-                    slot,
-                    entries: sidecar.poh_entries,
-                })?;
-                blockhash_writer
-                    .write_all(&sidecar.blockhash)
-                    .with_context(|| {
-                        format!("write {} block_id {block_id}", blockhash_tmp.display())
-                    })?;
-                if let Some(index) = blockhash_index_v3.as_mut() {
-                    index.push(slot, &sidecar.blockhash, block_time)?;
-                }
-                let current_block_id = i32::try_from(archive_block_id)
-                    .context("PreHot blockhash id exceeds i32::MAX")?;
-                rolling_blockhashes.insert(sidecar.blockhash, current_block_id, slot)?;
-                last_blockhash = Some(sidecar.blockhash);
-                block_id = block_id
-                    .checked_add(1)
-                    .context("PreHot block id overflow")?;
-                progress.update_slot(slot);
-                progress.update_input_bytes(footer.car_payload_bytes);
-                progress.update(1, u64::from(tx_count));
-                pending.clear();
-                if max_blocks.is_some_and(|limit| u64::from(block_id) >= limit) {
-                    break;
-                }
-                continue;
-            }
-            RawNode::Subset(_) => footer.subset_nodes_ignored += 1,
-            RawNode::Epoch(_) => footer.epoch_nodes_ignored += 1,
+    let mut lossless_block = LosslessCarBlock::default();
+    loop {
+        let read = scanner.next_lossless_block_timed(&mut lossless_block, Some(&mut timings))?;
+        add_lossless_read_stats(&mut footer, read.stats);
+        if !read.has_block {
+            break;
         }
+        let classify_started = timings.detail_timer();
+        let block = pending.take_lossless_block(&mut lossless_block)?;
         timings.classify += classify_started.elapsed();
+        let archive_block_id = block_id.saturating_add(blockhash_id_offset);
+        let previous_blockhash = (archive_block_id > 0).then_some(last_blockhash).flatten();
+        rolling_blockhashes.prune_for_slot(block.slot)?;
+        let (record, tx_count, mut sidecar) = build_block_record(
+            &mut pending,
+            block,
+            &raw_key_index,
+            &rolling_blockhashes,
+            archive_block_id,
+            &mut footer,
+            &mut timings,
+            external_blockhashes,
+            previous_blockhash,
+            &mut metadata_zstd,
+            parallel_tx_decoder.as_mut(),
+            None,
+        )?;
+        let slot = pending.last_slot;
+        let block_time = record.header.compact.block_time;
+        patch_poh_entry_signature_counts_from_indexed_transactions(
+            &mut sidecar.poh_entries,
+            &record.txs,
+            &mut pending.poh_signature_counts,
+            archive_transaction_index_and_signature_count,
+        )
+        .with_context(|| format!("slot {slot} PoH entry signature counts"))?;
+        let raw_pubkey_refs = crate::pre_hot::count_pubkeys(&record, |key| counter.add32(key))
+            .with_context(|| format!("slot {slot} count PreHot pubkeys"))?;
+        let raw_pubkey_refs_u32 = u32::try_from(raw_pubkey_refs)
+            .context("PreHot block raw pubkey reference count exceeds u32::MAX")?;
+        writer.write(&LivePreHotRecord::Block(LivePreHotBlock::new(
+            block_id,
+            record,
+            raw_pubkey_refs_u32,
+        )))?;
+        writer.stats.blocks = writer.stats.blocks.saturating_add(1);
+        writer.stats.txs = writer.stats.txs.saturating_add(u64::from(tx_count));
+        writer.stats.raw_pubkey_refs = writer.stats.raw_pubkey_refs.saturating_add(raw_pubkey_refs);
+        poh_writer.write(&WincodeArchiveV2PohRecord {
+            block_id,
+            slot,
+            entries: sidecar.poh_entries,
+        })?;
+        blockhash_writer
+            .write_all(&sidecar.blockhash)
+            .with_context(|| format!("write {} block_id {block_id}", blockhash_tmp.display()))?;
+        if let Some(index) = blockhash_index_v3.as_mut() {
+            index.push(slot, &sidecar.blockhash, block_time)?;
+        }
+        let current_block_id =
+            i32::try_from(archive_block_id).context("PreHot blockhash id exceeds i32::MAX")?;
+        rolling_blockhashes.insert(sidecar.blockhash, current_block_id, slot)?;
+        last_blockhash = Some(sidecar.blockhash);
+        block_id = block_id
+            .checked_add(1)
+            .context("PreHot block id overflow")?;
+        progress.update_slot(slot);
+        progress.update_input_bytes(footer.car_payload_bytes);
+        progress.update(1, u64::from(tx_count));
+        pending.return_lossless_block(&mut lossless_block)?;
+        if max_blocks.is_some_and(|limit| u64::from(block_id) >= limit) {
+            break;
+        }
     }
+
+    lossless_block.release_reusable_data_buffers();
+    drop(lossless_block);
+    drop(parallel_tx_decoder);
 
     anyhow::ensure!(
         pending.transactions.is_empty()
@@ -2912,12 +2801,13 @@ fn build_pre_hot_spool(
     }
     progress.final_report();
     info!(
-        "Archive V2 PreHot extract complete in {:.2}s: blocks={} txs={} keys={} raw_pubkey_refs={} spool_uncompressed={} spool_compressed={} ratio_pct={:.2} max_record_uncompressed={} max_record_compressed={} registry_sort_write={:.3}s path={}",
+        "Archive V2 PreHot extract complete in {:.2}s: blocks={} txs={} keys={} raw_pubkey_refs={} decode_workers={} spool_uncompressed={} spool_compressed={} ratio_pct={:.2} max_record_uncompressed={} max_record_compressed={} registry_sort_write={:.3}s path={}",
         started.elapsed().as_secs_f64(),
         spool_stats.blocks,
         spool_stats.txs,
         registry_keys,
         spool_stats.raw_pubkey_refs,
+        decode_workers,
         spool_stats.uncompressed_bytes,
         spool_stats.compressed_bytes,
         if spool_stats.uncompressed_bytes == 0 {
@@ -8248,98 +8138,73 @@ fn build_no_registry_from_scanner<R: Read>(
     let mut block_scratch = Vec::with_capacity(8 << 20);
     let mut metadata_zstd = ZstdReusableDecoder::new();
 
-    while let Some(raw) = scanner.next_node_timed(Some(&mut timings))? {
-        footer.car_entries += 1;
-        footer.car_payload_bytes += raw.payload_len as u64;
-        footer.decoded_node_payload_bytes += raw.payload_len as u64;
-
-        let classify_started = timings.detail_timer();
-        match raw.node {
-            RawNode::Transaction(tx) => {
-                footer.transactions += 1;
-                pending.transactions.push(PendingTx {
-                    tx,
-                    payload_len: raw.payload_len,
-                });
-            }
-            RawNode::Entry(entry) => {
-                footer.entries += 1;
-                pending.entries.push(PendingEntry {
-                    entry,
-                    payload_len: raw.payload_len,
-                });
-            }
-            RawNode::Rewards(rewards) => {
-                footer.rewards += 1;
-                anyhow::ensure!(
-                    pending.rewards.is_none(),
-                    "duplicate rewards node before block"
-                );
-                pending.rewards = Some(PendingRewards {
-                    rewards,
-                    payload_len: raw.payload_len,
-                });
-            }
-            RawNode::DataFrame(frame) => {
-                footer.dataframes += 1;
-                pending.dataframes.insert(frame.cid, frame);
-            }
-            RawNode::Block(block) => {
-                footer.blocks += 1;
-                timings.classify += classify_started.elapsed();
-                let (record, tx_count, sidecar) = build_no_registry_block_record(
-                    &mut pending,
-                    block,
-                    block_id.saturating_add(blockhash_id_offset),
-                    &mut footer,
-                    &mut timings,
-                    &mut metadata_zstd,
-                )?;
-                let encode_started = timings.detail_timer();
-                let record = WincodeArchiveV2NoRegistryRecord::Block(record);
-                encode_with_scratch(&record, &mut block_scratch)?;
-                let block_len = u32::try_from(block_scratch.len())
-                    .context("archive v2 no-registry frame exceeds u32::MAX")?;
-                writer.write_bytes(&block_scratch)?;
-                writer.write(&WincodeArchiveV2NoRegistryRecord::Index(
-                    SplitCompactIndexRecord {
-                        slot: pending.last_slot,
-                        block_id,
-                        block_offset,
-                        block_len,
-                        runtime_offset: 0,
-                        runtime_len: 0,
-                        tx_count,
-                    },
-                ))?;
-                poh_writer.write(&WincodeArchiveV2PohRecord {
-                    block_id,
-                    slot: pending.last_slot,
-                    entries: sidecar.poh_entries,
-                })?;
-                blockhash_registry_writer
-                    .write_all(&sidecar.blockhash)
-                    .with_context(|| {
-                        format!(
-                            "write {} block_id {}",
-                            blockhash_registry_path.display(),
-                            block_id
-                        )
-                    })?;
-                timings.wincode_encode += encode_started.elapsed();
-                block_offset += block_len as u64;
-                block_id = block_id.wrapping_add(1);
-                progress.update_slot(pending.last_slot);
-                progress.update_input_bytes(footer.car_payload_bytes);
-                progress.update(1, tx_count as u64);
-                pending.clear();
-                continue;
-            }
-            RawNode::Subset(_) => footer.subset_nodes_ignored += 1,
-            RawNode::Epoch(_) => footer.epoch_nodes_ignored += 1,
+    let mut lossless_block = LosslessCarBlock::default();
+    loop {
+        let read = scanner.next_lossless_block_timed(&mut lossless_block, Some(&mut timings))?;
+        add_lossless_read_stats(&mut footer, read.stats);
+        if !read.has_block {
+            break;
         }
+        let classify_started = timings.detail_timer();
+        let block = pending.take_lossless_block(&mut lossless_block)?;
         timings.classify += classify_started.elapsed();
+        let (record, tx_count, mut sidecar) = build_no_registry_block_record(
+            &mut pending,
+            block,
+            block_id.saturating_add(blockhash_id_offset),
+            &mut footer,
+            &mut timings,
+            &mut metadata_zstd,
+        )?;
+        patch_poh_entry_signature_counts_from_indexed_transactions(
+            &mut sidecar.poh_entries,
+            &record.txs,
+            &mut pending.poh_signature_counts,
+            no_registry_transaction_index_and_signature_count,
+        )
+        .with_context(|| format!("slot {} PoH entry signature counts", pending.last_slot))?;
+        let encode_started = timings.detail_timer();
+        let record = WincodeArchiveV2NoRegistryRecord::Block(record);
+        encode_with_scratch(&record, &mut block_scratch)?;
+        let block_len = u32::try_from(block_scratch.len())
+            .context("archive v2 no-registry frame exceeds u32::MAX")?;
+        writer.write_bytes(&block_scratch)?;
+        writer.write(&WincodeArchiveV2NoRegistryRecord::Index(
+            SplitCompactIndexRecord {
+                slot: pending.last_slot,
+                block_id,
+                block_offset,
+                block_len,
+                runtime_offset: 0,
+                runtime_len: 0,
+                tx_count,
+            },
+        ))?;
+        poh_writer.write(&WincodeArchiveV2PohRecord {
+            block_id,
+            slot: pending.last_slot,
+            entries: sidecar.poh_entries,
+        })?;
+        blockhash_registry_writer
+            .write_all(&sidecar.blockhash)
+            .with_context(|| {
+                format!(
+                    "write {} block_id {}",
+                    blockhash_registry_path.display(),
+                    block_id
+                )
+            })?;
+        timings.wincode_encode += encode_started.elapsed();
+        block_offset += block_len as u64;
+        block_id = block_id.wrapping_add(1);
+        progress.update_slot(pending.last_slot);
+        progress.update_input_bytes(footer.car_payload_bytes);
+        progress.update(1, tx_count as u64);
+        pending.return_lossless_block(&mut lossless_block)?;
     }
+
+    lossless_block.release_reusable_data_buffers();
+    drop(lossless_block);
 
     let encode_started = timings.detail_timer();
     writer.write(&WincodeArchiveV2NoRegistryRecord::Footer(footer.clone()))?;
@@ -8395,6 +8260,7 @@ pub(crate) fn build_registries(
     output_dir: &Path,
     external_blockhashes_path: Option<&Path>,
     force: bool,
+    workers: usize,
 ) -> Result<()> {
     std::fs::create_dir_all(output_dir)
         .with_context(|| format!("create output dir {}", output_dir.display()))?;
@@ -8403,10 +8269,12 @@ pub(crate) fn build_registries(
     let registry_path = output_dir.join(REGISTRY_FILE);
     let registry_counts_path = output_dir.join(REGISTRY_COUNTS_FILE);
     let blockhash_registry_path = output_dir.join(BLOCKHASH_REGISTRY_FILE);
+    let skipped_slot_map_path = output_dir.join(blockzilla_format::ARCHIVE_V2_SKIPPED_SLOTS_FILE);
     if !force
         && crate::file_nonempty(&registry_path)
         && crate::file_nonempty(&registry_counts_path)
         && crate::file_nonempty(&blockhash_registry_path)
+        && blockzilla_format::read_skipped_slot_map(&skipped_slot_map_path).is_ok()
     {
         info!(
             "Reusing existing Archive V2 registries: {}, {}, {}",
@@ -8422,14 +8290,17 @@ pub(crate) fn build_registries(
         &registry_path,
         Some(&registry_counts_path),
         &blockhash_registry_path,
+        Some(&skipped_slot_map_path),
         &external_blockhashes,
         None,
+        workers,
     )?;
     info!(
-        "Archive V2 registries built: registry={} registry_counts={} blockhash_registry={}",
+        "Archive V2 registries built: registry={} registry_counts={} blockhash_registry={} skipped_slots={}",
         registry_path.display(),
         registry_counts_path.display(),
-        blockhash_registry_path.display()
+        blockhash_registry_path.display(),
+        skipped_slot_map_path.display()
     );
     Ok(())
 }
@@ -17290,6 +17161,93 @@ pub(crate) fn patch_poh_entry_signature_counts(
     Ok(())
 }
 
+fn patch_poh_entry_signature_counts_from_indexed_transactions<T>(
+    poh_entries: &mut [CompactPohEntry],
+    transactions: &[T],
+    canonical_counts: &mut Vec<Option<u8>>,
+    mut index_and_count: impl FnMut(&T) -> Result<(u32, u8)>,
+) -> Result<()> {
+    canonical_counts.clear();
+    canonical_counts.resize(transactions.len(), None);
+    for transaction in transactions {
+        let (tx_index, signature_count) = index_and_count(transaction)?;
+        let tx_index = usize::try_from(tx_index).context("transaction index exceeds usize")?;
+        let count = canonical_counts.get_mut(tx_index).with_context(|| {
+            format!(
+                "transaction index {tx_index} is outside 0..{}",
+                transactions.len()
+            )
+        })?;
+        anyhow::ensure!(count.is_none(), "duplicate transaction index {tx_index}");
+        *count = Some(signature_count);
+    }
+    anyhow::ensure!(
+        canonical_counts.iter().all(Option::is_some),
+        "transaction indices are not a complete 0..{} permutation",
+        transactions.len()
+    );
+
+    let mut cursor = 0usize;
+    for entry in poh_entries {
+        let end = cursor
+            .checked_add(entry.tx_count as usize)
+            .context("PoH entry tx_count overflow while patching signature counts")?;
+        anyhow::ensure!(
+            end <= canonical_counts.len(),
+            "PoH entry consumes transactions beyond the block transaction list"
+        );
+        entry.signature_count =
+            canonical_counts[cursor..end]
+                .iter()
+                .try_fold(0u32, |total, count| {
+                    total
+                        .checked_add(u32::from(count.expect("validated signature count")))
+                        .context("PoH entry signature_count overflow")
+                })?;
+        cursor = end;
+    }
+    anyhow::ensure!(
+        cursor == canonical_counts.len(),
+        "PoH entries consumed {cursor} of {} block transactions while patching signature counts",
+        canonical_counts.len()
+    );
+    Ok(())
+}
+
+fn archive_transaction_index_and_signature_count(
+    transaction: &WincodeArchiveV2Transaction,
+) -> Result<(u32, u8)> {
+    let signature_count = match &transaction.tx {
+        WincodeArchiveV2Payload::Decoded { value, .. } => value.signatures.len(),
+        WincodeArchiveV2Payload::Raw { bytes, .. } => {
+            let (count, _) = solana_short_vec::decode_shortu16_len(bytes)
+                .map_err(|()| anyhow!("invalid raw transaction signature ShortU16 prefix"))?;
+            count
+        }
+    };
+    Ok((
+        transaction.tx_index,
+        u8::try_from(signature_count).context("transaction signature count exceeds u8::MAX")?,
+    ))
+}
+
+fn no_registry_transaction_index_and_signature_count(
+    transaction: &WincodeArchiveV2NoRegistryTransaction,
+) -> Result<(u32, u8)> {
+    let signature_count = match &transaction.tx {
+        WincodeArchiveV2Payload::Decoded { value, .. } => value.signatures.len(),
+        WincodeArchiveV2Payload::Raw { bytes, .. } => {
+            let (count, _) = solana_short_vec::decode_shortu16_len(bytes)
+                .map_err(|()| anyhow!("invalid raw transaction signature ShortU16 prefix"))?;
+            count
+        }
+    };
+    Ok((
+        transaction.tx_index,
+        u8::try_from(signature_count).context("transaction signature count exceeds u8::MAX")?,
+    ))
+}
+
 fn reconstruct_tick_only_poh(
     slot: u64,
     previous_blockhash: [u8; 32],
@@ -17534,7 +17492,7 @@ fn build_block_record(
     external_blockhashes: &ExternalBlockhashOverrides,
     previous_blockhash: Option<[u8; 32]>,
     zstd: &mut ZstdReusableDecoder,
-    parallel_tx_decoder: Option<&mut FirstSeenTxDecodePool>,
+    parallel_tx_decoder: Option<&mut HotTxDecodePool>,
     mut first_seen_signatures: Option<&mut FirstSeenBlockSignatures>,
 ) -> Result<(WincodeArchiveV2Block, u32, ArchiveV2BlockSidecar)> {
     pending.last_slot = block.slot;
@@ -17584,14 +17542,12 @@ fn build_block_record(
     };
 
     let txs = if let Some(decoder) =
-        parallel_tx_decoder.filter(|_| ordered_txs.len() >= FIRST_SEEN_PARALLEL_MIN_TRANSACTIONS)
+        parallel_tx_decoder.filter(|_| ordered_txs.len() >= HOT_PARALLEL_MIN_TRANSACTIONS)
     {
-        let signature_counts = first_seen_signature_counts
-            .context("parallel first-seen decode requires collected signature counts")?;
         decoder.decode_block_transactions(
             ordered_txs,
             &pending.dataframes,
-            signature_counts,
+            first_seen_signature_counts,
             block.slot,
             key_index,
             rolling_blockhashes,
@@ -19097,227 +19053,6 @@ fn dataframe_bytes_for_decode<'a>(
     Ok((scratch.as_slice(), scratch_capacity))
 }
 
-#[derive(Clone, Copy, Debug, Default)]
-struct RawDataFramePayloadPoolStats {
-    retained_buffers: usize,
-    retained_capacity: usize,
-    current_buffers: usize,
-    current_capacity: usize,
-    peak_current_buffers: usize,
-    peak_current_capacity: usize,
-    takes: u64,
-    reused_buffers: u64,
-    fresh_buffers: u64,
-    allocation_events: u64,
-    growth_events: u64,
-    discarded_buffers: u64,
-    discarded_capacity: u64,
-}
-
-#[derive(Clone, Copy)]
-struct RawDataFramePayloadPoolLimits {
-    max_retained_capacity: usize,
-    max_buffer_capacity: usize,
-    max_buffers_per_class: usize,
-    max_class_zero_buffers: usize,
-}
-
-const RAW_DATAFRAME_PAYLOAD_POOL_LIMITS: RawDataFramePayloadPoolLimits =
-    RawDataFramePayloadPoolLimits {
-        max_retained_capacity: RAW_DATAFRAME_POOL_MAX_RETAINED_BYTES,
-        max_buffer_capacity: RAW_DATAFRAME_POOL_MAX_BUFFER_BYTES,
-        max_buffers_per_class: RAW_DATAFRAME_POOL_MAX_BUFFERS_PER_CLASS,
-        max_class_zero_buffers: RAW_DATAFRAME_POOL_MAX_CLASS_ZERO_BUFFERS,
-    };
-
-struct RawDataFramePayloadPool {
-    // Class zero is reserved for zero-capacity buffers. Positive class N owns
-    // buffers with capacity in [2^(N-1), 2^N), while requests are rounded up
-    // to a power-of-two lower bound. Every buffer popped from the requested
-    // class (or a larger one) is therefore guaranteed to fit.
-    free_by_capacity: Vec<Vec<Vec<u8>>>,
-    stats: RawDataFramePayloadPoolStats,
-}
-
-impl Default for RawDataFramePayloadPool {
-    fn default() -> Self {
-        Self {
-            free_by_capacity: (0..=usize::BITS + 1).map(|_| Vec::new()).collect(),
-            stats: RawDataFramePayloadPoolStats::default(),
-        }
-    }
-}
-
-impl RawDataFramePayloadPool {
-    fn take(&mut self, required: usize) -> Vec<u8> {
-        self.stats.takes += 1;
-        let class = raw_dataframe_required_capacity_class(required);
-        let last_probe = class
-            .saturating_add(RAW_DATAFRAME_POOL_LARGER_CLASS_PROBES)
-            .min(self.free_by_capacity.len() - 1);
-        let mut reusable_class = None;
-        for candidate_class in class..=last_probe {
-            let Some(buffer) = self.free_by_capacity[candidate_class].last() else {
-                continue;
-            };
-            debug_assert!(
-                buffer.capacity() >= required,
-                "payload-pool class {candidate_class} capacity {} cannot satisfy {required}",
-                buffer.capacity(),
-            );
-            reusable_class = Some(candidate_class);
-            break;
-        }
-
-        let mut buffer = if let Some(reusable_class) = reusable_class {
-            let buffer = self.free_by_capacity[reusable_class]
-                .pop()
-                .expect("RawDataFrame payload pool selected an empty capacity class");
-            self.stats.reused_buffers += 1;
-            debug_assert!(self.stats.retained_buffers >= 1);
-            self.stats.retained_buffers = self
-                .stats
-                .retained_buffers
-                .checked_sub(1)
-                .expect("RawDataFrame payload pool retained-buffer accounting underflow");
-            debug_assert!(self.stats.retained_capacity >= buffer.capacity());
-            self.stats.retained_capacity = self
-                .stats
-                .retained_capacity
-                .checked_sub(buffer.capacity())
-                .expect("RawDataFrame payload pool retained-capacity accounting underflow");
-            buffer
-        } else {
-            self.stats.fresh_buffers += 1;
-            let allocation_capacity = if required > RAW_DATAFRAME_POOL_MAX_BUFFER_BYTES {
-                required
-            } else {
-                raw_dataframe_class_allocation_capacity(class, required)
-            };
-            if allocation_capacity != 0 {
-                self.stats.allocation_events += 1;
-            }
-            Vec::with_capacity(allocation_capacity)
-        };
-
-        buffer.clear();
-        if buffer.capacity() < required {
-            let target = if required > RAW_DATAFRAME_POOL_MAX_BUFFER_BYTES {
-                required
-            } else {
-                raw_dataframe_class_allocation_capacity(class, required)
-            };
-            buffer.reserve(target);
-            self.stats.allocation_events += 1;
-            self.stats.growth_events += 1;
-        }
-        self.stats.current_buffers = self
-            .stats
-            .current_buffers
-            .checked_add(1)
-            .expect("RawDataFrame payload pool current-buffer accounting overflow");
-        self.stats.current_capacity = self
-            .stats
-            .current_capacity
-            .checked_add(buffer.capacity())
-            .expect("RawDataFrame payload pool current-capacity accounting overflow");
-        self.stats.peak_current_buffers = self
-            .stats
-            .peak_current_buffers
-            .max(self.stats.current_buffers);
-        self.stats.peak_current_capacity = self
-            .stats
-            .peak_current_capacity
-            .max(self.stats.current_capacity);
-        buffer
-    }
-
-    fn recycle(&mut self, buffer: Vec<u8>) {
-        self.recycle_with_limits(buffer, RAW_DATAFRAME_PAYLOAD_POOL_LIMITS);
-    }
-
-    fn recycle_with_limits(&mut self, mut buffer: Vec<u8>, limits: RawDataFramePayloadPoolLimits) {
-        buffer.clear();
-        let capacity = buffer.capacity();
-        debug_assert!(self.stats.current_buffers >= 1);
-        self.stats.current_buffers = self
-            .stats
-            .current_buffers
-            .checked_sub(1)
-            .expect("RawDataFrame payload pool current-buffer accounting underflow");
-        debug_assert!(self.stats.current_capacity >= capacity);
-        self.stats.current_capacity = self
-            .stats
-            .current_capacity
-            .checked_sub(capacity)
-            .expect("RawDataFrame payload pool current-capacity accounting underflow");
-
-        let class = raw_dataframe_recycled_capacity_class(capacity);
-        let class_limit = if class == 0 {
-            limits.max_class_zero_buffers
-        } else {
-            limits.max_buffers_per_class
-        };
-        let retained_capacity = self.stats.retained_capacity.checked_add(capacity);
-        let retain = capacity <= limits.max_buffer_capacity
-            && self.free_by_capacity[class].len() < class_limit
-            && retained_capacity.is_some_and(|total| total <= limits.max_retained_capacity);
-        if !retain {
-            self.stats.discarded_buffers = self
-                .stats
-                .discarded_buffers
-                .checked_add(1)
-                .expect("RawDataFrame payload pool discarded-buffer accounting overflow");
-            self.stats.discarded_capacity = self
-                .stats
-                .discarded_capacity
-                .checked_add(capacity as u64)
-                .expect("RawDataFrame payload pool discarded-capacity accounting overflow");
-            return;
-        }
-
-        self.stats.retained_buffers = self
-            .stats
-            .retained_buffers
-            .checked_add(1)
-            .expect("RawDataFrame payload pool retained-buffer accounting overflow");
-        self.stats.retained_capacity = retained_capacity
-            .expect("RawDataFrame payload pool retained-capacity accounting overflow");
-        self.free_by_capacity[class].push(buffer);
-    }
-
-    fn stats(&self) -> RawDataFramePayloadPoolStats {
-        self.stats
-    }
-}
-
-#[inline]
-fn raw_dataframe_required_capacity_class(required: usize) -> usize {
-    if required == 0 {
-        0
-    } else {
-        1 + (usize::BITS - (required - 1).leading_zeros()) as usize
-    }
-}
-
-#[inline]
-fn raw_dataframe_recycled_capacity_class(capacity: usize) -> usize {
-    if capacity == 0 {
-        0
-    } else {
-        1 + (usize::BITS - 1 - capacity.leading_zeros()) as usize
-    }
-}
-
-#[inline]
-fn raw_dataframe_class_allocation_capacity(class: usize, required: usize) -> usize {
-    if class == 0 {
-        0
-    } else {
-        1usize.checked_shl((class - 1) as u32).unwrap_or(required)
-    }
-}
-
 #[derive(Default)]
 struct PendingBlock {
     transactions: Vec<PendingTx>,
@@ -19326,80 +19061,81 @@ struct PendingBlock {
     dataframes: HashMap<Cid36, StandaloneDataFrame>,
     last_slot: u64,
     record_scratch: BlockRecordScratch,
-    raw_dataframe_payloads: RawDataFramePayloadPool,
+    poh_signature_counts: Vec<Option<u8>>,
 }
 
 impl PendingBlock {
-    fn clear(&mut self) {
-        self.transactions.clear();
-        self.entries.clear();
-        self.rewards = None;
-        self.dataframes.clear();
-    }
+    fn take_lossless_block(&mut self, source: &mut LosslessCarBlock) -> Result<RawBlockNode> {
+        anyhow::ensure!(
+            self.transactions.is_empty()
+                && self.entries.is_empty()
+                && self.rewards.is_none()
+                && self.dataframes.is_empty(),
+            "compact block state was not empty before the next CAR block"
+        );
 
-    fn pending_slot_hint(&self) -> Option<u64> {
+        let block = source
+            .block
+            .take()
+            .context("lossless CAR read did not contain its terminal block node")?;
         self.transactions
-            .last()
-            .map(|pending| pending.tx.slot)
-            .or_else(|| self.rewards.as_ref().map(|pending| pending.rewards.slot))
+            .extend(source.transactions.drain(..).map(|tx| PendingTx { tx }));
+        self.entries
+            .extend(source.entries.drain(..).map(|entry| PendingEntry { entry }));
+        self.rewards = source
+            .rewards
+            .take()
+            .map(|rewards| PendingRewards { rewards });
+        std::mem::swap(&mut self.dataframes, &mut source.dataframes);
+        Ok(block)
     }
 
-    fn insert_dataframe_recycling(&mut self, frame: StandaloneDataFrame) -> Result<()> {
-        let slot_hint = self.pending_slot_hint();
-        let cid = frame.cid;
-        let location = frame.location;
-        match self.dataframes.entry(cid) {
-            std::collections::hash_map::Entry::Vacant(entry) => {
-                entry.insert(frame);
-                Ok(())
-            }
-            std::collections::hash_map::Entry::Occupied(_) => {
-                self.raw_dataframe_payloads.recycle(frame.frame.data);
-                let slot = slot_hint
-                    .map(|slot| slot.to_string())
-                    .unwrap_or_else(|| "unknown".to_owned());
-                anyhow::bail!(
-                    "duplicate standalone dataframe CID {cid} while collecting slot {slot} at CAR entry {} offset {}",
-                    location.entry_index,
-                    location.car_offset,
-                )
-            }
-        }
-    }
+    fn return_lossless_block(&mut self, target: &mut LosslessCarBlock) -> Result<()> {
+        anyhow::ensure!(
+            target.block.is_none()
+                && target.transactions.is_empty()
+                && target.entries.is_empty()
+                && target.rewards.is_none()
+                && target.dataframes.is_empty(),
+            "lossless CAR block was not empty before buffer return"
+        );
 
-    fn clear_recycling_frame_data(&mut self) {
-        for pending_tx in self.transactions.drain(..) {
-            let RawTransactionNode { data, metadata, .. } = pending_tx.tx;
-            self.raw_dataframe_payloads.recycle(data.data);
-            self.raw_dataframe_payloads.recycle(metadata.data);
-        }
-        self.entries.clear();
-        if let Some(pending_rewards) = self.rewards.take() {
-            self.raw_dataframe_payloads
-                .recycle(pending_rewards.rewards.data.data);
-        }
-        for (_, frame) in self.dataframes.drain() {
-            self.raw_dataframe_payloads.recycle(frame.frame.data);
-        }
+        target
+            .transactions
+            .extend(self.transactions.drain(..).map(|pending| pending.tx));
+        target
+            .entries
+            .extend(self.entries.drain(..).map(|pending| pending.entry));
+        target.rewards = self.rewards.take().map(|pending| pending.rewards);
+        std::mem::swap(&mut self.dataframes, &mut target.dataframes);
+        target.clear();
+        Ok(())
     }
+}
+
+fn add_lossless_read_stats(footer: &mut WincodeArchiveV2Footer, stats: LosslessBlockReadStats) {
+    footer.blocks += stats.blocks;
+    footer.transactions += stats.transactions;
+    footer.entries += stats.entries;
+    footer.rewards += stats.rewards;
+    footer.dataframes += stats.dataframes;
+    footer.subset_nodes_ignored += stats.subsets;
+    footer.epoch_nodes_ignored += stats.epochs;
+    footer.car_entries += stats.car_entries;
+    footer.car_payload_bytes += stats.payload_bytes;
+    footer.decoded_node_payload_bytes += stats.payload_bytes;
 }
 
 struct PendingTx {
     tx: RawTransactionNode,
-    #[allow(dead_code)]
-    payload_len: usize,
 }
 
 struct PendingEntry {
     entry: RawEntryNode,
-    #[allow(dead_code)]
-    payload_len: usize,
 }
 
 struct PendingRewards {
     rewards: RawRewardsNode,
-    #[allow(dead_code)]
-    payload_len: usize,
 }
 
 const FIRST_SEEN_SIGNATURE_BYTES: usize = 64;
@@ -19670,14 +19406,16 @@ impl RawCarScanner<Box<dyn Read>> {
         io_buf_bytes: usize,
     ) -> Result<Self> {
         let file = File::open(path).with_context(|| format!("open {}", path.display()))?;
-        let reader = BufReader::with_capacity(io_buf_bytes, file);
         let input: Box<dyn Read> = if compressed {
+            let reader = BufReader::with_capacity(io_buf_bytes, file);
             Box::new(
                 zstd_decoder_with_long_window(reader)
                     .with_context(|| format!("zstd decode {}", path.display()))?,
             )
         } else {
-            Box::new(reader)
+            // CarBlockReader supplies the only buffer needed for a plain CAR.
+            // Compressed input keeps one buffer on each side of the decoder.
+            Box::new(file)
         };
         Ok(RawCarScanner {
             reader: CarBlockReader::with_capacity(input, io_buf_bytes),
@@ -19733,14 +19471,14 @@ impl RawCarScanner<Box<dyn Read>> {
             info!("Streaming CAR URL: {url} content_length=unknown");
         }
 
-        let reader = BufReader::with_capacity(BUFFER_SIZE, response);
         let input: Box<dyn Read> = if input_label_is_zstd(url) {
+            let reader = BufReader::with_capacity(BUFFER_SIZE, response);
             Box::new(
                 zstd_decoder_with_long_window(reader)
                     .with_context(|| format!("zstd decode {url}"))?,
             )
         } else {
-            Box::new(reader)
+            Box::new(response)
         };
         Ok(RawCarScanner {
             reader: CarBlockReader::with_capacity(input, BUFFER_SIZE),
@@ -19753,6 +19491,22 @@ impl RawCarScanner<Box<dyn Read>> {
 impl<R: Read> RawCarScanner<R> {
     fn skip_header(&mut self) -> Result<()> {
         self.reader.skip_header().context("skip CAR header")
+    }
+
+    fn next_lossless_block_timed(
+        &mut self,
+        block: &mut LosslessCarBlock,
+        timings: Option<&mut ArchiveV2Timings>,
+    ) -> Result<LosslessBlockRead> {
+        let started = ArchiveV2Timings::optional_detail_timer(timings.as_deref());
+        let read = self
+            .reader
+            .read_until_block_lossless_with_stats(block)
+            .map_err(|err| anyhow!("{err}"))?;
+        if let Some(timings) = timings {
+            timings.scan_decode_node += started.elapsed();
+        }
+        Ok(read)
     }
 
     fn next_blockhash_node(&mut self) -> Result<Option<RawPrefix<'_>>> {
@@ -19785,60 +19539,20 @@ impl<R: Read> RawCarScanner<R> {
         timings: Option<&mut ArchiveV2Timings>,
     ) -> Result<Option<RawNodeWithLen>> {
         let started = ArchiveV2Timings::optional_detail_timer(timings.as_deref());
-        let Some(entry) = self
+        let mut take_data_buffer = |required| Vec::with_capacity(required);
+        let Some(record) = self
             .reader
-            .read_entry_payload_with_scratch(&mut self.scratch)
+            .read_decoded_node_record_with_scratch(&mut self.scratch, &mut take_data_buffer)
             .map_err(|err| anyhow!("{err}"))?
         else {
             return Ok(None);
         };
-        let node =
-            decode_raw_node(entry.location, entry.cid, entry.payload).with_context(|| {
-                format!(
-                    "decode node at entry {} offset {}",
-                    entry.location.entry_index, entry.location.car_offset
-                )
-            })?;
         if let Some(timings) = timings {
             timings.scan_decode_node += started.elapsed();
         }
         Ok(Some(RawNodeWithLen {
-            node,
-            payload_len: entry.payload_len,
-        }))
-    }
-
-    fn next_node_timed_with_data_buffers(
-        &mut self,
-        pool: &mut RawDataFramePayloadPool,
-        timings: Option<&mut ArchiveV2Timings>,
-    ) -> Result<Option<RawNodeWithLen>> {
-        let started = ArchiveV2Timings::optional_detail_timer(timings.as_deref());
-        let Some(entry) = self
-            .reader
-            .read_entry_payload_with_scratch(&mut self.scratch)
-            .map_err(|err| anyhow!("{err}"))?
-        else {
-            return Ok(None);
-        };
-        let node = decode_raw_node_with_data_buffers(
-            entry.location,
-            entry.cid,
-            entry.payload,
-            &mut |required| pool.take(required),
-        )
-        .with_context(|| {
-            format!(
-                "decode node at entry {} offset {}",
-                entry.location.entry_index, entry.location.car_offset
-            )
-        })?;
-        if let Some(timings) = timings {
-            timings.scan_decode_node += started.elapsed();
-        }
-        Ok(Some(RawNodeWithLen {
-            node,
-            payload_len: entry.payload_len,
+            node: record.node,
+            payload_len: record.payload_len,
         }))
     }
 }
@@ -19889,7 +19603,7 @@ struct ArchiveV2Timings {
     dataframe_assemble: Duration,
     tx_decode_compact: Duration,
     metadata_decode_compact: Duration,
-    first_seen_parallel_decode_wall: Duration,
+    parallel_decode_wall: Duration,
     metadata_logs_decode_compact: Duration,
     metadata_pubkey_compact: Duration,
     rewards_decode_compact: Duration,
@@ -19932,87 +19646,85 @@ impl ArchiveV2Timings {
 }
 
 #[derive(Default)]
-struct FirstSeenTxDecodeStats {
+struct HotTxDecodeStats {
     timings: ArchiveV2Timings,
     tx_source_bytes: u64,
     metadata_source_bytes: u64,
     nonce_recent_blockhashes: u64,
 }
 
-struct FirstSeenTxWorkerScratch {
+struct HotTxWorkerScratch {
     generation: u64,
     record: BlockRecordScratch,
     metadata_zstd: ZstdReusableDecoder,
-    stats: FirstSeenTxDecodeStats,
+    stats: HotTxDecodeStats,
 }
 
-impl Default for FirstSeenTxWorkerScratch {
+impl Default for HotTxWorkerScratch {
     fn default() -> Self {
         Self {
             generation: 0,
             record: BlockRecordScratch {
-                tx_bytes: Vec::with_capacity(FIRST_SEEN_WORKER_TX_SCRATCH_INITIAL_BYTES),
-                metadata_bytes: Vec::with_capacity(
-                    FIRST_SEEN_WORKER_METADATA_SCRATCH_INITIAL_BYTES,
-                ),
+                tx_bytes: Vec::with_capacity(HOT_WORKER_TX_SCRATCH_INITIAL_BYTES),
+                metadata_bytes: Vec::with_capacity(HOT_WORKER_METADATA_SCRATCH_INITIAL_BYTES),
                 reassemble_visited: HashSet::with_capacity(8),
             },
             metadata_zstd: ZstdReusableDecoder::new(),
-            stats: FirstSeenTxDecodeStats::default(),
+            stats: HotTxDecodeStats::default(),
         }
     }
 }
 
-impl FirstSeenTxWorkerScratch {
+impl HotTxWorkerScratch {
     fn prepare(&mut self, generation: u64, detailed_timings: bool) {
         if self.generation == generation {
             return;
         }
         self.generation = generation;
-        self.stats = FirstSeenTxDecodeStats::default();
+        self.stats = HotTxDecodeStats::default();
         self.stats.timings.detailed = detailed_timings;
     }
 
-    fn take_stats(&mut self, generation: u64) -> FirstSeenTxDecodeStats {
+    fn take_stats(&mut self, generation: u64) -> HotTxDecodeStats {
         let stats = if self.generation == generation {
             std::mem::take(&mut self.stats)
         } else {
-            FirstSeenTxDecodeStats::default()
+            HotTxDecodeStats::default()
         };
         self.trim_oversized_buffers();
         stats
     }
 
     fn trim_oversized_buffers(&mut self) {
-        if self.record.tx_bytes.capacity() > FIRST_SEEN_WORKER_SCRATCH_MAX_RETAINED_BYTES {
-            self.record.tx_bytes = Vec::with_capacity(FIRST_SEEN_WORKER_TX_SCRATCH_INITIAL_BYTES);
+        if self.record.tx_bytes.capacity() > HOT_WORKER_SCRATCH_MAX_RETAINED_BYTES {
+            self.record.tx_bytes = Vec::with_capacity(HOT_WORKER_TX_SCRATCH_INITIAL_BYTES);
         }
-        if self.record.metadata_bytes.capacity() > FIRST_SEEN_WORKER_SCRATCH_MAX_RETAINED_BYTES {
+        if self.record.metadata_bytes.capacity() > HOT_WORKER_SCRATCH_MAX_RETAINED_BYTES {
             self.record.metadata_bytes =
-                Vec::with_capacity(FIRST_SEEN_WORKER_METADATA_SCRATCH_INITIAL_BYTES);
+                Vec::with_capacity(HOT_WORKER_METADATA_SCRATCH_INITIAL_BYTES);
         }
         self.metadata_zstd.trim_oversized_output();
     }
 }
 
 thread_local! {
-    static FIRST_SEEN_TX_WORKER_SCRATCH: RefCell<FirstSeenTxWorkerScratch> =
-        RefCell::new(FirstSeenTxWorkerScratch::default());
+    static HOT_TX_WORKER_SCRATCH: RefCell<HotTxWorkerScratch> =
+        RefCell::new(HotTxWorkerScratch::default());
 }
 
-struct FirstSeenTxDecodePool {
+struct HotTxDecodePool {
     pool: rayon::ThreadPool,
     generation: u64,
 }
 
-impl FirstSeenTxDecodePool {
+impl HotTxDecodePool {
     fn new(workers: usize) -> Result<Self> {
         let pool = rayon::ThreadPoolBuilder::new()
             .num_threads(workers)
-            .thread_name(|index| format!("first-seen-decode-{index}"))
+            .thread_name(|index| format!("hot-tx-decode-{index}"))
             .build()
-            .context("create first-seen transaction decode pool")?;
-        info!("Archive V2 first-seen parallel transaction decode enabled: workers={workers}");
+            .context("create hot-block transaction decode pool")?;
+        info!("Archive V2 parallel transaction decode enabled: workers={workers}");
         Ok(Self {
             pool,
             generation: 0,
@@ -20024,42 +19736,44 @@ impl FirstSeenTxDecodePool {
         &mut self,
         transactions: &[PendingTx],
         dataframes: &HashMap<Cid36, StandaloneDataFrame>,
-        signature_counts: &[u8],
+        signature_counts: Option<&[u8]>,
         slot: u64,
         key_index: &KeyIndex,
         rolling_blockhashes: &RollingBlockhashIndex,
         footer: &mut WincodeArchiveV2Footer,
         timings: &mut ArchiveV2Timings,
     ) -> Result<Vec<WincodeArchiveV2Transaction>> {
-        anyhow::ensure!(
-            signature_counts.len() == transactions.len(),
-            "slot {slot} collected {} signature counts for {} transactions",
-            signature_counts.len(),
-            transactions.len(),
-        );
+        if let Some(signature_counts) = signature_counts {
+            anyhow::ensure!(
+                signature_counts.len() == transactions.len(),
+                "slot {slot} collected {} signature counts for {} transactions",
+                signature_counts.len(),
+                transactions.len(),
+            );
+        }
         self.generation = self
             .generation
             .checked_add(1)
-            .context("first-seen decode generation overflow")?;
+            .context("hot transaction decode generation overflow")?;
         let generation = self.generation;
         let detailed_timings = timings.detailed;
         let wall_started = timings.detail_timer();
 
-        // Indexed collection preserves transaction order. If several malformed
-        // transactions fail concurrently, Rayon does not define which error is
-        // returned; the candidate build still aborts before completion/promotion.
+        // Indexed collection preserves transaction order. Keep each result until
+        // all workers stop, then return the first error in transaction order so
+        // diagnostics stay deterministic across worker counts.
         let decoded = self.pool.install(|| {
             transactions
                 .par_iter()
                 .enumerate()
                 .map(|(tx_index, transaction)| {
-                    FIRST_SEEN_TX_WORKER_SCRATCH.with(|scratch| {
+                    HOT_TX_WORKER_SCRATCH.with(|scratch| {
                         let mut scratch = scratch.borrow_mut();
                         scratch.prepare(generation, detailed_timings);
-                        decode_first_seen_transaction(
+                        decode_hot_transaction(
                             transaction,
                             dataframes,
-                            signature_counts[tx_index],
+                            signature_counts.map(|counts| counts[tx_index]),
                             slot,
                             tx_index,
                             key_index,
@@ -20068,32 +19782,32 @@ impl FirstSeenTxDecodePool {
                         )
                     })
                 })
-                .collect::<Result<Vec<_>>>()
-        })?;
-        timings.first_seen_parallel_decode_wall += wall_started.elapsed();
+                .collect::<Vec<_>>()
+        });
+        timings.parallel_decode_wall += wall_started.elapsed();
 
         let worker_stats = self.pool.broadcast(|_| {
-            FIRST_SEEN_TX_WORKER_SCRATCH.with(|scratch| scratch.borrow_mut().take_stats(generation))
+            HOT_TX_WORKER_SCRATCH.with(|scratch| scratch.borrow_mut().take_stats(generation))
         });
         for stats in worker_stats {
-            merge_first_seen_tx_decode_stats(stats, footer, timings);
+            merge_hot_tx_decode_stats(stats, footer, timings);
         }
-        Ok(decoded)
+        decoded.into_iter().collect()
     }
 }
 
 #[allow(clippy::too_many_arguments)]
-fn decode_first_seen_transaction(
+fn decode_hot_transaction(
     pending_tx: &PendingTx,
     dataframes: &HashMap<Cid36, StandaloneDataFrame>,
-    expected_signature_count: u8,
+    expected_signature_count: Option<u8>,
     slot: u64,
     tx_index: usize,
     key_index: &KeyIndex,
     rolling_blockhashes: &RollingBlockhashIndex,
-    worker: &mut FirstSeenTxWorkerScratch,
+    worker: &mut HotTxWorkerScratch,
 ) -> Result<WincodeArchiveV2Transaction> {
-    let FirstSeenTxWorkerScratch {
+    let HotTxWorkerScratch {
         record,
         metadata_zstd,
         stats,
@@ -20114,15 +19828,30 @@ fn decode_first_seen_transaction(
     stats.timings.tx_scratch_max = stats.timings.tx_scratch_max.max(tx_scratch_capacity);
 
     let tx_started = stats.timings.detail_timer();
-    let value = decode_first_seen_compact_transaction(
-        slot,
-        tx_index,
-        tx_bytes,
-        expected_signature_count,
-        key_index,
-        rolling_blockhashes,
-        &mut stats.nonce_recent_blockhashes,
-    )
+    let value = if let Some(expected_signature_count) = expected_signature_count {
+        decode_first_seen_compact_transaction(
+            slot,
+            tx_index,
+            tx_bytes,
+            expected_signature_count,
+            key_index,
+            rolling_blockhashes,
+            &mut stats.nonce_recent_blockhashes,
+        )
+    } else {
+        wincode::deserialize::<VersionedTransaction<'_>>(tx_bytes)
+            .map_err(|err| anyhow!("{err}"))
+            .and_then(|versioned| {
+                to_owned_compact_transaction(
+                    slot,
+                    tx_index,
+                    versioned,
+                    key_index,
+                    rolling_blockhashes,
+                    &mut stats.nonce_recent_blockhashes,
+                )
+            })
+    }
     .with_context(|| format!("slot {slot} tx#{tx_index} transaction"))?;
     let tx = WincodeArchiveV2Payload::Decoded {
         source_len: tx_bytes.len() as u64,
@@ -20168,8 +19897,8 @@ fn decode_first_seen_transaction(
     })
 }
 
-fn merge_first_seen_tx_decode_stats(
-    stats: FirstSeenTxDecodeStats,
+fn merge_hot_tx_decode_stats(
+    stats: HotTxDecodeStats,
     footer: &mut WincodeArchiveV2Footer,
     timings: &mut ArchiveV2Timings,
 ) {
@@ -20238,6 +19967,37 @@ mod tests {
         );
         let error = checked_archive_v2_block_access_frame_len(limit + 1, 43).unwrap_err();
         assert!(error.to_string().contains("exceeding the shared"));
+    }
+
+    #[test]
+    fn lossless_reader_stats_map_exactly_to_archive_footer() {
+        let mut footer = WincodeArchiveV2Footer::default();
+        add_lossless_read_stats(
+            &mut footer,
+            LosslessBlockReadStats {
+                car_entries: 11,
+                payload_bytes: 12,
+                wire_bytes: 13,
+                transactions: 1,
+                entries: 2,
+                blocks: 3,
+                rewards: 4,
+                dataframes: 5,
+                subsets: 6,
+                epochs: 7,
+            },
+        );
+
+        assert_eq!(footer.transactions, 1);
+        assert_eq!(footer.entries, 2);
+        assert_eq!(footer.blocks, 3);
+        assert_eq!(footer.rewards, 4);
+        assert_eq!(footer.dataframes, 5);
+        assert_eq!(footer.subset_nodes_ignored, 6);
+        assert_eq!(footer.epoch_nodes_ignored, 7);
+        assert_eq!(footer.car_entries, 11);
+        assert_eq!(footer.car_payload_bytes, 12);
+        assert_eq!(footer.decoded_node_payload_bytes, 12);
     }
 
     struct ScriptedTerminalReader {
@@ -20546,7 +20306,7 @@ mod tests {
 
     #[test]
     fn first_seen_decode_workers_are_bounded() {
-        for workers in [0, FIRST_SEEN_DECODE_WORKERS_MAX + 1] {
+        for workers in [0, HOT_DECODE_WORKERS_MAX + 1] {
             let error = build_hot_blocks_first_seen(
                 Path::new("unused-input.car"),
                 Path::new("unused-output"),
@@ -20668,6 +20428,301 @@ mod tests {
                 std::fs::read(one_worker.join(&name)).unwrap(),
                 std::fs::read(four_workers.join(&name)).unwrap(),
                 "first-seen artifact differs with four decode workers: {name}"
+            );
+        }
+
+        std::fs::remove_dir_all(&root).unwrap();
+    }
+
+    #[test]
+    fn registry_reuse_decode_workers_are_bounded_before_filesystem_access() {
+        for workers in [0, HOT_DECODE_WORKERS_MAX + 1] {
+            let error = build_hot_blocks(
+                Path::new("unused-input.car"),
+                Path::new("unused-output"),
+                None,
+                None,
+                None,
+                1,
+                None,
+                false,
+                false,
+                workers,
+            )
+            .expect_err("out-of-range decode workers must fail before filesystem access");
+            assert!(
+                error
+                    .to_string()
+                    .contains("hot-block decode workers must be in 1..=8"),
+                "unexpected error: {error:#}"
+            );
+        }
+    }
+
+    #[test]
+    fn indexed_transaction_poh_patch_uses_canonical_order_for_each_entry() {
+        let transactions = [(2u32, 3u8), (0, 2), (3, 4), (1, 1)];
+        let mut entries = vec![
+            CompactPohEntry {
+                num_hashes: 1,
+                hash: [1; 32],
+                tx_count: 2,
+                signature_count: 0,
+            },
+            CompactPohEntry {
+                num_hashes: 1,
+                hash: [2; 32],
+                tx_count: 0,
+                signature_count: 0,
+            },
+            CompactPohEntry {
+                num_hashes: 1,
+                hash: [3; 32],
+                tx_count: 2,
+                signature_count: 0,
+            },
+        ];
+        let mut canonical_counts = Vec::new();
+
+        patch_poh_entry_signature_counts_from_indexed_transactions(
+            &mut entries,
+            &transactions,
+            &mut canonical_counts,
+            |&(index, count)| Ok((index, count)),
+        )
+        .unwrap();
+
+        assert_eq!(canonical_counts, [Some(2), Some(1), Some(3), Some(4)]);
+        assert_eq!(
+            entries
+                .iter()
+                .map(|entry| entry.signature_count)
+                .collect::<Vec<_>>(),
+            [3, 0, 7]
+        );
+    }
+
+    #[test]
+    fn hot_decode_pool_reuses_workers_across_blocks_without_changing_output() {
+        let location = NodeLocation {
+            entry_index: 1,
+            car_offset: 1,
+        };
+        let transaction_bytes = test_legacy_transaction_bytes(1);
+        let transactions = (0u8..64)
+            .map(|index| PendingTx {
+                tx: RawTransactionNode {
+                    location,
+                    cid: Cid36::from_car_bytes([index; 36]),
+                    slot: 42,
+                    index: Some(u64::from(index)),
+                    data: signature_raw_frame(transaction_bytes.clone(), Vec::new()),
+                    metadata: signature_raw_frame(Vec::new(), Vec::new()),
+                },
+            })
+            .collect::<Vec<_>>();
+        let dataframes = HashMap::new();
+        let key_index = KeyIndex::build(Vec::new());
+        let rolling = RollingBlockhashIndex::new(300);
+        let mut decoder = HotTxDecodePool::new(4).unwrap();
+
+        let decode = |decoder: &mut HotTxDecodePool| {
+            let mut footer = WincodeArchiveV2Footer::default();
+            let mut timings = ArchiveV2Timings::default();
+            decoder
+                .decode_block_transactions(
+                    &transactions,
+                    &dataframes,
+                    None,
+                    42,
+                    &key_index,
+                    &rolling,
+                    &mut footer,
+                    &mut timings,
+                )
+                .unwrap()
+        };
+        let first = decode(&mut decoder);
+        let second = decode(&mut decoder);
+
+        assert_eq!(first.len(), transactions.len());
+        assert_eq!(second.len(), transactions.len());
+        for (tx_index, (first, second)) in first.iter().zip(&second).enumerate() {
+            assert_eq!(first.tx_index, tx_index as u32);
+            assert_eq!(second.tx_index, tx_index as u32);
+            assert_eq!(
+                wincode::config::serialize(first, wincode_leb128_config()).unwrap(),
+                wincode::config::serialize(second, wincode_leb128_config()).unwrap()
+            );
+        }
+    }
+
+    #[test]
+    fn parallel_registry_reuse_fixture_is_byte_identical_and_poh_counts_match() {
+        static NEXT_PATH: AtomicUsize = AtomicUsize::new(0);
+
+        let fixture = Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("../crates/old-faithful/car-reader/benches/fixtures/epoch-822-biggest.car");
+        let root = std::env::temp_dir().join(format!(
+            "blockzilla-registry-reuse-parallel-test-{}-{}",
+            std::process::id(),
+            NEXT_PATH.fetch_add(1, Ordering::Relaxed),
+        ));
+        let registry_source = root.join("registry-source");
+        let one_worker = root.join("workers-1");
+        let four_workers = root.join("workers-4");
+        let _ = std::fs::remove_dir_all(&root);
+
+        build_hot_blocks_first_seen(
+            &fixture,
+            &registry_source,
+            None,
+            None,
+            1,
+            Some(1),
+            false,
+            false,
+            None,
+            65_536,
+            100_000,
+            1,
+            0,
+            false,
+        )
+        .unwrap_or_else(|error| panic!("registry fixture build failed: {error:#}"));
+
+        for (output, workers) in [(&one_worker, 1), (&four_workers, 4)] {
+            build_hot_blocks(
+                &fixture,
+                output,
+                None,
+                Some(&registry_source),
+                None,
+                1,
+                Some(1),
+                false,
+                true,
+                workers,
+            )
+            .unwrap_or_else(|error| {
+                panic!("workers={workers} registry-reuse fixture build failed: {error:#}")
+            });
+        }
+
+        let artifact_names = |dir: &Path| {
+            let mut names = std::fs::read_dir(dir)
+                .unwrap()
+                .map(|entry| {
+                    entry
+                        .unwrap()
+                        .file_name()
+                        .into_string()
+                        .expect("fixture artifact name must be UTF-8")
+                })
+                .collect::<Vec<_>>();
+            names.sort_unstable();
+            names
+        };
+        let expected_names = artifact_names(&one_worker);
+        assert_eq!(artifact_names(&four_workers), expected_names);
+        for name in expected_names {
+            assert_eq!(
+                std::fs::read(one_worker.join(&name)).unwrap(),
+                std::fs::read(four_workers.join(&name)).unwrap(),
+                "registry-reuse artifact differs with four decode workers: {name}"
+            );
+        }
+
+        let index =
+            read_archive_v2_hot_block_index(&one_worker.join(ARCHIVE_V2_BLOCK_INDEX_FILE)).unwrap();
+        let poh_file = File::open(one_worker.join(POH_FILE)).unwrap();
+        let mut poh_reader =
+            WincodeLeb128FramedReader::new(BufReader::with_capacity(BUFFER_SIZE, poh_file));
+        let mut poh_records = Vec::new();
+        while let Some((_len, record)) = poh_reader.read::<WincodeArchiveV2PohRecord>().unwrap() {
+            poh_records.push(record);
+        }
+        assert_eq!(poh_records.len(), index.rows.len());
+        for (record, row) in poh_records.iter().zip(&index.rows) {
+            assert_eq!(record.block_id, row.block_id);
+            assert_eq!(record.slot, row.slot);
+            assert_eq!(
+                record
+                    .entries
+                    .iter()
+                    .map(|entry| entry.tx_count)
+                    .sum::<u32>(),
+                row.tx_count,
+                "PoH transaction total differs at slot {}",
+                row.slot
+            );
+            assert_eq!(
+                record
+                    .entries
+                    .iter()
+                    .map(|entry| entry.signature_count)
+                    .sum::<u32>(),
+                row.signature_count,
+                "PoH signature total differs at slot {}",
+                row.slot
+            );
+        }
+
+        std::fs::remove_dir_all(&root).unwrap();
+    }
+
+    #[test]
+    fn parallel_pre_hot_fixture_writes_real_poh_signature_counts() {
+        static NEXT_PATH: AtomicUsize = AtomicUsize::new(0);
+
+        let fixture = Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("../crates/old-faithful/car-reader/benches/fixtures/epoch-822-biggest.car");
+        let root = std::env::temp_dir().join(format!(
+            "blockzilla-pre-hot-parallel-test-{}-{}",
+            std::process::id(),
+            NEXT_PATH.fetch_add(1, Ordering::Relaxed),
+        ));
+        let _ = std::fs::remove_dir_all(&root);
+
+        build_hot_blocks_pre_hot(
+            &fixture,
+            &root,
+            None,
+            None,
+            None,
+            1,
+            Some(1),
+            false,
+            false,
+            false,
+            None,
+            100_000,
+            false,
+            4,
+        )
+        .unwrap_or_else(|error| panic!("parallel PreHot fixture build failed: {error:#}"));
+
+        let index =
+            read_archive_v2_hot_block_index(&root.join(ARCHIVE_V2_BLOCK_INDEX_FILE)).unwrap();
+        let poh_file = File::open(root.join(POH_FILE)).unwrap();
+        let mut poh_reader =
+            WincodeLeb128FramedReader::new(BufReader::with_capacity(BUFFER_SIZE, poh_file));
+        let mut poh_records = Vec::new();
+        while let Some((_len, record)) = poh_reader.read::<WincodeArchiveV2PohRecord>().unwrap() {
+            poh_records.push(record);
+        }
+
+        assert_eq!(poh_records.len(), index.rows.len());
+        for (record, row) in poh_records.iter().zip(&index.rows) {
+            assert_eq!(
+                record
+                    .entries
+                    .iter()
+                    .map(|entry| entry.signature_count)
+                    .sum::<u32>(),
+                row.signature_count,
+                "PreHot PoH signature total differs at slot {}",
+                row.slot
             );
         }
 
@@ -22135,241 +22190,6 @@ mod tests {
     }
 
     #[test]
-    fn raw_dataframe_payload_pool_reuses_without_growth_within_size_class() {
-        assert_eq!(raw_dataframe_required_capacity_class(0), 0);
-        assert_eq!(raw_dataframe_required_capacity_class(1), 1);
-        assert_eq!(raw_dataframe_required_capacity_class(2), 2);
-        assert_eq!(raw_dataframe_required_capacity_class(3), 3);
-        assert_eq!(raw_dataframe_required_capacity_class(4), 3);
-        assert_eq!(raw_dataframe_required_capacity_class(5), 4);
-
-        let mut pool = RawDataFramePayloadPool::default();
-        let mut first = pool.take(3);
-        first.extend_from_slice(&[1, 2, 3]);
-        pool.recycle(first);
-        let second = pool.take(4);
-        assert!(second.capacity() >= 4);
-        pool.recycle(second);
-
-        let stats = pool.stats();
-        assert_eq!(stats.takes, 2);
-        assert_eq!(stats.fresh_buffers, 1);
-        assert_eq!(stats.reused_buffers, 1);
-        assert_eq!(stats.allocation_events, 1);
-        assert_eq!(stats.growth_events, 0);
-        assert_eq!(stats.current_buffers, 0);
-        assert_eq!(stats.current_capacity, 0);
-        assert_eq!(stats.retained_buffers, 1);
-        assert!(stats.retained_capacity >= 4);
-        assert_eq!(stats.peak_current_buffers, 1);
-    }
-
-    #[test]
-    fn raw_dataframe_payload_pool_does_not_accumulate_across_varied_rounds() {
-        let lengths: Vec<usize> = (0..512).map(|index| (index * 37 % 1_500) + 1).collect();
-        let mut pool = RawDataFramePayloadPool::default();
-
-        for _ in 0..64 {
-            let buffers: Vec<Vec<u8>> = lengths
-                .iter()
-                .map(|&required| pool.take(required))
-                .collect();
-            for buffer in buffers {
-                pool.recycle(buffer);
-            }
-        }
-
-        let stats = pool.stats();
-        assert_eq!(stats.current_buffers, 0);
-        assert_eq!(stats.current_capacity, 0);
-        assert_eq!(stats.peak_current_buffers, lengths.len());
-        assert_eq!(stats.retained_buffers, lengths.len());
-        assert_eq!(stats.retained_capacity, stats.peak_current_capacity);
-        assert_eq!(stats.fresh_buffers, lengths.len() as u64);
-        assert_eq!(stats.growth_events, 0);
-        assert_eq!(stats.discarded_buffers, 0);
-        assert_eq!(stats.reused_buffers, (lengths.len() * 63) as u64,);
-    }
-
-    #[test]
-    fn raw_dataframe_payload_pool_enforces_retention_limits() {
-        let limits = RawDataFramePayloadPoolLimits {
-            max_retained_capacity: 16,
-            max_buffer_capacity: 8,
-            max_buffers_per_class: 1,
-            max_class_zero_buffers: 1,
-        };
-        let mut pool = RawDataFramePayloadPool::default();
-        let first = pool.take(5);
-        let second = pool.take(5);
-        let oversized = pool.take(33);
-        let zero_a = pool.take(0);
-        let zero_b = pool.take(0);
-
-        pool.recycle_with_limits(first, limits);
-        pool.recycle_with_limits(second, limits);
-        pool.recycle_with_limits(oversized, limits);
-        pool.recycle_with_limits(zero_a, limits);
-        pool.recycle_with_limits(zero_b, limits);
-
-        let stats = pool.stats();
-        assert_eq!(stats.current_buffers, 0);
-        assert_eq!(stats.current_capacity, 0);
-        assert_eq!(stats.retained_buffers, 2);
-        assert_eq!(stats.retained_capacity, 8);
-        assert_eq!(stats.discarded_buffers, 3);
-        assert_eq!(stats.discarded_capacity, 72);
-    }
-
-    #[test]
-    fn pending_block_recycles_all_dataframe_payloads_and_duplicate_cids() {
-        fn take_payload(
-            pool: &mut RawDataFramePayloadPool,
-            len: usize,
-            byte: u8,
-        ) -> (Vec<u8>, *const u8) {
-            let mut buffer = pool.take(len);
-            buffer.resize(len, byte);
-            let pointer = buffer.as_ptr();
-            (buffer, pointer)
-        }
-
-        fn raw_frame(data: Vec<u8>) -> RawDataFrame {
-            RawDataFrame {
-                hash: None,
-                hash_was_negative: false,
-                index: None,
-                total: None,
-                data,
-                next: Vec::new(),
-            }
-        }
-
-        let mut pending = PendingBlock::default();
-        let (tx_data, tx_data_ptr) = take_payload(&mut pending.raw_dataframe_payloads, 2, 0x12);
-        let (metadata_data, metadata_ptr) =
-            take_payload(&mut pending.raw_dataframe_payloads, 5, 0x15);
-        let (rewards_data, rewards_ptr) =
-            take_payload(&mut pending.raw_dataframe_payloads, 9, 0x19);
-        let (old_standalone_data, old_standalone_ptr) =
-            take_payload(&mut pending.raw_dataframe_payloads, 17, 0x21);
-        let (new_standalone_data, new_standalone_ptr) =
-            take_payload(&mut pending.raw_dataframe_payloads, 33, 0x33);
-
-        let location = NodeLocation {
-            entry_index: 1,
-            car_offset: 2,
-        };
-        pending.transactions.push(PendingTx {
-            tx: RawTransactionNode {
-                location,
-                cid: Cid36::from_car_bytes([1; 36]),
-                slot: 42,
-                index: Some(0),
-                data: raw_frame(tx_data),
-                metadata: raw_frame(metadata_data),
-            },
-            payload_len: 0,
-        });
-        pending.rewards = Some(PendingRewards {
-            rewards: RawRewardsNode {
-                location,
-                cid: Cid36::from_car_bytes([2; 36]),
-                slot: 42,
-                data: raw_frame(rewards_data),
-            },
-            payload_len: 0,
-        });
-
-        let duplicate_cid = Cid36::from_car_bytes([3; 36]);
-        pending
-            .insert_dataframe_recycling(StandaloneDataFrame {
-                location,
-                cid: duplicate_cid,
-                frame: raw_frame(old_standalone_data),
-            })
-            .unwrap();
-        let duplicate_error = pending
-            .insert_dataframe_recycling(StandaloneDataFrame {
-                location,
-                cid: duplicate_cid,
-                frame: raw_frame(new_standalone_data),
-            })
-            .expect_err("duplicate standalone dataframe CID must fail");
-        assert!(
-            duplicate_error
-                .to_string()
-                .contains("duplicate standalone dataframe CID")
-        );
-        assert_eq!(pending.dataframes.len(), 1);
-        assert_eq!(
-            pending.dataframes[&duplicate_cid].frame.data,
-            vec![0x21; 17]
-        );
-
-        pending.clear_recycling_frame_data();
-        assert!(pending.transactions.is_empty());
-        assert!(pending.entries.is_empty());
-        assert!(pending.rewards.is_none());
-        assert!(pending.dataframes.is_empty());
-        let recycled = pending.raw_dataframe_payloads.stats();
-        assert_eq!(recycled.current_buffers, 0);
-        assert_eq!(recycled.current_capacity, 0);
-        assert_eq!(recycled.retained_buffers, 5);
-        assert_eq!(recycled.fresh_buffers, 5);
-        assert_eq!(recycled.reused_buffers, 0);
-        assert_eq!(recycled.peak_current_buffers, 5);
-
-        let expected = [
-            (2, tx_data_ptr),
-            (5, metadata_ptr),
-            (9, rewards_ptr),
-            (17, old_standalone_ptr),
-            (33, new_standalone_ptr),
-        ];
-        let mut taken = Vec::new();
-        for (len, pointer) in expected {
-            let buffer = pending.raw_dataframe_payloads.take(len);
-            assert_eq!(buffer.as_ptr(), pointer);
-            taken.push(buffer);
-        }
-        for buffer in taken {
-            pending.raw_dataframe_payloads.recycle(buffer);
-        }
-        let reused = pending.raw_dataframe_payloads.stats();
-        assert_eq!(reused.takes, 10);
-        assert_eq!(reused.reused_buffers, 5);
-        assert_eq!(reused.fresh_buffers, 5);
-        assert_eq!(reused.current_buffers, 0);
-        assert_eq!(reused.retained_buffers, 5);
-    }
-
-    #[test]
-    fn pending_block_clear_retains_record_scratch_allocations() {
-        let mut pending = PendingBlock::default();
-        pending.record_scratch.tx_bytes.reserve(1_024);
-        pending.record_scratch.metadata_bytes.reserve(2_048);
-        pending.record_scratch.reassemble_visited.reserve(32);
-        let capacities = (
-            pending.record_scratch.tx_bytes.capacity(),
-            pending.record_scratch.metadata_bytes.capacity(),
-            pending.record_scratch.reassemble_visited.capacity(),
-        );
-
-        pending.clear();
-
-        assert_eq!(pending.record_scratch.tx_bytes.capacity(), capacities.0);
-        assert_eq!(
-            pending.record_scratch.metadata_bytes.capacity(),
-            capacities.1
-        );
-        assert_eq!(
-            pending.record_scratch.reassemble_visited.capacity(),
-            capacities.2
-        );
-    }
-
-    #[test]
     fn dataframe_decode_bytes_borrows_direct_and_reassembles_continuations() {
         let direct = signature_raw_frame(vec![1, 2, 3, 4], Vec::new());
         let direct_pointer = direct.data.as_ptr();
@@ -22540,7 +22360,6 @@ mod tests {
                 ),
                 metadata: signature_raw_frame(Vec::new(), Vec::new()),
             },
-            payload_len: 0,
         };
         let transactions = vec![transaction(1, 1), transaction(2, 0)];
         let mut arena = FirstSeenBlockSignatures::default();

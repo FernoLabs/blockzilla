@@ -24,9 +24,9 @@ use blockzilla_format::{
     ARCHIVE_V2_SIGNATURES_FILE,
 };
 use blockzilla_read_sdk::{
-    ArchiveReader, ArchiveV2PublicationLock, ArchiveV2WireProfile, FullGenerationWireProfileAudit,
-    HashVerification, OpenOptions as ReaderOpenOptions, PinnedLocalRangeSource,
-    UnprovenWireProfileDecision, acquire_archive_v2_publication_lock,
+    ArchiveReader, ArchiveV2MetadataWireProfile, ArchiveV2PublicationLock, ArchiveV2WireProfile,
+    FullGenerationWireProfileAudit, HashVerification, OpenOptions as ReaderOpenOptions,
+    PinnedLocalRangeSource, UnprovenWireProfileDecision, acquire_archive_v2_publication_lock,
     audit_full_generation_wire_profile,
     manifest::{GENERATION_MANIFEST_FILE, TrustedGenerationIdentity},
     wire_profile_marker, wire_profile_marker_bytes,
@@ -996,7 +996,7 @@ fn audit_exact_generation(
     profile: ArchiveV2WireProfile,
 ) -> Result<FullGenerationWireProfileAudit> {
     let source = PinnedLocalRangeSource::new(&options.archive);
-    let reader = ArchiveReader::open_trusted(
+    let reader = ArchiveReader::open_trusted_with_metadata_profile(
         source.clone(),
         TrustedGenerationIdentity {
             cluster_id: "mainnet-beta".into(),
@@ -1005,6 +1005,7 @@ fn audit_exact_generation(
             slots_per_epoch: options.slots_per_epoch,
             wire_profile: profile,
         },
+        ArchiveV2MetadataWireProfile::UnmarkedHistoricalCompatibility,
         ReaderOpenOptions {
             hash_verification: HashVerification::SizesOnly,
             ..ReaderOpenOptions::default()

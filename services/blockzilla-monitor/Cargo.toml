@@ -6,6 +6,7 @@ rust-version.workspace = true
 license.workspace = true
 repository.workspace = true
 publish = false
+autobins = false
 
 [dependencies]
 # "datastar" pulls in the router's "sse" feature; "tower" supports the
@@ -30,3 +31,7 @@ rustix = { version = "1.1", features = ["fs"] }
 libc = "0.2"
 regex = "1"
 tower-http = { version = "0.6", features = ["set-header"] }
+
+[[bin]]
+name = "blockzilla-monitor"
+path = "src/main.rs"

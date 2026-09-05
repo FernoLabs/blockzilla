@@ -310,11 +310,11 @@ enum Commands {
         output_dir: PathBuf,
     },
 
-    /// Build only registry.bin, registry_counts.bin, and blockhash_registry.bin from a CAR/CAR.ZST.
+    /// Build registry.bin, registry_counts.bin, blockhash_registry.bin, and skipped_slots.bin from a CAR/CAR.ZST.
     BuildArchiveV2Registries {
         /// Input CAR or CAR.ZST file.
         input: PathBuf,
-        /// Output directory for registry.bin, registry_counts.bin, and blockhash_registry.bin.
+        /// Output directory for the registry files and skipped_slots.bin.
         output_dir: PathBuf,
         /// Explicit slot/blockhash provenance file for documented PoH-gap blocks.
         #[arg(long)]
@@ -322,6 +322,13 @@ enum Commands {
         /// Rewrite registries even when they already exist.
         #[arg(long)]
         force: bool,
+        /// Block-decoding workers. Values above one use one reader and one merger.
+        #[arg(
+            long,
+            default_value_t = 1,
+            value_parser = clap::value_parser!(u16).range(1..=8)
+        )]
+        workers: u16,
     },
 
     /// Benchmark CAR pubkey-registry strategies without building the full archive.
@@ -337,6 +344,13 @@ enum Commands {
         /// Candidate capacity for the SpaceSaving heavy-hitter head.
         #[arg(long, default_value_t = 262_144)]
         heavy_hitter_capacity: usize,
+        /// Block-decoding workers for the pipelined-single-merge strategy.
+        #[arg(
+            long,
+            default_value_t = 8,
+            value_parser = clap::value_parser!(u16).range(2..=8)
+        )]
+        workers: u16,
         /// Optional output directory for registry sidecars from this strategy.
         #[arg(long)]
         output_dir: Option<PathBuf>,
@@ -586,14 +600,15 @@ enum Commands {
         /// Expected unique-key capacity for the first-seen ID table.
         #[arg(long, default_value_t = 34_000_000, requires = "first_seen_registry")]
         first_seen_registry_capacity: usize,
-        /// Parallel transaction/metadata decoders used only by the first-seen builder.
+        /// Parallel transaction and metadata decoders. Block publication stays ordered.
         #[arg(
-            long,
+            long = "decode-workers",
+            visible_alias = "workers",
+            alias = "first-seen-decode-workers",
             default_value_t = 4,
-            requires = "first_seen_registry",
             value_parser = clap::value_parser!(u8).range(1..=8)
         )]
-        first_seen_decode_workers: u8,
+        decode_workers: u8,
         /// Decompressed CAR prefetch chunk size per buffer (two fixed buffers), only for local .car.zst first-seen builds.
         /// Omit to use the measured 4 MiB default for .car.zst; pass 0 to disable.
         #[arg(
@@ -1178,6 +1193,7 @@ pub(crate) enum CarBenchInputFormat {
 enum CarRegistryBenchStrategyArg {
     ExactOld,
     ExactStream,
+    PipelinedSingleMerge,
     UniqueSpaceSaving,
 }
 
@@ -1186,6 +1202,7 @@ impl From<CarRegistryBenchStrategyArg> for split_compact::CarRegistryBenchStrate
         match value {
             CarRegistryBenchStrategyArg::ExactOld => Self::ExactOld,
             CarRegistryBenchStrategyArg::ExactStream => Self::ExactStream,
+            CarRegistryBenchStrategyArg::PipelinedSingleMerge => Self::PipelinedSingleMerge,
             CarRegistryBenchStrategyArg::UniqueSpaceSaving => Self::UniqueSpaceSaving,
         }
     }
@@ -1366,17 +1383,20 @@ fn main() -> Result<()> {
             output_dir,
             external_blockhashes,
             force,
+            workers,
         } => archive_v2::build_registries(
             &input,
             &output_dir,
             external_blockhashes.as_deref(),
             force,
+            usize::from(workers),
         ),
         Commands::BenchCarRegistry {
             input,
             strategy,
             initial_capacity,
             heavy_hitter_capacity,
+            workers,
             output_dir,
             max_blocks,
         } => split_compact::bench_car_registry(split_compact::CarRegistryBenchConfig {
@@ -1385,6 +1405,7 @@ fn main() -> Result<()> {
             strategy: strategy.into(),
             initial_capacity,
             heavy_hitter_capacity,
+            workers: usize::from(workers),
             max_blocks,
         }),
         Commands::BuildArchiveV2RegistryIndex {
@@ -1515,7 +1536,7 @@ fn main() -> Result<()> {
             first_seen_seed_registry,
             first_seen_seed_keys,
             first_seen_registry_capacity,
-            first_seen_decode_workers,
+            decode_workers,
             car_zstd_prefetch_mib,
             first_seen_scan_only,
             first_seen_finalizer_lock,
@@ -1552,7 +1573,7 @@ fn main() -> Result<()> {
                     first_seen_seed_registry.as_deref(),
                     first_seen_seed_keys,
                     first_seen_registry_capacity,
-                    usize::from(first_seen_decode_workers),
+                    usize::from(decode_workers),
                     car_zstd_prefetch_mib,
                     first_seen_scan_only,
                 )
@@ -1571,6 +1592,7 @@ fn main() -> Result<()> {
                     pre_hot_dir.as_deref(),
                     pre_hot_registry_capacity,
                     reuse_pre_hot,
+                    usize::from(decode_workers),
                 )
             } else {
                 archive_v2::build_hot_blocks(
@@ -1583,6 +1605,7 @@ fn main() -> Result<()> {
                     max_blocks,
                     resume,
                     !no_access,
+                    usize::from(decode_workers),
                 )
             }
         }
@@ -2407,6 +2430,64 @@ mod cli_tests {
                 .err()
                 .expect("Compact V1 commands must remain outside the public CLI");
             assert!(error.to_string().contains("unrecognized subcommand"));
+        }
+    }
+
+    #[test]
+    fn car_registry_worker_counts_use_the_safe_shared_limit() {
+        for workers in ["1", "8"] {
+            assert!(
+                Cli::try_parse_from([
+                    "blockzilla",
+                    "build-archive-v2-registries",
+                    "input.car",
+                    "output",
+                    "--workers",
+                    workers,
+                ])
+                .is_ok()
+            );
+        }
+        for workers in ["0", "9"] {
+            assert!(
+                Cli::try_parse_from([
+                    "blockzilla",
+                    "build-archive-v2-registries",
+                    "input.car",
+                    "output",
+                    "--workers",
+                    workers,
+                ])
+                .is_err()
+            );
+        }
+        for workers in ["2", "8"] {
+            assert!(
+                Cli::try_parse_from([
+                    "blockzilla",
+                    "bench-car-registry",
+                    "input.car",
+                    "--strategy",
+                    "pipelined-single-merge",
+                    "--workers",
+                    workers,
+                ])
+                .is_ok()
+            );
+        }
+        for workers in ["1", "9"] {
+            assert!(
+                Cli::try_parse_from([
+                    "blockzilla",
+                    "bench-car-registry",
+                    "input.car",
+                    "--strategy",
+                    "pipelined-single-merge",
+                    "--workers",
+                    workers,
+                ])
+                .is_err()
+            );
         }
     }
 

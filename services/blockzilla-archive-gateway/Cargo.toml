@@ -7,6 +7,7 @@ license.workspace = true
 repository.workspace = true
 publish = false
 description = "Read-only HTTP range gateway for immutable Blockzilla Archive V2 generations"
+autobins = false
 
 [dependencies]
 anyhow = "1.0.102"
@@ -38,3 +39,7 @@ http-body-util = "0.1.3"
 tempfile = "3.26.0"
 wincode = { version = "=0.5.5", features = ["derive"] }
 zstd = "0.13.3"
+
+[[bin]]
+name = "blockzilla-archive-gateway"
+path = "src/main.rs"

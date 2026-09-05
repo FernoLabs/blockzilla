@@ -1,0 +1,29 @@
+{
+  "name": "@blockzilla/spyx-explorer",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "build:data": "node scripts/build-data.mjs",
+    "build:data:release": "node scripts/build-data.mjs --require-strict-replay --programs-sha256 066397944a0bc8596ad20056320d1a900d1aeb4a9893caeea03a010ac3536d3c --program-cpi-inventory-sha256 749346046e43eb760774c878cfe6e74285ea1a39c6530c02063e54c5a486fbed --holder-authority-supplement ../../benchmark-results/spyx-token-report-v1/holder-authority-runtime-owner-snapshot-full-0c4f0bd8.json --holder-authority-supplement-sha256 db773348dda84d2c42231f321403c6ed1e014f6b0ce5f2fb8494f2f4c9244eff",
+    "snapshot:holder-runtime-owners": "node scripts/build-holder-runtime-owner-snapshot.mjs",
+    "dev": "npm run build:data && vite dev",
+    "build": "npm run build:data:release && vite build",
+    "preview": "vite preview",
+    "check": "node scripts/build-data.mjs --validate-only && svelte-kit sync && svelte-check --tsconfig ./tsconfig.json",
+    "test:data": "node --test scripts/api-docs.test.mjs scripts/build-data-contract.test.mjs scripts/holder-navigation.test.mjs scripts/latest-request.test.mjs scripts/pda-flow-proof.test.mjs scripts/program-labels.test.mjs"
+  },
+  "dependencies": {
+    "@lucide/svelte": "^1.17.0",
+    "@sveltejs/kit": "^2.0.0",
+    "lightweight-charts": "5.2.1",
+    "svelte": "^5.0.0",
+    "vite": "^8.0.0"
+  },
+  "devDependencies": {
+    "@sveltejs/adapter-static": "^3.0.0",
+    "@types/node": "^24.0.0",
+    "svelte-check": "^4.0.0",
+    "typescript": "^5.6.0"
+  }
+}

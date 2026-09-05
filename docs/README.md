@@ -5,11 +5,18 @@ It is the shortest working path through the project.
 
 Current guides: [Blockzilla CLI](../blockzilla/README.md),
 [supporting services](../services/README.md), the
-[token API example](../examples/token-api/README.md), and
-[developer scripts](../scripts/README.md).
+[archive format and read SDK guide](reference/archive-formats-and-read-sdk.md),
+and [developer scripts](../scripts/README.md).
+
+The [token API example](../examples/token-api/README.md) is an older
+format-specific example. It is not the recommended read-SDK starting point.
 
 ## Implemented reference
 
+- [Archive formats and the read SDK](reference/archive-formats-and-read-sdk.md)
+  defines the stable names, common application model, trust states, and
+  current support boundary for CAR, Compact Archive V2, and Indexer-first
+  Standalone V3.
 - [Archive V2 hot-block format](reference/archive-v2-hot-block-format.md)
   documents the files and records implemented by `blockzilla-format` and the
   Blockzilla builders.
@@ -37,6 +44,9 @@ Current guides: [Blockzilla CLI](../blockzilla/README.md),
   parallel executor.
 - [gRPC ledger-projection shadow](operations/grpc-ledger-shadow.md) documents
   the authority-free offline migration canary and its fail-closed alerts.
+- [Archive V2 metadata normalization](operations/archive-v2-metadata-normalization.md)
+  defines the current typed-error format, source authority, offline staging,
+  publication boundary, and recovery rules.
 
 Archive V2 is pre-1.0. Pin the Git revision used to produce and read an archive.
 

@@ -606,9 +606,11 @@ dependencies = [
  "axum",
  "base64 0.22.1",
  "bincode",
+ "blockzilla-archive-gateway",
  "blockzilla-format",
  "blockzilla-log-parser",
  "blockzilla-read-sdk",
+ "blockzilla-token-transaction-dump",
  "bs58",
  "clap 4.6.5",
  "data-encoding",
@@ -622,12 +624,14 @@ dependencies = [
  "prost",
  "rayon",
  "reqwest 0.13.4",
+ "rustix",
  "serde",
  "serde_json",
  "sha2 0.11.0",
  "solana-pubkey 4.3.0",
  "solana-short-vec",
  "solana-vote-interface 5.1.1",
+ "tempfile",
  "tokio",
  "tokio-stream",
  "tower-http 0.6.11",
@@ -669,13 +673,8 @@ dependencies = [
 ]
 
 [[package]]
-name = "blockzilla-compaction-protocol"
+name = "blockzilla-dex-parser"
 version = "0.1.0"
-dependencies = [
- "hivezilla-protocol",
- "sha2 0.11.0",
- "thiserror 2.0.19",
-]
 
 [[package]]
 name = "blockzilla-firebase-indexer"
@@ -715,7 +714,6 @@ dependencies = [
  "memmap2",
  "of-car-reader",
  "ph",
- "postcard",
  "prost",
  "serde",
  "serde_json",
@@ -787,6 +785,7 @@ name = "blockzilla-read-sdk"
 version = "0.1.0"
 dependencies = [
  "blockzilla-format",
+ "rayon",
  "reqwest 0.13.4",
  "rustix",
  "serde",
@@ -843,6 +842,37 @@ dependencies = [
 ]
 
 [[package]]
+name = "blockzilla-spyx-query"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "axum",
+ "base64 0.22.1",
+ "blockzilla-dex-parser",
+ "blockzilla-format",
+ "blockzilla-read-sdk",
+ "blockzilla-token-balance-audit",
+ "blockzilla-token-transaction-dump",
+ "bs58",
+ "clap 4.6.5",
+ "reqwest 0.13.4",
+ "rustls",
+ "serde",
+ "serde_json",
+ "sha2 0.11.0",
+ "solana-pubkey 4.3.0",
+ "spl-token-2022-interface 3.1.1",
+ "spl-token-metadata-interface 1.0.1",
+ "tempfile",
+ "tokio",
+ "tower",
+ "tower-http 0.6.11",
+ "tracing",
+ "tracing-subscriber",
+ "wincode 0.5.5",
+]
+
+[[package]]
 name = "blockzilla-token-api"
 version = "0.1.0"
 dependencies = [
@@ -857,6 +887,36 @@ dependencies = [
  "tokio",
  "tracing",
  "tracing-subscriber",
+ "wincode 0.5.5",
+ "zstd",
+]
+
+[[package]]
+name = "blockzilla-token-balance-audit"
+version = "0.1.0"
+dependencies = [
+ "serde",
+ "serde_json",
+]
+
+[[package]]
+name = "blockzilla-token-transaction-dump"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "blockzilla-dex-parser",
+ "blockzilla-format",
+ "blockzilla-read-sdk",
+ "blockzilla-token-balance-audit",
+ "bs58",
+ "clap 4.6.5",
+ "mimalloc",
+ "pprof",
+ "serde",
+ "serde_json",
+ "sha2 0.11.0",
+ "solana-pubkey 4.3.0",
+ "tempfile",
  "wincode 0.5.5",
  "zstd",
 ]
@@ -2739,6 +2799,12 @@ dependencies = [
 ]
 
 [[package]]
+name = "http-range-header"
+version = "0.4.2"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "9171a2ea8a68358193d15dd5d70c1c10a2afc3e7e4c5bc92bc9f025cebd7359c"
+
+[[package]]
 name = "httparse"
 version = "1.10.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -3241,6 +3307,15 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "b6d2cec3eae94f9f509c767b45932f1ada8350c4bdb85af2fcab4a3c14807981"
 
 [[package]]
+name = "libmimalloc-sys"
+version = "0.1.49"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "6a45a52f43e1c16f667ccfe4dd8c85b7f7c204fd5e3bf46c5b0db9a5c3c0b8e9"
+dependencies = [
+ "cc",
+]
+
+[[package]]
 name = "linux-raw-sys"
 version = "0.12.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -3374,10 +3449,29 @@ dependencies = [
 ]
 
 [[package]]
+name = "mimalloc"
+version = "0.1.52"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "2d4139bb28d14ad1facf21d5eb8825051b326e172d216b39f6d31df53cc97862"
+dependencies = [
+ "libmimalloc-sys",
+]
+
+[[package]]
 name = "mime"
 version = "0.3.17"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "6877bb514081ee2a7ff5ef9de3281f14a4dd4bceac4c09388074a6b5df8a139a"
+
+[[package]]
+name = "mime_guess"
+version = "2.0.5"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "f7c44f8e672c00fe5308fa235f821cb4198414e1c77935c1ab6948d3fd78550e"
+dependencies = [
+ "mime",
+ "unicase",
+]
 
 [[package]]
 name = "minicbor"
@@ -3585,6 +3679,7 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "071dfc062690e90b734c0b2273ce72ad0ffa95f0c74596bc250dcfd960262841"
 dependencies = [
  "autocfg",
+ "libm",
 ]
 
 [[package]]
@@ -5194,10 +5289,10 @@ dependencies = [
  "solana-sysvar",
  "solana-vote-interface 6.0.0",
  "spl-generic-token",
- "spl-token-2022-interface",
+ "spl-token-2022-interface 2.1.0",
  "spl-token-group-interface",
  "spl-token-interface",
- "spl-token-metadata-interface",
+ "spl-token-metadata-interface 0.8.0",
  "thiserror 2.0.19",
  "zstd",
 ]
@@ -5449,6 +5544,20 @@ dependencies = [
  "bytemuck_derive",
  "curve25519-dalek 4.1.3",
  "solana-define-syscall 3.0.0",
+ "subtle",
+ "thiserror 2.0.19",
+]
+
+[[package]]
+name = "solana-curve25519"
+version = "4.0.1"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "14b4d2a4bf0d0b0a86c22111917e86e8bd39a7b31420fb2c7d73eb83761fc7af"
+dependencies = [
+ "bytemuck",
+ "bytemuck_derive",
+ "curve25519-dalek 4.1.3",
+ "solana-define-syscall 5.2.0",
  "subtle",
  "thiserror 2.0.19",
 ]
@@ -5854,6 +5963,7 @@ version = "1.3.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "889194d8c5faec648f2f6fadddb60566249921ebb074e2707e7095458d5864e2"
 dependencies = [
+ "borsh",
  "bytemuck",
 ]
 
@@ -6674,6 +6784,22 @@ dependencies = [
 ]
 
 [[package]]
+name = "solana-zk-elgamal-proof-interface"
+version = "0.1.3"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "d8da7f01db2148a1dc16261ff1dc6f3930a1e255a33cece4f1b56658694f27f7"
+dependencies = [
+ "bytemuck",
+ "bytemuck_derive",
+ "num-derive",
+ "num-traits",
+ "solana-address 2.7.0",
+ "solana-instruction",
+ "solana-sdk-ids",
+ "solana-zk-sdk-pod",
+]
+
+[[package]]
 name = "solana-zk-sdk"
 version = "4.0.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -6708,6 +6834,19 @@ dependencies = [
  "thiserror 2.0.19",
  "wasm-bindgen",
  "zeroize",
+]
+
+[[package]]
+name = "solana-zk-sdk-pod"
+version = "0.1.2"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "a800583b7a4cea3e851686af162cc6e4712eef97fa91dfa9aca2459b95c84777"
+dependencies = [
+ "base64 0.22.1",
+ "bytemuck",
+ "bytemuck_derive",
+ "solana-nullable",
+ "thiserror 2.0.19",
 ]
 
 [[package]]
@@ -6834,10 +6973,40 @@ dependencies = [
  "solana-sdk-ids",
  "solana-zk-sdk",
  "spl-pod",
- "spl-token-confidential-transfer-proof-extraction",
+ "spl-token-confidential-transfer-proof-extraction 0.5.1",
  "spl-token-confidential-transfer-proof-generation",
  "spl-token-group-interface",
- "spl-token-metadata-interface",
+ "spl-token-metadata-interface 0.8.0",
+ "spl-type-length-value",
+ "thiserror 2.0.19",
+]
+
+[[package]]
+name = "spl-token-2022-interface"
+version = "3.1.1"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "821d96d034ea31c4965d182c742153c491ae0abee531331b55771086c5030d86"
+dependencies = [
+ "arrayref",
+ "bytemuck",
+ "getrandom 0.2.17",
+ "num-derive",
+ "num-traits",
+ "num_enum",
+ "solana-account-info",
+ "solana-address 2.7.0",
+ "solana-instruction",
+ "solana-nullable",
+ "solana-program-error",
+ "solana-program-option",
+ "solana-program-pack",
+ "solana-sdk-ids",
+ "solana-zero-copy",
+ "solana-zk-elgamal-proof-interface",
+ "solana-zk-sdk-pod",
+ "spl-token-confidential-transfer-proof-extraction 0.6.1",
+ "spl-token-group-interface",
+ "spl-token-metadata-interface 1.0.1",
  "spl-type-length-value",
  "thiserror 2.0.19",
 ]
@@ -6850,7 +7019,7 @@ checksum = "879a9ebad0d77383d3ea71e7de50503554961ff0f4ef6cbca39ad126e6f6da3a"
 dependencies = [
  "bytemuck",
  "solana-account-info",
- "solana-curve25519",
+ "solana-curve25519 3.1.14",
  "solana-instruction",
  "solana-instructions-sysvar",
  "solana-msg",
@@ -6859,6 +7028,26 @@ dependencies = [
  "solana-sdk-ids",
  "solana-zk-sdk",
  "spl-pod",
+ "thiserror 2.0.19",
+]
+
+[[package]]
+name = "spl-token-confidential-transfer-proof-extraction"
+version = "0.6.1"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "0c1a845ec724e807643a04f1d43439ee3571dd913848112ac76aa90b850eaf7c"
+dependencies = [
+ "bytemuck",
+ "solana-account-info",
+ "solana-address 2.7.0",
+ "solana-curve25519 4.0.1",
+ "solana-instruction",
+ "solana-instructions-sysvar",
+ "solana-msg",
+ "solana-program-error",
+ "solana-sdk-ids",
+ "solana-zk-elgamal-proof-interface",
+ "solana-zk-sdk-pod",
  "thiserror 2.0.19",
 ]
 
@@ -6927,6 +7116,26 @@ dependencies = [
  "solana-pubkey 3.0.0",
  "spl-discriminator",
  "spl-pod",
+ "spl-type-length-value",
+ "thiserror 2.0.19",
+]
+
+[[package]]
+name = "spl-token-metadata-interface"
+version = "1.0.1"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "3d3d96f175e7022ff200464dfa75a3708a4e9b70c83c4ecd04fe52ee479f4fef"
+dependencies = [
+ "borsh",
+ "num-derive",
+ "num-traits",
+ "num_enum",
+ "solana-address 2.7.0",
+ "solana-borsh",
+ "solana-instruction",
+ "solana-nullable",
+ "solana-program-error",
+ "spl-discriminator",
  "spl-type-length-value",
  "thiserror 2.0.19",
 ]
@@ -7865,6 +8074,11 @@ dependencies = [
  "http",
  "http-body",
  "http-body-util",
+ "http-range-header",
+ "httpdate",
+ "mime",
+ "mime_guess",
+ "percent-encoding",
  "pin-project-lite",
  "tokio",
  "tokio-util",

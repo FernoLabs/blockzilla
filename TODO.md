@@ -89,3 +89,6 @@ for the concrete integrity and migration backlog.
 - [x] An authenticated read-only Range gateway exists for completed archives.
 - [x] The proposed Unix-socket operator protocol has a written design; its
       implementation is intentionally deferred.
+
+Build dashboard for Sanctum
+https://x.com/JamesHanley/status/2085262007834644821

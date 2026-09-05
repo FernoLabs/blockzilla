@@ -451,7 +451,6 @@ pub struct LaunchCheckpointPublication {
     pub path: PathBuf,
     pub epoch: u64,
     pub last_slot: u64,
-    pub generation_digest: [u8; 32],
     pub account_state_sha256: [u8; 32],
     /// Standard SHA-256 over every byte of the published checkpoint file.
     pub checkpoint_file_sha256: [u8; 32],
@@ -467,7 +466,6 @@ pub struct LaunchCheckpointPublication {
 pub struct LaunchGenerationMetrics {
     pub epoch: u64,
     pub generation_id: String,
-    pub generation_digest: [u8; 32],
     pub first_slot: u64,
     pub last_slot: u64,
     pub slots_visited: u64,
@@ -1390,9 +1388,9 @@ where
         }
     };
     let mut contexts = Vec::<CompactGenerationContext>::with_capacity(roots.len());
-    let mut seen_generation_digests = BTreeSet::new();
+    let mut seen_generations = BTreeSet::new();
     if let Some(source) = &checkpoint_source {
-        seen_generation_digests.insert(source.binding.generation_digest);
+        seen_generations.insert(compact_generation_identity(source));
     }
     let mut checkpoint_publications = Vec::new();
     let mut compact_visit = empty_compact_visit_summary();
@@ -1424,12 +1422,12 @@ where
                                 match previous_context.as_ref() {
                                     None => Err(LaunchReplayError::MissingGenerationEvent),
                                     Some(previous) => {
-                                        if !seen_generation_digests
-                                            .insert(context.binding.generation_digest)
+                                        if !seen_generations
+                                            .insert(compact_generation_identity(context))
                                         {
                                             Err(LaunchReplayError::IncompatibleGeneration {
                                                 generation_id: context.generation_id.clone(),
-                                                message: "generation digest is already present in the chain"
+                                                message: "generation identity is already present in the chain"
                                                     .to_owned(),
                                             })
                                         } else {
@@ -1468,8 +1466,7 @@ where
                                         slots_per_epoch: context.slots_per_epoch,
                                         genesis_hash: genesis.genesis_hash,
                                     });
-                                    seen_generation_digests
-                                        .insert(context.binding.generation_digest);
+                                    seen_generations.insert(compact_generation_identity(context));
                                 })
                             };
                             match result {
@@ -1582,7 +1579,6 @@ where
                 last_slot: current_context
                     .last_slot
                     .expect("an exhausted generation has a final index row"),
-                generation_digest: current_context.binding.generation_digest,
                 account_state_sha256,
                 checkpoint_file_sha256,
             });
@@ -1602,7 +1598,6 @@ where
             generation_metrics.record(LaunchGenerationMetrics {
                 epoch: current_context.epoch,
                 generation_id: current_context.generation_id.clone(),
-                generation_digest: current_context.binding.generation_digest,
                 first_slot: current_context
                     .first_slot
                     .expect("an exhausted generation has a first index row"),
@@ -1665,15 +1660,49 @@ where
 fn replay_exhausted_generation(replay: &LaunchReplay, context: &CompactGenerationContext) -> bool {
     context.complete
         && context.last_slot.is_some()
-        && replay.compact_checkpoint.is_some_and(|recorded| {
-            recorded.generation_digest == context.binding.generation_digest
-                && recorded.registry_sha256 == context.binding.registry_sha256
-                && recorded.wire_profile == Some(context.binding.wire_profile)
+        && replay.compact_checkpoint.as_ref().is_some_and(|recorded| {
+            compact_checkpoint_source_matches(&recorded.source, context)
+                && recorded.wire_profile == context.binding.wire_profile
                 && recorded.cursor.generation_block_count == context.block_count
                 && recorded.cursor.next_row == context.block_count
                 && recorded.cursor.next_slot.is_none()
                 && context.last_slot == Some(recorded.cursor.last_slot)
         })
+}
+
+fn compact_generation_source(
+    context: &CompactGenerationContext,
+) -> crate::checkpoint::CompactCheckpointSource {
+    crate::checkpoint::CompactCheckpointSource {
+        cluster_id: context.cluster_id.clone(),
+        epoch: context.epoch,
+        generation_id: context.generation_id.clone(),
+        first_slot: context.first_slot,
+        slots_per_epoch: context.slots_per_epoch,
+    }
+}
+
+fn compact_generation_identity(
+    context: &CompactGenerationContext,
+) -> (String, u64, String, Option<u64>, u64) {
+    (
+        context.cluster_id.clone(),
+        context.epoch,
+        context.generation_id.clone(),
+        context.first_slot,
+        context.slots_per_epoch,
+    )
+}
+
+fn compact_checkpoint_source_matches(
+    source: &crate::checkpoint::CompactCheckpointSource,
+    context: &CompactGenerationContext,
+) -> bool {
+    source.cluster_id == context.cluster_id
+        && source.epoch == context.epoch
+        && source.generation_id == context.generation_id
+        && source.first_slot == context.first_slot
+        && source.slots_per_epoch == context.slots_per_epoch
 }
 
 fn validate_continuation_context(
@@ -1745,11 +1774,10 @@ fn validate_completed_generation_transition(
         return Err(incompatible("previous Compact generation is not sealed"));
     }
     let recorded = replay
-        .and_then(|replay| replay.compact_checkpoint)
+        .and_then(|replay| replay.compact_checkpoint.as_ref())
         .ok_or_else(|| incompatible("previous Compact generation has no frozen row cursor"))?;
-    if recorded.generation_digest != previous.binding.generation_digest
-        || recorded.registry_sha256 != previous.binding.registry_sha256
-        || recorded.wire_profile != Some(previous.binding.wire_profile)
+    if !compact_checkpoint_source_matches(&recorded.source, previous)
+        || recorded.wire_profile != previous.binding.wire_profile
         || recorded.cursor.generation_block_count != previous.block_count
         || recorded.cursor.next_row != previous.block_count
         || recorded.cursor.next_slot.is_some()
@@ -2219,12 +2247,10 @@ impl LaunchReplay {
         if let Some(cursor) = self.pending_resume_cursor {
             let descriptor = self
                 .pending_resume_descriptor
+                .as_ref()
                 .expect("a restored cursor always has a descriptor");
-            if descriptor.generation_digest != context.binding.generation_digest
-                || descriptor.registry_sha256 != context.binding.registry_sha256
-                || descriptor
-                    .wire_profile
-                    .is_some_and(|profile| profile != context.binding.wire_profile)
+            if !compact_checkpoint_source_matches(&descriptor.source, context)
+                || descriptor.wire_profile != context.binding.wire_profile
             {
                 return Err(LaunchReplayError::ResumeGenerationMismatch {
                     generation_id: context.generation_id.clone(),
@@ -2263,19 +2289,10 @@ impl LaunchReplay {
                         .to_owned(),
                 });
             }
-        } else if let Some(previous) = self.compact_checkpoint {
-            let same_digest = previous.generation_digest == context.binding.generation_digest;
-            let same_registry = previous.registry_sha256 == context.binding.registry_sha256;
-            if same_digest != same_registry {
-                return Err(LaunchReplayError::IncompatibleGeneration {
-                    generation_id: context.generation_id.clone(),
-                    message: "generation digest and registry binding disagree with active replay"
-                        .to_owned(),
-                });
-            }
-            let same_generation = same_digest && same_registry;
+        } else if let Some(previous) = self.compact_checkpoint.as_ref() {
+            let same_generation = compact_checkpoint_source_matches(&previous.source, context);
             if same_generation {
-                if previous.wire_profile != Some(context.binding.wire_profile) {
+                if previous.wire_profile != context.binding.wire_profile {
                     return Err(LaunchReplayError::IncompatibleGeneration {
                         generation_id: context.generation_id.clone(),
                         message: "Archive V2 wire profile disagrees with active replay".to_owned(),
@@ -2317,9 +2334,8 @@ impl LaunchReplay {
             });
         }
         let recorded = RecordedCompactCheckpoint {
-            generation_digest: context.binding.generation_digest,
-            registry_sha256: context.binding.registry_sha256,
-            wire_profile: Some(context.binding.wire_profile),
+            source: compact_generation_source(context),
+            wire_profile: context.binding.wire_profile,
             cursor: CompactCheckpointCursor {
                 last_slot: slot.slot,
                 next_row,
@@ -3978,30 +3994,6 @@ fn seed_absent_covered_pre_balances(
     }
 }
 
-/// Remove balance-only accounts that an older writable-post-balance runtime
-/// dynamically hydrated. Untouched serialized-genesis accounts are excluded:
-/// only keys already classified as replay changes are migration candidates.
-pub(crate) fn prune_legacy_hydrated_balance_only_system_accounts(
-    outcome: &mut LaunchReplayOutcome,
-) -> usize {
-    let candidates = outcome
-        .changed_accounts
-        .iter()
-        .copied()
-        .filter(|pubkey| {
-            outcome
-                .account_state
-                .get(pubkey)
-                .is_some_and(is_balance_only_system_account)
-        })
-        .collect::<Vec<_>>();
-    for pubkey in &candidates {
-        outcome.account_state.remove(pubkey);
-        outcome.changed_accounts.remove(pubkey);
-    }
-    candidates.len()
-}
-
 fn transaction_account_meta_layout(
     slot: u64,
     transaction: &CompactTransactionProbe,
@@ -4666,7 +4658,6 @@ mod tests {
         let expected = LaunchGenerationMetrics {
             epoch: 7,
             generation_id: "epoch-7".to_owned(),
-            generation_digest: [7; 32],
             first_slot: 70,
             last_slot: 79,
             slots_visited: 10,

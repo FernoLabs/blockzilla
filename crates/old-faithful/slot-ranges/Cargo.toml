@@ -9,6 +9,7 @@ description = "Build and read Old Faithful slot-to-CAR range indexes"
 readme = "README.md"
 keywords = ["solana", "car", "index"]
 exclude = ["*.sh"]
+autobins = false
 
 [[bin]]
 name = "of-slot-ranges"
@@ -49,3 +50,15 @@ zstd = { version = "0.13.3", optional = true }
 
 [dev-dependencies]
 tempfile = "3.23"
+
+[[bin]]
+name = "debug_epoch_gap"
+path = "src/bin/debug_epoch_gap.rs"
+
+[[bin]]
+name = "debug_epoch_slot_window"
+path = "src/bin/debug_epoch_slot_window.rs"
+
+[[bin]]
+name = "fetch_slot_slice"
+path = "src/bin/fetch_slot_slice.rs"

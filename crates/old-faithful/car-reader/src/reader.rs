@@ -57,6 +57,78 @@ pub struct CarEntryMaybePayload<'a> {
     pub total_len: usize,
 }
 
+/// One fully decoded CAR node and its framing lengths.
+///
+/// The node owns the data-frame bytes that it needs. The lengths describe the
+/// original CAR entry and let scanners account for input bytes without encoding
+/// the node again.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct DecodedNodeRecord {
+    /// Decoded lossless node.
+    pub node: crate::reconstruct::RawNode,
+    /// Payload length without the CID or entry-length varint.
+    pub payload_len: usize,
+    /// Entry length from the CAR varint, including the CID and payload.
+    pub entry_len: usize,
+    /// Total on-wire length, including the varint, CID, and payload.
+    pub total_len: usize,
+}
+
+/// Physical CAR nodes and bytes consumed by one lossless block read.
+///
+/// These counters describe nodes in the CAR stream. They do not count logical
+/// entry or transaction references after CID resolution.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct LosslessBlockReadStats {
+    pub car_entries: u64,
+    pub payload_bytes: u64,
+    pub wire_bytes: u64,
+    pub transactions: u64,
+    pub entries: u64,
+    pub blocks: u64,
+    pub rewards: u64,
+    pub dataframes: u64,
+    pub subsets: u64,
+    pub epochs: u64,
+}
+
+impl LosslessBlockReadStats {
+    fn record(&mut self, record: &DecodedNodeRecord) -> CarReadResult<()> {
+        self.car_entries = checked_stat_add(self.car_entries, 1, "CAR entry count")?;
+        self.payload_bytes = checked_stat_add(
+            self.payload_bytes,
+            record.payload_len as u64,
+            "CAR payload byte count",
+        )?;
+        self.wire_bytes = checked_stat_add(
+            self.wire_bytes,
+            record.total_len as u64,
+            "CAR wire byte count",
+        )?;
+        let counter = match &record.node {
+            crate::reconstruct::RawNode::Transaction(_) => &mut self.transactions,
+            crate::reconstruct::RawNode::Entry(_) => &mut self.entries,
+            crate::reconstruct::RawNode::Block(_) => &mut self.blocks,
+            crate::reconstruct::RawNode::Rewards(_) => &mut self.rewards,
+            crate::reconstruct::RawNode::DataFrame(_) => &mut self.dataframes,
+            crate::reconstruct::RawNode::Subset(_) => &mut self.subsets,
+            crate::reconstruct::RawNode::Epoch(_) => &mut self.epochs,
+        };
+        *counter = checked_stat_add(*counter, 1, "CAR node count")?;
+        Ok(())
+    }
+}
+
+/// Result of one lossless block read.
+///
+/// `has_block` is false at clean EOF. `stats` still includes trailing subset
+/// and epoch nodes that were consumed before that EOF.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct LosslessBlockRead {
+    pub has_block: bool,
+    pub stats: LosslessBlockReadStats,
+}
+
 /// Payload loading decision for [`CarBlockReader::read_entry_payload_select_with_scratch`].
 pub enum CarPayloadRead {
     /// Skip the rest of the payload after reading the requested prefix.
@@ -183,41 +255,59 @@ impl<R: Read> CarBlockReader<R> {
         &mut self,
         out: &mut crate::reconstruct::LosslessCarBlock,
     ) -> CarReadResult<bool> {
+        Ok(self.read_until_block_lossless_with_stats(out)?.has_block)
+    }
+
+    /// Read and resolve one lossless block with physical per-call counters.
+    ///
+    /// The block owns a bounded data-frame buffer pool. Reusing the same block,
+    /// including through a worker recycle queue, reuses those allocations.
+    /// A clean EOF after subset or epoch nodes returns `has_block == false` and
+    /// includes those trailing nodes in `stats`. An EOF with an unfinished
+    /// transaction, entry, rewards, or data-frame group is invalid data.
+    pub fn read_until_block_lossless_with_stats(
+        &mut self,
+        out: &mut crate::reconstruct::LosslessCarBlock,
+    ) -> CarReadResult<LosslessBlockRead> {
         out.clear();
+        let mut stats = LosslessBlockReadStats::default();
 
         loop {
-            let entry_offset = self.offset;
-            let current_entry_index = self.entry_index;
-            let entry_len = match read_uvarint64_with_len(&mut self.reader) {
-                Ok((v, varint_len)) => {
-                    self.offset += varint_len as u64;
-                    v as usize
+            let checkpoint = out.data_buffer_pool.checkpoint();
+            let record = {
+                let pool = &mut out.data_buffer_pool;
+                self.read_decoded_node_record_with_scratch(&mut out.scratch, &mut |required| {
+                    pool.take(required)
+                })
+            };
+            let record = match record {
+                Ok(record) => record,
+                Err(err) => {
+                    out.data_buffer_pool.rollback_to_checkpoint(checkpoint);
+                    return Err(err);
                 }
-                Err(CarReadError::Eof) => return Ok(false),
-                Err(err) => return Err(err),
+            };
+            let Some(record) = record else {
+                let pending = out.pending_node_counts();
+                if !pending.is_empty() {
+                    return Err(CarReadError::InvalidData(format!(
+                        "unterminated block group: txs={} entries={} rewards={} dataframes={}",
+                        pending.transactions, pending.entries, pending.rewards, pending.dataframes,
+                    )));
+                }
+                return Ok(LosslessBlockRead {
+                    has_block: false,
+                    stats,
+                });
             };
 
-            let mut cid_buf = [0u8; 36];
-            self.reader.read_exact(&mut cid_buf)?;
-            self.offset += cid_buf.len() as u64;
-
-            let payload_len = entry_len
-                .checked_sub(cid_buf.len())
-                .ok_or_else(|| CarReadError::InvalidData("entry_len < cid_len".to_string()))?;
-
-            let done = out.read_entry_payload_into(
-                &mut self.reader,
-                payload_len,
-                crate::reconstruct::NodeLocation {
-                    entry_index: current_entry_index,
-                    car_offset: entry_offset,
-                },
-                cid_buf,
-            )?;
-            self.offset += payload_len as u64;
-            self.entry_index += 1;
+            stats.record(&record)?;
+            let done = out.push_raw_node(record.node)?;
             if done {
-                return Ok(true);
+                return Ok(LosslessBlockRead {
+                    has_block: true,
+                    stats,
+                });
             }
         }
     }
@@ -430,29 +520,75 @@ impl<R: Read> CarBlockReader<R> {
     ///
     /// The caller can reuse `scratch` across calls to avoid reallocating the
     /// payload buffer while scanning a whole archive.
+    ///
+    /// Use [`Self::read_decoded_node_record_with_scratch`] when you also need
+    /// the CAR framing lengths or want to recycle data-frame buffers.
     pub fn read_lossless_node_with_scratch(
         &mut self,
         scratch: &mut Vec<u8>,
     ) -> CarReadResult<Option<crate::reconstruct::RawNode>> {
+        let mut take_data_buffer = |len| Vec::with_capacity(len);
+        Ok(self
+            .read_decoded_node_record_with_scratch(scratch, &mut take_data_buffer)?
+            .map(|record| record.node))
+    }
+
+    /// Reads one decoded node, its CAR framing lengths, and obtains owned
+    /// data-frame storage from the caller.
+    ///
+    /// Reuse `scratch` for the encoded payload. `take_data_buffer` is called for
+    /// each embedded or standalone data frame. It can return a buffer from a
+    /// pool; existing contents are cleared before the decoded bytes are copied.
+    pub fn read_decoded_node_record_with_scratch<F>(
+        &mut self,
+        scratch: &mut Vec<u8>,
+        take_data_buffer: &mut F,
+    ) -> CarReadResult<Option<DecodedNodeRecord>>
+    where
+        F: FnMut(usize) -> Vec<u8>,
+    {
         let Some(entry) = self.read_entry_payload_with_scratch(scratch)? else {
             return Ok(None);
         };
 
-        let raw = crate::reconstruct::decode_raw_node(entry.location, entry.cid, entry.payload)
-            .map_err(|err| {
-                CarReadError::InvalidData(format!(
-                    "entry {} at offset {}: {}",
-                    entry.location.entry_index, entry.location.car_offset, err
-                ))
-            })?;
+        let node = crate::reconstruct::decode_raw_node_with_data_buffers(
+            entry.location,
+            entry.cid,
+            entry.payload,
+            take_data_buffer,
+        )
+        .map_err(|err| {
+            CarReadError::InvalidData(format!(
+                "entry {} at offset {}: {}",
+                entry.location.entry_index, entry.location.car_offset, err
+            ))
+        })?;
 
-        Ok(Some(raw))
+        Ok(Some(DecodedNodeRecord {
+            node,
+            payload_len: entry.payload_len,
+            entry_len: entry.entry_len,
+            total_len: entry.total_len,
+        }))
+    }
+
+    /// Reads one decoded node record using fresh payload and data-frame buffers.
+    pub fn read_decoded_node_record(&mut self) -> CarReadResult<Option<DecodedNodeRecord>> {
+        let mut scratch = Vec::new();
+        let mut take_data_buffer = |len| Vec::with_capacity(len);
+        self.read_decoded_node_record_with_scratch(&mut scratch, &mut take_data_buffer)
     }
 
     pub fn read_lossless_node(&mut self) -> CarReadResult<Option<crate::reconstruct::RawNode>> {
         let mut scratch = Vec::new();
         self.read_lossless_node_with_scratch(&mut scratch)
     }
+}
+
+fn checked_stat_add(value: u64, added: u64, label: &str) -> CarReadResult<u64> {
+    value
+        .checked_add(added)
+        .ok_or_else(|| CarReadError::InvalidData(format!("{label} overflow")))
 }
 
 /// Append exactly `additional` bytes without first zero-filling the
@@ -635,6 +771,7 @@ mod tests {
 
     use super::{CarBlockReader, CarPayloadRead, append_exact_from_bufread, entry_payload_slice};
     use crate::error::CarReadError;
+    use crate::reconstruct::RawNode;
 
     fn framing_car(payloads: &[&[u8]]) -> Vec<u8> {
         let mut car = vec![0]; // Empty CAR header for framing-level tests.
@@ -649,6 +786,50 @@ mod tests {
             car.extend_from_slice(payload);
         }
         car
+    }
+
+    fn dataframe_payload(data: &[u8]) -> Vec<u8> {
+        let mut encoder = minicbor::Encoder::new(Vec::new());
+        encoder.array(5).unwrap();
+        encoder.u64(6).unwrap();
+        encoder.null().unwrap();
+        encoder.null().unwrap();
+        encoder.null().unwrap();
+        encoder.bytes(data).unwrap();
+        encoder.into_writer()
+    }
+
+    #[test]
+    fn decoded_node_record_reports_lengths_and_uses_supplied_buffer() {
+        let payload = dataframe_payload(&[1, 2, 3, 4]);
+        let car = framing_car(&[&payload]);
+        let mut reader = CarBlockReader::with_capacity(&car[..], 2);
+        reader.skip_header().unwrap();
+        let mut scratch = Vec::new();
+        let supplied = Vec::with_capacity(64);
+        let supplied_capacity = supplied.capacity();
+        let mut supplied = Some(supplied);
+        let mut requested = Vec::new();
+
+        let record = reader
+            .read_decoded_node_record_with_scratch(&mut scratch, &mut |len| {
+                requested.push(len);
+                supplied.take().unwrap()
+            })
+            .unwrap()
+            .unwrap();
+
+        assert_eq!(record.payload_len, payload.len());
+        assert_eq!(record.entry_len, 36 + payload.len());
+        assert_eq!(record.total_len, car.len() - 1);
+        assert_eq!(requested, [4]);
+        let RawNode::DataFrame(frame) = record.node else {
+            panic!("expected dataframe node");
+        };
+        assert_eq!(frame.frame.data, [1, 2, 3, 4]);
+        assert_eq!(frame.frame.data.capacity(), supplied_capacity);
+        assert_eq!(reader.offset, car.len() as u64);
+        assert_eq!(reader.entry_index, 1);
     }
 
     #[test]

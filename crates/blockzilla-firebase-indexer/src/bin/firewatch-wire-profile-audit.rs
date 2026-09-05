@@ -36,8 +36,8 @@ use blockzilla_format::{
 #[cfg(test)]
 use blockzilla_read_sdk::WireProfileAuditOutcome;
 use blockzilla_read_sdk::{
-    ArchiveReader, ArchiveV2WireProfile, Error as ArchiveReaderError, HashVerification,
-    OpenOptions, PinnedLocalRangeSource, audit_full_generation_wire_profile,
+    ArchiveReader, ArchiveV2MetadataWireProfile, ArchiveV2WireProfile, Error as ArchiveReaderError,
+    HashVerification, OpenOptions, PinnedLocalRangeSource, audit_full_generation_wire_profile,
     manifest::TrustedGenerationIdentity, validate_pinned_local_registry_index_mapping,
     wire_profile_marker, wire_profile_marker_bytes,
 };
@@ -261,7 +261,7 @@ fn run() -> Result<()> {
     let source = PinnedLocalRangeSource::new(&archive);
     bind_selected_capture_to_pinned_source(&source, &before)
         .context("bind attestation evidence to the exact pinned audit descriptors")?;
-    let reader = ArchiveReader::open_trusted(
+    let reader = ArchiveReader::open_trusted_with_metadata_profile(
         source.clone(),
         TrustedGenerationIdentity {
             cluster_id: "mainnet-beta".into(),
@@ -270,6 +270,7 @@ fn run() -> Result<()> {
             slots_per_epoch: args.slots_per_epoch,
             wire_profile: args.wire_profile,
         },
+        ArchiveV2MetadataWireProfile::UnmarkedHistoricalCompatibility,
         OpenOptions {
             hash_verification: HashVerification::SizesOnly,
             ..OpenOptions::default()

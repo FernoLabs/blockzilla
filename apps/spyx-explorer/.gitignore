@@ -1,0 +1,8 @@
+node_modules/
+.svelte-kit/
+build/
+static/data/spyx-summary.json
+static/data/spyx-programs.json
+
+# Generated SPYX shards - regenerable from the archive (158 MB, 2594 files)
+static/data/

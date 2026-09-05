@@ -37,9 +37,10 @@ use blockzilla_format::{
     ARCHIVE_V2_TX_FLAG_TX_RAW_FALLBACK, ArchiveV2HotTxRow, CompactPubkey, FileBackedKeyIndex,
 };
 use blockzilla_read_sdk::{
-    ArchiveReader, ArchiveV2MessageProjector, ArchiveV2MetadataProjectionLimits,
-    ArchiveV2WireProfile, HashVerification, MAX_MESSAGE_ACCOUNTS, OpenOptions,
-    PinnedLocalRangeSource, manifest::TrustedGenerationIdentity, project_archive_v2_metadata_error,
+    ArchiveReader, ArchiveV2MessageProjector, ArchiveV2MetadataProfileAdmission,
+    ArchiveV2MetadataProjectionLimits, ArchiveV2MetadataWireProfile, ArchiveV2WireProfile,
+    HashVerification, MAX_MESSAGE_ACCOUNTS, OpenOptions, PinnedLocalRangeSource,
+    manifest::TrustedGenerationIdentity, project_archive_v2_metadata_error,
     project_archive_v2_metadata_prefix,
 };
 use rustix::fs::{CWD, RenameFlags, renameat_with};
@@ -113,7 +114,13 @@ pub fn open_archive(
             slots_per_epoch: trust_local.slots_per_epoch,
             wire_profile: trust_local.wire_profile,
         };
-        ArchiveReader::open_trusted(source, identity, options).with_context(|| {
+        ArchiveReader::open_trusted_with_metadata_profile(
+            source,
+            identity,
+            ArchiveV2MetadataWireProfile::UnmarkedHistoricalCompatibility,
+            options,
+        )
+        .with_context(|| {
             format!(
                 "open Archive V2 generation at {} (trusted local, no manifest)",
                 archive_root.display()
@@ -128,8 +135,12 @@ pub fn open_archive(
             hash_verification: archive_hash_verification(false),
             ..OpenOptions::default()
         };
-        ArchiveReader::open_with_options(source, options)
-            .with_context(|| format!("open Archive V2 generation at {}", archive_root.display()))?
+        ArchiveReader::open_with_options_and_metadata_admission(
+            source,
+            options,
+            ArchiveV2MetadataProfileAdmission::AllowUnmarkedHistorical,
+        )
+        .with_context(|| format!("open Archive V2 generation at {}", archive_root.display()))?
     };
 
     let manifest_epoch = archive.manifest().epoch;
@@ -212,6 +223,11 @@ fn transaction_is_in_semantic_scope(row: &ArchiveV2HotTxRow) -> Result<bool> {
     // not required, so a raw failed metadata payload is not an omission.
     if row.flags & ARCHIVE_V2_TX_FLAG_HAS_ERROR != 0 {
         return Ok(false);
+    }
+    if row.flags & ARCHIVE_V2_TX_FLAG_HAS_METADATA == 0 || row.metadata_len == 0 {
+        anyhow::bail!(
+            "decoded transaction metadata is absent, so the successful-only outcome is unknown"
+        )
     }
     if row.flags & ARCHIVE_V2_TX_FLAG_METADATA_RAW_FALLBACK != 0 {
         anyhow::bail!("raw metadata fallback for successful transaction")
@@ -1890,7 +1906,7 @@ fn visit_transaction_relations(
     let has_metadata = row.flags & ARCHIVE_V2_TX_FLAG_HAS_METADATA != 0 && row.metadata_len != 0;
     anyhow::ensure!(
         has_metadata,
-        "successful transaction has no decoded metadata (slot {slot} tx {})",
+        "decoded transaction metadata is absent, so the successful-only outcome is unknown (slot {slot} tx {})",
         row.tx_index
     );
     let need_inner = row.flags & ARCHIVE_V2_TX_FLAG_HAS_INNER_IX != 0;
@@ -2720,6 +2736,23 @@ mod tests {
             ..row(&[0], &[0], 0)
         };
         assert!(transaction_is_in_semantic_scope(&raw_transaction).is_err());
+    }
+
+    #[test]
+    fn row_policy_rejects_unknown_outcome_when_metadata_is_absent() {
+        let absent_metadata = row(&[0], &[], 0);
+        let error = transaction_is_in_semantic_scope(&absent_metadata).unwrap_err();
+        assert!(
+            error
+                .to_string()
+                .contains("successful-only outcome is unknown")
+        );
+
+        let missing_metadata_flag = row(&[0], &[1], 0);
+        assert!(transaction_is_in_semantic_scope(&missing_metadata_flag).is_err());
+
+        let empty_metadata = row(&[0], &[], ARCHIVE_V2_TX_FLAG_HAS_METADATA);
+        assert!(transaction_is_in_semantic_scope(&empty_metadata).is_err());
     }
 
     #[test]

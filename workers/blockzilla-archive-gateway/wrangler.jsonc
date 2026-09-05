@@ -1,0 +1,31 @@
+{
+  "name": "blockzilla-network-format-benchmark-v1",
+  "main": "src/benchmark-entry.js",
+  "compatibility_date": "2026-08-31",
+  "compatibility_flags": ["nodejs_compat"],
+  "vars": {
+    "BENCHMARK_PUBLIC_READ": true,
+    "BENCHMARK_RELEASE_MAP": "compact-v2:0=compact-v2/epoch-0,indexer-v3:0=indexer-v3/epoch-0,compact-v2:900=compact-v2/releases/e900-current-typed-errors-v1,indexer-v3:900=indexer-v3/releases/e900-current-typed-errors-v1"
+  },
+  "r2_buckets": [
+    {
+      "binding": "BENCHMARK_BUCKET",
+      "bucket_name": "blockzilla-network-format-benchmark-v1"
+    }
+  ],
+  "observability": {
+    "enabled": true,
+    "head_sampling_rate": 1,
+    "logs": {
+      "enabled": true,
+      "head_sampling_rate": 1,
+      "persist": true,
+      "invocation_logs": true
+    },
+    "traces": {
+      "enabled": false,
+      "head_sampling_rate": 1,
+      "persist": true
+    }
+  }
+}

@@ -6,6 +6,7 @@ rust-version.workspace = true
 license.workspace = true
 repository.workspace = true
 description = "Replay-first Solana runtime experiments for Blockzilla"
+autobins = false
 
 [[bin]]
 name = "blockzilla-replay-poc"
@@ -49,3 +50,51 @@ cranelift-frontend = "=0.134.2"
 cranelift-jit = "=0.134.2"
 cranelift-module = "=0.134.2"
 cranelift-native = "=0.134.2"
+
+[[bin]]
+name = "account-store-bench"
+path = "src/bin/account-store-bench.rs"
+
+[[bin]]
+name = "bpf-execution-bench"
+path = "src/bin/bpf-execution-bench.rs"
+
+[[bin]]
+name = "compact-account-trace"
+path = "src/bin/compact-account-trace.rs"
+
+[[bin]]
+name = "compact-balance-audit"
+path = "src/bin/compact-balance-audit.rs"
+
+[[bin]]
+name = "compact-conflict-bench"
+path = "src/bin/compact-conflict-bench.rs"
+
+[[bin]]
+name = "compact-decode-bench"
+path = "src/bin/compact-decode-bench.rs"
+
+[[bin]]
+name = "compact-native-audit"
+path = "src/bin/compact-native-audit.rs"
+
+[[bin]]
+name = "compact-slot-balance-audit"
+path = "src/bin/compact-slot-balance-audit.rs"
+
+[[bin]]
+name = "native-apply-bench"
+path = "src/bin/native-apply-bench.rs"
+
+[[bin]]
+name = "recent-blockhashes-hotpath-bench"
+path = "src/bin/recent-blockhashes-hotpath-bench.rs"
+
+[[bin]]
+name = "replay-hotpath-bench"
+path = "src/bin/replay-hotpath-bench.rs"
+
+[[bin]]
+name = "replay-state-bench"
+path = "src/bin/replay-state-bench.rs"

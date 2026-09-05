@@ -11,7 +11,7 @@ use blockzilla_format::{
 
 use crate::{
     ArchiveReader, ArchiveV2InstructionProgramSemantics, ArchiveV2MetadataProjectionLimits, Error,
-    RangeSource, Result, WireProfileAuditOutcome, validate_archive_v2_metadata_exact,
+    RangeSource, Result, WireProfileAuditOutcome,
 };
 
 /// Classification of every typed message in one generation.
@@ -287,22 +287,24 @@ pub fn audit_full_generation_wire_profile<S: RangeSource>(
                     .checked_add(projected.expected_loaded_writable)
                     .and_then(|count| count.checked_add(projected.expected_loaded_readonly))
                     .ok_or(Error::Overflow("resolved message account count"))?;
-                let metadata = validate_archive_v2_metadata_exact(
-                    metadata_bytes,
-                    ArchiveV2MetadataProjectionLimits {
-                        total_message_accounts,
-                        top_level_instruction_count: projected.instruction_count,
-                    },
-                    reader.registry_entries(),
-                )
-                .map_err(|source| {
-                    selected_semantic_rejection(
-                        reader,
-                        slot,
-                        row.tx_index,
-                        format!("typed metadata is invalid for the projected message: {source}"),
+                let metadata = reader
+                    .validate_metadata_exact(
+                        metadata_bytes,
+                        ArchiveV2MetadataProjectionLimits {
+                            total_message_accounts,
+                            top_level_instruction_count: projected.instruction_count,
+                        },
                     )
-                })?;
+                    .map_err(|source| {
+                        selected_semantic_rejection(
+                            reader,
+                            slot,
+                            row.tx_index,
+                            format!(
+                                "typed metadata is invalid for the projected message: {source}"
+                            ),
+                        )
+                    })?;
                 if metadata.has_error != (row.flags & ARCHIVE_V2_TX_FLAG_HAS_ERROR != 0)
                     || metadata.inner_instructions_present
                         != (row.flags & ARCHIVE_V2_TX_FLAG_HAS_INNER_IX != 0)

@@ -7,6 +7,7 @@ license.workspace = true
 repository.workspace = true
 description = "Provider-neutral immutable object storage contract for Hivezilla"
 publish = false
+autobins = false
 
 [[bin]]
 name = "blockzilla-s3-upload"

@@ -848,6 +848,21 @@ pub fn deserialize_archive_v2_hot_block_blob(bytes: &[u8]) -> ReadResult<Archive
 pub fn deserialize_archive_v2_hot_block_blob_borrowed_current(
     bytes: &[u8],
 ) -> ReadResult<BorrowedArchiveV2HotBlockBlob<'_>> {
+    deserialize_archive_v2_hot_block_blob_borrowed_current_with_preallocation_limit::<
+        ARCHIVE_V2_DECODE_PREALLOCATION_LIMIT_BYTES,
+    >(bytes)
+}
+
+/// Decode the current hot-block schema with an explicit one-sequence allocation limit.
+///
+/// This is for trusted maintenance tools that must retain unusually large epoch-boundary reward
+/// vectors. Normal readers should use [`deserialize_archive_v2_hot_block_blob_borrowed_current`]
+/// so untrusted input remains subject to the standard limit.
+pub fn deserialize_archive_v2_hot_block_blob_borrowed_current_with_preallocation_limit<
+    const PREALLOCATION_LIMIT_BYTES: usize,
+>(
+    bytes: &[u8],
+) -> ReadResult<BorrowedArchiveV2HotBlockBlob<'_>> {
     let (header, tx_count, tx_rows, message_bytes, metadata_bytes): (
         ArchiveV2HotBlockHeader,
         u32,
@@ -856,7 +871,7 @@ pub fn deserialize_archive_v2_hot_block_blob_borrowed_current(
         &[u8],
     ) = wincode::config::deserialize_exact(
         bytes,
-        bounded_wincode_leb128_config::<ARCHIVE_V2_DECODE_PREALLOCATION_LIMIT_BYTES>(),
+        bounded_wincode_leb128_config::<PREALLOCATION_LIMIT_BYTES>(),
     )?;
     Ok(BorrowedArchiveV2HotBlockBlob {
         header,
@@ -891,9 +906,11 @@ unsafe impl<'de, C: Config> SchemaRead<'de, C> for DiscardedArchiveV2HotRewards 
     #[inline]
     fn read(mut reader: impl Reader<'de>, dst: &mut MaybeUninit<Self::Dst>) -> ReadResult<()> {
         let _num_partitions = <Option<u64> as SchemaRead<'de, C>>::get(reader.by_ref())?;
-        let reward_count = <C::LengthEncoding as SeqLen<C>>::read_prealloc_check::<CompactReward>(
-            reader.by_ref(),
-        )?;
+        // This view does not allocate or retain a `CompactReward` sequence. Charge one byte per
+        // element so the configured limit still bounds a forged iteration count without applying
+        // `CompactReward`'s in-memory size to a zero-allocation path.
+        let reward_count =
+            <C::LengthEncoding as SeqLen<C>>::read_prealloc_check::<u8>(reader.by_ref())?;
         for _ in 0..reward_count {
             let _reward = <CompactReward as SchemaRead<'de, C>>::get(reader.by_ref())?;
         }
@@ -1273,6 +1290,65 @@ mod hot_block_slot_time_tests {
     }
 
     #[test]
+    fn reward_discarding_decoder_accepts_sequence_above_owned_allocation_limit() {
+        let reward = CompactReward {
+            pubkey: CompactPubkey::id(1),
+            lamports: 0,
+            post_balance: 0,
+            reward_type: 0,
+            commission: None,
+        };
+        let encoded_reward = wincode::config::serialize(&reward, wincode_leb128_config()).unwrap();
+        let reward_count =
+            ARCHIVE_V2_DECODE_PREALLOCATION_LIMIT_BYTES / core::mem::size_of::<CompactReward>() + 1;
+
+        let mut block = current_hot_block_fixture();
+        block.header.rewards = Some(ArchiveV2HotRewards {
+            num_partitions: None,
+            decoded: Vec::new(),
+        });
+        let empty_bytes = wincode::config::serialize(&block, wincode_leb128_config()).unwrap();
+        let encoded_header =
+            wincode::config::serialize(&block.header, wincode_leb128_config()).unwrap();
+        assert_eq!(encoded_header.last(), Some(&0));
+        let count_offset = encoded_header.len() - 1;
+        let encoded_count = wincode::config::serialize(
+            &u64::try_from(reward_count).unwrap(),
+            wincode_leb128_config(),
+        )
+        .unwrap();
+        let repeated_reward_bytes = reward_count.checked_mul(encoded_reward.len()).unwrap();
+        let mut bytes =
+            Vec::with_capacity(empty_bytes.len() - 1 + encoded_count.len() + repeated_reward_bytes);
+        bytes.extend_from_slice(&empty_bytes[..count_offset]);
+        bytes.extend_from_slice(&encoded_count);
+        for _ in 0..reward_count {
+            bytes.extend_from_slice(&encoded_reward);
+        }
+        bytes.extend_from_slice(&empty_bytes[count_offset + 1..]);
+
+        let retained_error =
+            deserialize_archive_v2_hot_block_blob_borrowed_current(&bytes).unwrap_err();
+        assert!(retained_error.to_string().contains("preallocation"));
+        let owned_error = deserialize_archive_v2_hot_block_blob(&bytes).unwrap_err();
+        assert!(owned_error.to_string().contains("preallocation"));
+
+        let retained =
+            deserialize_archive_v2_hot_block_blob_borrowed_current_with_preallocation_limit::<
+                { 2 * ARCHIVE_V2_DECODE_PREALLOCATION_LIMIT_BYTES },
+            >(&bytes)
+            .unwrap();
+        assert_eq!(
+            retained.header.rewards.as_ref().unwrap().decoded.len(),
+            reward_count
+        );
+
+        let discarded =
+            deserialize_archive_v2_hot_block_blob_borrowed_current_without_rewards(&bytes).unwrap();
+        assert_replay_view_matches_owned(&discarded, &block);
+    }
+
+    #[test]
     fn hot_block_decoders_reject_hostile_reward_preallocation() {
         let mut block = current_hot_block_fixture();
         block.header.rewards = Some(ArchiveV2HotRewards {
@@ -1289,6 +1365,10 @@ mod hot_block_slot_time_tests {
         assert!(borrowed.to_string().contains("preallocation"));
         let owned = deserialize_archive_v2_hot_block_blob(&bytes).unwrap_err();
         assert!(owned.to_string().contains("preallocation"));
+        let discarded =
+            deserialize_archive_v2_hot_block_blob_borrowed_current_without_rewards(&bytes)
+                .unwrap_err();
+        assert!(discarded.to_string().contains("preallocation"));
     }
 
     #[test]

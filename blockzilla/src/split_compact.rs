@@ -1,5 +1,7 @@
 use anyhow::{Context, Result, anyhow};
-use blockzilla_format::{write_registry_iter, write_u32_varint};
+use blockzilla_format::{
+    SkippedSlotMap, write_registry_iter, write_skipped_slot_map, write_u32_varint,
+};
 use gxhash::{GxBuildHasher, HashMap as GxHashMap};
 use of_car_reader::{
     CarBlockReader,
@@ -21,6 +23,12 @@ use std::{
     io::{BufRead, BufReader, BufWriter, Read, Write},
     path::Path,
     str::FromStr,
+    sync::{
+        Arc,
+        atomic::{AtomicUsize, Ordering},
+        mpsc::{self, Receiver, RecvTimeoutError, SyncSender},
+    },
+    thread,
     time::{Duration, Instant},
 };
 use tracing::info;
@@ -39,6 +47,7 @@ const ZSTD_WINDOW_LOG_MAX: u32 = 31;
 pub(crate) enum CarRegistryBenchStrategy {
     ExactOld,
     ExactStream,
+    PipelinedSingleMerge,
     UniqueSpaceSaving,
 }
 
@@ -49,7 +58,82 @@ pub(crate) struct CarRegistryBenchConfig<'a> {
     pub(crate) strategy: CarRegistryBenchStrategy,
     pub(crate) initial_capacity: usize,
     pub(crate) heavy_hitter_capacity: usize,
+    pub(crate) workers: usize,
     pub(crate) max_blocks: Option<u64>,
+}
+
+const REGISTRY_PIPELINE_POLL: Duration = Duration::from_millis(50);
+pub(crate) const REGISTRY_PIPELINE_WORKERS_MAX: usize = 8;
+
+#[derive(Default)]
+struct PipelineQueueDepth {
+    current: AtomicUsize,
+    maximum: AtomicUsize,
+}
+
+impl PipelineQueueDepth {
+    fn increment(&self) {
+        let depth = self.current.fetch_add(1, Ordering::Relaxed) + 1;
+        self.maximum.fetch_max(depth, Ordering::Relaxed);
+    }
+
+    fn decrement(&self) {
+        self.current.fetch_sub(1, Ordering::Relaxed);
+    }
+
+    fn maximum(&self) -> usize {
+        self.maximum.load(Ordering::Relaxed)
+    }
+}
+
+struct ReadyRegistryWorker {
+    worker: usize,
+    block: LosslessCarBlock,
+}
+
+struct CountedRegistryBlock {
+    worker: usize,
+    block: LosslessCarBlock,
+    counts: Vec<([u8; 32], u32)>,
+    touches: u64,
+}
+
+struct RecycledRegistryWorker {
+    block: LosslessCarBlock,
+    counts: Vec<([u8; 32], u32)>,
+}
+
+#[derive(Default)]
+struct RegistryPipelineWorkerStats {
+    timings: RegistryBuildTimings,
+    job_wait: Duration,
+    merge_send_wait: Duration,
+    recycle_wait: Duration,
+    block_sort: Duration,
+    touches: u64,
+    unique_block_keys: u64,
+}
+
+#[derive(Default)]
+struct RegistryPipelineMergerStats {
+    receive_wait: Duration,
+    map_update: Duration,
+    updates: u64,
+    blocks: u64,
+    maximum_queue_depth: usize,
+}
+
+struct RegistryPipelineScan {
+    counter: PubkeyCounter,
+    blockhashes: Vec<u8>,
+    skipped_slots: Option<SkippedSlotMap>,
+    timings: RegistryBuildTimings,
+    reader_wait: Duration,
+    reader_read: Duration,
+    reader_send_wait: Duration,
+    maximum_ready_depth: usize,
+    workers: RegistryPipelineWorkerStats,
+    merger: RegistryPipelineMergerStats,
 }
 
 fn require_block(block: &LosslessCarBlock) -> Result<&of_car_reader::reconstruct::RawBlockNode> {
@@ -72,7 +156,11 @@ where
     reader.skip_header()?;
 
     let mut block = LosslessCarBlock::default();
-    while reader.read_until_block_lossless(&mut block)? {
+    loop {
+        let read = reader.read_until_block_lossless_with_stats(&mut block)?;
+        if !read.has_block {
+            break;
+        }
         if f(&block)? {
             break;
         }
@@ -83,13 +171,13 @@ where
 
 fn open_car_input(path: &Path) -> Result<Box<dyn Read>> {
     let file = File::open(path).with_context(|| format!("open {}", path.display()))?;
-    let file = BufReader::with_capacity(BUFFER_SIZE, file);
 
     if path
         .extension()
         .and_then(|ext| ext.to_str())
         .is_some_and(|ext| ext.eq_ignore_ascii_case("zst"))
     {
+        let file = BufReader::with_capacity(BUFFER_SIZE, file);
         let mut decoder = zstd::Decoder::with_buffer(file)
             .with_context(|| format!("init zstd decoder for {}", path.display()))?;
         decoder
@@ -97,6 +185,7 @@ fn open_car_input(path: &Path) -> Result<Box<dyn Read>> {
             .with_context(|| format!("set zstd window_log_max for {}", path.display()))?;
         Ok(Box::new(decoder))
     } else {
+        // CarBlockReader adds the single read buffer needed for plain CAR.
         Ok(Box::new(file))
     }
 }
@@ -106,9 +195,19 @@ pub(crate) fn build_registry_and_blockhash_for_input(
     registry_path: &Path,
     registry_counts_path: Option<&Path>,
     blockhash_registry_path: &Path,
+    skipped_slot_map_path: Option<&Path>,
     external_blockhashes: &ExternalBlockhashOverrides,
     max_blocks: Option<u64>,
+    workers: usize,
 ) -> Result<()> {
+    anyhow::ensure!(
+        (1..=REGISTRY_PIPELINE_WORKERS_MAX).contains(&workers),
+        "registry workers must be in 1..={REGISTRY_PIPELINE_WORKERS_MAX}, got {workers}"
+    );
+    anyhow::ensure!(
+        skipped_slot_map_path.is_none() || max_blocks.is_none(),
+        "a partial registry scan cannot publish a full-epoch skipped-slot map"
+    );
     info!("Building registry + blockhash for {}", input.display());
 
     let mut blockhash_out: Vec<u8> = Vec::with_capacity(MAX_BLOCKHASHES_PER_EPOCH * 32);
@@ -116,7 +215,9 @@ pub(crate) fn build_registry_and_blockhash_for_input(
     let start = Instant::now();
     let mut progress = ProgressTracker::new("Split Compact Registry");
     let mut timings = RegistryBuildTimings::from_env();
-    let mut scratch = RegistryScanScratch::new();
+    let mut skipped_slots = skipped_slot_map_path
+        .map(|_| SkippedSlotMap::new(crate::SLOTS_PER_EPOCH as u32))
+        .transpose()?;
     let genesis = genesis_epoch0::maybe_load_for_input(input)?;
     if let Some(genesis) = &genesis {
         blockhash_out.extend_from_slice(&genesis.genesis_hash);
@@ -130,24 +231,69 @@ pub(crate) fn build_registry_and_blockhash_for_input(
         );
     }
 
-    let stream_started = Instant::now();
-    with_lossless_block_stream(input, |block| {
-        let raw_block = require_block(block)?;
-        let blockhash = blockhash_for_block(block, external_blockhashes)?;
-        blockhash_out.extend_from_slice(&blockhash);
+    if workers <= 1 {
+        let mut scratch = RegistryScanScratch::new();
+        let stream_started = Instant::now();
+        with_lossless_block_stream(input, |block| {
+            let raw_block = require_block(block)?;
+            if let Some(skipped_slots) = skipped_slots.as_mut() {
+                skipped_slots.record_present(raw_block.slot)?;
+            }
+            let blockhash = blockhash_for_block(block, external_blockhashes)?;
+            blockhash_out.extend_from_slice(&blockhash);
 
-        let count_started = DetailTimer::start(timings.detailed);
-        let txs = count_block_pubkeys(block, &mut counter, &mut timings, &mut scratch)?;
-        timings.count_block_total += count_started.elapsed();
-        timings.blocks += 1;
-        timings.txs += txs;
-        progress.update_slot(raw_block.slot);
-        progress.update(1, txs);
-        Ok(max_blocks.is_some_and(|limit| timings.blocks >= limit))
-    })?;
-    timings.stream_total = stream_started.elapsed();
+            let count_started = DetailTimer::start(timings.detailed);
+            let txs = count_block_pubkeys(block, &mut counter, &mut timings, &mut scratch)?;
+            timings.count_block_total += count_started.elapsed();
+            timings.blocks += 1;
+            timings.txs += txs;
+            progress.update_slot(raw_block.slot);
+            progress.update(1, txs);
+            Ok(max_blocks.is_some_and(|limit| timings.blocks >= limit))
+        })?;
+        timings.stream_total = stream_started.elapsed();
+    } else {
+        let pipeline = scan_car_pubkeys_pipelined(
+            input,
+            Some(external_blockhashes),
+            max_blocks,
+            workers,
+            counter,
+            blockhash_out,
+            skipped_slots,
+            timings.detailed,
+            &mut progress,
+        )?;
+        counter = pipeline.counter;
+        blockhash_out = pipeline.blockhashes;
+        skipped_slots = pipeline.skipped_slots;
+        timings = pipeline.timings;
+        info!(
+            "Registry pipeline instrumentation: workers={} reader_wait={:.3}s reader_read={:.3}s reader_send_wait={:.3}s worker_job_wait={:.3}s worker_merge_send_wait={:.3}s worker_recycle_wait={:.3}s worker_block_sort={:.3}s merger_receive_wait={:.3}s merger_map_update={:.3}s touches={} unique_block_keys={} merger_updates={} merger_blocks={} max_ready_depth={} max_merge_queue_depth={}",
+            workers,
+            pipeline.reader_wait.as_secs_f64(),
+            pipeline.reader_read.as_secs_f64(),
+            pipeline.reader_send_wait.as_secs_f64(),
+            pipeline.workers.job_wait.as_secs_f64(),
+            pipeline.workers.merge_send_wait.as_secs_f64(),
+            pipeline.workers.recycle_wait.as_secs_f64(),
+            pipeline.workers.block_sort.as_secs_f64(),
+            pipeline.merger.receive_wait.as_secs_f64(),
+            pipeline.merger.map_update.as_secs_f64(),
+            pipeline.workers.touches,
+            pipeline.workers.unique_block_keys,
+            pipeline.merger.updates,
+            pipeline.merger.blocks,
+            pipeline.maximum_ready_depth,
+            pipeline.merger.maximum_queue_depth,
+        );
+    }
 
     progress.final_report();
+
+    if let (Some(path), Some(skipped_slots)) = (skipped_slot_map_path, skipped_slots.as_ref()) {
+        write_skipped_slot_map(path, skipped_slots)?;
+    }
 
     {
         let write_started = Instant::now();
@@ -464,6 +610,7 @@ pub(crate) fn bench_car_registry(config: CarRegistryBenchConfig<'_>) -> Result<(
                 CarRegistryBenchStrategy::ExactStream => {
                     finalize_exact_stream(counter, config.output_dir)?
                 }
+                CarRegistryBenchStrategy::PipelinedSingleMerge => unreachable!(),
                 CarRegistryBenchStrategy::UniqueSpaceSaving => unreachable!(),
             };
             let finalize_elapsed = finalize_started.elapsed();
@@ -473,6 +620,102 @@ pub(crate) fn bench_car_registry(config: CarRegistryBenchConfig<'_>) -> Result<(
                 config.output_dir,
                 config.strategy,
                 &timings,
+                RegistryBenchMemory {
+                    rss_start,
+                    rss_after_stream,
+                    rss_after_finalize,
+                    rss_end: peak_rss_bytes(),
+                    estimated_counter_heap_bytes,
+                    estimated_tracker_heap_bytes: 0,
+                    map_capacity,
+                },
+                RegistryBenchFinalize {
+                    registry_len: final_report.registry_len,
+                    count_sum,
+                    candidate_count: 0,
+                    copied_key_count_bytes: final_report.copied_key_count_bytes,
+                    finalize_elapsed,
+                    total_elapsed: started.elapsed(),
+                },
+            );
+        }
+        CarRegistryBenchStrategy::PipelinedSingleMerge => {
+            let counter = PubkeyCounter::new(config.initial_capacity);
+            let mut progress = ProgressTracker::new("CAR Registry Pipeline Bench");
+            let pipeline = scan_car_pubkeys_pipelined(
+                config.input,
+                None,
+                config.max_blocks,
+                config.workers,
+                counter,
+                Vec::new(),
+                None,
+                true,
+                &mut progress,
+            )?;
+            progress.final_report();
+            let rss_after_stream = peak_rss_bytes();
+            let count_sum = pipeline.counter.count_sum();
+            let map_capacity = pipeline.counter.counts.capacity();
+            let estimated_counter_heap_bytes =
+                exact_counter_estimated_heap_bytes(map_capacity, size_of::<u32>());
+            let finalize_started = Instant::now();
+            let final_report = finalize_exact_stream(pipeline.counter, config.output_dir)?;
+            let finalize_elapsed = finalize_started.elapsed();
+            let rss_after_finalize = peak_rss_bytes();
+            println!("pipeline_workers={}", config.workers);
+            println!(
+                "pipeline_reader_wait_s={:.6}",
+                pipeline.reader_wait.as_secs_f64()
+            );
+            println!(
+                "pipeline_reader_read_s={:.6}",
+                pipeline.reader_read.as_secs_f64()
+            );
+            println!(
+                "pipeline_reader_send_wait_s={:.6}",
+                pipeline.reader_send_wait.as_secs_f64()
+            );
+            println!(
+                "pipeline_worker_job_wait_s={:.6}",
+                pipeline.workers.job_wait.as_secs_f64()
+            );
+            println!(
+                "pipeline_worker_merge_send_wait_s={:.6}",
+                pipeline.workers.merge_send_wait.as_secs_f64()
+            );
+            println!(
+                "pipeline_worker_recycle_wait_s={:.6}",
+                pipeline.workers.recycle_wait.as_secs_f64()
+            );
+            println!(
+                "pipeline_block_sort_s={:.6}",
+                pipeline.workers.block_sort.as_secs_f64()
+            );
+            println!(
+                "pipeline_merger_receive_wait_s={:.6}",
+                pipeline.merger.receive_wait.as_secs_f64()
+            );
+            println!(
+                "pipeline_merger_map_update_s={:.6}",
+                pipeline.merger.map_update.as_secs_f64()
+            );
+            println!("pipeline_pubkey_touches={}", pipeline.workers.touches);
+            println!(
+                "pipeline_unique_block_keys={}",
+                pipeline.workers.unique_block_keys
+            );
+            println!("pipeline_merger_updates={}", pipeline.merger.updates);
+            println!("pipeline_max_ready_depth={}", pipeline.maximum_ready_depth);
+            println!(
+                "pipeline_max_merge_queue_depth={}",
+                pipeline.merger.maximum_queue_depth
+            );
+            print_registry_bench_report(
+                config.input,
+                config.output_dir,
+                config.strategy,
+                &pipeline.timings,
                 RegistryBenchMemory {
                     rss_start,
                     rss_after_stream,
@@ -551,7 +794,11 @@ fn stream_car_pubkeys(
     let mut scratch = RegistryScanScratch::new();
     let stream_started = Instant::now();
 
-    while reader.read_until_block_lossless(&mut block)? {
+    loop {
+        let read = reader.read_until_block_lossless_with_stats(&mut block)?;
+        if !read.has_block {
+            break;
+        }
         let raw_block = require_block(&block)?;
         let count_started = DetailTimer::start(timings.detailed);
         let txs = count_block_pubkeys(&block, counter, timings, &mut scratch)?;
@@ -568,6 +815,334 @@ fn stream_car_pubkeys(
     timings.stream_total = stream_started.elapsed();
     progress.final_report();
     Ok(())
+}
+
+fn scan_car_pubkeys_pipelined(
+    input: &Path,
+    external_blockhashes: Option<&ExternalBlockhashOverrides>,
+    max_blocks: Option<u64>,
+    worker_count: usize,
+    counter: PubkeyCounter,
+    blockhashes: Vec<u8>,
+    skipped_slots: Option<SkippedSlotMap>,
+    detailed_timings: bool,
+    progress: &mut ProgressTracker,
+) -> Result<RegistryPipelineScan> {
+    anyhow::ensure!(
+        worker_count > 1,
+        "registry pipeline requires at least two workers"
+    );
+    let pipeline_started = Instant::now();
+
+    let (ready_tx, ready_rx) = mpsc::channel::<ReadyRegistryWorker>();
+    let (merge_tx, merge_rx) = mpsc::sync_channel::<CountedRegistryBlock>(worker_count);
+    let (error_tx, error_rx) = mpsc::channel::<anyhow::Error>();
+    let ready_depth = Arc::new(PipelineQueueDepth::default());
+    let merge_depth = Arc::new(PipelineQueueDepth::default());
+
+    let mut job_senders = Vec::with_capacity(worker_count);
+    let mut recycle_senders = Vec::with_capacity(worker_count);
+    let mut worker_handles = Vec::with_capacity(worker_count);
+    for worker in 0..worker_count {
+        let (job_tx, job_rx) = mpsc::sync_channel::<LosslessCarBlock>(1);
+        let (recycle_tx, recycle_rx) = mpsc::sync_channel::<RecycledRegistryWorker>(1);
+        job_senders.push(job_tx);
+        recycle_senders.push(recycle_tx);
+
+        let worker_ready_tx = ready_tx.clone();
+        let worker_merge_tx = merge_tx.clone();
+        let worker_error_tx = error_tx.clone();
+        let worker_ready_depth = Arc::clone(&ready_depth);
+        let worker_merge_depth = Arc::clone(&merge_depth);
+        worker_handles.push(
+            thread::Builder::new()
+                .name(format!("registry-decode-{worker}"))
+                .spawn(move || {
+                    run_registry_pipeline_worker(
+                        worker,
+                        detailed_timings,
+                        job_rx,
+                        recycle_rx,
+                        worker_ready_tx,
+                        worker_merge_tx,
+                        worker_error_tx,
+                        &worker_ready_depth,
+                        &worker_merge_depth,
+                    )
+                })
+                .with_context(|| format!("spawn registry decode worker {worker}"))?,
+        );
+    }
+    drop(ready_tx);
+    drop(merge_tx);
+    drop(error_tx);
+
+    let merger_merge_depth = Arc::clone(&merge_depth);
+    let merger_handle = thread::Builder::new()
+        .name("registry-merge".to_owned())
+        .spawn(move || {
+            run_registry_pipeline_merger(counter, merge_rx, recycle_senders, &merger_merge_depth)
+        })
+        .context("spawn registry merger")?;
+
+    let reader_result =
+        (|| -> Result<(Vec<u8>, Option<SkippedSlotMap>, Duration, Duration, Duration)> {
+        let input_file = open_car_input(input)?;
+        let mut reader = CarBlockReader::with_capacity(input_file, BUFFER_SIZE);
+        reader.skip_header()?;
+        let mut blockhashes = blockhashes;
+        let mut skipped_slots = skipped_slots;
+        let mut blocks = 0u64;
+        let mut reader_wait = Duration::ZERO;
+        let mut reader_read = Duration::ZERO;
+        let mut reader_send_wait = Duration::ZERO;
+
+        loop {
+            if let Ok(err) = error_rx.try_recv() {
+                return Err(err.context("registry decode worker failed"));
+            }
+
+            let wait_started = Instant::now();
+            let ready = loop {
+                match ready_rx.recv_timeout(REGISTRY_PIPELINE_POLL) {
+                    Ok(ready) => break ready,
+                    Err(RecvTimeoutError::Timeout) => {
+                        if let Ok(err) = error_rx.try_recv() {
+                            return Err(err.context("registry decode worker failed"));
+                        }
+                    }
+                    Err(RecvTimeoutError::Disconnected) => {
+                        if let Ok(err) = error_rx.try_recv() {
+                            return Err(err.context("registry decode worker failed"));
+                        }
+                        anyhow::bail!("all registry decode workers stopped before CAR EOF");
+                    }
+                }
+            };
+            reader_wait += wait_started.elapsed();
+            ready_depth.decrement();
+
+            let mut block = ready.block;
+            let read_started = Instant::now();
+            let read = reader.read_until_block_lossless_with_stats(&mut block)?;
+            reader_read += read_started.elapsed();
+            if !read.has_block {
+                break;
+            }
+            let raw_block = require_block(&block)?;
+            let slot = raw_block.slot;
+            let txs = block.transactions.len() as u64;
+            if let Some(skipped_slots) = skipped_slots.as_mut() {
+                skipped_slots.record_present(slot)?;
+            }
+            if let Some(external_blockhashes) = external_blockhashes {
+                let blockhash = blockhash_for_block(&block, external_blockhashes)?;
+                blockhashes.extend_from_slice(&blockhash);
+            }
+
+            let send_started = Instant::now();
+            job_senders
+                .get(ready.worker)
+                .context("registry worker ID is outside the worker set")?
+                .send(block)
+                .map_err(|_| anyhow!("registry decode worker {} stopped", ready.worker))?;
+            reader_send_wait += send_started.elapsed();
+
+            blocks += 1;
+            progress.update_slot(slot);
+            progress.update(1, txs);
+            if max_blocks.is_some_and(|limit| blocks >= limit) {
+                break;
+            }
+        }
+
+        Ok((
+            blockhashes,
+            skipped_slots,
+            reader_wait,
+            reader_read,
+            reader_send_wait,
+        ))
+    })();
+    drop(job_senders);
+
+    let mut combined_workers = RegistryPipelineWorkerStats::default();
+    let mut worker_error = None;
+    for (worker, handle) in worker_handles.into_iter().enumerate() {
+        match handle.join() {
+            Ok(Ok(stats)) => combined_workers.merge(stats),
+            Ok(Err(err)) if worker_error.is_none() => {
+                worker_error = Some(err.context(format!("registry decode worker {worker}")));
+            }
+            Ok(Err(_)) => {}
+            Err(_) if worker_error.is_none() => {
+                worker_error = Some(anyhow!("registry decode worker {worker} panicked"));
+            }
+            Err(_) => {}
+        }
+    }
+
+    let (counter, merger) = merger_handle
+        .join()
+        .map_err(|_| anyhow!("registry merger panicked"))?;
+    let (blockhashes, skipped_slots, reader_wait, reader_read, reader_send_wait) = reader_result?;
+    if let Some(err) = worker_error {
+        return Err(err);
+    }
+
+    let mut timings = std::mem::take(&mut combined_workers.timings);
+    timings.stream_total = pipeline_started.elapsed();
+    Ok(RegistryPipelineScan {
+        counter,
+        blockhashes,
+        skipped_slots,
+        timings,
+        reader_wait,
+        reader_read,
+        reader_send_wait,
+        maximum_ready_depth: ready_depth.maximum(),
+        workers: combined_workers,
+        merger,
+    })
+}
+
+#[allow(clippy::too_many_arguments)]
+fn run_registry_pipeline_worker(
+    worker: usize,
+    detailed_timings: bool,
+    jobs: Receiver<LosslessCarBlock>,
+    recycled: Receiver<RecycledRegistryWorker>,
+    ready: mpsc::Sender<ReadyRegistryWorker>,
+    merge: SyncSender<CountedRegistryBlock>,
+    errors: mpsc::Sender<anyhow::Error>,
+    ready_depth: &PipelineQueueDepth,
+    merge_depth: &PipelineQueueDepth,
+) -> Result<RegistryPipelineWorkerStats> {
+    let mut stats = RegistryPipelineWorkerStats {
+        timings: RegistryBuildTimings {
+            detailed: detailed_timings,
+            ..RegistryBuildTimings::default()
+        },
+        ..RegistryPipelineWorkerStats::default()
+    };
+    let mut scratch = RegistryScanScratch::new();
+    let mut collector = PubkeyTouchCollector::default();
+    let mut block = LosslessCarBlock::default();
+    let mut counts = Vec::new();
+
+    loop {
+        ready_depth.increment();
+        if ready.send(ReadyRegistryWorker { worker, block }).is_err() {
+            ready_depth.decrement();
+            break;
+        }
+
+        let job_wait_started = Instant::now();
+        block = match jobs.recv() {
+            Ok(block) => block,
+            Err(_) => break,
+        };
+        stats.job_wait += job_wait_started.elapsed();
+
+        collector.keys.clear();
+        let count_started = Instant::now();
+        let txs =
+            match count_block_pubkeys(&block, &mut collector, &mut stats.timings, &mut scratch) {
+                Ok(txs) => txs,
+                Err(err) => {
+                    let _ = errors.send(anyhow!("{err:#}"));
+                    return Err(err);
+                }
+            };
+        stats.timings.count_block_total += count_started.elapsed();
+        stats.timings.blocks += 1;
+        stats.timings.txs += txs;
+
+        let touches = collector.keys.len() as u64;
+        stats.touches = stats.touches.saturating_add(touches);
+        let sort_started = Instant::now();
+        compress_pubkey_touches(&mut collector.keys, &mut counts);
+        stats.block_sort += sort_started.elapsed();
+        stats.unique_block_keys = stats.unique_block_keys.saturating_add(counts.len() as u64);
+
+        let send_started = Instant::now();
+        merge_depth.increment();
+        if merge
+            .send(CountedRegistryBlock {
+                worker,
+                block,
+                counts,
+                touches,
+            })
+            .is_err()
+        {
+            merge_depth.decrement();
+            anyhow::bail!("registry merger stopped");
+        }
+        stats.merge_send_wait += send_started.elapsed();
+
+        let recycle_started = Instant::now();
+        let recycled = recycled
+            .recv()
+            .map_err(|_| anyhow!("registry merger did not recycle worker {worker} buffers"))?;
+        stats.recycle_wait += recycle_started.elapsed();
+        block = recycled.block;
+        counts = recycled.counts;
+    }
+
+    Ok(stats)
+}
+
+fn run_registry_pipeline_merger(
+    mut counter: PubkeyCounter,
+    input: Receiver<CountedRegistryBlock>,
+    recycled: Vec<SyncSender<RecycledRegistryWorker>>,
+    merge_depth: &PipelineQueueDepth,
+) -> (PubkeyCounter, RegistryPipelineMergerStats) {
+    let mut stats = RegistryPipelineMergerStats::default();
+    loop {
+        let receive_started = Instant::now();
+        let mut batch = match input.recv() {
+            Ok(batch) => batch,
+            Err(_) => break,
+        };
+        stats.receive_wait += receive_started.elapsed();
+        merge_depth.decrement();
+        stats.maximum_queue_depth = merge_depth.maximum();
+
+        let update_started = Instant::now();
+        for (key, count) in &batch.counts {
+            counter.add_count(key, *count);
+        }
+        stats.map_update += update_started.elapsed();
+        stats.updates = stats.updates.saturating_add(batch.counts.len() as u64);
+        stats.blocks = stats.blocks.saturating_add(1);
+        debug_assert!(batch.touches >= batch.counts.len() as u64);
+
+        batch.counts.clear();
+        if let Some(worker) = recycled.get(batch.worker) {
+            let _ = worker.send(RecycledRegistryWorker {
+                block: batch.block,
+                counts: batch.counts,
+            });
+        }
+    }
+    (counter, stats)
+}
+
+fn compress_pubkey_touches(keys: &mut Vec<[u8; 32]>, counts: &mut Vec<([u8; 32], u32)>) {
+    keys.sort_unstable();
+    counts.clear();
+    for &key in keys.iter() {
+        if let Some((last_key, count)) = counts.last_mut()
+            && *last_key == key
+        {
+            *count = count.saturating_add(1);
+        } else {
+            counts.push((key, 1));
+        }
+    }
+    keys.clear();
 }
 
 struct RegistryBenchFinalizeReport {
@@ -858,6 +1433,34 @@ impl RegistryBuildTimings {
             detailed: true,
             ..Self::default()
         }
+    }
+
+    fn merge_worker(&mut self, other: Self) {
+        self.detailed |= other.detailed;
+        self.count_block_total += other.count_block_total;
+        self.tx_reassemble += other.tx_reassemble;
+        self.tx_pubkey_scan += other.tx_pubkey_scan;
+        self.metadata_reassemble += other.metadata_reassemble;
+        self.metadata_decode_count += other.metadata_decode_count;
+        self.blocks = self.blocks.saturating_add(other.blocks);
+        self.txs = self.txs.saturating_add(other.txs);
+        self.metadata_frames = self.metadata_frames.saturating_add(other.metadata_frames);
+        self.tx_scratch_max = self.tx_scratch_max.max(other.tx_scratch_max);
+        self.metadata_scratch_max = self.metadata_scratch_max.max(other.metadata_scratch_max);
+    }
+}
+
+impl RegistryPipelineWorkerStats {
+    fn merge(&mut self, other: Self) {
+        self.timings.merge_worker(other.timings);
+        self.job_wait += other.job_wait;
+        self.merge_send_wait += other.merge_send_wait;
+        self.recycle_wait += other.recycle_wait;
+        self.block_sort += other.block_sort;
+        self.touches = self.touches.saturating_add(other.touches);
+        self.unique_block_keys = self
+            .unique_block_keys
+            .saturating_add(other.unique_block_keys);
     }
 }
 
@@ -1207,6 +1810,11 @@ struct PubkeyCounter {
     counts: GxHashMap<[u8; 32], u32>,
 }
 
+#[derive(Default)]
+struct PubkeyTouchCollector {
+    keys: Vec<[u8; 32]>,
+}
+
 trait PubkeySink {
     fn add32(&mut self, key: &[u8; 32]);
 }
@@ -1221,12 +1829,23 @@ impl PubkeyCounter {
     fn count_sum(&self) -> u128 {
         self.counts.values().map(|count| u128::from(*count)).sum()
     }
+
+    fn add_count(&mut self, key: &[u8; 32], increment: u32) {
+        let count = self.counts.entry(*key).or_insert(0);
+        *count = count.saturating_add(increment);
+    }
 }
 
 impl PubkeySink for PubkeyCounter {
     fn add32(&mut self, key: &[u8; 32]) {
         let count = self.counts.entry(*key).or_insert(0);
         *count = count.saturating_add(1);
+    }
+}
+
+impl PubkeySink for PubkeyTouchCollector {
+    fn add32(&mut self, key: &[u8; 32]) {
+        self.keys.push(*key);
     }
 }
 

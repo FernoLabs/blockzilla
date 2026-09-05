@@ -1,0 +1,39 @@
+[package]
+name = "blockzilla-token-transaction-dump"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+publish = false
+autobins = false
+
+[features]
+default = []
+cpu-profile = ["dep:pprof"]
+
+[[bin]]
+name = "blockzilla-token-transaction-dump"
+path = "src/main.rs"
+
+[dependencies]
+anyhow = "1.0.102"
+blockzilla-format = { path = "../blockzilla-format" }
+blockzilla-dex-parser = { path = "../blockzilla-dex-parser" }
+blockzilla-read-sdk = { path = "../blockzilla-read-sdk" }
+blockzilla-token-balance-audit = { path = "../blockzilla-token-balance-audit" }
+bs58 = "0.5.1"
+clap = { version = "4.6.1", features = ["derive"] }
+mimalloc = "0.1.52"
+# Static-musl builds need pprof's frame-pointer unwinder. Build the profiling
+# binary with `-C force-frame-pointers=yes`; `profiling.rs` rejects empty stacks.
+pprof = { version = "0.15.0", features = ["flamegraph", "frame-pointer"], optional = true }
+serde = { version = "1.0.228", features = ["derive"] }
+serde_json = "1.0.149"
+sha2 = "0.11.0"
+solana-pubkey = { version = "4.2.0", features = ["curve25519"] }
+wincode = { version = "=0.5.5", features = ["derive"] }
+
+[dev-dependencies]
+tempfile = "3.27.0"
+zstd = "0.13.3"

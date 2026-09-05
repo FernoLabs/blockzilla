@@ -11,8 +11,10 @@ are the executable source of truth.
 
 This reference covers the independently addressable hot-block family used by
 Blockzilla and Edgezilla. It does not describe the older monolithic semantic
-Archive V2 stream, CAR byte-for-byte reconstruction, or a future publication
-manifest.
+Archive V2 stream, CAR byte-for-byte reconstruction, or the complete
+publication-manifest and trust policy. See
+[`archive-formats-and-read-sdk.md`](archive-formats-and-read-sdk.md) for that
+product-level boundary.
 
 ## Versions and encoding
 
@@ -228,6 +230,28 @@ A normal metadata range contains one `CompactMetaV1` encoded with the same
 wincode configuration. The row flags allow scanners to decide whether logs,
 inner instructions, token balances, loaded addresses, return data, or an error
 are present before decoding that metadata range.
+
+### Metadata error schema authority
+
+Archive V2 has one historical metadata difference. When `err` is present,
+old generations store a length-delimited serialized transaction error. The
+current format stores `CompactTransactionError` directly. When `err` is not
+present, both layouts have the same bytes. All fields after `err` also have the
+same schema and order.
+
+The historical raw-error layout is a compatibility input only. A new
+generation must use the current typed-error layout for every metadata record
+and must bind the exact
+`archive-v2-metadata-schema-current-typed-errors-v1.marker` object in its
+generation manifest. Before publication, the producer must run the complete
+exact metadata audit. The audit must reject legacy-only, different ambiguous,
+invalid, and raw-fallback metadata records.
+
+Readers select one metadata profile at generation admission. A normal
+published reader requires the current marker and uses the current-only
+decoder. An unmarked historical generation needs the explicit compatibility
+admission path. Readers must not select a metadata schema separately for each
+transaction.
 
 ## Signatures and registries
 
