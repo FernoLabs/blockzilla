@@ -244,14 +244,23 @@ struct ArchivePaths {
 struct LocalArchivePaths {
     car: PathBuf,
     slot_index: PathBuf,
+    compressed: bool,
 }
 
 impl LocalArchivePaths {
     fn new(archive_root: &Path, epoch: u64) -> Self {
         let epoch_root = archive_root.join("car").join(epoch.to_string());
+        let raw_car = epoch_root.join(format!("epoch-{epoch}.car"));
+        let compressed_car = epoch_root.join(format!("epoch-{epoch}.car.zst"));
+        let (car, compressed) = if raw_car.is_file() || !compressed_car.is_file() {
+            (raw_car, false)
+        } else {
+            (compressed_car, true)
+        };
         Self {
-            car: epoch_root.join(format!("epoch-{epoch}.car")),
+            car,
             slot_index: epoch_root.join(format!("epoch-{epoch}-slot-ranges.raw")),
+            compressed,
         }
     }
 }
@@ -321,7 +330,7 @@ enum CarNetworkStream {
 
 enum CarSource {
     Network(CarInstructionSource<CarNetworkStream>),
-    Local(CarInstructionSource<File>),
+    Local(CarInstructionSource<Box<dyn Read>>),
 }
 
 impl ArchiveInstructionSource for CarSource {
@@ -449,10 +458,11 @@ impl CarArchive {
 
     /// Open one epoch from `<archive-root>/car/<epoch>/`.
     ///
-    /// The directory must contain `epoch-<epoch>.car` and
-    /// `epoch-<epoch>-slot-ranges.raw`. Both files are opened before the scan,
-    /// and the complete slot index receives the same geometry and trusted
-    /// canonical-count checks as a network source.
+    /// The directory must contain `epoch-<epoch>.car` or
+    /// `epoch-<epoch>.car.zst`, plus `epoch-<epoch>-slot-ranges.raw`. The raw
+    /// file is preferred when both CAR forms exist. The complete slot index
+    /// receives the same geometry and trusted canonical-count checks as a
+    /// network source.
     pub fn open_local(
         archive_root: impl AsRef<Path>,
         epoch: u64,
@@ -762,12 +772,20 @@ impl CarArchive {
 
         let car_file = open_local_file(&paths.car)?;
         let car_content_length = local_file_len(&car_file, &paths.car)?;
+        let car_range_limit = if paths.compressed {
+            // Slot-index offsets address the decoded CAR stream. The decoder
+            // validates the stream length while reading; stored bytes are used
+            // for the source-size receipt.
+            u64::MAX
+        } else {
+            car_content_length
+        };
         let first_slot = epoch
             .checked_mul(SLOTS_PER_EPOCH)
             .ok_or(Error::EpochOverflow)?;
-        let nonempty_slots = decode_nonempty_slots(&index_bytes, first_slot, car_content_length)?;
+        let nonempty_slots = decode_nonempty_slots(&index_bytes, first_slot, car_range_limit)?;
         let slots = resolve_canonical_plan(nonempty_slots, plan_requirement, first_slot)?;
-        validate_slot_range_bounds(&index_bytes, car_content_length)?;
+        validate_slot_range_bounds(&index_bytes, car_range_limit)?;
         let block_count = u32::try_from(slots.len()).map_err(|_| Error::BlockCountOverflow)?;
         let binding = local_file_set_binding(
             epoch,
@@ -778,7 +796,12 @@ impl CarArchive {
         );
         let identity = SourceIdentity {
             format: ArchiveFormat::Car,
-            label: format!("epoch-{epoch}.car"),
+            label: paths
+                .car
+                .file_name()
+                .and_then(|name| name.to_str())
+                .unwrap_or("local-car")
+                .to_owned(),
             cluster_id: None,
             epoch,
             first_slot,
@@ -787,8 +810,18 @@ impl CarArchive {
             verification: SourceVerification::OperatorTrusted,
             binding: Some(binding),
         };
+        let car_reader: Box<dyn Read> = if paths.compressed {
+            Box::new(
+                zstd::stream::read::Decoder::new(car_file).map_err(|source| Error::LocalOpen {
+                    path: paths.car.clone(),
+                    source,
+                })?,
+            )
+        } else {
+            Box::new(car_file)
+        };
         let source = CarInstructionSource::new_operator_trusted_descriptor(
-            car_file,
+            car_reader,
             identity,
             CanonicalBlockPlan::new(slots),
             CarQueryLimits::default(),
