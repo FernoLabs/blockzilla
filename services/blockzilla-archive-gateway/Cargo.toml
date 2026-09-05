@@ -13,7 +13,7 @@ autobins = false
 anyhow = "1.0.102"
 async-stream = "0.3.6"
 axum = { version = "0.8.9", features = ["http1", "json", "tokio"] }
-blockzilla-read-sdk = { path = "../../crates/blockzilla-read-sdk" }
+blockzilla-read-sdk = { package = "blockzilla-read-sdk-legacy", path = "../../crates/blockzilla-read-sdk-legacy" }
 bytes = "1.11.1"
 clap = { version = "4.5.60", features = ["derive", "env"] }
 hex = "0.4.3"

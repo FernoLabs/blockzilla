@@ -609,7 +609,7 @@ dependencies = [
  "blockzilla-archive-gateway",
  "blockzilla-format",
  "blockzilla-log-parser",
- "blockzilla-read-sdk",
+ "blockzilla-read-sdk-legacy",
  "blockzilla-token-transaction-dump",
  "bs58",
  "clap 4.6.5",
@@ -649,7 +649,7 @@ dependencies = [
  "async-stream",
  "axum",
  "blockzilla-format",
- "blockzilla-read-sdk",
+ "blockzilla-read-sdk-legacy",
  "bytes",
  "clap 4.6.5",
  "futures-core",
@@ -682,7 +682,7 @@ version = "0.1.0"
 dependencies = [
  "anyhow",
  "blockzilla-format",
- "blockzilla-read-sdk",
+ "blockzilla-read-sdk-legacy",
  "bs58",
  "clap 4.6.5",
  "libc",
@@ -781,7 +781,7 @@ dependencies = [
 ]
 
 [[package]]
-name = "blockzilla-read-sdk"
+name = "blockzilla-read-sdk-legacy"
 version = "0.1.0"
 dependencies = [
  "blockzilla-format",
@@ -807,7 +807,7 @@ dependencies = [
  "anyhow",
  "base64 0.22.1",
  "blockzilla-format",
- "blockzilla-read-sdk",
+ "blockzilla-read-sdk-legacy",
  "bs58",
  "bzip2 0.5.2",
  "clap 4.6.5",
@@ -850,7 +850,7 @@ dependencies = [
  "base64 0.22.1",
  "blockzilla-dex-parser",
  "blockzilla-format",
- "blockzilla-read-sdk",
+ "blockzilla-read-sdk-legacy",
  "blockzilla-token-balance-audit",
  "blockzilla-token-transaction-dump",
  "bs58",
@@ -906,7 +906,7 @@ dependencies = [
  "anyhow",
  "blockzilla-dex-parser",
  "blockzilla-format",
- "blockzilla-read-sdk",
+ "blockzilla-read-sdk-legacy",
  "blockzilla-token-balance-audit",
  "bs58",
  "clap 4.6.5",

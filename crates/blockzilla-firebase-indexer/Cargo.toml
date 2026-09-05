@@ -33,7 +33,7 @@ path = "src/bin/firewatch-wire-profile-marker-transition.rs"
 [dependencies]
 anyhow = "1.0.102"
 blockzilla-format = { path = "../blockzilla-format" }
-blockzilla-read-sdk = { path = "../blockzilla-read-sdk" }
+blockzilla-read-sdk = { package = "blockzilla-read-sdk-legacy", path = "../blockzilla-read-sdk-legacy" }
 bs58 = "0.5.1"
 clap = { version = "4.6.1", features = ["derive", "env"] }
 libc = "0.2.183"

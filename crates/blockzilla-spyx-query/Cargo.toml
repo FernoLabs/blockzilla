@@ -18,7 +18,7 @@ axum = { version = "0.8.9", features = ["json", "query", "tokio"] }
 base64 = "0.22.1"
 blockzilla-dex-parser = { path = "../blockzilla-dex-parser" }
 blockzilla-format = { path = "../blockzilla-format" }
-blockzilla-read-sdk = { path = "../blockzilla-read-sdk" }
+blockzilla-read-sdk = { package = "blockzilla-read-sdk-legacy", path = "../blockzilla-read-sdk-legacy" }
 blockzilla-token-balance-audit = { path = "../blockzilla-token-balance-audit" }
 blockzilla-token-transaction-dump = { path = "../blockzilla-token-transaction-dump" }
 bs58 = "0.5.1"

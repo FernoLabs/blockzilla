@@ -125,7 +125,7 @@ clap = { version = "4.6.1", features = ["derive", "env"] }
 tracing = "0.1.44"
 tracing-subscriber = "0.3.23"
 blockzilla-format = { path = "../crates/blockzilla-format" }
-blockzilla-read-sdk = { path = "../crates/blockzilla-read-sdk" }
+blockzilla-read-sdk = { package = "blockzilla-read-sdk-legacy", path = "../crates/blockzilla-read-sdk-legacy" }
 blockzilla-archive-gateway = { path = "../services/blockzilla-archive-gateway", optional = true }
 blockzilla-token-transaction-dump = { path = "../crates/blockzilla-token-transaction-dump", optional = true }
 blockzilla-log-parser = { path = "../crates/blockzilla-log-parser" }

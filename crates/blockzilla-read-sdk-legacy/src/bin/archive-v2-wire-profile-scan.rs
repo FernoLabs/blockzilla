@@ -18,7 +18,7 @@ use std::{
 };
 
 use blockzilla_format::{ARCHIVE_V2_TX_FLAG_TX_RAW_FALLBACK, CompactPubkey};
-use blockzilla_read_sdk::{
+use blockzilla_read_sdk_legacy::{
     ArchiveReader, ArchiveV2InstructionProgramSemantics, ArchiveV2MessageProjector,
     ArchiveV2MetadataWireProfile, ArchiveV2WireProfile, BorrowedDecodedBlock, CompiledPubkeyFilter,
     Error as ReadError, HashVerification, MAX_ORDERED_PARALLEL_RETAINED_DECOMPRESSED_BYTES,
@@ -1086,7 +1086,7 @@ mod tests {
         WINCODE_ARCHIVE_V2_HOT_BLOCK_VERSION, WincodeArchiveV2Footer, WincodeArchiveV2Header,
         wincode_leb128_config, write_archive_v2_hot_block_index,
     };
-    use blockzilla_read_sdk::manifest::{BLOCK_INDEX_FILE, BLOCKS_FILE, META_FILE, REGISTRY_FILE};
+    use blockzilla_read_sdk_legacy::manifest::{BLOCK_INDEX_FILE, BLOCKS_FILE, META_FILE, REGISTRY_FILE};
     use tempfile::TempDir;
 
     use super::*;

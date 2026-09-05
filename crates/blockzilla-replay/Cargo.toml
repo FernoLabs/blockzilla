@@ -25,7 +25,7 @@ genesis = []
 anyhow = "1.0.102"
 base64 = "0.22.1"
 blockzilla-format = { path = "../blockzilla-format" }
-blockzilla-read-sdk = { path = "../blockzilla-read-sdk" }
+blockzilla-read-sdk = { package = "blockzilla-read-sdk-legacy", path = "../blockzilla-read-sdk-legacy" }
 bzip2 = "0.5.2"
 bs58 = "0.5.1"
 clap = { version = "4.6.1", features = ["derive"] }

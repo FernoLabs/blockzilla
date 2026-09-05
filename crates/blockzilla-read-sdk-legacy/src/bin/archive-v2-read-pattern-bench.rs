@@ -15,7 +15,7 @@ use std::{
 };
 
 use blockzilla_format::ArchiveV2HotBlockIndexRow;
-use blockzilla_read_sdk::{
+use blockzilla_read_sdk_legacy::{
     ArchiveReader, ArchiveV2MetadataWireProfile, ArchiveV2WireProfile, HashVerification,
     OpenOptions, PinnedLocalRangeSource, RangeSource,
     manifest::{BLOCKS_FILE, TrustedGenerationIdentity},

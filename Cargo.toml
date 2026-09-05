@@ -6,7 +6,7 @@ members = [
     "crates/blockzilla-firebase-indexer",
     "crates/blockzilla-format",
     "crates/blockzilla-log-parser",
-    "crates/blockzilla-read-sdk",
+    "crates/blockzilla-read-sdk-legacy",
     "crates/blockzilla-replay",
     "crates/blockzilla-spyx-query",
     "crates/blockzilla-token-balance-audit",

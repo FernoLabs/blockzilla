@@ -115,11 +115,11 @@ pub fn market_parser_implementation_fingerprint() -> String {
     ));
     hasher.update(b"\0exact-message-projector-source\0");
     hasher.update(include_bytes!(
-        "../../blockzilla-read-sdk/src/message_projection.rs"
+        "../../blockzilla-read-sdk-legacy/src/message_projection.rs"
     ));
     hasher.update(b"\0exact-metadata-projector-source\0");
     hasher.update(include_bytes!(
-        "../../blockzilla-read-sdk/src/selective_metadata.rs"
+        "../../blockzilla-read-sdk-legacy/src/selective_metadata.rs"
     ));
     hasher.update(b"\0posting-projection-source\0");
     hasher.update(include_bytes!(
