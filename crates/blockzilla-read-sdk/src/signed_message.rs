@@ -6,7 +6,7 @@
 //! signature verifier so archive readers and conversion tools use the same
 //! wire rules.
 
-use std::fmt;
+use std::{borrow::Cow, fmt};
 
 use blockzilla_format::{
     ArchiveV2ComputeBudgetInstructionData, ArchiveV2HotInstructionData,
@@ -55,9 +55,9 @@ pub enum InstructionDataEncoding {
 
 /// One exact instruction-data candidate.
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub struct InstructionDataCandidate {
+pub struct InstructionDataCandidate<'a> {
     pub encoding: InstructionDataEncoding,
-    pub bytes: Vec<u8>,
+    pub bytes: Cow<'a, [u8]>,
 }
 
 /// Which column of the Compact V2 vote-hash dictionary a reference uses.
@@ -173,7 +173,7 @@ pub struct SignedMessage<'a> {
 pub struct SignedInstructionCandidates<'a> {
     pub program_id_index: u8,
     pub accounts: &'a [u8],
-    pub data_candidates: &'a [InstructionDataCandidate],
+    pub data_candidates: &'a [InstructionDataCandidate<'a>],
 }
 
 /// A resolved message whose instruction bytes still need signature proof.
@@ -848,7 +848,11 @@ pub fn reconstruct_instruction_data(
             candidates: candidates.len(),
         });
     }
-    Ok(candidates.pop().expect("one checked candidate").bytes)
+    Ok(candidates
+        .pop()
+        .expect("one checked candidate")
+        .bytes
+        .into_owned())
 }
 
 /// Return all possible exact on-chain byte forms retained by Compact V2.
@@ -860,13 +864,13 @@ pub fn reconstruct_instruction_data(
 pub fn reconstruct_instruction_data_candidates(
     data: &ArchiveV2HotInstructionData,
     vote_hashes: Option<&dyn VoteHashResolver>,
-) -> Result<Vec<InstructionDataCandidate>, SignedMessageError> {
+) -> Result<Vec<InstructionDataCandidate<'static>>, SignedMessageError> {
     match data {
         ArchiveV2HotInstructionData::Raw(bytes)
         | ArchiveV2HotInstructionData::UnknownSystem(bytes)
         | ArchiveV2HotInstructionData::UnknownVote(bytes) => Ok(vec![InstructionDataCandidate {
             encoding: InstructionDataEncoding::Raw,
-            bytes: bytes.clone(),
+            bytes: bytes.clone().into(),
         }]),
         ArchiveV2HotInstructionData::ComputeBudget(value) => {
             let mut out = Vec::with_capacity(9);
@@ -891,17 +895,17 @@ pub fn reconstruct_instruction_data_candidates(
             }
             Ok(vec![InstructionDataCandidate {
                 encoding: InstructionDataEncoding::ComputeBudget,
-                bytes: out,
+                bytes: out.into(),
             }])
         }
         ArchiveV2HotInstructionData::System(value) => Ok(vec![InstructionDataCandidate {
             encoding: InstructionDataEncoding::System,
-            bytes: system_instruction_bytes(value)?,
+            bytes: system_instruction_bytes(value)?.into(),
         }]),
         ArchiveV2HotInstructionData::VoteCompactUpdateVoteState(update) => {
             Ok(vec![InstructionDataCandidate {
                 encoding: InstructionDataEncoding::VoteCompact,
-                bytes: vote_update_instruction_bytes(12, update, vote_hashes)?,
+                bytes: vote_update_instruction_bytes(12, update, vote_hashes)?.into(),
             }])
         }
         ArchiveV2HotInstructionData::VoteCompactUpdateVoteStateSwitch {
@@ -912,7 +916,7 @@ pub fn reconstruct_instruction_data_candidates(
             out.extend_from_slice(&resolve_aux_hash(*switch_proof_hash)?);
             Ok(vec![InstructionDataCandidate {
                 encoding: InstructionDataEncoding::VoteCompact,
-                bytes: out,
+                bytes: out.into(),
             }])
         }
         ArchiveV2HotInstructionData::VoteTowerSync(tower) => {
@@ -930,7 +934,7 @@ fn tower_candidates(
     tower: &ArchiveV2VoteTowerSync,
     switch_proof_hash: Option<ArchiveV2VoteHashRef>,
     vote_hashes: Option<&dyn VoteHashResolver>,
-) -> Result<Vec<InstructionDataCandidate>, SignedMessageError> {
+) -> Result<Vec<InstructionDataCandidate<'static>>, SignedMessageError> {
     let switch_proof_hash = switch_proof_hash.map(resolve_aux_hash).transpose()?;
     let mut canonical = vote_tower_sync_instruction_bytes(variant, tower, vote_hashes)?;
     if let Some(hash) = switch_proof_hash {
@@ -942,12 +946,12 @@ fn tower_candidates(
     }
     let mut candidates = vec![InstructionDataCandidate {
         encoding: InstructionDataEncoding::VoteTowerCanonical,
-        bytes: canonical,
+        bytes: canonical.into(),
     }];
-    if historical != candidates[0].bytes {
+    if candidates[0].bytes != historical {
         candidates.push(InstructionDataCandidate {
             encoding: InstructionDataEncoding::VoteTowerHistorical,
-            bytes: historical,
+            bytes: historical.into(),
         });
     }
     Ok(candidates)
@@ -1255,11 +1259,11 @@ mod tests {
         let choices = [
             InstructionDataCandidate {
                 encoding: InstructionDataEncoding::VoteTowerCanonical,
-                bytes: vec![0xaa],
+                bytes: vec![0xaa].into(),
             },
             InstructionDataCandidate {
                 encoding: InstructionDataEncoding::VoteTowerHistorical,
-                bytes: vec![0xbb],
+                bytes: vec![0xbb].into(),
             },
         ];
         let candidate_instructions = [SignedInstructionCandidates {
@@ -1371,11 +1375,11 @@ mod tests {
         let choices = [
             InstructionDataCandidate {
                 encoding: InstructionDataEncoding::Raw,
-                bytes: vec![0xaa],
+                bytes: vec![0xaa].into(),
             },
             InstructionDataCandidate {
                 encoding: InstructionDataEncoding::Raw,
-                bytes: vec![0xbb],
+                bytes: vec![0xbb].into(),
             },
         ];
         let candidate_instructions = [SignedInstructionCandidates {

@@ -330,7 +330,7 @@ enum CarNetworkStream {
 
 enum CarSource {
     Network(CarInstructionSource<CarNetworkStream>),
-    Local(CarInstructionSource<Box<dyn Read>>),
+    Local(CarInstructionSource<Box<dyn Read + Send>>),
 }
 
 impl ArchiveInstructionSource for CarSource {
@@ -810,7 +810,7 @@ impl CarArchive {
             verification: SourceVerification::OperatorTrusted,
             binding: Some(binding),
         };
-        let car_reader: Box<dyn Read> = if paths.compressed {
+        let car_reader: Box<dyn Read + Send> = if paths.compressed {
             Box::new(
                 zstd::stream::read::Decoder::new(car_file).map_err(|source| Error::LocalOpen {
                     path: paths.car.clone(),

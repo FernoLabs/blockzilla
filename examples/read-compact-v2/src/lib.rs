@@ -668,7 +668,7 @@ pub fn output_file(path: &Path) -> Result<std::io::BufWriter<std::fs::File>, Box
         .write(true)
         .create_new(true)
         .open(path)?;
-    Ok(std::io::BufWriter::new(file))
+    Ok(std::io::BufWriter::with_capacity(1 << 20, file))
 }
 
 fn source_name(source: &Source) -> &'static str {

@@ -355,7 +355,7 @@ pub fn parse_pubkey(value: &str) -> Result<[u8; 32], CliError> {
 /// Create a new output file. An existing file is never replaced by accident.
 pub fn create_output(path: &PathBuf) -> io::Result<BufWriter<File>> {
     let file = OpenOptions::new().write(true).create_new(true).open(path)?;
-    Ok(BufWriter::new(file))
+    Ok(BufWriter::with_capacity(1 << 20, file))
 }
 
 pub fn validate_workload_counts(

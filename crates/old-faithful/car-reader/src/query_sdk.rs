@@ -1,6 +1,6 @@
 //! Source-neutral instruction adapter for operator-trusted CAR streams.
 //!
-//! This adapter is intentionally sequential and local-reader first. It accepts
+//! This adapter publishes in order and overlaps reading with projection. It accepts
 //! any `Read` that yields a decoded CAR byte stream. The current CAR wire form
 //! has no explicit raw-transaction or raw-metadata fallback marker, so decoder
 //! failures are archive errors instead of coverage downgrades.
@@ -324,6 +324,8 @@ struct ProjectionScratch {
     block_counts: Option<blockzilla_query_sdk::BlockCounts>,
     metadata: TransactionStatusMeta,
     metadata_zstd: ZstdReusableDecoder,
+    transactions: crate::versioned_transaction::VersionedTransactionReuse,
+    transaction_output: Vec<CanonicalTransaction>,
 }
 
 /// One-pass source-neutral adapter over an uncompressed sequential CAR stream.
@@ -418,107 +420,101 @@ impl<R: Read> CarInstructionSource<R> {
         &mut self,
         request: &ScanRequest,
         sink: &mut dyn BlockSink,
-    ) -> blockzilla_query_sdk::Result<ScanReceipt> {
+    ) -> blockzilla_query_sdk::Result<ScanReceipt>
+    where
+        R: Send,
+    {
         if self.scanned {
             return Err(source_error(CarQueryError::AlreadyScanned));
         }
-
         let identity = self.identity.clone();
         let mut publisher = OrderedBlockPublisher::new(&identity, request, sink)?;
         self.scanned = true;
-
-        let first = request.range.map_or(0, |range| range.first_block);
-        let end = request.range.map_or(identity.block_count, |range| {
-            range
-                .first_block
-                .checked_add(range.block_count.get())
-                .expect("OrderedBlockPublisher validated the range")
-        });
-        let full_scan = request.range.is_none();
-        let mut previous_real_slot = None;
-        let mut pending_real = false;
-        let mut clean_eof = false;
-
-        for ordinal in 0..end {
-            let planned_slot = self.plan.slots[ordinal as usize];
-            if !pending_real && !clean_eof {
-                pending_real = self
-                    .reader
-                    .read_until_block_ordered_lossless_bounded(
-                        &mut self.block,
-                        self.limits.block_read_limits(),
-                    )
-                    .map_err(|error| source_error(CarQueryError::Read(error)))?;
-                clean_eof = !pending_real;
-                if pending_real {
-                    let real_slot = block_slot(&self.block).map_err(source_error)?;
-                    validate_real_slot(&identity, previous_real_slot, real_slot)
-                        .map_err(source_error)?;
-                    previous_real_slot = Some(real_slot);
-                }
+        let limits = self.limits;
+        let reader = &mut self.reader;
+        let plan = &self.plan;
+        let block = &mut self.block;
+        let scratch = &mut self.scratch;
+        // Two raw blocks circulate between reading and projection. No payload
+        // clone, per-transaction channel, or unbounded read-ahead queue.
+        std::thread::scope(|scope| {
+            let (free_tx, free_rx) = std::sync::mpsc::sync_channel(2);
+            let (ready_tx, ready_rx) = std::sync::mpsc::sync_channel(2);
+            for _ in 0..2 {
+                free_tx.send(OrderedLosslessCarBlock::default()).unwrap();
             }
-
-            let real_slot = pending_real
-                .then(|| block_slot(&self.block))
-                .transpose()
-                .map_err(source_error)?;
-            if let Some(real_slot) = real_slot
-                && real_slot < planned_slot
-            {
-                return Err(source_error(CarQueryError::InvalidArchive(format!(
-                    "CAR block slot {real_slot} is absent from the canonical plan before planned slot {planned_slot}"
-                ))));
-            }
-
-            if ordinal < first {
-                if real_slot == Some(planned_slot) {
-                    pending_real = false;
-                }
-                continue;
-            }
-
-            if real_slot == Some(planned_slot) {
-                let mut block = project_block(
-                    &self.block,
-                    &identity,
-                    ordinal,
-                    request,
-                    self.limits,
-                    &mut self.scratch,
-                )
-                .map_err(source_error)?;
-                publisher.publish(&block)?;
-                self.scratch.output_pool.recycle_block(&mut block);
-                pending_real = false;
-            } else {
-                publish_empty_row(&mut publisher, &identity, ordinal, planned_slot)?;
-            }
-        }
-
-        if full_scan {
-            if pending_real {
-                return Err(source_error(CarQueryError::InvalidArchive(format!(
-                    "CAR block slot {} appears after the final canonical plan row",
-                    block_slot(&self.block).map_err(source_error)?
-                ))));
-            }
-            if !clean_eof {
-                let has_extra = self
-                    .reader
-                    .read_until_block_ordered_lossless_bounded(
-                        &mut self.block,
-                        self.limits.block_read_limits(),
-                    )
-                    .map_err(|error| source_error(CarQueryError::Read(error)))?;
-                if has_extra {
-                    return Err(source_error(CarQueryError::InvalidArchive(format!(
-                        "CAR block slot {} appears after the final canonical plan row",
-                        block_slot(&self.block).map_err(source_error)?
-                    ))));
-                }
-            }
-        }
-
+            let producer = std::thread::Builder::new()
+                .name("car-read-ahead".into())
+                .spawn_scoped(scope, move || {
+                    while let Ok(mut raw) = free_rx.recv() {
+                        match reader.read_until_block_ordered_lossless_bounded(
+                            &mut raw,
+                            limits.block_read_limits(),
+                        ) {
+                            Ok(true) => {
+                                if ready_tx.send(Ok(Some(raw))).is_err() {
+                                    break;
+                                }
+                            }
+                            Ok(false) => {
+                                let _ = ready_tx.send(Ok(None));
+                                break;
+                            }
+                            Err(error) => {
+                                let _ = ready_tx.send(Err(error));
+                                break;
+                            }
+                        }
+                    }
+                })
+                .map_err(|error| {
+                    source_error(CarQueryError::InvalidArchive(format!(
+                        "cannot start CAR reader: {error}"
+                    )))
+                })?;
+            let mut have_block = false;
+            let result = scan_projected_blocks(
+                &identity,
+                plan,
+                limits,
+                block,
+                scratch,
+                request,
+                &mut publisher,
+                |block| {
+                    if have_block {
+                        // If the producer reached EOF it may already have closed this queue.
+                        let _ = free_tx.send(std::mem::take(block));
+                    }
+                    match ready_rx.recv() {
+                        Ok(Ok(Some(raw))) => {
+                            *block = raw;
+                            have_block = true;
+                            Ok(true)
+                        }
+                        Ok(Ok(None)) => {
+                            have_block = false;
+                            Ok(false)
+                        }
+                        Ok(Err(error)) => Err(source_error(CarQueryError::Read(error))),
+                        Err(_) => Err(source_error(CarQueryError::InvalidArchive(
+                            "CAR read-ahead stopped without EOF".into(),
+                        ))),
+                    }
+                },
+            );
+            // Disconnect both directions before joining, including sink errors
+            // and partial scans. A producer cannot remain blocked on a queue.
+            drop(free_tx);
+            drop(ready_rx);
+            let joined = producer.join().map_err(|_| {
+                source_error(CarQueryError::InvalidArchive(
+                    "CAR read-ahead worker panicked".into(),
+                ))
+            });
+            result?;
+            joined
+        })?;
         let counters = self.reader.reader.get_ref();
         publisher.set_io_receipt(ScanIoReceipt {
             source_read_calls: Some(counters.calls_with_bytes),
@@ -531,7 +527,95 @@ impl<R: Read> CarInstructionSource<R> {
     }
 }
 
-impl<R: Read> ArchiveInstructionSource for CarInstructionSource<R> {
+fn scan_projected_blocks(
+    identity: &SourceIdentity,
+    plan: &CanonicalBlockPlan,
+    limits: CarQueryLimits,
+    block: &mut OrderedLosslessCarBlock,
+    scratch: &mut ProjectionScratch,
+    request: &ScanRequest,
+    publisher: &mut OrderedBlockPublisher<'_>,
+    mut next_block: impl FnMut(&mut OrderedLosslessCarBlock) -> blockzilla_query_sdk::Result<bool>,
+) -> blockzilla_query_sdk::Result<()> {
+    let first = request.range.map_or(0, |range| range.first_block);
+    let end = request.range.map_or(identity.block_count, |range| {
+        range
+            .first_block
+            .checked_add(range.block_count.get())
+            .expect("OrderedBlockPublisher validated the range")
+    });
+    let full_scan = request.range.is_none();
+    let mut previous_real_slot = None;
+    let mut pending_real = false;
+    let mut clean_eof = false;
+
+    for ordinal in 0..end {
+        let planned_slot = plan.slots[ordinal as usize];
+        if !pending_real && !clean_eof {
+            pending_real = next_block(block)?;
+            clean_eof = !pending_real;
+            if pending_real {
+                let real_slot = block_slot(block).map_err(source_error)?;
+                validate_real_slot(&identity, previous_real_slot, real_slot)
+                    .map_err(source_error)?;
+                previous_real_slot = Some(real_slot);
+            }
+        }
+
+        let real_slot = pending_real
+            .then(|| block_slot(block))
+            .transpose()
+            .map_err(source_error)?;
+        if let Some(real_slot) = real_slot
+            && real_slot < planned_slot
+        {
+            return Err(source_error(CarQueryError::InvalidArchive(format!(
+                "CAR block slot {real_slot} is absent from the canonical plan before planned slot {planned_slot}"
+            ))));
+        }
+
+        if ordinal < first {
+            if real_slot == Some(planned_slot) {
+                pending_real = false;
+            }
+            continue;
+        }
+
+        if real_slot == Some(planned_slot) {
+            let mut block = project_block(block, &identity, ordinal, request, limits, scratch)
+                .map_err(source_error)?;
+            publisher.publish(&block)?;
+            scratch.output_pool.recycle_block(&mut block);
+            // The callback has finished; keep the empty output allocation.
+            scratch.transaction_output = block.transactions;
+            pending_real = false;
+        } else {
+            publish_empty_row(publisher, &identity, ordinal, planned_slot)?;
+        }
+    }
+
+    if full_scan {
+        if pending_real {
+            return Err(source_error(CarQueryError::InvalidArchive(format!(
+                "CAR block slot {} appears after the final canonical plan row",
+                block_slot(block).map_err(source_error)?
+            ))));
+        }
+        if !clean_eof {
+            let has_extra = next_block(block)?;
+            if has_extra {
+                return Err(source_error(CarQueryError::InvalidArchive(format!(
+                    "CAR block slot {} appears after the final canonical plan row",
+                    block_slot(block).map_err(source_error)?
+                ))));
+            }
+        }
+    }
+
+    Ok(())
+}
+
+impl<R: Read + Send> ArchiveInstructionSource for CarInstructionSource<R> {
     fn identity(&self) -> &SourceIdentity {
         &self.identity
     }
@@ -686,14 +770,14 @@ fn project_block(
     scratch.block_counts = request
         .counts_only
         .then(blockzilla_query_sdk::BlockCounts::default);
-    let mut transactions = reserved_vec(
-        if request.counts_only {
-            0
-        } else {
-            block.transactions.len()
-        },
-        "block transactions",
-    )?;
+    let mut transactions = std::mem::take(&mut scratch.transaction_output);
+    if !request.counts_only {
+        transactions
+            .try_reserve(block.transactions.len())
+            .map_err(|_| {
+                CarQueryError::InvalidArchive("block transaction allocation failed".into())
+            })?;
+    }
     for (position, raw) in block.transactions.iter().enumerate() {
         let tx_index = u32::try_from(position)
             .map_err(|_| CarQueryError::InvalidArchive("transaction index exceeds u32".into()))?;
@@ -735,11 +819,34 @@ fn project_transaction(
     limits: CarQueryLimits,
     scratch: &mut ProjectionScratch,
 ) -> CarQueryResult<Option<CanonicalTransaction>> {
+    if raw.data.data.len() > limits.max_transaction_bytes {
+        return Err(CarQueryError::InvalidArchive(
+            "transaction frame exceeds limit".into(),
+        ));
+    }
+    let transaction = scratch
+        .transactions
+        .deserialize_transaction(&raw.data.data)
+        .map_err(|error| CarQueryError::TransactionDecode(error.to_string()))?;
+    let result = project_decoded_transaction(&transaction, raw, tx_index, request, limits, scratch);
+    scratch.transactions.recycle_transaction(transaction);
+    result
+}
+
+fn project_decoded_transaction(
+    transaction: &VersionedTransaction<'_>,
+    raw: &RawTransactionNode,
+    tx_index: u32,
+    request: &ScanRequest,
+    limits: CarQueryLimits,
+    scratch: &mut ProjectionScratch,
+) -> CarQueryResult<Option<CanonicalTransaction>> {
     let ProjectionScratch {
         output_pool,
         block_counts,
         metadata,
         metadata_zstd,
+        ..
     } = scratch;
     if raw.data.data.len() > limits.max_transaction_bytes {
         return Err(CarQueryError::InvalidArchive(format!(
@@ -748,8 +855,6 @@ fn project_transaction(
             limits.max_transaction_bytes
         )));
     }
-    let transaction = wincode::deserialize_exact::<VersionedTransaction<'_>>(&raw.data.data)
-        .map_err(|error| CarQueryError::TransactionDecode(error.to_string()))?;
     let message = message_view(&transaction.message)?;
     validate_message_geometry(&transaction, &message, limits)?;
 
@@ -760,15 +865,23 @@ fn project_transaction(
             limits.max_metadata_bytes
         )));
     }
+    // The count example does not need logs, balances, rewards, or key values.
+    // Keep the historical decoder for bincode metadata; protobuf is visited in place.
+    if let Some(counts) = block_counts.as_mut()
+        && crate::metadata_decoder::slot_uses_protobuf_metadata(raw.slot)
+    {
+        count_protobuf_transaction(&message, &raw.metadata.data, metadata_zstd, counts, limits)?;
+        return Ok(None);
+    }
     let metadata = if raw.metadata.data.is_empty() {
         None
     } else {
-        *metadata = TransactionStatusMeta::default();
-        decode_transaction_status_meta_from_frame(
+        decode_projected_metadata(
             raw.slot,
             &raw.metadata.data,
             metadata,
             metadata_zstd,
+            request,
         )
         .map_err(CarQueryError::Metadata)?;
         Some(&*metadata)
@@ -955,6 +1068,234 @@ fn project_transaction(
         token_balance_coverage,
         token_balances,
     }))
+}
+
+/// Keep only metadata used by the query. Logs, lamport balances, rewards, and
+/// return data are not part of these projections and need no owned objects.
+fn decode_projected_metadata(
+    slot: u64,
+    frame: &[u8],
+    out: &mut TransactionStatusMeta,
+    zstd: &mut ZstdReusableDecoder,
+    request: &ScanRequest,
+) -> Result<(), MetadataDecodeError> {
+    use crate::confirmed_block::{
+        InnerInstruction, InnerInstructions, TokenBalance, TransactionError, UiTokenAmount,
+    };
+    use crate::metadata_decoder::{
+        InnerInstructionVisit, TokenBalanceVisit, TransactionStatusMetaVisitor,
+        slot_uses_protobuf_metadata, visit_protobuf_transaction_status_meta,
+    };
+    if !slot_uses_protobuf_metadata(slot) {
+        return decode_transaction_status_meta_from_frame(slot, frame, out, zstd);
+    }
+    struct Projection<'a> {
+        out: &'a mut TransactionStatusMeta,
+        instructions: bool,
+        balances: bool,
+    }
+    fn token(value: TokenBalanceVisit<'_>) -> TokenBalance {
+        TokenBalance {
+            account_index: value.account_index,
+            mint: value.mint.into(),
+            owner: value.owner.into(),
+            program_id: value.program_id.into(),
+            ui_token_amount: value.ui_token_amount.map(|amount| UiTokenAmount {
+                ui_amount: amount.ui_amount,
+                decimals: amount.decimals,
+                amount: amount.amount.into(),
+                ui_amount_string: amount.ui_amount_string.into(),
+            }),
+        }
+    }
+    impl<'a> TransactionStatusMetaVisitor<'a> for Projection<'_> {
+        fn wants_status_error(&self) -> bool {
+            true
+        }
+        fn wants_inner_instructions(&self) -> bool {
+            true
+        }
+        fn wants_loaded_addresses(&self) -> bool {
+            true
+        }
+        fn wants_pre_token_balances(&self) -> bool {
+            self.balances
+        }
+        fn wants_post_token_balances(&self) -> bool {
+            self.balances
+        }
+        fn status_error(&mut self, bytes: &'a [u8]) {
+            self.out.err = Some(TransactionError {
+                err: bytes.to_vec(),
+            });
+        }
+        fn inner_instructions_none(&mut self, none: bool) {
+            self.out.inner_instructions_none = none;
+        }
+        fn inner_instruction_group(&mut self, index: u32) {
+            self.out.inner_instructions.push(InnerInstructions {
+                index,
+                instructions: Vec::new(),
+            });
+        }
+        fn inner_instruction(&mut self, value: InnerInstructionVisit<'a>) {
+            if self.instructions {
+                self.out
+                    .inner_instructions
+                    .last_mut()
+                    .expect("group precedes instruction")
+                    .instructions
+                    .push(InnerInstruction {
+                        program_id_index: value.program_id_index,
+                        accounts: value.accounts.to_vec(),
+                        data: value.data.to_vec(),
+                        stack_height: value.stack_height,
+                    });
+            }
+        }
+        fn loaded_writable_address(&mut self, bytes: &'a [u8]) {
+            self.out.loaded_writable_addresses.push(bytes.to_vec());
+        }
+        fn loaded_readonly_address(&mut self, bytes: &'a [u8]) {
+            self.out.loaded_readonly_addresses.push(bytes.to_vec());
+        }
+        fn pre_token_balance(&mut self, value: TokenBalanceVisit<'a>) {
+            self.out.pre_token_balances.push(token(value));
+        }
+        fn post_token_balance(&mut self, value: TokenBalanceVisit<'a>) {
+            self.out.post_token_balances.push(token(value));
+        }
+    }
+    prost::Message::clear(out);
+    let compressed = zstd
+        .decompress_if_zstd(frame)
+        .map_err(MetadataDecodeError::ZstdDecompress)?;
+    visit_protobuf_transaction_status_meta(
+        if compressed { zstd.output() } else { frame },
+        &mut Projection {
+            out,
+            instructions: request.include_instructions,
+            balances: !matches!(request.token_balances, TokenBalanceRequirement::None),
+        },
+    )
+    .map_err(|error| MetadataDecodeError::ProtoConvert(error.to_string()))
+}
+
+/// Count and validate instruction geometry without materializing protobuf objects.
+fn count_protobuf_transaction(
+    message: &MessageView<'_>,
+    frame: &[u8],
+    zstd: &mut ZstdReusableDecoder,
+    counts: &mut blockzilla_query_sdk::BlockCounts,
+    limits: CarQueryLimits,
+) -> CarQueryResult<()> {
+    use crate::metadata_decoder::{
+        InnerInstructionVisit, TransactionStatusMetaVisitor, visit_protobuf_transaction_status_meta,
+    };
+    struct Counter {
+        outer: usize,
+        accounts: usize,
+        inner: usize,
+        writable: usize,
+        readonly: usize,
+        previous_group: Option<u32>,
+        not_recorded: bool,
+        invalid: bool,
+    }
+    impl<'a> TransactionStatusMetaVisitor<'a> for Counter {
+        fn wants_status_error(&self) -> bool {
+            true
+        }
+        fn wants_inner_instructions(&self) -> bool {
+            true
+        }
+        fn wants_loaded_addresses(&self) -> bool {
+            true
+        }
+        fn status_error(&mut self, bytes: &'a [u8]) {
+            self.invalid |= decode_failed_outer_bytes(bytes).is_err();
+        }
+        fn inner_instruction_group(&mut self, index: u32) {
+            self.invalid |= index as usize >= self.outer
+                || self
+                    .previous_group
+                    .is_some_and(|previous| index <= previous);
+            self.previous_group = Some(index);
+        }
+        fn inner_instruction(&mut self, instruction: InnerInstructionVisit<'a>) {
+            self.inner += 1;
+            self.invalid |= instruction.program_id_index as usize >= self.accounts
+                || instruction
+                    .accounts
+                    .iter()
+                    .any(|&index| index as usize >= self.accounts)
+                || instruction.data.len() > MAX_CANONICAL_SHORT_VEC_ITEMS;
+        }
+        fn inner_instructions_none(&mut self, none: bool) {
+            self.not_recorded = none;
+        }
+        fn loaded_writable_address(&mut self, address: &'a [u8]) {
+            self.writable += 1;
+            self.invalid |= address.len() != 32;
+        }
+        fn loaded_readonly_address(&mut self, address: &'a [u8]) {
+            self.readonly += 1;
+            self.invalid |= address.len() != 32;
+        }
+    }
+    let accounts =
+        message.static_keys.len() + message.expected_loaded.0 + message.expected_loaded.1;
+    let mut counter = Counter {
+        outer: message.instructions.len(),
+        accounts,
+        inner: 0,
+        writable: 0,
+        readonly: 0,
+        previous_group: None,
+        not_recorded: false,
+        invalid: false,
+    };
+    if !frame.is_empty() {
+        let compressed = zstd
+            .decompress_if_zstd(frame)
+            .map_err(|error| CarQueryError::Metadata(MetadataDecodeError::ZstdDecompress(error)))?;
+        visit_protobuf_transaction_status_meta(
+            if compressed { zstd.output() } else { frame },
+            &mut counter,
+        )
+        .map_err(|error| {
+            CarQueryError::InvalidArchive(format!("metadata count decode: {error}"))
+        })?;
+        counter.invalid |= (counter.writable, counter.readonly) != message.expected_loaded
+            || (counter.not_recorded && counter.previous_group.is_some());
+    }
+    let complete = !frame.is_empty() || message.expected_loaded == (0, 0);
+    if complete {
+        for instruction in message.instructions {
+            counter.invalid |= instruction.program_id_index as usize >= accounts
+                || instruction
+                    .accounts
+                    .iter()
+                    .any(|&index| index as usize >= accounts)
+                || instruction.data.len() > MAX_CANONICAL_SHORT_VEC_ITEMS;
+        }
+        let total = message.instructions.len() + counter.inner;
+        counter.invalid |= total > limits.max_instructions_per_transaction
+            || total > MAX_CANONICAL_SHORT_VEC_ITEMS;
+        if !counter.invalid {
+            counts.instructions += total as u64;
+            counts.recorded_inner_instructions += counter.inner as u64;
+        }
+    }
+    if counter.invalid {
+        return Err(CarQueryError::InvalidArchive(
+            "invalid metadata or instruction geometry in count scan".into(),
+        ));
+    }
+    counts.transactions += 1;
+    counts.incomplete_instructions += u64::from(!complete);
+    counts.incomplete_cpi += u64::from(frame.is_empty() || counter.not_recorded);
+    Ok(())
 }
 
 fn project_token_balances(
@@ -1218,10 +1559,14 @@ fn decode_failed_outer_index(metadata: &TransactionStatusMeta) -> CarQueryResult
     let Some(error) = &metadata.err else {
         return Ok(None);
     };
-    let decoded = match wincode::deserialize_exact::<StoredTransactionError>(&error.err) {
+    decode_failed_outer_bytes(&error.err)
+}
+
+fn decode_failed_outer_bytes(bytes: &[u8]) -> CarQueryResult<Option<u32>> {
+    let decoded = match wincode::deserialize_exact::<StoredTransactionError>(bytes) {
         Ok(decoded) => decoded,
         Err(err) => {
-            if let Some(index) = decode_legacy_unit_borsh_io_error_index(&error.err) {
+            if let Some(index) = decode_legacy_unit_borsh_io_error_index(bytes) {
                 return Ok(Some(index));
             }
             return Err(CarQueryError::InvalidArchive(format!(
@@ -1291,6 +1636,7 @@ fn project_instructions(
     for (outer_index, instruction) in message.instructions.iter().enumerate() {
         push_instruction(
             &mut output,
+            pool,
             outer_index,
             None,
             None,
@@ -1309,6 +1655,7 @@ fn project_instructions(
             for (inner_index, instruction) in group.instructions.iter().enumerate() {
                 push_instruction(
                     &mut output,
+                    pool,
                     outer_index,
                     Some(inner_index),
                     instruction.stack_height,
@@ -1333,6 +1680,7 @@ fn project_instructions(
 #[allow(clippy::too_many_arguments)]
 fn push_instruction(
     output: &mut Vec<ResolvedInstruction>,
+    pool: &mut blockzilla_query_sdk::projection_pool::ProjectionPool,
     outer_index: usize,
     inner_index: Option<usize>,
     stack_height: Option<u32>,
@@ -1366,7 +1714,10 @@ fn push_instruction(
         }
     };
     let accounts = if request.include_instruction_accounts {
-        let mut accounts = reserved_vec(account_indexes.len(), "instruction account keys")?;
+        let mut accounts = pool.accounts();
+        accounts.try_reserve(account_indexes.len()).map_err(|_| {
+            CarQueryError::InvalidArchive("instruction account allocation failed".into())
+        })?;
         for index in account_indexes {
             accounts.push(*account_keys.get(usize::from(*index)).ok_or_else(|| {
                 CarQueryError::InvalidArchive(format!(
@@ -1397,8 +1748,9 @@ fn push_instruction(
         .as_ref()
         .is_some_and(|key| instruction_data_required(&request.instruction_data, key));
     let (data_coverage, data) = if selected {
-        let mut selected_data = reserved_vec(data.len(), "selected instruction data")?;
-        selected_data.extend_from_slice(data);
+        let selected_data = pool.copy_data(data).map_err(|_| {
+            CarQueryError::InvalidArchive("instruction data allocation failed".into())
+        })?;
         (InstructionDataCoverage::Exact, selected_data)
     } else {
         (InstructionDataCoverage::NotRequested, Vec::new())
@@ -1471,6 +1823,139 @@ mod tests {
     };
 
     const FIRST_SLOT: u64 = 80_000_000;
+
+    #[test]
+    fn real_car_blocks_have_the_same_counts_with_borrowed_metadata() {
+        for bytes in [
+            include_bytes!("../benches/fixtures/epoch-157-biggest.car").as_slice(),
+            include_bytes!("../benches/fixtures/epoch-822-biggest.car").as_slice(),
+        ] {
+            let limits = CarQueryLimits::default();
+            let mut reader =
+                CarBlockReader::with_capacity(Cursor::new(bytes), limits.io_buffer_bytes);
+            reader.skip_header_bounded(limits.max_header_bytes).unwrap();
+            let mut raw = OrderedLosslessCarBlock::default();
+            let mut slots = Vec::new();
+            while reader
+                .read_until_block_ordered_lossless_bounded(&mut raw, limits.block_read_limits())
+                .unwrap()
+            {
+                slots.push(block_slot(&raw).unwrap());
+            }
+            assert!(!slots.is_empty());
+            let mut id = identity(&slots);
+            id.first_slot = slots[0];
+            id.slots_per_epoch = slots.last().unwrap() - slots[0] + 1;
+            let full_request = ScanRequest::all()
+                .allow_incomplete_instructions()
+                .allow_incomplete_cpi()
+                .without_instruction_data()
+                .without_instruction_accounts();
+            let mut full = CarInstructionSource::new(
+                Cursor::new(bytes),
+                id.clone(),
+                CanonicalBlockPlan::new(slots.clone()),
+                limits,
+            )
+            .unwrap();
+            let mut inner = 0u64;
+            let receipt = full
+                .for_each_block(&full_request, |block| {
+                    inner += block
+                        .transactions
+                        .iter()
+                        .flat_map(|tx| &tx.instructions)
+                        .filter(|ix| ix.coordinate.inner_index.is_some())
+                        .count() as u64;
+                    Ok(())
+                })
+                .unwrap();
+            let mut count = CarInstructionSource::new(
+                Cursor::new(bytes),
+                id,
+                CanonicalBlockPlan::new(slots),
+                limits,
+            )
+            .unwrap();
+            let mut counted_inner = 0;
+            let counted = count
+                .for_each_block(&full_request.count_instructions_only(), |block| {
+                    counted_inner += block.counts.unwrap().recorded_inner_instructions;
+                    Ok(())
+                })
+                .unwrap();
+            assert_eq!(counted.transactions, receipt.transactions);
+            assert_eq!(counted.instructions, receipt.instructions);
+            assert_eq!(counted_inner, inner);
+            assert_eq!(
+                counted.transactions_with_incomplete_cpi,
+                receipt.transactions_with_incomplete_cpi
+            );
+            assert_eq!(
+                counted.transactions_with_incomplete_instructions,
+                receipt.transactions_with_incomplete_instructions
+            );
+        }
+    }
+
+    #[test]
+    fn protobuf_count_matches_full_projection_and_rejects_bad_groups() {
+        let bytes = simple_transaction(7);
+        let tx = wincode::deserialize_exact::<VersionedTransaction<'_>>(&bytes).unwrap();
+        let message = message_view(&tx.message).unwrap();
+        for compressed in [false, true] {
+            let meta = TransactionStatusMeta {
+                inner_instructions: vec![InnerInstructions {
+                    index: 0,
+                    instructions: vec![InnerInstruction {
+                        program_id_index: 1,
+                        accounts: vec![0],
+                        data: vec![8],
+                        stack_height: Some(2),
+                    }],
+                }],
+                log_messages: vec!["unused log".repeat(100)],
+                ..Default::default()
+            };
+            let wire = meta.encode_to_vec();
+            let frame = if compressed {
+                zstd::bulk::compress(&wire, 1).unwrap()
+            } else {
+                wire
+            };
+            let mut counts = blockzilla_query_sdk::BlockCounts::default();
+            count_protobuf_transaction(
+                &message,
+                &frame,
+                &mut ZstdReusableDecoder::new(),
+                &mut counts,
+                CarQueryLimits::default(),
+            )
+            .unwrap();
+            assert_eq!(counts.transactions, 1);
+            assert_eq!(counts.instructions, message.instructions.len() as u64 + 1);
+            assert_eq!(counts.recorded_inner_instructions, 1);
+            assert_eq!(counts.incomplete_cpi, 0);
+        }
+        let bad = TransactionStatusMeta {
+            inner_instructions: vec![InnerInstructions {
+                index: message.instructions.len() as u32,
+                instructions: Vec::new(),
+            }],
+            ..Default::default()
+        }
+        .encode_to_vec();
+        assert!(
+            count_protobuf_transaction(
+                &message,
+                &bad,
+                &mut ZstdReusableDecoder::new(),
+                &mut Default::default(),
+                CarQueryLimits::default()
+            )
+            .is_err()
+        );
+    }
 
     #[derive(Clone)]
     struct FixtureTransaction {

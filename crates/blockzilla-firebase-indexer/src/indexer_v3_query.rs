@@ -467,6 +467,29 @@ enum ParallelScanJobBlocks {
     },
 }
 
+impl ParallelScanJobBlocks {
+    fn len(&self) -> usize {
+        match self {
+            Self::Ordered(range) => range.len(),
+            Self::Selected { indexes, .. } => indexes.len(),
+        }
+    }
+
+    fn get(&self, index: usize) -> Option<usize> {
+        if index >= self.len() {
+            return None;
+        }
+        Some(match self {
+            Self::Ordered(range) => range.start + index,
+            Self::Selected { all, indexes } => all[indexes.start + index],
+        })
+    }
+
+    fn iter(&self) -> impl ExactSizeIterator<Item = usize> + '_ {
+        (0..self.len()).map(|index| self.get(index).expect("bounded selection index"))
+    }
+}
+
 enum ParallelScanJobPlan {
     Ordered {
         reader: Arc<Reader>,
@@ -1285,13 +1308,22 @@ impl IndexerV3InstructionSource {
         let selected_len = signature_scan.selected_blocks.len();
         let mut selected_index = 0_usize;
         while selected_index < selected_len {
-            let run_start = signature_scan.selected_blocks[selected_index];
+            let run_start = signature_scan
+                .selected_blocks
+                .get(selected_index)
+                .expect("bounded selection index");
             let mut run_index_end = selected_index
                 .checked_add(1)
                 .ok_or_else(|| QueryError::InvalidStream("V3 selected index overflow".into()))?;
             while run_index_end < selected_len {
-                let previous = signature_scan.selected_blocks[run_index_end - 1];
-                let next = signature_scan.selected_blocks[run_index_end];
+                let previous = signature_scan
+                    .selected_blocks
+                    .get(run_index_end - 1)
+                    .expect("bounded selection index");
+                let next = signature_scan
+                    .selected_blocks
+                    .get(run_index_end)
+                    .expect("bounded selection index");
                 if previous.checked_add(1) != Some(next) {
                     break;
                 }
@@ -1299,7 +1331,10 @@ impl IndexerV3InstructionSource {
                     QueryError::InvalidStream("V3 selected run index overflow".into())
                 })?;
             }
-            let run_end = signature_scan.selected_blocks[run_index_end - 1]
+            let run_end = signature_scan
+                .selected_blocks
+                .get(run_index_end - 1)
+                .expect("bounded selection index")
                 .checked_add(1)
                 .ok_or_else(|| QueryError::InvalidStream("V3 selected block overflow".into()))?;
             let mut semantic_scan = reader
@@ -1310,7 +1345,10 @@ impl IndexerV3InstructionSource {
                 .map_err(|error| source_error(IndexerV3InstructionSourceError::Reader(error)))?;
 
             for index in selected_index..run_index_end {
-                let ordinal = signature_scan.selected_blocks[index];
+                let ordinal = signature_scan
+                    .selected_blocks
+                    .get(index)
+                    .expect("bounded selection index");
                 let row = reader.block(ordinal).ok_or_else(|| {
                     source_error(IndexerV3InstructionSourceError::Invalid(format!(
                         "selected V3 block ordinal {ordinal} is missing after open validation"
@@ -1689,10 +1727,7 @@ impl IndexerV3InstructionSource {
         #[cfg(test)]
         self.apply_parallel_test_hook(job.id)?;
         let mut owned_payload = ParallelOwnedPayloadGuard::new(owned_payload_tracker);
-        let block_ordinals = match job.blocks {
-            ParallelScanJobBlocks::Ordered(range) => range.collect::<Vec<_>>(),
-            ParallelScanJobBlocks::Selected { all, indexes } => all[indexes].to_vec(),
-        };
+        let block_ordinals = job.blocks;
         let registry_stats_before = self.context.registry_stats;
         let reader = &self.reader;
         let context = &mut self.context;
@@ -1708,7 +1743,7 @@ impl IndexerV3InstructionSource {
                     source: error,
                 })
             })?;
-        let mut signature_scan = SelectedBlockSignatureReader::for_selected_blocks(
+        let mut signature_scan = SelectedBlockSignatureReader::for_blocks(
             reader,
             context.source.clone(),
             context.sidecars.signatures_size.is_some() && request_needs_signature_bytes(request),
@@ -1719,13 +1754,22 @@ impl IndexerV3InstructionSource {
         let selected_len = signature_scan.selected_blocks.len();
         let mut selected_index = 0_usize;
         while selected_index < selected_len {
-            let run_start = signature_scan.selected_blocks[selected_index];
+            let run_start = signature_scan
+                .selected_blocks
+                .get(selected_index)
+                .expect("bounded selection index");
             let mut run_index_end = selected_index.checked_add(1).ok_or_else(|| {
                 QueryError::InvalidStream("parallel V3 selected index overflow".into())
             })?;
             while run_index_end < selected_len {
-                let previous = signature_scan.selected_blocks[run_index_end - 1];
-                let next = signature_scan.selected_blocks[run_index_end];
+                let previous = signature_scan
+                    .selected_blocks
+                    .get(run_index_end - 1)
+                    .expect("bounded selection index");
+                let next = signature_scan
+                    .selected_blocks
+                    .get(run_index_end)
+                    .expect("bounded selection index");
                 if previous.checked_add(1) != Some(next) {
                     break;
                 }
@@ -1733,7 +1777,10 @@ impl IndexerV3InstructionSource {
                     QueryError::InvalidStream("parallel V3 selected run index overflow".into())
                 })?;
             }
-            let run_end = signature_scan.selected_blocks[run_index_end - 1]
+            let run_end = signature_scan
+                .selected_blocks
+                .get(run_index_end - 1)
+                .expect("bounded selection index")
                 .checked_add(1)
                 .ok_or_else(|| {
                     QueryError::InvalidStream("parallel V3 selected block overflow".into())
@@ -1752,7 +1799,10 @@ impl IndexerV3InstructionSource {
                         "parallel V3 scan was cancelled".into(),
                     ));
                 }
-                let ordinal = signature_scan.selected_blocks[index];
+                let ordinal = signature_scan
+                    .selected_blocks
+                    .get(index)
+                    .expect("bounded selection index");
                 let row = reader.block(ordinal).ok_or_else(|| {
                     source_error(IndexerV3InstructionSourceError::Invalid(format!(
                         "parallel V3 block ordinal {ordinal} is missing after open validation"
@@ -3329,6 +3379,7 @@ impl IndexerV3InstructionSource {
                 context.project_program(reference, &request.instruction_programs)?
             };
             let accounts = project_instruction_accounts(
+                &mut context.output_pool,
                 request.include_instruction_accounts,
                 account_keys,
                 account_key_count,
@@ -3342,7 +3393,13 @@ impl IndexerV3InstructionSource {
                 ),
                 Some(candidates) if candidates.len() == 1 => (
                     InstructionDataCoverage::Exact,
-                    copy_bytes(&candidates[0].bytes, "exact V3 outer instruction data")?,
+                    context
+                        .output_pool
+                        .copy_data(&candidates[0].bytes)
+                        .map_err(|source| IndexerV3InstructionSourceError::Allocation {
+                            context: "exact V3 outer instruction data",
+                            source,
+                        })?,
                 ),
                 Some(_) => {
                     let selected = selected_outer_data.as_mut().ok_or_else(|| {
@@ -3402,6 +3459,7 @@ impl IndexerV3InstructionSource {
                         context.project_program(reference, &request.instruction_programs)?
                     };
                     let accounts = project_instruction_accounts(
+                        &mut context.output_pool,
                         request.include_instruction_accounts,
                         account_keys,
                         account_key_count,
@@ -3411,9 +3469,13 @@ impl IndexerV3InstructionSource {
                         instruction_data_required(&request.instruction_data, key)
                     });
                     let (data_coverage, data) = if selected {
-                        let mut data = Vec::new();
-                        reserve_exact(&mut data, inner.data.len(), "selected V3 CPI data")?;
-                        data.extend_from_slice(inner.data);
+                        let data = context
+                            .output_pool
+                            .copy_data(inner.data)
+                            .map_err(|source| IndexerV3InstructionSourceError::Allocation {
+                                context: "selected V3 CPI data",
+                                source,
+                            })?;
                         (InstructionDataCoverage::Exact, data)
                     } else {
                         (InstructionDataCoverage::NotRequested, Vec::new())
@@ -4335,7 +4397,7 @@ pub(crate) struct SelectedBlockSignatureReader<'a> {
     reader: &'a Reader,
     source: Arc<dyn RangeSource>,
     signatures_available: bool,
-    selected_blocks: Vec<usize>,
+    selected_blocks: ParallelScanJobBlocks,
     next_selected: usize,
     batch: Option<SignatureBatch>,
 }
@@ -4358,14 +4420,12 @@ impl<'a> SelectedBlockSignatureReader<'a> {
                 "V3 signature range is outside the archive".into(),
             ));
         }
-        let mut selected = Vec::new();
-        reserve_exact(
-            &mut selected,
-            blocks.len(),
-            "contiguous V3 signature block selection",
-        )?;
-        selected.extend(blocks);
-        Self::for_selected_blocks(reader, source, signatures_available, selected)
+        Self::for_blocks(
+            reader,
+            source,
+            signatures_available,
+            ParallelScanJobBlocks::Ordered(blocks),
+        )
     }
 
     /// Prepare a strictly increasing sparse block selection.
@@ -4378,8 +4438,26 @@ impl<'a> SelectedBlockSignatureReader<'a> {
         signatures_available: bool,
         selected_blocks: Vec<usize>,
     ) -> IndexerV3InstructionSourceResult<Self> {
+        let indexes = 0..selected_blocks.len();
+        Self::for_blocks(
+            reader,
+            source,
+            signatures_available,
+            ParallelScanJobBlocks::Selected {
+                all: selected_blocks.into(),
+                indexes,
+            },
+        )
+    }
+
+    fn for_blocks(
+        reader: &'a Reader,
+        source: Arc<dyn RangeSource>,
+        signatures_available: bool,
+        selected_blocks: ParallelScanJobBlocks,
+    ) -> IndexerV3InstructionSourceResult<Self> {
         let mut previous = None;
-        for &block in &selected_blocks {
+        for block in selected_blocks.iter() {
             if reader.block(block).is_none() {
                 return Err(IndexerV3InstructionSourceError::Invalid(format!(
                     "selected V3 signature block {block} is outside the archive"
@@ -4409,7 +4487,6 @@ impl<'a> SelectedBlockSignatureReader<'a> {
         let expected = self
             .selected_blocks
             .get(self.next_selected)
-            .copied()
             .ok_or_else(|| {
                 IndexerV3InstructionSourceError::Invalid(
                     "V3 signature scan received too many selected blocks".into(),
@@ -4483,7 +4560,7 @@ impl<'a> SelectedBlockSignatureReader<'a> {
     }
 
     fn load_batch(&mut self) -> IndexerV3InstructionSourceResult<()> {
-        let first_block = *self
+        let first_block = self
             .selected_blocks
             .get(self.next_selected)
             .ok_or_else(|| {
@@ -4502,7 +4579,7 @@ impl<'a> SelectedBlockSignatureReader<'a> {
         let mut selected_end = self.next_selected;
         let mut block_end = first_block;
 
-        while let Some(&block_ordinal) = self.selected_blocks.get(selected_end) {
+        while let Some(block_ordinal) = self.selected_blocks.get(selected_end) {
             if block_ordinal != expected_block {
                 break;
             }
@@ -5427,13 +5504,6 @@ fn reserve_exact<T>(
         .map_err(|source| IndexerV3InstructionSourceError::Allocation { context, source })
 }
 
-fn copy_bytes(bytes: &[u8], context: &'static str) -> IndexerV3InstructionSourceResult<Vec<u8>> {
-    let mut output = Vec::new();
-    reserve_exact(&mut output, bytes.len(), context)?;
-    output.extend_from_slice(bytes);
-    Ok(output)
-}
-
 fn required_plane<'a>(
     plane: Option<&'a [u8]>,
     name: &'static str,
@@ -5544,22 +5614,6 @@ fn resolve_index_u32(
     })
 }
 
-fn resolve_indexes(
-    account_keys: &[[u8; 32]],
-    indexes: &[u8],
-) -> IndexerV3InstructionSourceResult<Vec<[u8; 32]>> {
-    let mut resolved = Vec::new();
-    reserve_exact(
-        &mut resolved,
-        indexes.len(),
-        "resolved V3 instruction accounts",
-    )?;
-    for index in indexes {
-        resolved.push(resolve_index(account_keys, *index)?);
-    }
-    Ok(resolved)
-}
-
 fn projected_account_reference(
     message: &ProjectedCompactV2Message<'_>,
     metadata: &ProjectedMetadata<'_>,
@@ -5594,13 +5648,19 @@ fn projected_account_reference(
 }
 
 fn project_instruction_accounts(
+    pool: &mut blockzilla_query_sdk::projection_pool::ProjectionPool,
     include_accounts: bool,
     account_keys: &[[u8; 32]],
     account_key_count: usize,
     indexes: &[u8],
 ) -> IndexerV3InstructionSourceResult<Vec<[u8; 32]>> {
     if include_accounts {
-        return resolve_indexes(account_keys, indexes);
+        let mut output = pool.accounts();
+        reserve_exact(&mut output, indexes.len(), "V3 instruction accounts")?;
+        for &index in indexes {
+            output.push(resolve_index(account_keys, index)?);
+        }
+        return Ok(output);
     }
     if let Some(index) = indexes
         .iter()
@@ -8118,7 +8178,7 @@ mod tests {
         let compact_data = vote_tower_data(false);
         let candidates = reconstruct_instruction_data_candidates(&compact_data, None).unwrap();
         assert_eq!(candidates.len(), 2);
-        let selected_data = candidates[1].bytes.clone();
+        let selected_data = candidates[1].bytes.to_vec();
         let signed = serialize_signed_message(&SignedMessage {
             version: SignedMessageVersion::Legacy,
             header: message_header(1),

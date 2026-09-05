@@ -11,6 +11,7 @@ use blockzilla_format::{
     ArchiveV2VoteStateUpdate, ArchiveV2VoteTowerSync, CompactMessageHeader, CompactPubkey,
     CompactTransactionConfig, OwnedCompactRecentBlockhash, WincodeLeb128Config,
 };
+use smallvec::{SmallVec, smallvec};
 use thiserror::Error;
 use wincode::{ReadResult, SchemaRead, error::invalid_tag_encoding, io::Reader};
 
@@ -287,7 +288,7 @@ impl<'de> ProjectedCompactV2AddressTableLookup<'de> {
 pub struct ProjectedCompactV2Instruction<'de> {
     program_id_index: u8,
     accounts: &'de [u8],
-    data_candidates: Option<Vec<InstructionDataCandidate>>,
+    data_candidates: Option<SmallVec<[InstructionDataCandidate<'de>; 1]>>,
 }
 
 impl<'de> ProjectedCompactV2Instruction<'de> {
@@ -303,7 +304,7 @@ impl<'de> ProjectedCompactV2Instruction<'de> {
     /// program was selected. `None` means that data was not requested. An
     /// empty slice means that relaxed projection could not obtain a required
     /// vote-hash proof.
-    pub fn data_candidates(&self) -> Option<&[InstructionDataCandidate]> {
+    pub fn data_candidates(&self) -> Option<&[InstructionDataCandidate<'de>]> {
         self.data_candidates.as_deref()
     }
 }
@@ -323,7 +324,7 @@ pub struct ProjectedCompactV2Message<'de> {
     expected_loaded_readonly: usize,
 }
 
-impl ProjectedCompactV2Message<'_> {
+impl<'de> ProjectedCompactV2Message<'de> {
     pub fn count_limits(&self) -> crate::CompactV2MetadataProjectionLimits {
         crate::CompactV2MetadataProjectionLimits {
             total_message_accounts: self.static_account_count + self.expected_loaded_addresses(),
@@ -348,7 +349,7 @@ impl ProjectedCompactV2Message<'_> {
         &self.recent_blockhash
     }
 
-    pub fn instructions(&self) -> &[ProjectedCompactV2Instruction<'_>] {
+    pub fn instructions(&self) -> &[ProjectedCompactV2Instruction<'de>] {
         &self.instructions
     }
 
@@ -722,7 +723,7 @@ fn read_instruction<'de, const MAY24: bool>(
     {
         let candidates = match read_instruction_data::<MAY24>(cursor, vote_hashes) {
             Ok(candidates) => candidates,
-            Err(error) if data_policy.relaxed() && is_missing_vote_proof(&error) => Vec::new(),
+            Err(error) if data_policy.relaxed() && is_missing_vote_proof(&error) => SmallVec::new(),
             Err(error) => return Err(error),
         };
         let data_limit = u16::MAX as usize;
@@ -756,10 +757,10 @@ fn is_missing_vote_proof(error: &CompactV2MessageProjectionError) -> bool {
     )
 }
 
-fn read_instruction_data<const MAY24: bool>(
-    cursor: &mut &[u8],
+fn read_instruction_data<'de, const MAY24: bool>(
+    cursor: &mut &'de [u8],
     vote_hashes: Option<&dyn VoteHashResolver>,
-) -> CompactV2MessageProjectionResult<Vec<InstructionDataCandidate>> {
+) -> CompactV2MessageProjectionResult<SmallVec<[InstructionDataCandidate<'de>; 1]>> {
     let tag = get::<u32>(cursor)?;
     if MAY24 {
         match tag {
@@ -842,25 +843,46 @@ fn read_instruction_data<const MAY24: bool>(
     }
 }
 
-fn raw_candidate(
-    cursor: &mut &[u8],
-) -> CompactV2MessageProjectionResult<Vec<InstructionDataCandidate>> {
+fn raw_candidate<'de>(
+    cursor: &mut &'de [u8],
+) -> CompactV2MessageProjectionResult<SmallVec<[InstructionDataCandidate<'de>; 1]>> {
     let bytes = read_bytes_bounded(
         cursor,
         MAX_SOLANA_SHORT_VEC_ITEMS,
         "instruction data length exceeds its signed-message bound or remaining input",
     )?;
-    Ok(vec![InstructionDataCandidate {
+    Ok(smallvec![InstructionDataCandidate {
         encoding: InstructionDataEncoding::Raw,
-        bytes: bytes.to_vec(),
+        bytes: std::borrow::Cow::Borrowed(bytes),
     }])
 }
 
-fn reconstruct(
+#[test]
+fn raw_candidate_borrows_payload_and_keeps_one_candidate_inline() {
+    let wire = [3, 7, 8, 9];
+    let mut cursor = wire.as_slice();
+    let candidates = raw_candidate(&mut cursor).unwrap();
+    assert!(!candidates.spilled());
+    assert!(matches!(candidates[0].bytes, std::borrow::Cow::Borrowed(_)));
+    assert_eq!(candidates[0].bytes.as_ptr(), wire[1..].as_ptr());
+    assert!(cursor.is_empty());
+}
+
+fn reconstruct<'de>(
     data: ArchiveV2HotInstructionData,
     vote_hashes: Option<&dyn VoteHashResolver>,
-) -> CompactV2MessageProjectionResult<Vec<InstructionDataCandidate>> {
-    reconstruct_instruction_data_candidates(&data, vote_hashes).map_err(Into::into)
+) -> CompactV2MessageProjectionResult<SmallVec<[InstructionDataCandidate<'de>; 1]>> {
+    reconstruct_instruction_data_candidates(&data, vote_hashes)
+        .map(|values| {
+            values
+                .into_iter()
+                .map(|value| InstructionDataCandidate {
+                    encoding: value.encoding,
+                    bytes: value.bytes,
+                })
+                .collect()
+        })
+        .map_err(Into::into)
 }
 
 fn read_system_instruction(cursor: &mut &[u8]) -> ReadResult<ArchiveV2SystemInstructionData> {
@@ -1316,7 +1338,7 @@ mod tests {
             Some(
                 [InstructionDataCandidate {
                     encoding: InstructionDataEncoding::Raw,
-                    bytes: vec![7, 8, 9],
+                    bytes: vec![7, 8, 9].into(),
                 }]
                 .as_slice()
             )
@@ -1344,7 +1366,7 @@ mod tests {
             Some(
                 [InstructionDataCandidate {
                     encoding: InstructionDataEncoding::Raw,
-                    bytes: vec![7, 8, 9],
+                    bytes: vec![7, 8, 9].into(),
                 }]
                 .as_slice()
             )

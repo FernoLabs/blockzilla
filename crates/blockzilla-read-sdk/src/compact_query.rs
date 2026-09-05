@@ -1597,6 +1597,7 @@ impl<S: RangeSource> CompactV2InstructionSource<S> {
                 context.project_program(reader, reference, &request.instruction_programs)?
             };
             let accounts = project_instruction_accounts(
+                &mut context.output_pool,
                 request.include_instruction_accounts,
                 account_keys,
                 account_key_count,
@@ -1608,9 +1609,17 @@ impl<S: RangeSource> CompactV2InstructionSource<S> {
                     InstructionDataCoverage::Unknown(CoverageReason::InstructionDataUnavailable),
                     Vec::new(),
                 ),
-                Some(candidates) if candidates.len() == 1 => {
-                    (InstructionDataCoverage::Exact, candidates[0].bytes.clone())
-                }
+                Some(candidates) if candidates.len() == 1 => (
+                    InstructionDataCoverage::Exact,
+                    context
+                        .output_pool
+                        .copy_data(&candidates[0].bytes)
+                        .map_err(|_| {
+                            CompactV2InstructionSourceError::Invalid(
+                                "instruction allocation failed".into(),
+                            )
+                        })?,
+                ),
                 Some(_) => {
                     let selected = selected_outer_data.as_ref().ok_or_else(|| {
                         CompactV2InstructionSourceError::Invalid(
@@ -1625,7 +1634,14 @@ impl<S: RangeSource> CompactV2InstructionSource<S> {
                                         .into(),
                                 )
                             })?;
-                            (InstructionDataCoverage::Exact, data.clone())
+                            (
+                                InstructionDataCoverage::Exact,
+                                context.output_pool.copy_data(data).map_err(|_| {
+                                    CompactV2InstructionSourceError::Invalid(
+                                        "instruction allocation failed".into(),
+                                    )
+                                })?,
+                            )
                         }
                         SelectedOuterData::Unknown(reason) => {
                             (InstructionDataCoverage::Unknown(*reason), Vec::new())
@@ -1669,6 +1685,7 @@ impl<S: RangeSource> CompactV2InstructionSource<S> {
                         context.project_program(reader, reference, &request.instruction_programs)?
                     };
                     let accounts = project_instruction_accounts(
+                        &mut context.output_pool,
                         request.include_instruction_accounts,
                         account_keys,
                         account_key_count,
@@ -1678,7 +1695,14 @@ impl<S: RangeSource> CompactV2InstructionSource<S> {
                         instruction_data_required(&request.instruction_data, key)
                     });
                     let (data_coverage, data) = if selected {
-                        (InstructionDataCoverage::Exact, inner.data.to_vec())
+                        (
+                            InstructionDataCoverage::Exact,
+                            context.output_pool.copy_data(inner.data).map_err(|_| {
+                                CompactV2InstructionSourceError::Invalid(
+                                    "instruction allocation failed".into(),
+                                )
+                            })?,
+                        )
                     } else {
                         (InstructionDataCoverage::NotRequested, Vec::new())
                     };
@@ -2301,16 +2325,6 @@ fn resolve_index_u32(
     })
 }
 
-fn resolve_indexes(
-    account_keys: &[[u8; 32]],
-    indexes: &[u8],
-) -> CompactV2InstructionSourceResult<Vec<[u8; 32]>> {
-    indexes
-        .iter()
-        .map(|index| resolve_index(account_keys, *index))
-        .collect()
-}
-
 fn projected_account_reference(
     message: &ProjectedCompactV2Message<'_>,
     metadata: &ProjectedMetadata<'_>,
@@ -2345,13 +2359,21 @@ fn projected_account_reference(
 }
 
 fn project_instruction_accounts(
+    pool: &mut blockzilla_query_sdk::projection_pool::ProjectionPool,
     include_accounts: bool,
     account_keys: &[[u8; 32]],
     account_key_count: usize,
     indexes: &[u8],
 ) -> CompactV2InstructionSourceResult<Vec<[u8; 32]>> {
     if include_accounts {
-        return resolve_indexes(account_keys, indexes);
+        let mut output = pool.accounts();
+        output.try_reserve(indexes.len()).map_err(|_| {
+            CompactV2InstructionSourceError::Invalid("account allocation failed".into())
+        })?;
+        for &index in indexes {
+            output.push(resolve_index(account_keys, index)?);
+        }
+        return Ok(output);
     }
     if let Some(index) = indexes
         .iter()
@@ -3418,7 +3440,7 @@ mod tests {
             let data = vote_tower_data(false);
             let candidates = reconstruct_instruction_data_candidates(&data, None).unwrap();
             assert_eq!(candidates.len(), 2);
-            let selected_data = candidates[1].bytes.clone();
+            let selected_data = candidates[1].bytes.to_vec();
             let signed_message = serialize_signed_message(&SignedMessage {
                 version: SignedMessageVersion::Legacy,
                 header: header(),
@@ -3465,7 +3487,7 @@ mod tests {
             )
             .unwrap();
             assert_eq!(candidates.len(), 2);
-            let selected_data = candidates[1].bytes.clone();
+            let selected_data = candidates[1].bytes.to_vec();
             let signed_message = serialize_signed_message(&SignedMessage {
                 version: SignedMessageVersion::Legacy,
                 header: header(),
