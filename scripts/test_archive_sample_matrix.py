@@ -88,6 +88,11 @@ class RunnerTests(unittest.TestCase):
         self.assertEqual(jobs[43]["mode"], "local")
         self.assertEqual(jobs[44]["mode"], "network")
 
+    def test_epoch_300_comparison_keeps_format_order(self):
+        jobs = matrix.plan(SimpleNamespace(mode="local", workloads=("slot-hours",), epochs=[300]))
+        self.assertEqual([(job["format"], job["epoch"]) for job in jobs],
+                         [(fmt, 300) for fmt in matrix.FORMATS])
+
     def test_incomplete_summary_is_not_success(self):
         with tempfile.TemporaryDirectory() as folder:
             path = Path(folder) / "stdout.log"

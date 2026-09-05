@@ -75,7 +75,7 @@ def binary(fmt, workload):
 def plan(args):
     modes = ("local", "network") if args.mode == "both" else (args.mode,)
     return [dict(format=f, mode=m, epoch=e, workload=w, binary=binary(f, w))
-            for f in FORMATS for m in modes for e in EPOCHS for w in args.workloads]
+            for f in FORMATS for m in modes for e in getattr(args, "epochs", EPOCHS) for w in args.workloads]
 
 
 def job_key(job):
@@ -93,7 +93,7 @@ def inventory(args):
     rows = []
     if args.archive_root:
         for fmt in FORMATS:
-            for epoch in EPOCHS:
+            for epoch in getattr(args, "epochs", EPOCHS):
                 for name in object_names(fmt, epoch) + (() if fmt == "car" else OPTIONAL):
                     path = args.archive_root / fmt / str(epoch) / name
                     if name in OPTIONAL and not path.exists():
@@ -104,7 +104,7 @@ def inventory(args):
                     rows.append(dict(format=fmt, epoch=epoch, object=name, size_bytes=stat.st_size,
                                      mtime_ns=stat.st_mtime_ns, source="local"))
     if args.mode in ("network", "both"):
-        keys = [(f, e, n) for f in FORMATS for e in EPOCHS
+        keys = [(f, e, n) for f in FORMATS for e in getattr(args, "epochs", EPOCHS)
                 for n in object_names(f, e) + (() if f == "car" else OPTIONAL)]
 
         def head(key):
@@ -336,10 +336,17 @@ def main():
     parser.add_argument("--threads", type=int, default=12)
     parser.add_argument("--wallet", default=WALLET)
     parser.add_argument("--workloads", default=",".join(WORKLOADS), help="comma-separated; default: all four")
+    parser.add_argument("--epochs", default=",".join(map(str, EPOCHS)), help="comma-separated sample epochs; each is read in full")
     parser.add_argument("--interval", type=float, default=10, help="resource log interval in seconds")
     parser.add_argument("--check-only", action="store_true", help="check files, binaries and HTTP HEADs; do not start readers")
     args = parser.parse_args()
     args.workloads = args.workloads.split(",")
+    try:
+        args.epochs = [int(epoch) for epoch in args.epochs.split(",")]
+    except ValueError:
+        parser.error("epochs must be comma-separated integers")
+    if len(set(args.epochs)) != len(args.epochs) or not set(args.epochs) <= set(EPOCHS):
+        parser.error("epochs must be distinct members of the sample set")
     if len(set(args.workloads)) != len(args.workloads) or not set(args.workloads) <= set(WORKLOADS):
         parser.error("invalid workload selection")
     if args.threads < 1 or not math.isfinite(args.interval) or args.interval < 1:
@@ -414,7 +421,7 @@ def execute(args, parser):
         raise
     expected = len(FORMATS) * (2 if args.mode == "both" else 1)
     parity = []
-    for epoch in EPOCHS:
+    for epoch in args.epochs:
         for workload in args.workloads:
             group = [r for r in results if r["epoch"] == epoch and r["workload"] == workload]
             passed = len(group) == expected and all(r["status"] == "PASS" for r in group)
