@@ -67,33 +67,34 @@ crates/
     blockzilla-log-parser
     blockzilla-dex-parser
 
-  car/
+  old-faithful/
     of-car                         types
     of-car-reader                  reader (absorbs blockzilla-car-read-sdk)
+    of-slot-ranges                 slot-to-CAR index tools and reading API
   compact-v2/
     blockzilla-compact             record model
     blockzilla-registry            registry + MPHF, blockhash registry
     blockzilla-archive-v2          container
     blockzilla-compact-v2-reader   engine + facade merged
-  index-archive/
-    blockzilla-index-archive       container + sidecars
-    blockzilla-index-archive-reader
-
-  index/
-    blockzilla-user-program-index      signer-to-program relations
-    blockzilla-spyx-query              token postings and market queries
-    blockzilla-token-transaction-dump  token transaction extraction
-    blockzilla-token-balance-audit     token balance verification
+  archive-v3/
+    blockzilla-archive-v3          V3 container + sidecars
+    blockzilla-archive-v3-reader
 
   compat/                          deletable in one command
     blockzilla-archive-v2-compat   legacy decoders
     blockzilla-archive-v2-migrate  converters + migration bins
 
+indexer/
+  blockzilla-user-program-index      signer-to-program relations
+  blockzilla-spyx-query              token postings and market queries
+  blockzilla-token-transaction-dump  token transaction extraction
+  blockzilla-token-balance-audit     token balance verification
+
 runtime/
   blockzilla-replay                SVM experiments
 
 blockzilla/
-  cli/                             + index-archive convert subcommands
+  cli/                             + archive-v3 convert subcommands
   archive-gateway/                 NAS origin, authenticated Range
   monitor/
 
@@ -107,17 +108,54 @@ edgezilla/
 
 examples/
   workloads/                       shared sinks: firewatch, pump, usdc, identity
-  read-car/  read-compact-v2/  read-indexer-v3/  token-api/
+  read-car/  read-compact-v2/  read-archive-v3/  token-api/
 
 bench/
-  reader-profile/  index-archive-measure/
+  reader-profile/  archive-v3-measure/
 
 web/    docs/    scripts/
 ```
 
-Every format folder has the same shape: **types plus one reader**. That symmetry
-is why `blockzilla-car-read-sdk` folds into `of-car-reader` and
+Every format folder contains **types plus one reader**. Old Faithful also
+contains its slot-index tools, which are specific to CAR access. This shared
+reader structure is why `blockzilla-car-read-sdk` folds into `of-car-reader` and
 `blockzilla-compact-v2-read-sdk` folds into the V2 engine.
+
+## Top-level indexer group
+
+User decision, 2026-09-06: place index builders, index queries, and related
+extraction and audit tools in top-level `indexer/`, beside `runtime/`.
+Keep reusable format definitions, archive readers, byte sources, and parsers
+in `crates/`. Archive V3 remains in `crates/archive-v3/`: it is an archive
+format, not an indexer application.
+
+User decision, 2026-09-06: keep `of-slot-ranges`, currently at
+`crates/old-faithful/slot-ranges`, beside the Old Faithful format and reader
+at `crates/old-faithful/of-slot-ranges/`. It builds, repairs, and validates Old Faithful
+slot-to-CAR range indexes. Preserve all eight declared binary targets,
+including `of-car-slot-index`, `of-repair-slot-ranges`, and both validators.
+Its reusable index-reading API also remains available. These format-specific
+index tools are an exception to the top-level indexer grouping. The earlier target
+layout omitted this package; that omission was not a deletion decision.
+
+## V3 naming and direction
+
+User decision, 2026-09-06: Index Archive is **Archive V3**, the intended
+replacement for Archive V2. It is not a separate index product. Use
+`archive-v3/`, `blockzilla-archive-v3`, and `blockzilla-archive-v3-reader` in
+the target layout. Use `read-archive-v3` for the example and `archive-v3`
+for the CLI command group.
+
+The current `blockzilla-index-archive-format` and
+`blockzilla-indexer-v3-read-sdk` packages map to those V3 names. Existing names
+in the analysis below identify current or historical code; they do not change
+the target naming. Apply package, import, script, and documentation renames
+together in a separate mechanical step. This decision does not change archive
+bytes, object names, or published routes.
+
+V2 remains supported during the transition. V3 must retain the required ledger
+and metadata data and pass compatibility and workload checks before replacing
+V2. Reuse of the compact record model does not make V3 a V2 container.
 
 ## Corrections after the merge
 
