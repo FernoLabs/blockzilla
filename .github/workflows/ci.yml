@@ -27,12 +27,18 @@ jobs:
         run: cargo fmt --all -- --check
       - name: Check Archive V2 wire boundary
         run: bash scripts/check-archive-v2-wire-boundary.sh
+      - name: Test workspace target migration checks
+        run: python3 scripts/test_check_workspace_targets.py
       - name: Check workspace
         run: cargo check --workspace --all-targets --locked
       - name: Check opt-in Blockzilla contributor and repair binaries
         run: cargo check --locked -p blockzilla --features developer-tools,archive-repair-tools --all-targets
+      - name: Check user-program index commands and operational tools
+        run: cargo check --locked -p blockzilla-user-program-index --features developer-tools --all-targets
       - name: Test workspace
         run: cargo test --workspace --all-targets --locked
+      - name: Test user-program index operational tools
+        run: cargo test --locked -p blockzilla-user-program-index --features developer-tools --all-targets
       - name: Test Archive V2 metadata repair
         run: cargo test --locked -p blockzilla --features archive-repair-tools --bin archive-v2-normalize-metadata-trusted
       - name: Test Hivezilla shred reconstruction feature

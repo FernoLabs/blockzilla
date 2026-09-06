@@ -3,7 +3,7 @@
 //! number, allocation profile, and (optionally) a CPU flamegraph.
 //!
 //! ```text
-//! cargo run --release -p blockzilla-firebase-indexer --bin index-bench -- \
+//! cargo run --release -p blockzilla-user-program-index --features developer-tools --bin index-bench -- \
 //!   /path/to/epoch-dir --epoch 822 --iterations 200 --flamegraph flamegraph.svg
 //! ```
 
@@ -18,7 +18,7 @@ use std::{
 };
 
 use anyhow::{Context, Result, anyhow, bail};
-use blockzilla_firebase_indexer::{build, format::IndexBuilder};
+use blockzilla_user_program_index::{build, format::IndexBuilder};
 use clap::Parser;
 
 static ALLOCATION_CALLS: AtomicU64 = AtomicU64::new(0);
@@ -74,7 +74,7 @@ fn record_allocation(bytes: usize) {
 #[derive(Debug, Parser)]
 #[command(
     name = "index-bench",
-    about = "Microbenchmark blockzilla-firebase-indexer's scan+index hot path"
+    about = "Microbenchmark blockzilla-user-program-index's scan+index hot path"
 )]
 struct Args {
     /// Path to the epoch's Archive V2 Compact generation directory.

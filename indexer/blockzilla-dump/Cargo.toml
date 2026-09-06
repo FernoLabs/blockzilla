@@ -18,7 +18,6 @@ blockzilla-archive-v2 = { path = "../../crates/compact-v2/blockzilla-archive-v2"
 blockzilla-compact = { path = "../../crates/compact-v2/blockzilla-compact", default-features = false }
 blockzilla-primitives = { path = "../../crates/blockzilla-primitives", default-features = false }
 blockzilla-registry = { path = "../../crates/compact-v2/blockzilla-registry", default-features = false }
-blockzilla-replay-format = { path = "../../crates/blockzilla-replay-format" }
 anyhow = "1.0.104"
 blockzilla-model = { version = "0.2.0", path = "../../crates/blockzilla-model" }
 blockzilla-compact-v2-reader = { version = "0.2.0", path = "../../crates/compact-v2/blockzilla-compact-v2-reader", features = ["http"] }

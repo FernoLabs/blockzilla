@@ -22,7 +22,6 @@ blockzilla-compact = { path = "../blockzilla-compact", default-features = false,
 blockzilla-primitives = { path = "../../blockzilla-primitives", default-features = false }
 blockzilla-program-logs = { path = "../../parser/blockzilla-program-logs", default-features = false, features = ["known-program-logs"] }
 blockzilla-registry = { path = "../blockzilla-registry", default-features = false }
-blockzilla-replay-format = { path = "../../blockzilla-replay-format" }
 url = { version = "2.5.8", optional = true }
 blockzilla-source = { version = "0.2.0", path = "../../source/blockzilla-source" }
 blockzilla-source-local = { version = "0.2.0", path = "../../source/blockzilla-source-local" }

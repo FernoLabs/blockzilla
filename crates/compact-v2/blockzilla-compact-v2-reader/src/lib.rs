@@ -22,10 +22,12 @@ mod message_projection;
 mod message_schema;
 mod metadata_projection;
 mod metadata_schema;
+pub mod poh;
 pub mod query_keys;
 mod reader;
 pub mod signed_message;
 mod source;
+pub mod source_decode;
 
 pub use archive_signatures::{
     ArchiveSignatureConfig, ArchiveSignatureError, ArchiveSignatureReport, SignatureResult,

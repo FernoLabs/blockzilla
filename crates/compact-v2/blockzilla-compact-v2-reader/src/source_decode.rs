@@ -1,8 +1,8 @@
-//! Hand-written, zero-copy decoders for the specific fields this indexer
-//! actually reads out of an Archive V2 Compact message and transaction
-//! metadata.
+//! Borrowed decoders for selected fields in historical Compact V2 source
+//! messages and transaction metadata. The V3 prototype and user-program index
+//! use this shared implementation.
 //!
-//! `blockzilla_format`'s derived `SchemaRead` impls for
+//! `blockzilla_archive_v2` and `blockzilla_compact`'s derived `SchemaRead` impls for
 //! `ArchiveV2HotInstructionData` and `CompactMetaV1` are correct but decode
 //! (and heap-allocate) *every* field, including ones this indexer never
 //! reads: raw instruction bytes for every non-system/vote/compute-budget
@@ -13,7 +13,7 @@
 //! contributing a further ~25-30%.
 //!
 //! This module decodes the *identical* wire format field-by-field —
-//! reusing `blockzilla_format`'s own types' `SchemaRead` impls for every
+//! reusing `blockzilla_archive_v2` and `blockzilla_compact`'s own types' `SchemaRead` impls for every
 //! field this indexer actually needs — but **skips** (bounds-checked,
 //! zero-copy, via `wincode::io::Reader::take_borrowed`) every raw-byte-blob
 //! field it doesn't: instruction `data` payloads, inner-instruction `data`
@@ -42,7 +42,7 @@
 //! Any future change to `ArchiveV2HotInstructionData` or `CompactMetaV1`'s
 //! variant order/field order breaks this module silently (wrong bytes
 //! skipped, not a panic). Verified two ways: the `tests` module below
-//! round-trips synthetic messages/metadata through `blockzilla_format`'s
+//! round-trips synthetic messages/metadata through `blockzilla_archive_v2` and `blockzilla_compact`'s
 //! own `SchemaWrite` and asserts this module decodes them correctly
 //! (catches wire-format drift for the shapes it covers); separately, a full
 //! `build` run against real mainnet data produced byte-identical output
@@ -55,18 +55,23 @@
 //! initially forgot `account_keys`'s `Vec<CompactPubkey>` length prefix
 //! before reading its elements, silently desyncing every read after the
 //! message header. It surfaced as an implausible result (fewer distinct
-//! signers than a real build's wallet count, which should be impossible),
+//! signers than a real build's signer user count, which should be impossible),
 //! not a crash — exactly the failure mode this module's docs warn about,
 //! and why the tests below check exact decoded values, not just "did it
 //! return without erroring."
 
+use crate::{CompactV2MessageSchema, CompactV2MetadataSchema};
 use blockzilla_archive_v2::{ArchiveV2ComputeBudgetInstructionData, ArchiveV2VoteHashRef};
-use blockzilla_compact::{CompactInnerInstruction, CompactMessageHeader, CompactReward, CompactTokenBalance, CompactTransactionConfig, DataArray, OwnedCompactRecentBlockhash};
-use blockzilla_primitives::{CompactPubkey, WincodeLeb128Config};
-use blockzilla_compact_v2_reader::{CompactV2MessageSchema, CompactV2MetadataSchema};
+use blockzilla_compact::{
+    CompactInnerInstruction, CompactMessageHeader, CompactReward, CompactTokenBalance,
+    CompactTransactionConfig, DataArray, OwnedCompactRecentBlockhash,
+};
+use blockzilla_primitives::{CompactPubkey, HistoricalSourceWincodeLeb128Config};
 use wincode::{ReadResult, SchemaRead, error::invalid_tag_encoding, io::Reader};
 
-pub type Cfg = WincodeLeb128Config;
+// This visitor lends exact historical source fields, including non-minimal
+// integer spellings. Canonical archive validation uses the strict codec.
+pub type Cfg = HistoricalSourceWincodeLeb128Config;
 
 /// Every message account is addressed by a one-byte instruction index.
 /// This includes static and address-table-loaded accounts together.
@@ -192,7 +197,7 @@ fn skip_vote_tower_sync(cursor: &mut &[u8]) -> ReadResult<()> {
 
 /// Skip one `ArchiveV2HotInstructionData` value (tag + payload), never
 /// allocating for the `Raw`/`UnknownSystem`/`UnknownVote` catch-all variants
-/// — which is what every instruction for a program `blockzilla_format`
+/// — which is what every instruction for a program `blockzilla_archive_v2` and `blockzilla_compact`
 /// doesn't specifically decode (i.e. every token/DeFi program) uses.
 fn skip_instruction_data(
     cursor: &mut &[u8],
@@ -283,11 +288,23 @@ fn read_instruction<'de>(
 /// discover the real signer population of an epoch (see
 /// `build::discover_signers`) without paying for a full instruction decode.
 pub fn decode_signers(cursor: &mut &[u8]) -> ReadResult<SignerKeys> {
-    match get::<u32>(cursor)? {
-        0 | 1 => {}
-        other => return Err(invalid_tag_encoding(other as usize)),
-    }
+    decode_signers_with_schema(cursor, CompactV2MessageSchema::Current)
+}
+
+/// Decode required signers under one explicitly selected message grammar.
+pub fn decode_signers_with_schema(
+    cursor: &mut &[u8],
+    message_schema: CompactV2MessageSchema,
+) -> ReadResult<SignerKeys> {
+    let is_v1 = match (message_schema, get::<u32>(cursor)?) {
+        (_, 0 | 1) => false,
+        (CompactV2MessageSchema::Current, 2) => true,
+        (_, other) => return Err(invalid_tag_encoding(other as usize)),
+    };
     let header = get::<CompactMessageHeader>(cursor)?;
+    if is_v1 {
+        get::<CompactTransactionConfig>(cursor)?;
+    }
     // `account_keys: Vec<CompactPubkey>`'s length prefix must still be
     // consumed before its elements, even though we only want the first
     // `num_required_signatures` of them — Vec's wire format is always
@@ -325,7 +342,7 @@ pub type SignerKeys = smallvec::SmallVec<[CompactPubkey; 2]>;
 /// `num_required_signatures` is the count of *signer* positions at the
 /// front of `account_keys` (Solana's standard message layout: signed
 /// accounts first, then unsigned; V0's appended loaded addresses are never
-/// signers) — callers use it to tell a real signing wallet from a merely-
+/// signers) — callers use it to tell a real signer user from a merely-
 /// referenced account. For a V0 message, `address_table_lookups` is streamed
 /// far enough to validate and count its writable/readonly indices (its
 /// resolved form lives in transaction metadata), and the cursor is positioned
@@ -664,12 +681,14 @@ fn skip_program_log(cursor: &mut &[u8]) -> ReadResult<()> {
             get::<blockzilla_program_logs::program_logs::token_2022::Token2022Log>(cursor)?;
         }
         3 => {
-            get::<blockzilla_program_logs::program_logs::associated_token_account::TokenLog>(cursor)?;
-        }
-        4 => {
-            get::<blockzilla_program_logs::program_logs::address_lookup_table::AddressLookupTableLog>(
+            get::<blockzilla_program_logs::program_logs::associated_token_account::TokenLog>(
                 cursor,
             )?;
+        }
+        4 => {
+            get::<
+                blockzilla_program_logs::program_logs::address_lookup_table::AddressLookupTableLog,
+            >(cursor)?;
         }
         5 => {
             get::<blockzilla_program_logs::program_logs::loader_v3::LoaderV3Log>(cursor)?;
@@ -695,7 +714,9 @@ fn skip_program_log(cursor: &mut &[u8]) -> ReadResult<()> {
             get::<blockzilla_program_logs::program_logs::stake::StakeProgramLog>(cursor)?;
         }
         12 => {
-            get::<blockzilla_program_logs::program_logs::zk_elgamal_proof::ZkElgamalProofLog>(cursor)?;
+            get::<blockzilla_program_logs::program_logs::zk_elgamal_proof::ZkElgamalProofLog>(
+                cursor,
+            )?;
         }
         13 | 16 => {
             get::<u32>(cursor)?;
@@ -762,9 +783,9 @@ fn skip_okx_router_log(cursor: &mut &[u8]) -> ReadResult<()> {
             skip_string(cursor)?;
             get::<u64>(cursor)?;
             get::<u64>(cursor)?;
-            get::<blockzilla_program_logs::program_logs::known_programs::okx_router::AmountInSpelling>(
-                cursor,
-            )?;
+            get::<
+                blockzilla_program_logs::program_logs::known_programs::okx_router::AmountInSpelling,
+            >(cursor)?;
         }
         1 => skip_string(cursor)?,
         2..=4 => {
@@ -791,7 +812,9 @@ fn skip_okx_router_log(cursor: &mut &[u8]) -> ReadResult<()> {
             )?;
         }
         12 => {
-            get::<blockzilla_program_logs::program_logs::known_programs::okx_router::OkxMarker>(cursor)?;
+            get::<blockzilla_program_logs::program_logs::known_programs::okx_router::OkxMarker>(
+                cursor,
+            )?;
         }
         other => return Err(invalid_tag_encoding(other as usize)),
     }
@@ -830,9 +853,9 @@ fn skip_phoenix_v1_log(cursor: &mut &[u8]) -> ReadResult<()> {
             get::<u64>(cursor)?;
         }
         3 => {
-            get::<blockzilla_program_logs::program_logs::known_programs::phoenix_v1::PhoenixStaticLog>(
-                cursor,
-            )?;
+            get::<
+                blockzilla_program_logs::program_logs::known_programs::phoenix_v1::PhoenixStaticLog,
+            >(cursor)?;
         }
         other => return Err(invalid_tag_encoding(other as usize)),
     }
@@ -1457,12 +1480,29 @@ fn _assert_inner_instruction_shape(value: CompactInnerInstruction) {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use blockzilla_program_logs::{program_logs::ProgramLog, program_logs::known_programs::KnownProgramLog, program_logs::known_programs::drift::DriftLog, program_logs::known_programs::okx_router::AmountInSpelling, program_logs::known_programs::okx_router::OkxRouterLog, program_logs::known_programs::phoenix_perps::PhoenixPerpsLog, program_logs::known_programs::phoenix_v1::PhoenixLog};
-    use blockzilla_archive_v2::{ArchiveV2HotInstruction, ArchiveV2HotInstructionData, ArchiveV2HotLegacyMessage, ArchiveV2HotMessagePayload, ArchiveV2HotV0Message, ArchiveV2HotV1Message, ArchiveV2SystemInstructionData, ArchiveV2VoteLockoutOffset, ArchiveV2VoteStateUpdate};
-    use blockzilla_compact::{CompactInnerInstructions, CompactInstructionError, CompactLogStream, CompactMessageHeader, CompactMetaV1, CompactReturnData, CompactTransactionError, DataTable, LogEvent, OwnedCompactAddressTableLookup, OwnedCompactRecentBlockhash};
+    use blockzilla_archive_v2::{
+        ArchiveV2HotInstruction, ArchiveV2HotInstructionData, ArchiveV2HotLegacyMessage,
+        ArchiveV2HotMessagePayload, ArchiveV2HotV0Message, ArchiveV2HotV1Message,
+        ArchiveV2SystemInstructionData, ArchiveV2VoteLockoutOffset, ArchiveV2VoteStateUpdate,
+    };
+    use blockzilla_compact::{
+        CompactInnerInstructions, CompactInstructionError, CompactLogStream, CompactMessageHeader,
+        CompactMetaV1, CompactReturnData, CompactTransactionError, DataTable, LogEvent,
+        OwnedCompactAddressTableLookup, OwnedCompactRecentBlockhash,
+    };
     use blockzilla_primitives::{StringTable, wincode_leb128_config};
+    use blockzilla_program_logs::{
+        program_logs::ProgramLog, program_logs::known_programs::KnownProgramLog,
+        program_logs::known_programs::drift::DriftLog,
+        program_logs::known_programs::okx_router::AmountInSpelling,
+        program_logs::known_programs::okx_router::OkxRouterLog,
+        program_logs::known_programs::phoenix_perps::PhoenixPerpsLog,
+        program_logs::known_programs::phoenix_v1::PhoenixLog,
+    };
 
-    fn serialize<T: wincode::SchemaWrite<Cfg, Src = T>>(value: &T) -> Vec<u8> {
+    fn serialize<T: wincode::SchemaWrite<blockzilla_primitives::WincodeLeb128Config, Src = T>>(
+        value: &T,
+    ) -> Vec<u8> {
         wincode::config::serialize(value, wincode_leb128_config()).unwrap()
     }
 
@@ -1590,6 +1630,65 @@ mod tests {
                 "truncated metadata tail length {length} was accepted"
             );
         }
+    }
+
+    #[test]
+    fn source_split_metadata_retains_nonminimal_scalar_bytes() {
+        let metadata = CompactMetaV1 {
+            err: None,
+            fee: 0,
+            pre_balances: Vec::new(),
+            post_balances: Vec::new(),
+            inner_instructions: None,
+            logs: None,
+            pre_token_balances: Vec::new(),
+            post_token_balances: Vec::new(),
+            rewards: Vec::new(),
+            loaded_writable_addresses: Vec::new(),
+            loaded_readonly_addresses: Vec::new(),
+            return_data: None,
+            compute_units_consumed: None,
+            cost_units: None,
+        };
+        let mut bytes = serialize(&metadata);
+        assert_eq!(&bytes[..2], &[0, 0]);
+        bytes.splice(1..2, [0x80, 0]);
+        assert!(
+            wincode::config::deserialize_exact::<CompactMetaV1, _>(&bytes, wincode_leb128_config())
+                .is_err()
+        );
+
+        let mut cursor = bytes.as_slice();
+        let effects = stream_metadata_effects_with_schema(
+            &mut cursor,
+            CompactV2MetadataSchema::CurrentTypedError,
+            MetadataDecodeLimits {
+                total_message_accounts: 0,
+                top_level_instruction_count: 0,
+            },
+            |_| Ok::<(), wincode::error::ReadError>(()),
+        )
+        .unwrap();
+        assert!(cursor.is_empty());
+        assert_eq!(effects.fields.outcome_head, [0, 0x80, 0]);
+        assert_eq!(effects.fields.outcome_head.as_ptr(), bytes.as_ptr());
+        assert_eq!(
+            [
+                effects.fields.outcome_head,
+                effects.fields.pre_balances,
+                effects.fields.post_balances,
+                effects.fields.inner_instructions,
+                effects.fields.logs,
+                effects.fields.pre_token_balances,
+                effects.fields.post_token_balances,
+                effects.fields.transaction_rewards,
+                effects.fields.loaded_writable,
+                effects.fields.loaded_readonly,
+                effects.fields.outcome_tail,
+            ]
+            .concat(),
+            bytes
+        );
     }
 
     #[test]
@@ -1785,7 +1884,10 @@ mod tests {
         );
     }
 
-    fn append<T: wincode::SchemaWrite<Cfg, Src = T>>(bytes: &mut Vec<u8>, value: &T) {
+    fn append<T: wincode::SchemaWrite<blockzilla_primitives::WincodeLeb128Config, Src = T>>(
+        bytes: &mut Vec<u8>,
+        value: &T,
+    ) {
         bytes.extend(serialize(value));
     }
 
@@ -2132,6 +2234,40 @@ mod tests {
         assert_eq!(decoded.expected_loaded_writable, 0);
         assert_eq!(decoded.expected_loaded_readonly, 0);
         assert_eq!(events.len(), 4);
+    }
+
+    #[test]
+    fn signer_prefix_uses_the_selected_message_schema() {
+        let message = ArchiveV2HotMessagePayload::V1(ArchiveV2HotV1Message {
+            header: CompactMessageHeader {
+                num_required_signatures: 1,
+                num_readonly_signed_accounts: 0,
+                num_readonly_unsigned_accounts: 0,
+            },
+            config: CompactTransactionConfig {
+                priority_fee: None,
+                compute_unit_limit: None,
+                loaded_accounts_data_size_limit: None,
+                heap_size: None,
+            },
+            account_keys: vec![CompactPubkey::Id(9)],
+            recent_blockhash: OwnedCompactRecentBlockhash::Id(1),
+            instructions: vec![],
+        });
+        let bytes = serialize(&message);
+        assert_eq!(
+            decode_signers_with_schema(&mut bytes.as_slice(), CompactV2MessageSchema::Current)
+                .unwrap()
+                .as_slice(),
+            &[CompactPubkey::Id(9)]
+        );
+        assert!(
+            decode_signers_with_schema(
+                &mut bytes.as_slice(),
+                CompactV2MessageSchema::May24PreUnknownFallbacks,
+            )
+            .is_err()
+        );
     }
 
     #[test]

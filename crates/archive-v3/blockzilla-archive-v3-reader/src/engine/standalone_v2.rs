@@ -30,7 +30,7 @@ use blockzilla_source_local::PinnedLocalRangeSource;
 use serde::{Deserialize, Serialize};
 use wincode::SchemaRead;
 
-use blockzilla_user_program_index::decode;
+use blockzilla_compact_v2_reader::source_decode as decode;
 
 #[path = "standalone_directory_v3.rs"]
 #[allow(clippy::duplicate_mod)] // The storage-measure binary also exposes this codec at its root.

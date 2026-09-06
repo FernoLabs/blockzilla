@@ -38,8 +38,8 @@ use blockzilla_compact_v2_reader::{
     PinnedLocalRangeSource, RangeSource, SourceError, SourceResult,
     manifest::TrustedGenerationIdentity,
 };
-use blockzilla_firebase_indexer::decode::{self, MAX_MESSAGE_ACCOUNTS, MetadataDecodeLimits};
 use blockzilla_primitives::CompactPubkey;
+use blockzilla_user_program_index::decode::{self, MAX_MESSAGE_ACCOUNTS, MetadataDecodeLimits};
 use clap::{Parser, ValueEnum};
 use rustix::fs::{CWD, Dir, Mode, OFlags, RenameFlags, renameat_with};
 use serde::{Deserialize, Serialize};

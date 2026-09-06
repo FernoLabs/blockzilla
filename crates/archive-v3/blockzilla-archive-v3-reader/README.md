@@ -41,9 +41,10 @@ no converter dependency. Writer-backed integration tests remain in the
 converter, including split-frame and absent-versus-recorded-empty checks.
 
 The frozen prototype engine, adaptive posting reader, candidate selection,
-and registry lookup are also implemented here. Firebase retains its prior
-exports for existing consumers. This reader does not depend on Firebase.
-Prototype projection still uses the V2 reader and `blockzilla-user-program-index`.
+and registry lookup are also implemented here. Applications use this reader
+directly; the former Firebase compatibility exports have been removed.
+Prototype projection uses the shared historical source decoder in the V2 reader.
+No format reader depends on an indexer application.
 The prototype types keep their `IndexerV3` prefix during the transition.
 
 Small conversion fixtures and common-model comparisons must check output

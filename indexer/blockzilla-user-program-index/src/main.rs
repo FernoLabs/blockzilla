@@ -1,12 +1,12 @@
 use std::path::PathBuf;
 
 use anyhow::{Context, Result};
-use blockzilla_firebase_indexer::{build, dense_accumulator, query};
+use blockzilla_user_program_index::{build, dense_accumulator, query};
 use clap::{Parser, Subcommand};
 
 #[derive(Debug, Parser)]
 #[command(
-    name = "blockzilla-firebase-indexer",
+    name = "blockzilla-user-program-index",
     about = "Per-epoch reverse index: signer wallet -> programs reached by successful transactions (direct and CPI)"
 )]
 struct Cli {

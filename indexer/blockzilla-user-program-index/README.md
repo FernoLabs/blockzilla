@@ -12,7 +12,21 @@ token balances, rewards, or return data. The dense builder uses two bounded
 passes. Pass 1 finds signer users. Pass 2 builds user-program relations. The
 builder then publishes the complete index with an atomic no-replace rename.
 
-Use these public operations:
+The library and standalone command are in this one package. The former
+`blockzilla-firebase-indexer` package is removed. Install the command with:
+
+```sh
+cargo install --path indexer/blockzilla-user-program-index --features cli --bin blockzilla-user-program-index
+```
+
+The command supports `build`, `build-dense`, `discover-signers`, and `query`.
+Existing command options and index files are unchanged. For example:
+
+```sh
+cargo run -p blockzilla-user-program-index --features cli -- --help
+```
+
+Use these public operations from the dump command:
 
 - `blockzilla-dump user-program-index build` builds one immutable epoch index.
 - `blockzilla-dump user-program-index query` returns the reached programs for
@@ -50,7 +64,7 @@ directory.
 ```rust,no_run
 use std::path::Path;
 
-use blockzilla_read_sdk::{ArchiveReader, RangeSource};
+use blockzilla_compact_v2_reader::{ArchiveReader, RangeSource};
 use blockzilla_user_program_index::build::{
     DenseIndexBuildOptions, build_dense_index_from_reader,
 };
@@ -78,3 +92,29 @@ files. Use `query::query_user_program_index` for new tools. Its JSON uses
 `user` and `index_user_count`. The older `query::query_index` result keeps its
 Rust `wallet` names for source compatibility. On-disk field and file names that
 contain `wallet` also remain unchanged for format compatibility.
+
+## Optional operations and benchmarks
+
+Build retained operational tools with `--features developer-tools`. This feature
+also enables `cli`. The default library does not add the legacy read SDK,
+HTTP operations client, profiler, or command dependencies.
+
+The retained binaries are:
+
+- `archive-v2-account-projection` and `archive-v2-account-projection-verify`
+- `archive-v2-lean-read-bench`
+- `firewatch-wire-profile-audit` and `firewatch-wire-profile-audit-batch`
+- `firewatch-wire-profile-marker-transition`
+- `index-bench` and `index-parity`
+
+```sh
+cargo test -p blockzilla-user-program-index --features developer-tools --all-targets
+cargo run -p blockzilla-user-program-index --features developer-tools --bin index-parity -- --help
+```
+
+The batch auditor accepts the canonical indexer executable path for new
+immutable batch manifests. It also accepts the old executable path in existing
+manifests. Each selected path still requires the manifest's exact binary hash.
+
+The controller remains parked. See [PARKED-BINS.md](PARKED-BINS.md) for its API
+blocker. [REDESIGN.md](REDESIGN.md) retains the earlier design and measurements.

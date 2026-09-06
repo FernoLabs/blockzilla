@@ -1,6 +1,8 @@
 # Parked binary: firewatch-index-controller
 
-Not declared in `Cargo.toml`, so it is not built.
+The source is retained at `src/bin/firewatch-index-controller.rs` in
+`blockzilla-user-program-index`. It is not declared in `Cargo.toml`, so it is
+not built, including with `developer-tools`.
 
 `IndexManifest` moved to `blockzilla-user-program-index` during the
 `codex/sample-archive-benchmark` merge and no longer carries
@@ -11,4 +13,4 @@ and pulling that into `blockzilla-user-program-index` would tie the new index
 crate to the reader we are retiring.
 
 Restore it with the V2 freeze, when the grammar becomes single-valued and the
-comparison is no longer needed. Until then the source is retained unchanged.
+comparison is no longer needed. Until then its behavior remains unported; package imports follow the consolidated indexer.

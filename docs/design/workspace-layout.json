@@ -6,10 +6,12 @@
     "blockzilla-indexer-v3-read-sdk": "blockzilla-archive-v3-reader",
     "blockzilla-index-archive-convert": "blockzilla-archive-v3-convert",
     "blockzilla-index-archive-measure": "blockzilla-archive-v3-measure",
-    "blockzilla-read-indexer-v3": "blockzilla-read-archive-v3"
+    "blockzilla-read-indexer-v3": "blockzilla-read-archive-v3",
+    "blockzilla-firebase-indexer": "blockzilla-user-program-index"
   },
   "removed_packages": [
-    "blockzilla-car-read-sdk"
+    "blockzilla-car-read-sdk",
+    "blockzilla-replay-format"
   ],
   "packages": [
     {
@@ -150,7 +152,7 @@
     {
       "package": "blockzilla-firebase-indexer",
       "current": "crates/blockzilla-firebase-indexer",
-      "destination": "indexer/blockzilla-firebase-indexer"
+      "destination": "indexer/blockzilla-user-program-index"
     },
     {
       "package": "blockzilla-index-archive-measure",
@@ -272,6 +274,89 @@
       "from_package": "blockzilla-archive-v3-convert",
       "target": "ia-compare-prefix",
       "to_package": "blockzilla-archive-v3-measure"
+    }
+  ],
+  "removed_targets": [
+    {
+      "package": "blockzilla-firebase-indexer",
+      "target": "blockzilla_firebase_indexer",
+      "kind": [
+        "lib"
+      ]
+    }
+  ],
+  "target_feature_changes": [
+    {
+      "package": "blockzilla-user-program-index",
+      "target": "blockzilla-user-program-index",
+      "from": [],
+      "to": [
+        "cli"
+      ]
+    },
+    {
+      "package": "blockzilla-user-program-index",
+      "target": "archive-v2-account-projection-verify",
+      "from": [],
+      "to": [
+        "developer-tools"
+      ]
+    },
+    {
+      "package": "blockzilla-user-program-index",
+      "target": "archive-v2-account-projection",
+      "from": [],
+      "to": [
+        "developer-tools"
+      ]
+    },
+    {
+      "package": "blockzilla-user-program-index",
+      "target": "archive-v2-lean-read-bench",
+      "from": [],
+      "to": [
+        "developer-tools"
+      ]
+    },
+    {
+      "package": "blockzilla-user-program-index",
+      "target": "firewatch-wire-profile-audit-batch",
+      "from": [],
+      "to": [
+        "developer-tools"
+      ]
+    },
+    {
+      "package": "blockzilla-user-program-index",
+      "target": "firewatch-wire-profile-audit",
+      "from": [],
+      "to": [
+        "developer-tools"
+      ]
+    },
+    {
+      "package": "blockzilla-user-program-index",
+      "target": "firewatch-wire-profile-marker-transition",
+      "from": [],
+      "to": [
+        "developer-tools"
+      ]
+    },
+    {
+      "package": "blockzilla-user-program-index",
+      "target": "index-bench",
+      "from": [],
+      "to": [
+        "developer-tools"
+      ]
+    },
+    {
+      "package": "blockzilla-user-program-index",
+      "target": "index-parity",
+      "from": [],
+      "to": [
+        "developer-tools"
+      ]
     }
   ]
 }

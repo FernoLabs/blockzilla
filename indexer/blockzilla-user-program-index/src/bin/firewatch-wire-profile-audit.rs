@@ -22,8 +22,16 @@ use blockzilla_archive_v2::{
     ARCHIVE_V2_SIGNATURES_FILE,
 };
 #[cfg(test)]
-use blockzilla_firebase_indexer::firewatch_wire_profile_attestation::validate_receipt_source_recovery_evidence;
-use blockzilla_firebase_indexer::{
+use blockzilla_read_sdk_legacy::WireProfileAuditOutcome;
+use blockzilla_read_sdk_legacy::{
+    ArchiveReader, ArchiveV2MetadataWireProfile, ArchiveV2WireProfile, Error as ArchiveReaderError,
+    HashVerification, OpenOptions, PinnedLocalRangeSource, audit_full_generation_wire_profile,
+    manifest::TrustedGenerationIdentity, validate_pinned_local_registry_index_mapping,
+    wire_profile_marker, wire_profile_marker_bytes,
+};
+#[cfg(test)]
+use blockzilla_user_program_index::firewatch_wire_profile_attestation::validate_receipt_source_recovery_evidence;
+use blockzilla_user_program_index::{
     firewatch_wire_profile_attestation::{
         FullGenerationAuditDecisionV3 as GenerationProfileDecision, FullGenerationAuditEvidenceV3,
         WIRE_PROFILE_ATTESTATION_KIND, WIRE_PROFILE_ATTESTATION_SCHEMA_VERSION,
@@ -32,14 +40,6 @@ use blockzilla_firebase_indexer::{
         validate_wire_profile_attestation_structure,
     },
     format::RegistryFileIdentity,
-};
-#[cfg(test)]
-use blockzilla_read_sdk_legacy::WireProfileAuditOutcome;
-use blockzilla_read_sdk_legacy::{
-    ArchiveReader, ArchiveV2MetadataWireProfile, ArchiveV2WireProfile, Error as ArchiveReaderError,
-    HashVerification, OpenOptions, PinnedLocalRangeSource, audit_full_generation_wire_profile,
-    manifest::TrustedGenerationIdentity, validate_pinned_local_registry_index_mapping,
-    wire_profile_marker, wire_profile_marker_bytes,
 };
 use clap::{Parser, ValueEnum};
 use serde::{Deserialize, Serialize, de::DeserializeOwned};

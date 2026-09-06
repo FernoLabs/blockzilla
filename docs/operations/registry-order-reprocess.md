@@ -233,7 +233,7 @@ TARGET_GENERATION_SHA256="$(
     "$REGISTRY_REPROCESS_RECEIPT"
 )"
 
-blockzilla-firebase-indexer build-dense \
+blockzilla-user-program-index build-dense \
   --epoch "$EPOCH_NUMBER" \
   --archive "$TARGET_EPOCH_DIR" \
   --out "$FIREWATCH_INDEX_DIR" \
@@ -260,7 +260,7 @@ index-parity \
 Then query wallet-to-program relations against that same path:
 
 ```sh
-blockzilla-firebase-indexer query \
+blockzilla-user-program-index query \
   --wallet "$WALLET_PUBKEY" \
   --index "$FIREWATCH_INDEX_DIR" \
   --archive "$TARGET_EPOCH_DIR" \

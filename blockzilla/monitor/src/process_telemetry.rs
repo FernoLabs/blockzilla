@@ -868,6 +868,7 @@ fn has_blockzilla_command_marker(sample: &ProcessSample) -> bool {
         "blockzilla-live-producer",
         "blockzilla-monitor",
         "blockzilla-replay-poc",
+        "blockzilla-user-program-index",
         "blockzilla-firebase-indexer",
         "firewatch-index-controller",
         "hivezilla",
@@ -1478,6 +1479,7 @@ mod tests {
     fn firewatch_processes_are_not_reported_as_competing_host_io() {
         for executable in [
             "firewatch-index-controller",
+            "blockzilla-user-program-index",
             "blockzilla-firebase-indexer",
             "index-parity",
         ] {

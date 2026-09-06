@@ -1,7 +1,7 @@
 # Workspace structure
 
-Updated 2026-09-06 on branch `refactor`. The layout is applied: 46 workspace
-packages, 165 targets, and 105 binaries. The former CAR SDK is merged into
+Updated 2026-09-06 on branch `refactor`. The layout is applied: 44 workspace
+packages, 163 targets, and 105 binaries. The former CAR SDK is merged into
 `of-car-reader`. No binary was deleted by the folder move.
 
 ## Layout
@@ -14,7 +14,6 @@ crates/
   blockzilla-model/                 canonical blocks and ordering contract
   blockzilla-primitives/            keys, string table, LEB128 framing
   blockzilla-live-format/           shared live and candidate formats
-  blockzilla-replay-format/         reserved replay format; removal candidate
   source/
     blockzilla-source/
     blockzilla-source-local/
@@ -47,7 +46,6 @@ indexer/
   blockzilla-token-transaction-dump/
   blockzilla-token-balance-audit/
   blockzilla-dump/
-  blockzilla-firebase-indexer/
 
 runtime/
   blockzilla-replay/
@@ -67,7 +65,7 @@ web/  docs/  scripts/
 
 The complete package mapping is in [workspace-layout.json](workspace-layout.json).
 It includes unchanged packages, explicit renames, and the removed CAR interface
-package. The excluded `examples/archive-token-events` source is also retained.
+package, the merged Firebase package, and the retired replay codec. The excluded `examples/archive-token-events` source is also retained.
 
 ## Decisions
 
@@ -81,7 +79,7 @@ package. The excluded `examples/archive-token-events` source is also retained.
   `of_car_reader::archive`, behind the opt-in `archive` feature. The V2
   interface is `blockzilla_compact_v2_reader::archive`. The dedicated V3
   reader owns `CanonicalReader` for canonical local files and retains the
-  prototype's `IndexerV3Archive` API, which Firebase re-exports. These APIs open
+  prototype's `IndexerV3Archive` API. These APIs open
   different layouts. The converter retains compatibility exports of the local
   reader; read applications use the reader crate directly.
 - **Keep the shared model.** `blockzilla-model` provides common block types,
@@ -102,9 +100,13 @@ package. The excluded `examples/archive-token-events` source is also retained.
   field-level comparison. JSON key order alone is not a correctness defect.
 - **Keep live format shared.** Both the CLI and Hivezilla use it. Ledger and
   gossip compatibility code stay beside Hivezilla.
-- **Do not enable or delete the reserved replay format during this move.**
-  Its [removal review](../../crates/blockzilla-replay-format/REMOVAL-CANDIDATE.md)
-  remains separate from runtime experiments and the folder changes.
+- **Retire the unused replay codec.** Its PoH hashing helpers now live in
+  the V2 reader. Payload format 8 stays reserved; the replay runtime is
+  unchanged. See the [retirement record](replay-format-retirement.md).
+- **One user-program index package.** The Firebase command and eight supported
+  operational tools now live in `blockzilla-user-program-index`. Its six
+  inactive implementation copies and unused reader re-exports are removed.
+  The command uses the `cli` feature; operational tools use `developer-tools`.
 
 ## Completed work
 
@@ -148,21 +150,26 @@ from the ordered reader's physical-order contract.
    signatures, and hashes, plus cross-format checks through `blockzilla-model`.
    A reader move alone does not add HTTP support or common-model projection.
 2. Migrate the six remaining legacy-reader consumers: the CLI, archive gateway,
-   token dumper, Firebase tools, replay tools, and SPYX query tools. Preserve
+   token dumper, user-program operational tools, replay tools, and SPYX query tools. Preserve
    selective metadata, signer projection, compact logs, and batch behavior.
-3. Extract shared record projection and decoding from the V2 reader and
-   user-program index. The prototype reader still depends on these
-   implementations. Removing Firebase ownership does not remove those
-   separate dependencies.
+3. Consolidate signed-message reconstruction between the V2 reader and V3
+   converter. The historical source decoder is now shared by the V2 reader,
+   V3 prototype, and user-program index. No format reader depends on an indexer.
 4. Verify current archive message and metadata schemas, then finish the V2
    freeze. Only then remove legacy readers and wire-profile migration code.
    Moving a directory does not make it safe to delete.
-5. Restore the parked Firebase controller and the excluded archive-token-events
+5. Restore the parked Firewatch controller and the excluded archive-token-events
    example against supported readers. Its old SDK-boundary test is not
    currently part of workspace CI.
 6. Complete cross-format output and performance checks on the archive corpus.
    Local fixture tests and successful compilation do not prove production
    archive compatibility or release readiness.
+
+## Redundant-code review
+
+The later [repository audit](redundant-code-review.md) records the indexer
+merge, shared decoder and report extraction, replay-codec retirement, and
+remaining consolidation work. These changes retain all supported binaries.
 
 ## Main and reader-fix integration
 
@@ -195,8 +202,10 @@ moves and the reader documentation update.
 These results are from local macOS checks. They do not replace Linux CI,
 Worker release builds, or the production corpus checks listed above.
 
-Formatting and the Archive V2 wire-boundary check pass. The package mapping
-still accounts for all 46 packages, 165 targets, and 105 binaries. Third-party
+For the structural refactor, formatting and the Archive V2 wire-boundary check
+passed, and the package mapping accounted for 46 packages, 165 targets, and
+105 binaries. The later consolidation reduced this to 44 packages and 163
+targets, with all 105 binaries retained. Third-party
 lockfile versions and checksums are unchanged. Captured SPYX process evidence
 is unchanged, and the pre-existing model error-message edit remains uncommitted.
 
@@ -207,7 +216,8 @@ python3 scripts/check-workspace-targets.py before.json after.json \
   --layout docs/design/workspace-layout.json
 ```
 
-The checker accounts for declared package renames and CAR package removal. It
+The checker accounts for package merges, explicit target removal, feature
+changes, and package renames. It
 checks every destination, target name, target kind, and required feature. It
 rejects missing and extra targets. Target identity is not sufficient by itself:
 

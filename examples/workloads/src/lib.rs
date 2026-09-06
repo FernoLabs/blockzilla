@@ -9,6 +9,7 @@ mod firewatch;
 mod output;
 mod progress;
 mod pump;
+mod report;
 pub mod transaction_identity;
 mod usdc;
 
@@ -25,6 +26,7 @@ pub use pump::{
     PUMP_COVERAGE_INCOMPLETE_INSTRUCTIONS, PUMP_COVERAGE_PRIMARY_SIGNATURE_UNAVAILABLE,
     PUMP_HEADER_BYTES, PUMP_RECORD_BYTES, PumpReport, PumpSink, pump_scan_request,
 };
+pub use report::ExampleReport;
 pub use transaction_identity::{
     HEADER_BYTES, HEADER_BYTES as TRANSACTION_IDENTITY_DUMP_HEADER_BYTES, RECORD_BYTES,
     RECORD_BYTES as TRANSACTION_IDENTITY_DUMP_RECORD_BYTES, SCHEMA_VERSION,

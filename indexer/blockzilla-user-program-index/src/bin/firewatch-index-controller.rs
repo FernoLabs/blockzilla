@@ -5,10 +5,8 @@
 //! or resource pressure appears, and grows it only after a sustained safe window. It does not change scheduler
 //! state, registry markers, archive generations, or unknown index staging directories.
 
-#[path = "../firewatch_controller_cgroup.rs"]
-mod firewatch_controller_cgroup;
-#[path = "../firewatch_controller_eta.rs"]
-mod firewatch_controller_eta;
+use blockzilla_user_program_index::firewatch_controller_cgroup;
+use blockzilla_user_program_index::firewatch_controller_eta;
 
 use std::{
     collections::{BTreeMap, BTreeSet},
@@ -29,19 +27,19 @@ use std::{
 };
 
 use anyhow::{Context, Result, bail, ensure};
-use blockzilla_firebase_indexer::firewatch_wire_profile_attestation::{
+use blockzilla_user_program_index::firewatch_wire_profile_attestation::{
     DIRECT_ATTESTATION_GENERATION_KIND, RECEIPT_SOURCE_ATTESTATION_GENERATION_KIND,
     RECEIPT_TARGET_ATTESTATION_GENERATION_KIND, WireProfileAttestation,
     validate_receipt_source_recovery_evidence, validate_wire_profile_attestation_structure,
 };
 #[cfg(test)]
-use blockzilla_firebase_indexer::firewatch_wire_profile_attestation::{
+use blockzilla_user_program_index::firewatch_wire_profile_attestation::{
     FullGenerationAuditDecisionV3, FullGenerationAuditEvidenceV3,
     WIRE_PROFILE_ATTESTATION_SCHEMA_VERSION, WIRE_PROFILE_AUDIT_ALGORITHM,
     WIRE_PROFILE_AUDITED_PROFILES, encode_full_generation_audit_evidence_v3,
     encode_receipt_source_recovery_evidence_v3,
 };
-use blockzilla_firebase_indexer::format::{
+use blockzilla_user_program_index::format::{
     FORMAT_VERSION, GenerationBindingKind, IndexManifest, MANIFEST_SCHEMA_VERSION,
     RegistryFileIdentity, SEMANTICS_VERSION,
 };
@@ -7388,7 +7386,7 @@ fn unix_now() -> u64 {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use blockzilla_firebase_indexer::format::{
+    use blockzilla_user_program_index::format::{
         IndexBuilder, IndexSemantics, OmissionCounts, ProgramUsage, bind_shard, write_program_map,
     };
 
@@ -7883,7 +7881,7 @@ mod tests {
                 1,
                 ProgramUsage::new_transaction(2, 1, 0, 42, Some(1_700_000_000)).unwrap()
             ),
-            blockzilla_firebase_indexer::format::RecordOutcome::Recorded
+            blockzilla_user_program_index::format::RecordOutcome::Recorded
         );
         assert_eq!(builder.write(&shard).unwrap(), 1);
         let shard_binding = bind_shard(0, &shard, 2, 2).unwrap();
@@ -7906,12 +7904,12 @@ mod tests {
             generation_id: generation.into(),
             generation_digest: "e".repeat(64),
             archive_wire_profile: ArchiveV2WireProfile::PostUnknownInstructionFallbacksV1,
-            registry: blockzilla_firebase_indexer::format::IndexFileBinding {
+            registry: blockzilla_user_program_index::format::IndexFileBinding {
                 size: 64,
                 sha256: "a".repeat(64),
             },
             registry_file_identity,
-            registry_index: blockzilla_firebase_indexer::format::IndexFileBinding {
+            registry_index: blockzilla_user_program_index::format::IndexFileBinding {
                 size: 24,
                 sha256: "b".repeat(64),
             },

@@ -27,12 +27,11 @@ documents rather than being duplicated here.
 
 ### Generic signer-to-program index
 
-The implementation currently lives in `indexer/blockzilla-firebase-indexer/`;
-the package name is provisional because the index is not Firewatch-specific.
+The library and commands live in `indexer/blockzilla-user-program-index/`.
+This package includes the former Firebase indexer tools.
 
-- [ ] Choose a product-neutral public crate, binary, and format name before
-      release. `blockzilla-signer-program-index` describes the current
-      semantics without overstating them as all wallet or account activity.
+- [x] Use `blockzilla-user-program-index` for the public crate and primary
+      binary. Keep existing stored field and file names for compatibility.
 - [ ] Rebuild epoch 900, compare counts, and spot-check known signers and
       programs.
 - [ ] Measure full-epoch release memory, build time, and cold/warm query
@@ -43,7 +42,7 @@ the package name is provisional because the index is not Firewatch-specific.
       [Firewatch local archive indexing](docs/guides/firewatch-local-archive-indexing.md).
 
 The detailed index status, validation gates, and remaining risks live in the
-[signer-to-program redesign](indexer/blockzilla-firebase-indexer/REDESIGN.md).
+[signer-to-program redesign](indexer/blockzilla-user-program-index/REDESIGN.md).
 
 ### Archive lifecycle
 

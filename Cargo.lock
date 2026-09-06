@@ -766,7 +766,6 @@ dependencies = [
  "blockzilla-source-cache",
  "blockzilla-source-http",
  "blockzilla-source-local",
- "blockzilla-user-program-index",
  "ed25519-dalek 2.2.0",
  "serde",
  "serde_json",
@@ -808,7 +807,6 @@ dependencies = [
  "blockzilla-primitives",
  "blockzilla-program-logs",
  "blockzilla-registry",
- "blockzilla-replay-format",
  "blockzilla-source",
  "blockzilla-source-cache",
  "blockzilla-source-http",
@@ -842,7 +840,6 @@ dependencies = [
  "blockzilla-model",
  "blockzilla-primitives",
  "blockzilla-registry",
- "blockzilla-replay-format",
  "blockzilla-user-program-index",
  "bs58",
  "clap 4.6.5",
@@ -865,42 +862,6 @@ dependencies = [
  "blockzilla-model",
  "sha2 0.11.0",
  "thiserror 2.0.19",
-]
-
-[[package]]
-name = "blockzilla-firebase-indexer"
-version = "0.2.0"
-dependencies = [
- "anyhow",
- "blockzilla-archive-v2",
- "blockzilla-archive-v3",
- "blockzilla-archive-v3-reader",
- "blockzilla-compact",
- "blockzilla-compact-v2-reader",
- "blockzilla-model",
- "blockzilla-primitives",
- "blockzilla-program-logs",
- "blockzilla-read-sdk-legacy",
- "blockzilla-registry",
- "blockzilla-user-program-index",
- "bs58",
- "clap 4.6.5",
- "ed25519-dalek 2.2.0",
- "libc",
- "of-car-reader 0.2.0",
- "pprof",
- "reqwest 0.13.4",
- "rustix",
- "serde",
- "serde_json",
- "sha2 0.11.0",
- "smallvec",
- "tempfile",
- "thiserror 2.0.19",
- "tracing",
- "tracing-subscriber",
- "wincode 0.6.1",
- "zstd",
 ]
 
 [[package]]
@@ -1130,13 +1091,6 @@ dependencies = [
 ]
 
 [[package]]
-name = "blockzilla-replay-format"
-version = "0.2.0"
-dependencies = [
- "sha2 0.11.0",
-]
-
-[[package]]
 name = "blockzilla-source"
 version = "0.2.0"
 dependencies = [
@@ -1270,9 +1224,13 @@ dependencies = [
  "blockzilla-compact",
  "blockzilla-compact-v2-reader",
  "blockzilla-primitives",
- "blockzilla-program-logs",
+ "blockzilla-read-sdk-legacy",
  "blockzilla-registry",
  "bs58",
+ "clap 4.6.5",
+ "libc",
+ "pprof",
+ "reqwest 0.13.4",
  "rustix",
  "serde",
  "serde_json",
@@ -1281,7 +1239,9 @@ dependencies = [
  "tempfile",
  "thiserror 2.0.19",
  "tracing",
+ "tracing-subscriber",
  "wincode 0.6.1",
+ "zstd",
 ]
 
 [[package]]

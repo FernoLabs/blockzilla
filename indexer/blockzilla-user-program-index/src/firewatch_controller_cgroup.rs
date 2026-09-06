@@ -17,25 +17,25 @@ const MAX_MEMORY_EVENTS_BYTES: u64 = 16 * 1024;
 const MAX_MEMORY_PRESSURE_BYTES: u64 = 16 * 1024;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub(crate) struct CgroupMemoryEvents {
-    pub(crate) high: u64,
-    pub(crate) max: u64,
-    pub(crate) oom: u64,
-    pub(crate) oom_kill: u64,
+pub struct CgroupMemoryEvents {
+    pub high: u64,
+    pub max: u64,
+    pub oom: u64,
+    pub oom_kill: u64,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq)]
-pub(crate) struct CgroupMemorySnapshot {
-    pub(crate) current_bytes: u64,
-    pub(crate) high_bytes: Option<u64>,
-    pub(crate) max_bytes: Option<u64>,
-    pub(crate) anon_bytes: u64,
-    pub(crate) file_bytes: u64,
-    pub(crate) inactive_file_bytes: u64,
-    pub(crate) pressure_some_avg10: Option<f64>,
-    pub(crate) pressure_full_avg10: Option<f64>,
-    pub(crate) swap_current_bytes: u64,
-    pub(crate) events: CgroupMemoryEvents,
+pub struct CgroupMemorySnapshot {
+    pub current_bytes: u64,
+    pub high_bytes: Option<u64>,
+    pub max_bytes: Option<u64>,
+    pub anon_bytes: u64,
+    pub file_bytes: u64,
+    pub inactive_file_bytes: u64,
+    pub pressure_some_avg10: Option<f64>,
+    pub pressure_full_avg10: Option<f64>,
+    pub swap_current_bytes: u64,
+    pub events: CgroupMemoryEvents,
 }
 
 /// Resolve this process's unified cgroup-v2 directory.
@@ -43,7 +43,7 @@ pub(crate) struct CgroupMemorySnapshot {
 /// The returned path is canonical and is guaranteed to remain below the
 /// canonical `/sys/fs/cgroup` root. Hybrid or malformed `/proc/self/cgroup`
 /// data is rejected instead of being guessed.
-pub(crate) fn resolve_self_cgroup_v2() -> Result<PathBuf> {
+pub fn resolve_self_cgroup_v2() -> Result<PathBuf> {
     let text = read_bounded_utf8(Path::new(PROC_SELF_CGROUP), MAX_PROC_CGROUP_BYTES)
         .context("read unified process cgroup membership")?;
     let relative = parse_unified_cgroup(&text)?;
@@ -53,7 +53,7 @@ pub(crate) fn resolve_self_cgroup_v2() -> Result<PathBuf> {
 }
 
 /// Read the memory-controller state for a canonical cgroup-v2 directory.
-pub(crate) fn read_cgroup_memory(path: &Path) -> Result<CgroupMemorySnapshot> {
+pub fn read_cgroup_memory(path: &Path) -> Result<CgroupMemorySnapshot> {
     let root = canonical_cgroup_root(Path::new(CGROUP_V2_ROOT))?;
     read_cgroup_memory_under_root(path, &root)
 }

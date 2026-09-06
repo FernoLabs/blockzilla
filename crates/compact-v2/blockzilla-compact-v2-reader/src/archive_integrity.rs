@@ -14,6 +14,7 @@ use std::{
     time::{Duration, Instant},
 };
 
+use crate::poh::{MAX_POH_NUM_HASHES_PER_ENTRY, SignatureMixinBuilder};
 use blockzilla_archive_v2::{
     ARCHIVE_V2_BLOCKHASH_REGISTRY_FILE, ARCHIVE_V2_POH_FILE, ARCHIVE_V2_PREV_BLOCKHASH_TAIL_FILE,
     ARCHIVE_V2_SIGNATURES_FILE, ArchiveV2HotBlockIndexRow, WincodeArchiveV2PohRecord,
@@ -22,7 +23,6 @@ use blockzilla_archive_v3::sidecars::poh::{
     DecodedPohFrame, PohWireProfile, decode_payload as decode_retained_poh_payload,
 };
 use blockzilla_compact::CompactPohEntry;
-use blockzilla_replay_format::{MAX_REPLAY_NUM_HASHES_PER_ENTRY, ReplaySignatureMixinBuilder};
 use rayon::prelude::*;
 use serde::Serialize;
 use sha2::{Digest, Sha256, block_api::compress256};
@@ -765,7 +765,7 @@ pub fn preflight_archive_v2_poh(
         max_effective_hash_rounds_block_id: selected.max_effective_hash_rounds_block_id,
         max_effective_hash_rounds_slot: selected.max_effective_hash_rounds_slot,
         total_effective_hash_rounds: selected.total_effective_hash_rounds,
-        absolute_num_hashes_per_entry_guard: MAX_REPLAY_NUM_HASHES_PER_ENTRY,
+        absolute_num_hashes_per_entry_guard: MAX_POH_NUM_HASHES_PER_ENTRY,
         reader: reader_stats.into(),
         elapsed_millis: duration_millis(started.elapsed()),
         hash_recomputation: "not-run",
@@ -981,7 +981,7 @@ fn validate_preflight_stream_binding(
         || preflight.frames_bound != reader.index().rows.len() as u64
         || preflight.poh_file_bytes != current_poh_bytes
         || preflight.wire_profile != expected_wire
-        || preflight.absolute_num_hashes_per_entry_guard != MAX_REPLAY_NUM_HASHES_PER_ENTRY
+        || preflight.absolute_num_hashes_per_entry_guard != MAX_POH_NUM_HASHES_PER_ENTRY
         || preflight.hash_recomputation != "not-run"
         || preflight.max_effective_hash_rounds_per_block == 0
         || preflight.total_effective_hash_rounds == 0
@@ -1265,10 +1265,10 @@ fn inspect_poh_preflight_record(
     };
     let mut tx_cursor = 0usize;
     for (entry_index, entry) in record.entries.iter().enumerate() {
-        if entry.num_hashes > MAX_REPLAY_NUM_HASHES_PER_ENTRY {
+        if entry.num_hashes > MAX_POH_NUM_HASHES_PER_ENTRY {
             return Err(ArchiveIntegrityError::Invalid(format!(
                 "PoH block {sequence} slot {} entry {entry_index} declares {} hashes, above absolute guard {}",
-                block.row.slot, entry.num_hashes, MAX_REPLAY_NUM_HASHES_PER_ENTRY
+                block.row.slot, entry.num_hashes, MAX_POH_NUM_HASHES_PER_ENTRY
             )));
         }
         stats.max_num_hashes_per_entry = stats.max_num_hashes_per_entry.max(entry.num_hashes);
@@ -1872,9 +1872,9 @@ fn consume_integrity_block(
         ))
     })?;
     for (entry_index, entry) in poh.entries.iter().enumerate() {
-        if entry.num_hashes > MAX_REPLAY_NUM_HASHES_PER_ENTRY {
+        if entry.num_hashes > MAX_POH_NUM_HASHES_PER_ENTRY {
             return Err(ArchiveIntegrityError::Invalid(format!(
-                "PoH block {sequence} slot {} entry {entry_index} declares {} hashes, above absolute replay guard {MAX_REPLAY_NUM_HASHES_PER_ENTRY}",
+                "PoH block {sequence} slot {} entry {entry_index} declares {} hashes, above absolute replay guard {MAX_POH_NUM_HASHES_PER_ENTRY}",
                 block.row.slot, entry.num_hashes
             )));
         }
@@ -2639,7 +2639,7 @@ fn recompute_entry_hash(job: &EntryJob<'_>) -> [u8; HASH_BYTES] {
             hash_one(&hash)
         }
     } else {
-        let mut mixin = ReplaySignatureMixinBuilder::new();
+        let mut mixin = SignatureMixinBuilder::new();
         for signature in job.signatures.chunks_exact(SIGNATURE_BYTES) {
             let signature: &[u8; SIGNATURE_BYTES] = signature
                 .try_into()
@@ -2704,6 +2704,7 @@ fn duration_millis(duration: Duration) -> u64 {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::poh::{SignatureMixinBuilder, derive_entry_hash};
     use blockzilla_archive_v2::{
         ARCHIVE_V2_BLOCK_INDEX_FILE, ARCHIVE_V2_BLOCKS_FILE, ARCHIVE_V2_GENESIS_BIN_FILE,
         ARCHIVE_V2_META_FILE, ARCHIVE_V2_PUBKEY_REGISTRY_FILE, ArchiveV2HotBlockBlob,
@@ -2719,7 +2720,6 @@ mod tests {
         wincode as archive_wire,
     };
     use blockzilla_primitives::{framed::write_u32_varint, wincode_leb128_config};
-    use blockzilla_replay_format::{ReplaySignatureMixinBuilder, derive_replay_entry_hash};
     use std::{fs, io::Cursor, path::Path};
     use tempfile::TempDir;
 
@@ -2858,15 +2858,14 @@ mod tests {
             let mixin = if transaction_count == 0 {
                 None
             } else {
-                let mut builder = ReplaySignatureMixinBuilder::new();
+                let mut builder = SignatureMixinBuilder::new();
                 for signature in &signatures {
                     builder.push_signature(signature).unwrap();
                 }
                 Some(builder.finish())
             };
             let expected =
-                derive_replay_entry_hash([5; HASH_BYTES], num_hashes, transaction_count, mixin)
-                    .unwrap();
+                derive_entry_hash([5; HASH_BYTES], num_hashes, transaction_count, mixin).unwrap();
             let bytes: Vec<u8> = signatures.into_iter().flatten().collect();
             let actual = recompute_entry_hash(&EntryJob {
                 start_hash: [5; HASH_BYTES],
@@ -3089,9 +3088,9 @@ mod tests {
         slot: u64,
     ) -> [u8; 32] {
         let signatures = [[7u8; SIGNATURE_BYTES]];
-        let mut builder = ReplaySignatureMixinBuilder::new();
+        let mut builder = SignatureMixinBuilder::new();
         builder.push_signature(&signatures[0]).unwrap();
-        let hash = derive_replay_entry_hash(start_hash, 1, 1, Some(builder.finish())).unwrap();
+        let hash = derive_entry_hash(start_hash, 1, 1, Some(builder.finish())).unwrap();
         let payload = match profile {
             PohSidecarSchema::Current | PohSidecarSchema::CurrentAllZeroDerived => {
                 archive_wire::encode(&CurrentPohRecord {
@@ -3139,11 +3138,11 @@ mod tests {
         let mixin = if transaction_count == 0 {
             None
         } else {
-            let mut builder = ReplaySignatureMixinBuilder::new();
+            let mut builder = SignatureMixinBuilder::new();
             builder.push_signature(&[7u8; SIGNATURE_BYTES]).unwrap();
             Some(builder.finish())
         };
-        let hash = derive_replay_entry_hash(start_hash, 1, transaction_count, mixin).unwrap();
+        let hash = derive_entry_hash(start_hash, 1, transaction_count, mixin).unwrap();
         let payload = archive_wire::encode(&CurrentPohRecord {
             block_id: 0,
             slot,
@@ -3530,10 +3529,7 @@ mod tests {
         let final_hash = [61; 32];
         write_test_poh_frames(
             over_guard.path(),
-            &[make_payload(
-                MAX_REPLAY_NUM_HASHES_PER_ENTRY + 1,
-                final_hash,
-            )],
+            &[make_payload(MAX_POH_NUM_HASHES_PER_ENTRY + 1, final_hash)],
             &[final_hash],
         );
         let reader = open_test_archive(over_guard.path(), 2, 1_000);

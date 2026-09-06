@@ -25,6 +25,7 @@ use blockzilla_archive_v2::{
     write_archive_v2_hot_block_index,
 };
 use blockzilla_compact::{CompactMessageHeader, CompactPohEntry, OwnedCompactRecentBlockhash};
+use blockzilla_compact_v2_reader::poh::{SignatureMixinBuilder, derive_entry_hash};
 use blockzilla_compact_v2_reader::{
     COMPACT_V2_CURRENT_MESSAGE_SCHEMA_MARKER_BYTES, COMPACT_V2_CURRENT_MESSAGE_SCHEMA_MARKER_FILE,
     SignedInstruction, SignedMessage, SignedMessageVersion,
@@ -41,7 +42,6 @@ use blockzilla_dump::{
 };
 use blockzilla_primitives::{CompactPubkey, wincode_leb128_config, write_u32_varint};
 use blockzilla_registry::{KeyIndex, write_registry};
-use blockzilla_replay_format::{ReplaySignatureMixinBuilder, derive_replay_entry_hash};
 use ed25519_dalek::{Signer, SigningKey};
 use sha2::{Digest, Sha256};
 use tempfile::TempDir;
@@ -206,12 +206,11 @@ fn build_epoch_zero(root: &Path) {
         second.sign(&signed_message).to_bytes(),
     ];
     fs::write(root.join(ARCHIVE_V2_SIGNATURES_FILE), signatures.concat()).unwrap();
-    let mut signature_mixin = ReplaySignatureMixinBuilder::new();
+    let mut signature_mixin = SignatureMixinBuilder::new();
     for signature in &signatures {
         signature_mixin.push_signature(signature).unwrap();
     }
-    let final_hash =
-        derive_replay_entry_hash(genesis_hash, 1, 1, Some(signature_mixin.finish())).unwrap();
+    let final_hash = derive_entry_hash(genesis_hash, 1, 1, Some(signature_mixin.finish())).unwrap();
 
     let message = ArchiveV2HotMessagePayload::Legacy(ArchiveV2HotLegacyMessage {
         header,

@@ -6,8 +6,7 @@
 //! groups. The first selected grammar can advance only after the auditor's
 //! dedicated selected-profile-rejected exit code.
 
-#[path = "../firewatch_controller_cgroup.rs"]
-mod firewatch_controller_cgroup;
+use blockzilla_user_program_index::firewatch_controller_cgroup;
 
 use std::{
     collections::{BTreeMap, BTreeSet},
@@ -33,18 +32,18 @@ use blockzilla_archive_v2::{
     ARCHIVE_V2_PUBKEY_REGISTRY_FILE, ARCHIVE_V2_PUBKEY_REGISTRY_INDEX_FILE,
     ARCHIVE_V2_SIGNATURES_FILE,
 };
+use blockzilla_read_sdk_legacy::{
+    ArchiveV2WireProfile, wire_profile_marker, wire_profile_marker_bytes,
+};
 #[cfg(test)]
-use blockzilla_firebase_indexer::firewatch_wire_profile_attestation::encode_receipt_source_recovery_evidence_v3;
-use blockzilla_firebase_indexer::{
+use blockzilla_user_program_index::firewatch_wire_profile_attestation::encode_receipt_source_recovery_evidence_v3;
+use blockzilla_user_program_index::{
     firewatch_wire_profile_attestation::{
         DIRECT_ATTESTATION_GENERATION_KIND, RECEIPT_SOURCE_ATTESTATION_GENERATION_KIND,
         WireProfileAttestation, is_sha256, validate_receipt_source_recovery_evidence,
         validate_wire_profile_attestation_structure,
     },
     format::RegistryFileIdentity,
-};
-use blockzilla_read_sdk_legacy::{
-    ArchiveV2WireProfile, wire_profile_marker, wire_profile_marker_bytes,
 };
 use clap::Parser;
 use reqwest::blocking::Client;
@@ -73,8 +72,9 @@ const DIRECT_GENERATION_DOMAIN: &[u8] = b"blockzilla.firewatch.direct-generation
 const REGISTRY_GENERATION_DOMAIN: &[u8] = b"blockzilla.registry-reprocess.generation.v1";
 const REGISTRY_RECEIPT_FILE: &str = "archive-v2-registry-reprocess.receipt.json";
 const RECEIPT_SOURCE_PROFILE_AUTHORITY: &str = "registry_receipt_source_dual_audit";
+const LEGACY_INDEXER_EXECUTABLE_PATH: &str = "/volume1/blockzilla/bin/blockzilla-firebase-indexer";
 const REQUIRED_YIELD_EXECUTABLE_PATHS: [&str; 3] = [
-    "/volume1/blockzilla/bin/blockzilla-firebase-indexer",
+    "/volume1/blockzilla/bin/blockzilla-user-program-index",
     "/volume1/blockzilla/bin/index-parity",
     "/volume1/blockzilla/bin/blockzilla-index-archive-convert.new",
 ];
@@ -137,6 +137,20 @@ struct BatchManifest {
 struct ManifestExecutable {
     path: PathBuf,
     sha256: String,
+}
+
+// Existing immutable batches can still pin the deployed legacy executable.
+// New batches use the canonical binary name; ordering and other paths stay fixed.
+fn valid_yield_executable_paths(executables: &[ManifestExecutable]) -> bool {
+    executables.len() == REQUIRED_YIELD_EXECUTABLE_PATHS.len()
+        && executables
+            .iter()
+            .zip(REQUIRED_YIELD_EXECUTABLE_PATHS)
+            .enumerate()
+            .all(|(index, (executable, expected))| {
+                executable.path == Path::new(expected)
+                    || (index == 0 && executable.path == Path::new(LEGACY_INDEXER_EXECUTABLE_PATH))
+            })
 }
 
 #[derive(Debug, Clone, Deserialize, Serialize)]
@@ -652,12 +666,7 @@ fn validate_manifest(manifest: &BatchManifest) -> Result<()> {
         "batch manifest has too many tasks"
     );
     ensure!(
-        manifest.yield_executables.len() == REQUIRED_YIELD_EXECUTABLE_PATHS.len()
-            && manifest
-                .yield_executables
-                .iter()
-                .map(|item| item.path.as_path())
-                .eq(REQUIRED_YIELD_EXECUTABLE_PATHS.iter().map(Path::new)),
+        valid_yield_executable_paths(&manifest.yield_executables),
         "initial batch release requires the exact ordered indexer, parity, and converter.new yield paths"
     );
     ensure!(
@@ -5688,6 +5697,27 @@ fn unix_now() -> u64 {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn yield_paths_accept_canonical_or_retained_indexer_and_keep_exact_order() {
+        let mut executables: Vec<_> = REQUIRED_YIELD_EXECUTABLE_PATHS
+            .iter()
+            .map(|path| ManifestExecutable {
+                path: PathBuf::from(path),
+                sha256: "a".repeat(64),
+            })
+            .collect();
+        assert!(valid_yield_executable_paths(&executables));
+        executables[0].path = PathBuf::from(LEGACY_INDEXER_EXECUTABLE_PATH);
+        assert!(valid_yield_executable_paths(&executables));
+        executables.swap(0, 1);
+        assert!(!valid_yield_executable_paths(&executables));
+        executables.swap(0, 1);
+        executables[0].path = PathBuf::from("/tmp/blockzilla-user-program-index");
+        assert!(!valid_yield_executable_paths(&executables));
+        executables.pop();
+        assert!(!valid_yield_executable_paths(&executables));
+    }
 
     fn file_binding(bytes: &[u8]) -> RegistryFileBinding {
         RegistryFileBinding {

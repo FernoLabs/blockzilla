@@ -6,10 +6,14 @@ import json
 from pathlib import Path
 
 
-def targets(metadata, package_renames=None, removed=(), target_renames=None, relocations=()):
+def targets(metadata, package_renames=None, removed=(), target_renames=None, relocations=(),
+            removed_targets=(), feature_changes=()):
     package_renames = package_renames or {}
     target_renames = target_renames or {}
     relocation_map = {(r['from_package'], r['target']): r['to_package'] for r in relocations}
+    removed_target_set = {(r['package'], r['target'], tuple(sorted(r['kind'])))
+                          for r in removed_targets}
+    feature_change_map = {(r['package'], r['target']): r for r in feature_changes}
     members = set(metadata['workspace_members'])
     result = collections.Counter()
     for package in metadata['packages']:
@@ -17,6 +21,9 @@ def targets(metadata, package_renames=None, removed=(), target_renames=None, rel
             continue
         name = package_renames.get(package['name'], package['name'])
         for target in package['targets']:
+            kind = tuple(sorted(target['kind']))
+            if (package['name'], target['name'], kind) in removed_target_set:
+                continue
             target_name = target['name']
             for old, new in package_renames.items():
                 if target_name == old:
@@ -25,8 +32,13 @@ def targets(metadata, package_renames=None, removed=(), target_renames=None, rel
                     target_name = new.replace('-', '_')
             target_name = target_renames.get(target_name, target_name)
             owner = relocation_map.get((name, target_name), name)
-            result[(owner, target_name, tuple(sorted(target['kind'])),
-                    tuple(sorted(target.get('required-features', []))))] += 1
+            features = tuple(sorted(target.get('required-features', [])))
+            change = feature_change_map.get((owner, target_name))
+            if change:
+                if features != tuple(sorted(change['from'])):
+                    raise ValueError(f'Unexpected baseline features for {owner}/{target_name}: {features}')
+                features = tuple(sorted(change['to']))
+            result[(owner, target_name, kind, features)] += 1
     return result
 
 
@@ -46,7 +58,8 @@ def main():
         raise SystemExit('Layout must list every baseline workspace package exactly once.')
     expected = targets(before, layout.get('package_renames', {}),
                        layout.get('removed_packages', []),
-                       layout.get('target_renames', {}), layout.get('target_relocations', []))
+                       layout.get('target_renames', {}), layout.get('target_relocations', []),
+                       layout.get('removed_targets', []), layout.get('target_feature_changes', []))
     actual = targets(after)
     for title, differences in [('Missing targets', expected - actual),
                                ('Unexpected targets', actual - expected)]:

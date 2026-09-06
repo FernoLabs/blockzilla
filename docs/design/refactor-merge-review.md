@@ -2,6 +2,10 @@
 
 Review date: 2026-09-06. Target: `main`. Integration branch: `refactor`.
 
+This review covers reader-fix integration at `2703ed38`. See the later
+[redundant-code review](redundant-code-review.md) for the indexer consolidation
+and the current validation results.
+
 ## Included branches
 
 - Remote `main` at `ffffcbe1` was already an ancestor of the refactor.

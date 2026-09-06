@@ -319,7 +319,7 @@ indexer_count() {
         [ -e "$ic_proc/exe" ] || continue
         ic_exe=$(readlink "$ic_proc/exe" 2>/dev/null || true)
         case "$ic_exe" in
-            */blockzilla-firebase-indexer|*/blockzilla-firebase-indexer-*) ic_count=$((ic_count + 1)) ;;
+            */blockzilla-user-program-index|*/blockzilla-user-program-index-*|*/blockzilla-firebase-indexer|*/blockzilla-firebase-indexer-*) ic_count=$((ic_count + 1)) ;;
         esac
     done
     printf '%s' "$ic_count"

@@ -31,8 +31,8 @@ code rather than assumed.
 
 | Consumer | What it does today | Cost |
 |---|---|---|
-| Firewatch index build | Full archive re-decode **once per 8M-account chunk** — [`build.rs:550`](../../indexer/blockzilla-firebase-indexer/src/build.rs#L550), `DEFAULT_MAX_ACCOUNTS_PER_CHUNK = 8_000_000` | N full decodes of an epoch to build **one** index |
-| Account resolution | `decode::decode_metadata_prefix` — a hand-written field-order walker that decodes into transaction status metadata purely to reach `loaded_addresses` ([`decode.rs:976`](../../indexer/blockzilla-firebase-indexer/src/decode.rs#L976)) | Every V0 transaction pays a metadata decode to learn its own account list |
+| Firewatch index build | Full archive re-decode **once per 8M-account chunk** — [`index build`](../../indexer/blockzilla-user-program-index/src/build.rs), `DEFAULT_MAX_ACCOUNTS_PER_CHUNK = 8_000_000` | N full decodes of an epoch to build **one** index |
+| Account resolution | `decode::decode_metadata_prefix` — a hand-written field-order walker that decodes into transaction status metadata purely to reach `loaded_addresses` ([`source decoder`](../../crates/compact-v2/blockzilla-compact-v2-reader/src/source_decode.rs)) | Every V0 transaction pays a metadata decode to learn its own account list |
 | Remote read | Gateway serves whole files with HTTP `Range` — `/v1/epochs/{epoch}/files/{name}` ([`gateway lib.rs:501`](../../blockzilla/archive-gateway/src/lib.rs#L501)) | Access granularity is a ranged GET; per-request latency dominates, so page layout and directory size matter more than raw decode speed |
 | Replay | Needs message + account list + recent blockhash, and explicitly *not* effects. `SplitCompactIndexRecord` already splits `block_offset/len` from `runtime_offset/len` | The separation is already understood; it just isn't the published shape |
 

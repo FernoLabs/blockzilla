@@ -21,7 +21,6 @@ blockzilla-primitives = { path = "../../blockzilla-primitives", default-features
 blockzilla-registry = { path = "../../compact-v2/blockzilla-registry", default-features = false }
 blockzilla-archive-v3 = { path = "../blockzilla-archive-v3" }
 blockzilla-compact-v2-reader = { path = "../../compact-v2/blockzilla-compact-v2-reader", default-features = false }
-blockzilla-user-program-index = { path = "../../../indexer/blockzilla-user-program-index" }
 blockzilla-model = { version = "0.2.0", path = "../../blockzilla-model" }
 serde = { version = "1.0.228", features = ["derive"] }
 serde_json = "1.0.149"

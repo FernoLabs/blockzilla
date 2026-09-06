@@ -3,7 +3,7 @@
 use std::path::PathBuf;
 
 use anyhow::Result;
-use blockzilla_firebase_indexer::firewatch_wire_profile_transition::{
+use blockzilla_user_program_index::firewatch_wire_profile_transition::{
     MarkerTransitionLocks, MarkerTransitionOptions, transition_marker_free_direct_generation,
 };
 use clap::Parser;
