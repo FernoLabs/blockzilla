@@ -93,6 +93,28 @@ class RunnerTests(unittest.TestCase):
         self.assertEqual([(job["format"], job["epoch"]) for job in jobs],
                          [(fmt, 300) for fmt in matrix.FORMATS])
 
+    def test_v2_only_plan_and_inventory(self):
+        args = SimpleNamespace(mode="local", workloads=matrix.WORKLOADS, formats=["compact-v2"])
+        jobs = matrix.plan(args)
+        self.assertEqual(len(jobs), 44)
+        self.assertEqual({j["format"] for j in jobs}, {"compact-v2"})
+        with tempfile.TemporaryDirectory() as folder:
+            args.archive_root = Path(folder)
+            args.epochs = [0]
+            root = args.archive_root / "compact-v2" / "0"
+            root.mkdir(parents=True)
+            for name in matrix.FILES["compact-v2"]:
+                (root / name).touch()
+            rows = matrix.inventory(args)
+            self.assertEqual(len(rows), len(matrix.FILES["compact-v2"]))
+            self.assertEqual({r["format"] for r in rows}, {"compact-v2"})
+
+    def test_car_count_only_keeps_nine_examples_in_order(self):
+        jobs = matrix.plan(SimpleNamespace(mode="local", workloads=matrix.WORKLOADS, epochs=[300], car_count_only=True))
+        self.assertEqual(len(jobs), 9)
+        self.assertEqual([j["format"] for j in jobs], ["compact-v2"] * 4 + ["indexer-v3"] * 4 + ["car"])
+        self.assertEqual(jobs[-1]["workload"], "slot-hours")
+
     def test_incomplete_summary_is_not_success(self):
         with tempfile.TemporaryDirectory() as folder:
             path = Path(folder) / "stdout.log"
@@ -136,6 +158,15 @@ class RunnerTests(unittest.TestCase):
             self.assertEqual(len(list(results.glob("jobs/**/attempt-*"))), 264)
             self.assertEqual(json.loads((results / "status.json").read_text())["state"], "PASS")
             self.assertEqual(len((results / "summary.tsv").read_text().splitlines()), 265)
+            # The reduced comparison must finish cleanly without requiring CAR dumps.
+            reduced = root / "reduced"
+            reduced_command = command[:]
+            reduced_command[reduced_command.index(str(results))] = str(reduced)
+            reduced_command += ["--epochs", "300", "--car-count-only"]
+            with patch.object(sys, "argv", reduced_command), patch.object(matrix, "inventory", return_value=objects), \
+                    contextlib.redirect_stdout(io.StringIO()):
+                self.assertEqual(matrix.main(), 0)
+            self.assertEqual(json.loads((reduced / "status.json").read_text())["completed"], 18)
             # A changed binary must not re-use old PASS markers.
             path = bins / "read-car"
             path.write_text(STUB + "\n# different build\n")

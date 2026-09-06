@@ -436,13 +436,14 @@ impl ExampleReport for UsdcReport {
 
     fn print_details(&self) {
         println!(
-            "workload={} matching_transactions={} pre_rows={} post_rows={} token_balances_unavailable_transactions={} token_mint_unavailable_transactions={}",
+            "workload={} matching_transactions={} pre_rows={} post_rows={} token_balances_unavailable_transactions={} token_mint_unavailable_transactions={} skipped_failed_transactions={}",
             self.workload(),
             self.matching_transactions,
             self.pre_rows,
             self.post_rows,
             self.token_balances_unavailable_transactions,
             self.token_mint_unavailable_transactions,
+            self.skipped_failed_transactions,
         );
     }
 }
@@ -464,7 +465,7 @@ impl ExampleReport for PumpReport {
 
     fn print_details(&self) {
         println!(
-            "workload={} matching_transactions={} written_transactions={} direct_invocations={} cpi_invocations={} incomplete_instruction_transactions={} incomplete_cpi_transactions={} matches_without_primary_signature={}",
+            "workload={} matching_transactions={} written_transactions={} direct_invocations={} cpi_invocations={} incomplete_instruction_transactions={} incomplete_cpi_transactions={} matches_without_primary_signature={} skipped_failed_transactions={}",
             self.workload(),
             self.matching_transactions,
             self.written_transactions,
@@ -473,6 +474,7 @@ impl ExampleReport for PumpReport {
             self.incomplete_instruction_transactions,
             self.incomplete_cpi_transactions,
             self.matches_without_primary_signature,
+            self.skipped_failed_transactions,
         );
     }
 }

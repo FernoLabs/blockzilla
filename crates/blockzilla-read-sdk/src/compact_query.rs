@@ -946,11 +946,36 @@ impl<S: RangeSource> CompactV2InstructionSource<S> {
             });
         }
 
+        // Typed row flags provide status without projecting instructions or balances.
+        // Raw/absent metadata remains unknown and follows the normal coverage path.
+        if request.omit_failed_transaction_details
+            && row.flags & ARCHIVE_V2_TX_FLAG_HAS_METADATA != 0
+            && row.flags & ARCHIVE_V2_TX_FLAG_METADATA_RAW_FALLBACK == 0
+            && row.flags & ARCHIVE_V2_TX_FLAG_HAS_ERROR != 0
+        {
+            return Ok(CanonicalTransaction {
+                header: TransactionHeader {
+                    tx_index: row.tx_index,
+                    status: ExecutionStatus::Failed,
+                    failed_outer_instruction_index: None,
+                    instruction_coverage: InstructionCoverage::Unknown(
+                        CoverageReason::ProjectionNotRequested,
+                    ),
+                    cpi_coverage: CpiCoverage::Unknown(CoverageReason::ProjectionNotRequested),
+                },
+                primary_signature: None,
+                required_signers: Vec::new(),
+                instructions: Vec::new(),
+                token_balance_coverage: TokenBalanceCoverage::NotRequested,
+                token_balances: Vec::new(),
+            });
+        }
+
         let message_bytes = lane_region(message_lane, row.message_offset, row.message_len)?;
         let projector =
             CompactV2MessageProjector::new(reader.message_schema(), reader.registry_entries());
         let message = if !request.include_instructions
-            && !request.include_execution_status
+            && (!request.include_execution_status || request.omit_failed_transaction_details)
             && !request.include_required_signers
             && request.required_signer.is_none()
         {
@@ -1009,7 +1034,9 @@ impl<S: RangeSource> CompactV2InstructionSource<S> {
         } else {
             let bytes = lane_region(metadata_lane, row.metadata_offset, row.metadata_len)?;
             exact_metadata_bytes = Some(bytes);
-            if !request.include_instructions && !request.include_execution_status {
+            if !request.include_instructions
+                && (!request.include_execution_status || request.omit_failed_transaction_details)
+            {
                 ProjectedMetadata::ExactUnprojected
             } else {
                 let limits = CompactV2MetadataProjectionLimits::for_message(&message);
@@ -1070,7 +1097,15 @@ impl<S: RangeSource> CompactV2InstructionSource<S> {
                 (status, failed, cpi)
             }
             ProjectedMetadata::ExactUnprojected => (
-                ExecutionStatus::Unknown(CoverageReason::ProjectionNotRequested),
+                if request.include_execution_status {
+                    if row.flags & ARCHIVE_V2_TX_FLAG_HAS_ERROR != 0 {
+                        ExecutionStatus::Failed
+                    } else {
+                        ExecutionStatus::Succeeded
+                    }
+                } else {
+                    ExecutionStatus::Unknown(CoverageReason::ProjectionNotRequested)
+                },
                 None,
                 CpiCoverage::Unknown(CoverageReason::ProjectionNotRequested),
             ),
@@ -4157,6 +4192,49 @@ mod tests {
             Some(fixture.compressed_bytes + 2 * 6 * 32 + 7 * 64)
         );
         assert_eq!(receipt.io.decoded_bytes, Some(fixture.decoded_bytes));
+    }
+
+    #[test]
+    fn failed_detail_filter_keeps_headers_counts_and_unknown_status() {
+        for workers in [1, 3] {
+            let fixture = Fixture::main();
+            let mut source =
+                CompactV2InstructionSource::new(fixture.trusted_reader(), FIRST_SLOT).unwrap();
+            let request = ScanRequest::all()
+                .allow_incomplete_instructions()
+                .allow_incomplete_cpi()
+                .without_primary_signatures()
+                .without_required_signers()
+                .without_instruction_accounts()
+                .without_instruction_data()
+                .without_failed_transaction_details();
+            let mut transactions = Vec::new();
+            let mut sink = blockzilla_query_sdk::FnBlockSink::new(|block: BlockView<'_>| {
+                transactions.extend_from_slice(block.transactions);
+                Ok(())
+            });
+            let receipt = source
+                .scan_ordered_parallel(
+                    &request,
+                    &mut sink,
+                    CompactV2ParallelScanConfig::new(workers),
+                )
+                .unwrap();
+            assert_eq!(receipt.scan.transactions, 7);
+            assert_eq!(transactions[2].header.status, ExecutionStatus::Failed);
+            assert!(transactions[2].instructions.is_empty());
+            assert!(transactions[2].token_balances.is_empty());
+            assert!(!request.needs_primary_signature(&transactions[2]));
+            assert!(matches!(
+                transactions[3].header.status,
+                ExecutionStatus::Unknown(CoverageReason::MetadataAbsent)
+            ));
+            assert!(matches!(
+                transactions[4].header.status,
+                ExecutionStatus::Unknown(CoverageReason::RawMetadata)
+            ));
+            assert!(!transactions[0].instructions.is_empty());
+        }
     }
 
     #[test]

@@ -951,6 +951,27 @@ fn project_decoded_transaction(
         CpiCoverage::Unknown(CoverageReason::ProjectionNotRequested)
     };
 
+    // Skip unrequested failure details before key resolution and CPI projection.
+    // Full-detail requests still validate instruction order below.
+    if request.omit_failed_transaction_details && recorded_status == ExecutionStatus::Failed {
+        return Ok(Some(CanonicalTransaction {
+            header: TransactionHeader {
+                tx_index,
+                status,
+                failed_outer_instruction_index,
+                instruction_coverage: InstructionCoverage::Unknown(
+                    CoverageReason::ProjectionNotRequested,
+                ),
+                cpi_coverage: CpiCoverage::Unknown(CoverageReason::ProjectionNotRequested),
+            },
+            primary_signature: None,
+            required_signers: Vec::new(),
+            instructions: Vec::new(),
+            token_balance_coverage: TokenBalanceCoverage::NotRequested,
+            token_balances: Vec::new(),
+        }));
+    }
+
     let loaded_keys = if !request.include_instructions {
         None
     } else {
@@ -2411,7 +2432,7 @@ mod tests {
     }
 
     #[test]
-    fn plan_synthesizes_empty_rows_and_cid_order_is_canonical() {
+    fn plan_synthesizes_empty_rows_and_requires_physical_transaction_order() {
         let plan = vec![FIRST_SLOT, FIRST_SLOT + 2, FIRST_SLOT + 5];
         let first = FixtureTransaction {
             cid: cid(0x21),
@@ -2429,8 +2450,20 @@ mod tests {
         append_block(
             &mut car,
             FIRST_SLOT + 2,
-            &[first, second],
+            &[first.clone(), second.clone()],
             &[1, 0],
+            &[0, 1],
+            0x31,
+        );
+        // The streaming adapter rejects reordered frames; it does not build a CID table.
+        let error = collect(&mut source(car, plan.clone()), &ScanRequest::all()).unwrap_err();
+        assert!(format!("{error:?}").contains("transaction frame index 1"));
+        let mut car = car_header();
+        append_block(
+            &mut car,
+            FIRST_SLOT + 2,
+            &[first, second],
+            &[0, 1],
             &[0, 1],
             0x31,
         );
@@ -2909,7 +2942,28 @@ mod tests {
         };
         let mut car = car_header();
         append_block(&mut car, FIRST_SLOT, &[cpi_after_failure], &[0], &[0], 0x66);
-        assert!(collect(&mut source(car, vec![FIRST_SLOT]), &ScanRequest::all()).is_err());
+        assert!(
+            collect(
+                &mut source(car.clone(), vec![FIRST_SLOT]),
+                &ScanRequest::all()
+            )
+            .is_err()
+        );
+
+        let request = ScanRequest::all().without_failed_transaction_details();
+        let (_, blocks) = collect(&mut source(car, vec![FIRST_SLOT]), &request).unwrap();
+        let transaction = &blocks[0].transactions[0];
+        assert_eq!(transaction.header.status, ExecutionStatus::Failed);
+        assert_eq!(transaction.header.failed_outer_instruction_index, Some(0));
+        assert!(transaction.instructions.is_empty());
+        assert_eq!(
+            transaction.header.instruction_coverage,
+            InstructionCoverage::Unknown(CoverageReason::ProjectionNotRequested)
+        );
+        assert_eq!(
+            transaction.header.cpi_coverage,
+            CpiCoverage::Unknown(CoverageReason::ProjectionNotRequested)
+        );
     }
 
     #[test]
@@ -3047,7 +3101,10 @@ mod tests {
         )
         .unwrap();
         let error = collect(&mut adapter, &ScanRequest::all()).unwrap_err();
-        assert!(format!("{error:?}").contains("transaction reference count 2"));
+        assert!(
+            format!("{error:?}")
+                .contains("ordered entries reference 2 transactions but reader collected 1")
+        );
 
         let transaction_cid = cid(0x97);
         let entry_cid = cid(0x98);
@@ -3077,7 +3134,10 @@ mod tests {
             &ScanRequest::all(),
         )
         .unwrap_err();
-        assert!(format!("{error:?}").contains("entry reference count 2"));
+        assert!(
+            format!("{error:?}")
+                .contains("ordered block references 2 entries but reader collected 1")
+        );
     }
 
     #[test]

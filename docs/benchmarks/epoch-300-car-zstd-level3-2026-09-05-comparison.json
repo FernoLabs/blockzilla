@@ -1,0 +1,14 @@
+{
+  "status": "PASS",
+  "parity": "MATCH",
+  "raw_bytes": 508337873180,
+  "compressed_bytes": 206321123867,
+  "size_reduction_percent": 59.412600407614576,
+  "compression": "zstd level 3, 12 compression threads",
+  "compression_seconds": 2641,
+  "baseline_seconds": 817.005932,
+  "compressed_read_seconds": 753.091564,
+  "speedup": 1.084869318759226,
+  "decoded_car_MB_s": 675.0393916560025,
+  "stored_bytes_per_scan_second": 273980935.2974293
+}

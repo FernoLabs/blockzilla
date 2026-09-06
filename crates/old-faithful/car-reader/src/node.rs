@@ -51,6 +51,10 @@ impl<'b, C, T> Decode<'b, C> for CborArrayView<'b, T> {
     #[inline]
     fn decode(d: &mut Decoder<'b>, _ctx: &mut C) -> core::result::Result<Self, CborError> {
         let start = d.position();
+        // Reject unsupported shapes before the borrowed iterator can treat them as empty.
+        d.array()?
+            .ok_or_else(|| CborError::message("indefinite array not supported"))?;
+        d.set_position(start);
         d.skip()?;
         let end = d.position();
         let input = d.input();
@@ -631,6 +635,26 @@ pub fn decode_entry_summary(data: &[u8]) -> crate::node::Result<(u64, &[u8], usi
 mod tests {
     use super::{DataFrame, Node, decode_node};
     use minicbor::{Decode, Decoder, Encoder};
+
+    #[test]
+    fn dataframe_rejects_unsupported_next_array_shapes() {
+        let mut link = vec![0xd8, 42, 0x58, 37, 0, 1, 0x71, 0x12, 0x20];
+        link.extend_from_slice(&[0x11; 32]);
+        for indefinite in [false, true] {
+            let mut frame = vec![0x86, 6, 0xf6, 0xf6, 0xf6, 0x40, 0x9f];
+            if indefinite {
+                frame.extend_from_slice(&link);
+                frame.push(0xff);
+            } else {
+                *frame.last_mut().unwrap() = 0x40; // Wrong type: byte string.
+            }
+            assert!(DataFrame::decode(&mut Decoder::new(&frame), &mut ()).is_err());
+        }
+        let mut valid = vec![0x86, 6, 0xf6, 0xf6, 0xf6, 0x40, 0x81];
+        valid.extend_from_slice(&link);
+        let frame = DataFrame::decode(&mut Decoder::new(&valid), &mut ()).unwrap();
+        assert_eq!(frame.next.unwrap().iter().count(), 1);
+    }
 
     #[test]
     fn dataframe_hash_accepts_signed_cbor_i64() {

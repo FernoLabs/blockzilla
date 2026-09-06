@@ -140,6 +140,11 @@ pub struct ScanRequest {
     /// Return per-block instruction counts instead of transaction objects.
     #[serde(default)]
     pub counts_only: bool,
+    /// Allow adapters to omit expensive details of known failed transactions.
+    /// The failed header remains visible; consumers must skip it. Unknown status
+    /// is never treated as failed. Adapters may still decode details as a fallback.
+    #[serde(default)]
+    pub omit_failed_transaction_details: bool,
     /// Permit omission of signatures for complete, non-matching program queries.
     #[serde(default)]
     pub primary_signatures_for_matches: bool,
@@ -208,6 +213,11 @@ impl ScanRequest {
     }
 
     pub fn needs_primary_signature(&self, transaction: &crate::CanonicalTransaction) -> bool {
+        if self.omit_failed_transaction_details
+            && transaction.header.status == ExecutionStatus::Failed
+        {
+            return false;
+        }
         if !self.include_primary_signatures {
             return false;
         }
@@ -242,12 +252,14 @@ impl ScanRequest {
         self.include_instructions = true;
         self.token_balances = TokenBalanceRequirement::None;
         self.counts_only = true;
+        self.omit_failed_transaction_details = false;
         self
     }
 
     pub const fn all() -> Self {
         Self {
             counts_only: false,
+            omit_failed_transaction_details: false,
             primary_signatures_for_matches: false,
             range: None,
             require_verified_source: true,
@@ -271,6 +283,7 @@ impl ScanRequest {
     pub const fn bounded(range: ScanRange) -> Self {
         Self {
             counts_only: false,
+            omit_failed_transaction_details: false,
             primary_signatures_for_matches: false,
             range: Some(range),
             require_verified_source: true,
@@ -307,6 +320,14 @@ impl ScanRequest {
     }
 
     pub const fn allow_unknown_execution(mut self) -> Self {
+        self.require_known_execution = false;
+        self
+    }
+
+    /// Read status and retain failed headers, without requiring failed payloads.
+    pub const fn without_failed_transaction_details(mut self) -> Self {
+        self.omit_failed_transaction_details = true;
+        self.include_execution_status = true;
         self.require_known_execution = false;
         self
     }
@@ -716,6 +737,11 @@ impl<'a> OrderedBlockPublisher<'a> {
         }
 
         for transaction in &block.transactions {
+            if self.request.omit_failed_transaction_details
+                && transaction.header.status == ExecutionStatus::Failed
+            {
+                continue; // Omitted failed details are not missing source evidence.
+            }
             if !matches!(
                 transaction.header.instruction_coverage,
                 InstructionCoverage::Complete

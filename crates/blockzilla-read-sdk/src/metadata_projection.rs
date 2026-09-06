@@ -392,6 +392,31 @@ impl CompactV2MetadataProjector {
         Ok(())
     }
 
+    /// Read status from the V3 outcome plane without loading instruction planes.
+    /// Validate the complete outcome, including its trailing fields.
+    pub fn project_split_outcome(
+        self,
+        outcome: &[u8],
+        limits: CompactV2MetadataProjectionLimits,
+    ) -> CompactV2MetadataProjectionResult<CompactV2ExecutionStatus> {
+        validate_limits(limits)?;
+        let mut cursor = outcome;
+        let status = match self.schema {
+            CompactV2MetadataSchema::CurrentTypedError => {
+                read_current_execution_status(&mut cursor, limits)?
+            }
+            CompactV2MetadataSchema::LegacyRawError => {
+                read_legacy_execution_status(&mut cursor, limits)?
+            }
+        };
+        get::<u64>(&mut cursor)?; // fee
+        skip_return_data(&mut cursor, self.registry_entries)?;
+        get::<Option<u64>>(&mut cursor)?; // compute_units_consumed
+        get::<Option<u64>>(&mut cursor)?; // cost_units
+        require_split_plane_consumed("outcome", cursor)?;
+        Ok(status)
+    }
+
     /// Project the three semantic metadata planes retained by Indexer V3.
     ///
     /// `outcome` is the exact concatenation of the original error, fee,
@@ -411,20 +436,7 @@ impl CompactV2MetadataProjector {
     ) -> CompactV2MetadataProjectionResult<ProjectedCompactV2Metadata<'de>> {
         validate_limits(limits)?;
 
-        let mut outcome_cursor = outcome;
-        let execution_status = match self.schema {
-            CompactV2MetadataSchema::CurrentTypedError => {
-                read_current_execution_status(&mut outcome_cursor, limits)?
-            }
-            CompactV2MetadataSchema::LegacyRawError => {
-                read_legacy_execution_status(&mut outcome_cursor, limits)?
-            }
-        };
-        get::<u64>(&mut outcome_cursor)?; // fee
-        skip_return_data(&mut outcome_cursor, self.registry_entries)?;
-        get::<Option<u64>>(&mut outcome_cursor)?; // compute_units_consumed
-        get::<Option<u64>>(&mut outcome_cursor)?; // cost_units
-        require_split_plane_consumed("outcome", outcome_cursor)?;
+        let execution_status = self.project_split_outcome(outcome, limits)?;
 
         let mut loaded_cursor = loaded_addresses;
         let loaded_writable_addresses = read_loaded_addresses(
@@ -1931,6 +1943,38 @@ mod tests {
         assert!(output.pre.is_empty());
         assert_eq!(output.post[0].amount, 123);
         assert_eq!(capacities, (output.pre.capacity(), output.post.capacity()));
+    }
+
+    #[test]
+    fn outcome_only_projection_preserves_status_and_rejects_bad_lengths() {
+        for error in [
+            None,
+            Some(CompactTransactionError::InstructionError(
+                1,
+                blockzilla_format::CompactInstructionError::Custom(42),
+            )),
+        ] {
+            let value = full_metadata(error, Some(cpi_groups()));
+            let (mut outcome, loaded, inner) = current_split_bytes(&value);
+            let projector = projector(CompactV2MetadataSchema::CurrentTypedError);
+            let expected = projector
+                .project_split_planes(&outcome, &loaded, &inner, LIMITS)
+                .unwrap()
+                .execution_status;
+            assert_eq!(
+                projector.project_split_outcome(&outcome, LIMITS).unwrap(),
+                expected
+            );
+            for length in 0..outcome.len() {
+                assert!(
+                    projector
+                        .project_split_outcome(&outcome[..length], LIMITS)
+                        .is_err()
+                );
+            }
+            outcome.push(0xff);
+            assert!(projector.project_split_outcome(&outcome, LIMITS).is_err());
+        }
     }
 
     #[test]
