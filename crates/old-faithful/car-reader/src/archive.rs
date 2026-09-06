@@ -1,4 +1,7 @@
-//! Dedicated high-level reader for CAR epochs.
+//! High-level reader for CAR epochs.
+//!
+//! Enable the `archive` feature to use this module. It includes the native zstd
+//! decoder and the blocking HTTP client.
 //!
 //! [`CarArchive`] opens the fixed CAR and raw slot-index names from a public
 //! Worker, Old Faithful, or the matching local `car/<epoch>/` layout. It
@@ -16,14 +19,7 @@ use std::{
     path::{Path, PathBuf},
 };
 
-pub use blockzilla_query_sdk::{
-    ArchiveFormat, ArchiveInstructionSource, ArchiveInstructionSourceExt, ArchiveIoSnapshot,
-    BlockSink, BlockView, Error as QueryError, FnBlockSink, RecordedTokenBalance,
-    Result as QueryResult, ScanIoReceipt, ScanRange, ScanReceipt, ScanRequest, SourceIdentity,
-    SourceVerification, TokenBalanceCoverage, TokenBalanceRequirement, TokenBalanceSide,
-    TransactionView,
-};
-use of_car_reader::{
+use crate::{
     query_sdk::{CanonicalBlockPlan, CarInstructionSource, CarQueryError, CarQueryLimits},
     query_sdk_http::{
         CarHttpError, CarHttpIdentity, CarHttpOptions, CarHttpSession, CarHttpStats,
@@ -32,6 +28,13 @@ use of_car_reader::{
     slot_ranges::{
         SLOT_RANGE_ENTRY_SIZE, SLOTS_PER_EPOCH, SlotRangeError, decode_slot_range_entry,
     },
+};
+pub use blockzilla_query_sdk::{
+    ArchiveFormat, ArchiveInstructionSource, ArchiveInstructionSourceExt, ArchiveIoSnapshot,
+    BlockSink, BlockView, Error as QueryError, FnBlockSink, RecordedTokenBalance,
+    Result as QueryResult, ScanIoReceipt, ScanRange, ScanReceipt, ScanRequest, SourceIdentity,
+    SourceVerification, TokenBalanceCoverage, TokenBalanceRequirement, TokenBalanceSide,
+    TransactionView,
 };
 use sha2::{Digest, Sha256};
 use thiserror::Error;
@@ -1081,8 +1084,8 @@ fn combined_io(index: CarHttpStats, car: CarHttpStats) -> ArchiveIoSnapshot {
 
 fn object_set_binding(
     epoch: u64,
-    car: &of_car_reader::query_sdk_http::CarHttpIdentity,
-    index: &of_car_reader::query_sdk_http::CarHttpIdentity,
+    car: &crate::query_sdk_http::CarHttpIdentity,
+    index: &crate::query_sdk_http::CarHttpIdentity,
 ) -> String {
     let mut digest = Sha256::new();
     digest.update(OBJECT_SET_BINDING_DOMAIN);
@@ -1133,7 +1136,7 @@ fn local_file_set_binding(
 fn hash_http_identity(
     digest: &mut Sha256,
     label: &[u8],
-    identity: &of_car_reader::query_sdk_http::CarHttpIdentity,
+    identity: &crate::query_sdk_http::CarHttpIdentity,
 ) {
     hash_bytes(digest, label);
     hash_bytes(digest, identity.normalized_url.as_bytes());
@@ -1160,7 +1163,7 @@ fn hex_lower(bytes: &[u8]) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use of_car_reader::{
+    use crate::{
         query_sdk_http::{
             CarHttpIdentity, MAX_HTTP_CHUNK_BYTES, MAX_HTTP_WINDOW_CHUNKS, MAX_HTTP_WORKERS,
         },

@@ -26,6 +26,7 @@ libc = "0.2.183"
 blockzilla-read-sdk-legacy = { path = "../blockzilla-read-sdk-legacy" }
 anyhow = "1.0.102"
 blockzilla-index-archive-format = { path = "../blockzilla-index-archive-format" }
+blockzilla-indexer-v3-read-sdk = { path = "../blockzilla-indexer-v3-read-sdk" }
 blockzilla-query-sdk = { path = "../blockzilla-query-sdk" }
 blockzilla-compact-v2-reader = { path = "../blockzilla-read-sdk", features = ["http"] }
 blockzilla-user-program-index = { version = "0.2.0", path = "../blockzilla-user-program-index" }

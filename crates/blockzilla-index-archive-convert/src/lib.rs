@@ -5,6 +5,7 @@ pub mod basic_indexes;
 pub mod candidate;
 pub mod canonical_reader;
 pub mod container;
+pub mod convert;
 pub mod derived_indexes;
 pub mod pipeline;
 pub mod program_index;

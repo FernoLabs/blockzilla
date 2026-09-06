@@ -165,6 +165,8 @@
 //!
 //! # Other modules
 //!
+//! - `archive` opens a complete local or HTTP CAR epoch through the common
+//!   ordered query interface when the `archive` feature is enabled.
 //! - [`node`] decodes Old Faithful CBOR nodes and peeks node kinds.
 //! - [`slot_ranges`] reads and writes worker slot range files.
 //! - [`genesis`] parses Solana genesis archives when the `genesis` feature is
@@ -172,6 +174,8 @@
 //! - [`compact_index`] parses compact indexes when the `compact-index` feature
 //!   is enabled.
 
+#[cfg(feature = "archive")]
+pub mod archive;
 pub mod car_block_group;
 pub mod car_stream;
 #[cfg(feature = "compact-index")]

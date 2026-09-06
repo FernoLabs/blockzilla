@@ -14,7 +14,7 @@ use std::{
     str::FromStr,
 };
 
-use blockzilla_car_read_sdk::{ArchiveIoSnapshot, ScanIoReceipt, ScanReceipt, SourceVerification};
+use of_car_reader::archive::{ArchiveIoSnapshot, ScanIoReceipt, ScanReceipt, SourceVerification};
 use blockzilla_example_workloads::{CoverageReport, OutputReport};
 
 pub const DEFAULT_PUBLIC_ORIGIN: &str =

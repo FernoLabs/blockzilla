@@ -1,4 +1,4 @@
-//! A small targeted read SDK for one Blockzilla Indexer V3 epoch.
+//! The source-neutral engine and targeted reader for one Blockzilla Archive V3 epoch.
 //!
 //! [`IndexerV3Archive::open`] derives the V3 Worker route, pins the complete
 //! reader object set with exact lengths and strong ETags, prepares a bounded
@@ -15,23 +15,50 @@ use std::{
     sync::{Arc, Mutex},
 };
 
-use blockzilla_firebase_indexer::{
-    ADAPTIVE_V3_CONTROL_FILE, ADAPTIVE_V3_COVERAGE_FILE, ADAPTIVE_V3_PAGES_FILE, AdaptiveV3Reader,
-    INDEXER_V3_OPTIONAL_RETAINED_SIDECARS, INDEXER_V3_REQUIRED_RETAINED_SIDECARS,
-    IndexerV3InstructionSource, IndexerV3InstructionSourceError, IndexerV3RegistryIndex,
-    build_indexer_v3_candidate_blocks_for_key, indexer_v3_required_ledger_objects,
+#[path = "engine/standalone_v2.rs"]
+#[allow(dead_code)]
+mod indexer_v3_wire;
+// The frozen posting codec refers to its sibling by the original wire module name.
+use indexer_v3_wire as standalone_v2;
+
+#[path = "engine/standalone_account_postings.rs"]
+#[allow(dead_code)]
+mod indexer_v3_postings;
+
+mod indexer_v3_candidates;
+mod indexer_v3_query;
+mod indexer_v3_registry;
+
+pub use indexer_v3_candidates::{
+    IndexerV3CandidateBlocks, IndexerV3CandidateCounts, IndexerV3CandidateCoverage,
+    IndexerV3CandidateGeometry, IndexerV3CandidateKey, IndexerV3CandidatePolicy,
+    IndexerV3CandidateReadStats, build_indexer_v3_candidate_blocks,
+    build_indexer_v3_candidate_blocks_for_key,
 };
-pub use blockzilla_firebase_indexer::{
-    INDEXER_V3_PARALLEL_BLOCKS_PER_JOB, INDEXER_V3_PARALLEL_BUFFERED_BLOCKS_PER_WORKER,
+
+pub use indexer_v3_postings::{
+    ADAPTIVE_V3_CONTROL_FILE, ADAPTIVE_V3_COVERAGE_FILE, ADAPTIVE_V3_PAGES_FILE,
+    AdaptiveOpenReadStats, AdaptiveV3Reader, LimitedLookupResult as AdaptiveV3LimitedLookupResult,
+    LookupResult as AdaptiveV3LookupResult, PostingVisitSummary as AdaptiveV3PostingVisitSummary,
+    ResolvedCoverage as AdaptiveV3ResolvedCoverage, ResolvedPosting as AdaptiveV3ResolvedPosting,
+    RoleBlockVisitSummary as AdaptiveV3RoleBlockVisitSummary,
+    RoleMatchedBlock as AdaptiveV3RoleMatchedBlock,
+};
+pub use indexer_v3_query::{
+    INDEXER_V3_OPTIONAL_RETAINED_SIDECARS, INDEXER_V3_PARALLEL_BLOCKS_PER_JOB,
+    INDEXER_V3_PARALLEL_BUFFERED_BLOCKS_PER_WORKER,
     INDEXER_V3_PARALLEL_DECLARED_DECODED_BYTE_LIMIT,
     INDEXER_V3_PARALLEL_RETAINED_PROJECTION_SCRATCH_LIMIT,
     INDEXER_V3_PARALLEL_RETAINED_TRANSACTION_BUFFER_LIMIT,
     INDEXER_V3_PARALLEL_RETAINED_WORKSPACE_LIMIT, INDEXER_V3_PARALLEL_TRANSACTION_LIMIT,
-    IndexerV3CandidateBlocks, IndexerV3CandidateKey, IndexerV3CandidatePolicy,
+    INDEXER_V3_QUERY_REGISTRY_RETAINED_KEY_BYTES, INDEXER_V3_REQUIRED_RETAINED_SIDECARS,
+    IndexerV3InstructionSource, IndexerV3InstructionSourceError, IndexerV3InstructionSourceResult,
     IndexerV3ParallelScanReceipt, IndexerV3ParallelScanStats, IndexerV3RegistryReadMode,
     IndexerV3RegistryReadPolicy, IndexerV3RegistryReadReceipt, IndexerV3SelectiveScanReceipt,
-    IndexerV3SourceScope, MAX_INDEXER_V3_PARALLEL_WORKERS,
+    IndexerV3SourceScope, MAX_INDEXER_V3_PARALLEL_WORKERS, indexer_v3_required_ledger_objects,
 };
+pub use indexer_v3_registry::IndexerV3RegistryIndex;
+
 pub use blockzilla_query_sdk::{
     ArchiveFormat, ArchiveInstructionSource, ArchiveInstructionSourceExt, ArchiveIoSnapshot,
     BlockSink, BlockView, Error as QueryError, FnBlockSink, InstructionDataRequirement,

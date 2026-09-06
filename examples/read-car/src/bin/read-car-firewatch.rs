@@ -2,7 +2,7 @@ use blockzilla_example_workloads::ProgressSink;
 
 use std::{error::Error, time::Instant};
 
-use blockzilla_car_read_sdk::{ArchiveInstructionSource, CarArchive, ScanRequest};
+use of_car_reader::archive::{ArchiveInstructionSource, CarArchive, ScanRequest};
 use blockzilla_example_workloads::{FirewatchSink, firewatch_scan_request};
 use blockzilla_read_car::{
     DEFAULT_FIREWATCH_WALLET, OutputFacts, RunFacts, WorkloadSource, create_output, parse_pubkey,

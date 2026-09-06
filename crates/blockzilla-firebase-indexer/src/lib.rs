@@ -1,42 +1,27 @@
 //! Compatibility re-exports for the operational index command.
 //!
-//! New library users should depend on `blockzilla-user-program-index`.
+//! Index applications should depend on `blockzilla-user-program-index`.
+//! Archive V3 readers should depend on `blockzilla-indexer-v3-read-sdk`.
 
 pub use blockzilla_user_program_index::{
     build, decode, dense_accumulator, format, query, signer_rank,
 };
 
-#[path = "bin/archive-v2-account-projection/standalone_v2.rs"]
-#[allow(clippy::duplicate_mod, dead_code)]
-mod indexer_v3_wire;
-// The recovered posting reader is also compiled by its converter binary,
-// where its sibling has this original module name.
-use indexer_v3_wire as standalone_v2;
-
-#[path = "bin/archive-v2-account-projection/standalone_account_postings.rs"]
-#[allow(clippy::duplicate_mod, dead_code)]
-mod indexer_v3_postings;
-
-mod indexer_v3_candidates;
-mod indexer_v3_query;
-mod indexer_v3_registry;
-
-pub use indexer_v3_candidates::{
+// Archive V3 now owns its reader; retain these names for existing consumers.
+pub use blockzilla_indexer_v3_read_sdk::{
     IndexerV3CandidateBlocks, IndexerV3CandidateCounts, IndexerV3CandidateCoverage,
     IndexerV3CandidateGeometry, IndexerV3CandidateKey, IndexerV3CandidatePolicy,
     IndexerV3CandidateReadStats, build_indexer_v3_candidate_blocks,
     build_indexer_v3_candidate_blocks_for_key,
 };
 
-pub use indexer_v3_postings::{
+pub use blockzilla_indexer_v3_read_sdk::{
     ADAPTIVE_V3_CONTROL_FILE, ADAPTIVE_V3_COVERAGE_FILE, ADAPTIVE_V3_PAGES_FILE,
-    AdaptiveOpenReadStats, AdaptiveV3Reader, LimitedLookupResult as AdaptiveV3LimitedLookupResult,
-    LookupResult as AdaptiveV3LookupResult, PostingVisitSummary as AdaptiveV3PostingVisitSummary,
-    ResolvedCoverage as AdaptiveV3ResolvedCoverage, ResolvedPosting as AdaptiveV3ResolvedPosting,
-    RoleBlockVisitSummary as AdaptiveV3RoleBlockVisitSummary,
-    RoleMatchedBlock as AdaptiveV3RoleMatchedBlock,
+    AdaptiveOpenReadStats, AdaptiveV3LimitedLookupResult, AdaptiveV3LookupResult,
+    AdaptiveV3PostingVisitSummary, AdaptiveV3Reader, AdaptiveV3ResolvedCoverage,
+    AdaptiveV3ResolvedPosting, AdaptiveV3RoleBlockVisitSummary, AdaptiveV3RoleMatchedBlock,
 };
-pub use indexer_v3_query::{
+pub use blockzilla_indexer_v3_read_sdk::{
     INDEXER_V3_OPTIONAL_RETAINED_SIDECARS, INDEXER_V3_PARALLEL_BLOCKS_PER_JOB,
     INDEXER_V3_PARALLEL_BUFFERED_BLOCKS_PER_WORKER,
     INDEXER_V3_PARALLEL_DECLARED_DECODED_BYTE_LIMIT,
@@ -49,7 +34,7 @@ pub use indexer_v3_query::{
     IndexerV3RegistryReadPolicy, IndexerV3RegistryReadReceipt, IndexerV3SelectiveScanReceipt,
     IndexerV3SourceScope, MAX_INDEXER_V3_PARALLEL_WORKERS, indexer_v3_required_ledger_objects,
 };
-pub use indexer_v3_registry::IndexerV3RegistryIndex;
+pub use blockzilla_indexer_v3_read_sdk::IndexerV3RegistryIndex;
 
 // Wire-profile migration tooling, retained against the legacy read SDK.
 pub mod firewatch_controller_cgroup;

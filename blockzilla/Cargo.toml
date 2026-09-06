@@ -171,6 +171,7 @@ tokio-stream = { version = "0.1.18", features = ["sync"] }
 tower-http = { version = "0.6.8", features = ["cors"] }
 
 [dev-dependencies]
+postcard = { version = "1.1.3", features = ["alloc"] }
 tempfile = "3.27.0"
 
 [lints]

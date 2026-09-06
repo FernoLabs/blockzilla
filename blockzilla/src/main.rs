@@ -1142,6 +1142,8 @@ enum Commands {
 /// Archive V3 candidate construction, taken from the former `ia-*` binaries.
 #[derive(Subcommand)]
 enum ArchiveV3Commands {
+    /// Convert a Compact V2 generation into an unpublished Archive V3 candidate.
+    Convert(blockzilla_index_archive_convert::convert::ConvertOptions),
     /// Validate the complete physical layout of an unpublished candidate.
     ValidateCandidate {
         candidate_dir: PathBuf,
@@ -1189,6 +1191,9 @@ fn run_archive_v3(command: ArchiveV3Commands) -> anyhow::Result<()> {
     }
 
     match command {
+        ArchiveV3Commands::Convert(options) => {
+            blockzilla_index_archive_convert::convert::run(options)?;
+        }
         ArchiveV3Commands::ValidateCandidate { candidate_dir, epoch } => {
             let result = validate_complete_candidate(&candidate_dir, epoch)?;
             println!("archive_id={}", result.archive_id.to_hex());
@@ -2509,6 +2514,35 @@ fn json_f64(value: Option<f64>) -> String {
 
 #[cfg(test)]
 mod cli_tests {
+    #[test]
+    fn archive_v3_convert_command_parses() {
+        use clap::Parser;
+
+        let cli = super::Cli::try_parse_from([
+            "blockzilla",
+            "archive-v3",
+            "convert",
+            "v2-generation",
+            "v3-candidate",
+            "--workers",
+            "2",
+            "--pipeline-memory-limit-mib",
+            "128",
+        ])
+        .unwrap();
+        match cli.command {
+            super::Commands::ArchiveV3 {
+                command: super::ArchiveV3Commands::Convert(options),
+            } => {
+                assert_eq!(options.source, std::path::Path::new("v2-generation"));
+                assert_eq!(options.output, std::path::Path::new("v3-candidate"));
+                assert_eq!(options.workers, 2);
+                assert_eq!(options.pipeline_memory_limit_mib, 128);
+            }
+            _ => panic!("unexpected command"),
+        }
+    }
+
     use super::*;
 
     #[test]

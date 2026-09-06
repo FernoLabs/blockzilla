@@ -7,15 +7,15 @@ use std::{
     path::Path,
 };
 
-use anyhow::{Context, Result, bail, ensure};
-use blockzilla_archive_v2::ArchiveV2HotBlockIndexRow;
-use blockzilla_index_archive_convert::{
+use crate::{
     container::{FinishedObject, HeaderedWriter},
     source_v2_sidecars::{
         BlockSignatureCountCoverage, BlockhashRegistryLayout, PohBlockMapping, SourcePohSchema,
         detect_blockhash_registry_layout,
     },
 };
+use anyhow::{Context, Result, bail, ensure};
+use blockzilla_archive_v2::ArchiveV2HotBlockIndexRow;
 use blockzilla_index_archive_format::{
     ArchiveId, FILE_HEADER_LEN,
     catalog::blocks::PageSpan,
@@ -503,10 +503,15 @@ fn read_frame(reader: &mut impl Read, frame: usize) -> Result<Option<Vec<u8>>> {
 mod tests {
     use std::fs;
 
-    use blockzilla_archive_v2::{WincodeArchiveV2PohRecord, WincodeArchiveV2PohRecordLegacyNoSignatureCount, WincodeArchiveV2ShreddingRecord};
-    use blockzilla_compact::{CompactPohEntry, CompactPohEntryLegacyNoSignatureCount, CompactShredding};
-    use blockzilla_primitives::WincodeLeb128FramedWriter;
+    use blockzilla_archive_v2::{
+        WincodeArchiveV2PohRecord, WincodeArchiveV2PohRecordLegacyNoSignatureCount,
+        WincodeArchiveV2ShreddingRecord,
+    };
+    use blockzilla_compact::{
+        CompactPohEntry, CompactPohEntryLegacyNoSignatureCount, CompactShredding,
+    };
     use blockzilla_index_archive_format::sidecars::{framing, poh::DecodedPohFrame};
+    use blockzilla_primitives::WincodeLeb128FramedWriter;
     use tempfile::tempdir;
 
     use super::*;

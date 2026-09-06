@@ -19,9 +19,10 @@ use std::{
 use anyhow::{Context, Result, bail, ensure};
 use blockzilla_archive_v2::{ARCHIVE_V2_TX_FLAG_HAS_METADATA, ARCHIVE_V2_TX_FLAG_MESSAGE_V0, ARCHIVE_V2_TX_FLAG_METADATA_RAW_FALLBACK, ARCHIVE_V2_TX_FLAG_TX_RAW_FALLBACK, ArchiveV2HotBlockIndexRow, ArchiveV2HotMessagePayload};
 use blockzilla_compact_v2_reader::{
-    CompactV2MessageSchema, CompactV2MetadataSchema, PinnedLocalRangeSource, RangeSource,
-    decode_compact_v2_message,
+    CompactV2MessageSchema, CompactV2MetadataSchema, decode_compact_v2_message,
 };
+use blockzilla_source::RangeSource;
+use blockzilla_source_local::PinnedLocalRangeSource;
 use serde::{Deserialize, Serialize};
 use wincode::SchemaRead;
 
@@ -4047,7 +4048,8 @@ mod tests {
     use super::*;
     use blockzilla_compact::{CompactMetaV1, CompactReward};
     use blockzilla_primitives::{CompactPubkey, wincode_leb128_config};
-    use blockzilla_compact_v2_reader::{HttpRangeSource, HttpRangeSourceOptions, SourceError};
+    use blockzilla_source::SourceError;
+    use blockzilla_source_http::{HttpRangeSource, HttpRangeSourceOptions};
     use std::{
         collections::HashMap,
         io::Read as _,
@@ -4225,7 +4227,7 @@ mod tests {
         }
 
         impl RangeSource for HeaderOnlySource {
-            fn size(&self, object: &str) -> blockzilla_compact_v2_reader::SourceResult<Option<u64>> {
+            fn size(&self, object: &str) -> blockzilla_source::SourceResult<Option<u64>> {
                 Ok((object == INDEX_FILE).then_some(self.index_size))
             }
 
@@ -4234,7 +4236,7 @@ mod tests {
                 object: &str,
                 offset: u64,
                 length: usize,
-            ) -> blockzilla_compact_v2_reader::SourceResult<Vec<u8>> {
+            ) -> blockzilla_source::SourceResult<Vec<u8>> {
                 if object == INDEX_FILE && offset == 0 && length == FILE_HEADER_LEN {
                     return Ok(self.header.to_vec());
                 }

@@ -7,7 +7,6 @@ members = [
     "crates/source/blockzilla-source-cache",
 
     "blockzilla",
-    "crates/blockzilla-car-read-sdk",
     "crates/blockzilla-dex-parser",
     "crates/blockzilla-dump",
     "crates/blockzilla-example-workloads",

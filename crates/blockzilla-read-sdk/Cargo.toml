@@ -16,10 +16,11 @@ default = []
 http = ["dep:blockzilla-source-http", "dep:blockzilla-source-cache", "dep:url"]
 
 [dependencies]
-blockzilla-archive-v2 = { path = "../../crates/blockzilla-archive-v2", default-features = false }
-blockzilla-compact = { path = "../../crates/blockzilla-compact", default-features = false }
+# The reader must decode known-program log variants, including in isolated builds.
+blockzilla-archive-v2 = { path = "../../crates/blockzilla-archive-v2", default-features = false, features = ["known-program-logs"] }
+blockzilla-compact = { path = "../../crates/blockzilla-compact", default-features = false, features = ["known-program-logs"] }
 blockzilla-primitives = { path = "../../crates/blockzilla-primitives", default-features = false }
-blockzilla-program-logs = { path = "../../crates/blockzilla-program-logs", default-features = false }
+blockzilla-program-logs = { path = "../../crates/blockzilla-program-logs", default-features = false, features = ["known-program-logs"] }
 blockzilla-registry = { path = "../../crates/blockzilla-registry", default-features = false }
 blockzilla-replay-format = { path = "../blockzilla-replay-format" }
 url = { version = "2.5.8", optional = true }

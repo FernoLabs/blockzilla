@@ -1,9 +1,17 @@
-# Indexer V3 read SDK
+# Archive V3 reader
 
-This crate is the high-level reader for one Indexer V3 epoch. It hides Worker
+This crate owns the reader engine and public entry points for one Archive V3
+epoch. It hides Worker
 routes, HTTP range reads, strong ETag checks, object-set binding, cache
 selection, reverse target lookup, local split routing, and the low-level V3
 reader.
+
+The engine, adaptive posting reader, candidate selection, and registry lookup
+are implemented in this crate. `blockzilla-firebase-indexer` retains its prior
+exports for existing consumers. Archive V3 does not depend on that crate.
+Shared compact projection and metadata decoding still use the V2 reader and
+`blockzilla-user-program-index`. The current crate name and `IndexerV3` API
+names remain in place until the separate workspace rename.
 
 ## Sequential scan
 

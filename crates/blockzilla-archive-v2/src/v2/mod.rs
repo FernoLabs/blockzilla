@@ -18,6 +18,7 @@ use wincode::{
 use blockzilla_compact::CompactLogStream;
 use blockzilla_compact::{CompactBlockHeader, CompactInnerInstructions, CompactMessageHeader, CompactMetaV1, CompactReward, CompactShredding, CompactTransactionConfig, CompactTransactionError, OwnedCompactAddressTableLookup, OwnedCompactRecentBlockhash, OwnedCompactTransaction, SplitCompactIndexRecord};
 use blockzilla_primitives::{CompactPubkey, WincodeLeb128Config, wincode_leb128_config};
+use blockzilla_primitives::bounded_wincode_leb128_config;
 
 mod archive;
 pub use archive::*;
@@ -637,6 +638,35 @@ pub fn deserialize_archive_v2_hot_block_blob_borrowed_current(
     })
 }
 
+/// Decode exactly one current hot block with an explicit per-sequence allocation limit.
+///
+/// Trusted maintenance tools can use a larger limit to retain epoch-boundary rewards.
+/// The limit does not change the wire layout, and transaction rows, messages, and metadata
+/// remain borrowed from the input. Trailing bytes are rejected.
+pub fn deserialize_archive_v2_hot_block_blob_borrowed_current_with_preallocation_limit<
+    const PREALLOCATION_LIMIT_BYTES: usize,
+>(
+    bytes: &[u8],
+) -> ReadResult<BorrowedArchiveV2HotBlockBlob<'_>> {
+    let (header, tx_count, tx_rows, message_bytes, metadata_bytes): (
+        ArchiveV2HotBlockHeader,
+        u32,
+        &[[u8; ARCHIVE_V2_HOT_TX_ROW_LEN]],
+        &[u8],
+        &[u8],
+    ) = wincode::config::deserialize_exact(
+        bytes,
+        bounded_wincode_leb128_config::<PREALLOCATION_LIMIT_BYTES>(),
+    )?;
+    Ok(BorrowedArchiveV2HotBlockBlob {
+        header,
+        tx_count,
+        tx_rows,
+        message_bytes,
+        metadata_bytes,
+    })
+}
+
 #[derive(Debug, SchemaRead)]
 struct ArchiveV2HotBlockHeaderWithoutRewardsPrefix {
     slot: u64,
@@ -959,6 +989,99 @@ mod hot_block_slot_time_tests {
             assert!(region_start >= frame_start);
             assert!(region_end <= frame_end);
         }
+    }
+
+    #[test]
+    fn bounded_current_decoder_respects_reward_allocation_limit() {
+        const ONE_REWARD_BYTES: usize = core::mem::size_of::<CompactReward>();
+        let mut expected = current_hot_block_fixture();
+        expected.header.rewards = Some(ArchiveV2HotRewards {
+            num_partitions: Some(8),
+            decoded: vec![reward_fixture(17), reward_fixture(29)],
+        });
+        let bytes = wincode::config::serialize(&expected, wincode_leb128_config()).unwrap();
+
+        let error =
+            deserialize_archive_v2_hot_block_blob_borrowed_current_with_preallocation_limit::<
+                ONE_REWARD_BYTES,
+            >(&bytes)
+            .unwrap_err();
+        assert!(matches!(
+            error,
+            wincode::error::ReadError::PreallocationSizeLimit { needed, limit }
+                if needed == 2 * ONE_REWARD_BYTES && limit == ONE_REWARD_BYTES
+        ));
+
+        let borrowed =
+            deserialize_archive_v2_hot_block_blob_borrowed_current_with_preallocation_limit::<
+                { 2 * ONE_REWARD_BYTES },
+            >(&bytes)
+            .unwrap();
+        assert_eq!(
+            wincode::config::serialize(&borrowed.header, wincode_leb128_config()).unwrap(),
+            wincode::config::serialize(&expected.header, wincode_leb128_config()).unwrap()
+        );
+        assert_eq!(borrowed.tx_count, expected.tx_count);
+        assert_eq!(borrowed.tx_rows().collect::<Vec<_>>(), expected.tx_rows);
+        assert_eq!(borrowed.message_bytes, expected.message_bytes);
+        assert_eq!(borrowed.metadata_bytes, expected.metadata_bytes);
+
+        let current = deserialize_archive_v2_hot_block_blob_borrowed_current(&bytes).unwrap();
+        assert_eq!(borrowed.tx_rows.as_ptr(), current.tx_rows.as_ptr());
+        assert_eq!(borrowed.message_bytes.as_ptr(), current.message_bytes.as_ptr());
+        assert_eq!(borrowed.metadata_bytes.as_ptr(), current.metadata_bytes.as_ptr());
+    }
+
+    #[test]
+    fn bounded_current_decoder_rejects_hostile_reward_count() {
+        let mut block = current_hot_block_fixture();
+        block.header.rewards = Some(ArchiveV2HotRewards {
+            num_partitions: None,
+            decoded: Vec::new(),
+        });
+        let header = wincode::config::serialize(&block.header, wincode_leb128_config()).unwrap();
+        assert_eq!(header.last(), Some(&0));
+        let mut bytes = wincode::config::serialize(&block, wincode_leb128_config()).unwrap();
+        let hostile_count = wincode::config::serialize(&u64::MAX, wincode_leb128_config()).unwrap();
+        bytes.splice(header.len() - 1..header.len(), hostile_count);
+
+        let error =
+            deserialize_archive_v2_hot_block_blob_borrowed_current_with_preallocation_limit::<4096>(
+                &bytes,
+            )
+            .unwrap_err();
+        assert!(matches!(
+            error,
+            wincode::error::ReadError::PreallocationSizeLimit { limit: 4096, .. }
+        ));
+    }
+
+    #[test]
+    fn bounded_current_decoder_rejects_truncated_and_trailing_frames() {
+        let bytes =
+            wincode::config::serialize(&current_hot_block_fixture(), wincode_leb128_config())
+                .unwrap();
+        assert!(
+            deserialize_archive_v2_hot_block_blob_borrowed_current_with_preallocation_limit::<4096>(
+                &bytes,
+            )
+            .is_ok()
+        );
+        assert!(
+            deserialize_archive_v2_hot_block_blob_borrowed_current_with_preallocation_limit::<4096>(
+                &bytes[..bytes.len() - 1],
+            )
+            .is_err()
+        );
+
+        let mut trailing = bytes;
+        trailing.push(0xff);
+        assert!(
+            deserialize_archive_v2_hot_block_blob_borrowed_current_with_preallocation_limit::<4096>(
+                &trailing,
+            )
+            .is_err()
+        );
     }
 
     #[test]

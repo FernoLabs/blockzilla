@@ -2,7 +2,7 @@ use blockzilla_example_workloads::ProgressSink;
 
 use std::{error::Error, io, time::Instant};
 
-use blockzilla_car_read_sdk::{
+use of_car_reader::archive::{
     ArchiveInstructionSource, BlockSink, BlockView, CarArchive, QueryError, QueryResult,
     ScanRequest,
 };
@@ -81,7 +81,7 @@ fn main() -> Result<(), Box<dyn Error>> {
 
 fn open_archive(
     arguments: &blockzilla_read_car::CountArguments,
-) -> blockzilla_car_read_sdk::Result<CarArchive> {
+) -> of_car_reader::archive::Result<CarArchive> {
     match &arguments.source {
         CountSource::Network { origin } => {
             CarArchive::open(origin, arguments.epoch, arguments.expected_blocks)

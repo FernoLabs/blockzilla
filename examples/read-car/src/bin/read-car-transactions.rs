@@ -2,7 +2,7 @@
 
 use std::{env, error::Error, io::Write, num::NonZeroU32, path::PathBuf, time::Instant};
 
-use blockzilla_car_read_sdk::{
+use of_car_reader::archive::{
     ArchiveInstructionSource, CarArchive, CarArchiveOptions, ScanRequest,
 };
 use blockzilla_example_workloads::TransactionIdentityDumpSink;

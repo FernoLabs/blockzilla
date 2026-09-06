@@ -37,12 +37,14 @@ use blockzilla_compact_v2_reader::{
     CompactV2MessageProjectionError, CompactV2MessageProjector, CompactV2MetadataProjectionError,
     CompactV2MetadataProjectionLimits, CompactV2MetadataProjector, MAX_BLOCKHASH_REGISTRY_BYTES,
     MAX_SIGNED_MESSAGE_CANDIDATE_COMBINATIONS, MAX_VOTE_HASH_REGISTRY_BYTES,
-    PREVIOUS_BLOCKHASH_CURRENT_RECORD_LEN, PinnedLocalRangeSource, PreviousBlockhashTail,
+    PREVIOUS_BLOCKHASH_CURRENT_RECORD_LEN, PreviousBlockhashTail,
     PreviousBlockhashTailSchema, ProjectedCompactV2Message, ProjectedCompactV2MessageVersion,
-    RangeSource, ResolvedAddressTableLookup, SignedInstructionCandidates, SignedMessageCandidates,
+    ResolvedAddressTableLookup, SignedInstructionCandidates, SignedMessageCandidates,
     SignedMessageError, SignedMessageVersion, VOTE_HASH_RECORD_LEN, VoteHashRegistry,
     VoteHashResolver, parse_previous_blockhash_tail, select_signed_message_candidate_ed25519,
 };
+use blockzilla_source::RangeSource;
+use blockzilla_source_local::PinnedLocalRangeSource;
 use thiserror::Error;
 
 use crate::indexer_v3_postings::AdaptiveV3Reader;
@@ -244,7 +246,7 @@ pub enum IndexerV3InstructionSourceError {
     Reader(#[source] anyhow::Error),
 
     #[error("Indexer V3 range source error: {0}")]
-    RangeSource(#[from] blockzilla_compact_v2_reader::SourceError),
+    RangeSource(#[from] blockzilla_source::SourceError),
 
     #[error("Indexer V3 message projection error: {0}")]
     Message(#[from] CompactV2MessageProjectionError),
@@ -4325,25 +4327,25 @@ impl CountingRangeSource {
         })
     }
 
-    fn record(&self, bytes: usize) -> blockzilla_compact_v2_reader::SourceResult<()> {
+    fn record(&self, bytes: usize) -> blockzilla_source::SourceResult<()> {
         let bytes = u64::try_from(bytes).map_err(|_| {
-            blockzilla_compact_v2_reader::SourceError::Protocol("V3 returned-byte count exceeds u64".into())
+            blockzilla_source::SourceError::Protocol("V3 returned-byte count exceeds u64".into())
         })?;
         let mut stats = self.stats.lock().map_err(|_| {
-            blockzilla_compact_v2_reader::SourceError::Protocol("V3 source read counter is poisoned".into())
+            blockzilla_source::SourceError::Protocol("V3 source read counter is poisoned".into())
         })?;
         stats.calls = stats.calls.checked_add(1).ok_or_else(|| {
-            blockzilla_compact_v2_reader::SourceError::Protocol("V3 source read-call count overflow".into())
+            blockzilla_source::SourceError::Protocol("V3 source read-call count overflow".into())
         })?;
         stats.bytes = stats.bytes.checked_add(bytes).ok_or_else(|| {
-            blockzilla_compact_v2_reader::SourceError::Protocol("V3 source read-byte count overflow".into())
+            blockzilla_source::SourceError::Protocol("V3 source read-byte count overflow".into())
         })?;
         Ok(())
     }
 }
 
 impl RangeSource for CountingRangeSource {
-    fn size(&self, object: &str) -> blockzilla_compact_v2_reader::SourceResult<Option<u64>> {
+    fn size(&self, object: &str) -> blockzilla_source::SourceResult<Option<u64>> {
         self.inner.size(object)
     }
 
@@ -4352,7 +4354,7 @@ impl RangeSource for CountingRangeSource {
         object: &str,
         offset: u64,
         length: usize,
-    ) -> blockzilla_compact_v2_reader::SourceResult<Vec<u8>> {
+    ) -> blockzilla_source::SourceResult<Vec<u8>> {
         let bytes = self.inner.read_range(object, offset, length)?;
         self.record(bytes.len())?;
         Ok(bytes)
@@ -4364,7 +4366,7 @@ impl RangeSource for CountingRangeSource {
         offset: u64,
         length: usize,
         destination: &mut Vec<u8>,
-    ) -> blockzilla_compact_v2_reader::SourceResult<()> {
+    ) -> blockzilla_source::SourceResult<()> {
         self.inner
             .read_range_into(object, offset, length, destination)?;
         self.record(destination.len())
@@ -4375,7 +4377,7 @@ impl RangeSource for CountingRangeSource {
         object: &str,
         offset: u64,
         destination: &mut [u8],
-    ) -> blockzilla_compact_v2_reader::SourceResult<()> {
+    ) -> blockzilla_source::SourceResult<()> {
         self.inner
             .read_range_into_slice(object, offset, destination)?;
         self.record(destination.len())
@@ -5765,9 +5767,10 @@ mod tests {
         InstructionCoverage, InstructionDataCoverage, ScanRange,
     };
     use blockzilla_compact_v2_reader::{
-        LocalRangeSource, SignedInstruction, SignedMessage,
+        SignedInstruction, SignedMessage,
         reconstruct_instruction_data_candidates, serialize_signed_message,
     };
+    use blockzilla_source_local::LocalRangeSource;
     use ed25519_dalek::{Signer, SigningKey};
     use tempfile::TempDir;
     use wincode::SchemaWrite;
@@ -5837,7 +5840,7 @@ mod tests {
     }
 
     impl RangeSource for SignatureTrackingSource {
-        fn size(&self, object: &str) -> blockzilla_compact_v2_reader::SourceResult<Option<u64>> {
+        fn size(&self, object: &str) -> blockzilla_source::SourceResult<Option<u64>> {
             self.inner.size(object)
         }
 
@@ -5846,7 +5849,7 @@ mod tests {
             object: &str,
             offset: u64,
             length: usize,
-        ) -> blockzilla_compact_v2_reader::SourceResult<Vec<u8>> {
+        ) -> blockzilla_source::SourceResult<Vec<u8>> {
             if object == ARCHIVE_V2_SIGNATURES_FILE {
                 self.signature_reads
                     .lock()
@@ -8543,7 +8546,7 @@ mod tests {
         }
 
         impl RangeSource for SizeOverrideSource {
-            fn size(&self, object: &str) -> blockzilla_compact_v2_reader::SourceResult<Option<u64>> {
+            fn size(&self, object: &str) -> blockzilla_source::SourceResult<Option<u64>> {
                 if object == self.object {
                     Ok(Some(self.size))
                 } else {
@@ -8556,7 +8559,7 @@ mod tests {
                 object: &str,
                 offset: u64,
                 length: usize,
-            ) -> blockzilla_compact_v2_reader::SourceResult<Vec<u8>> {
+            ) -> blockzilla_source::SourceResult<Vec<u8>> {
                 if object == self.object {
                     self.body_reads.fetch_add(1, Ordering::Relaxed);
                 }
