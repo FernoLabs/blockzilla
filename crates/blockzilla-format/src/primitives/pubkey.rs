@@ -152,3 +152,11 @@ mod tests {
         assert_eq!(decoded, CompactPubkey::raw(pubkey));
     }
 }
+
+pub trait PubkeyCompactor {
+    fn compact_str(&self, k: &str) -> Option<CompactPubkey>;
+}
+
+pub type StrId = u32;
+pub type DataId = u32;
+pub type ProgramId = CompactPubkey;

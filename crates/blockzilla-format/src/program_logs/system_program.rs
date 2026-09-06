@@ -2,7 +2,8 @@ use serde::{Deserialize, Serialize};
 use solana_pubkey::Pubkey;
 use wincode::{SchemaRead, SchemaWrite};
 
-use crate::log::{StrId, StringTable};
+use crate::primitives::StrId;
+use crate::primitives::StringTable;
 use crate::{CompactPubkey, PubkeyCompactor, PubkeyResolver};
 
 /// System Program id

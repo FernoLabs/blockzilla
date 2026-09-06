@@ -8,6 +8,7 @@ pub mod skipped_slots;
 
 pub mod blockhash_registry;
 pub mod compact;
+pub mod primitives;
 pub mod pass1;
 pub mod program_logs;
 pub mod split_compact;
@@ -17,6 +18,7 @@ pub use blockhash_registry::BlockhashRegistry;
 pub use candidate_v1::*;
 pub use car_block_index::*;
 pub use compact::*;
+pub use primitives::*;
 pub use framed::*;
 pub use live_producer::*;
 pub use pass1::*;

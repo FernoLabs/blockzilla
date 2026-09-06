@@ -1,3 +1,4 @@
+use crate::primitives::PubkeyCompactor;
 #[cfg(not(target_arch = "wasm32"))]
 use memmap2::MmapOptions;
 use anyhow::{Context, Result};
@@ -107,9 +108,6 @@ struct GoFunctionLayout {
     group_count: usize,
 }
 
-pub trait PubkeyCompactor {
-    fn compact_str(&self, k: &str) -> Option<CompactPubkey>;
-}
 
 pub struct RawPubkeyCompactor;
 

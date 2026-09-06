@@ -1,4 +1,10 @@
 use anyhow::{Context, Result};
+use wincode::{
+    ReadResult, WriteResult,
+    error::invalid_value,
+    int_encoding::{ByteOrder, IntEncoding},
+    io::{Reader, Writer},
+};
 use std::io::{Read, Write};
 
 /// Canonical upper bound for one generic Wincode/LEB128 framed record.
@@ -263,3 +269,219 @@ mod tests {
         assert!(error.to_string().contains("exceeds configured limit"));
     }
 }
+
+#[derive(Debug, Clone, Copy)]
+pub struct Leb128;
+
+unsafe impl<B: ByteOrder> IntEncoding<B> for Leb128 {
+    const STATIC: bool = false;
+    const ZERO_COPY: bool = false;
+
+    #[inline]
+    fn encode_u16(val: u16, writer: impl Writer) -> WriteResult<()> {
+        encode_unsigned_leb128(val as u128, writer)
+    }
+
+    #[inline]
+    fn size_of_u16(val: u16) -> usize {
+        unsigned_leb128_size(val as u128)
+    }
+
+    #[inline]
+    fn decode_u16<'de>(reader: impl Reader<'de>) -> ReadResult<u16> {
+        Ok(decode_unsigned_leb128(reader, u16::BITS)? as u16)
+    }
+
+    #[inline]
+    fn encode_u32(val: u32, writer: impl Writer) -> WriteResult<()> {
+        encode_unsigned_leb128(val as u128, writer)
+    }
+
+    #[inline]
+    fn size_of_u32(val: u32) -> usize {
+        unsigned_leb128_size(val as u128)
+    }
+
+    #[inline]
+    fn decode_u32<'de>(reader: impl Reader<'de>) -> ReadResult<u32> {
+        Ok(decode_unsigned_leb128(reader, u32::BITS)? as u32)
+    }
+
+    #[inline]
+    fn encode_u64(val: u64, writer: impl Writer) -> WriteResult<()> {
+        encode_unsigned_leb128(val as u128, writer)
+    }
+
+    #[inline]
+    fn size_of_u64(val: u64) -> usize {
+        unsigned_leb128_size(val as u128)
+    }
+
+    #[inline]
+    fn decode_u64<'de>(reader: impl Reader<'de>) -> ReadResult<u64> {
+        Ok(decode_unsigned_leb128(reader, u64::BITS)? as u64)
+    }
+
+    #[inline]
+    fn encode_u128(val: u128, writer: impl Writer) -> WriteResult<()> {
+        encode_unsigned_leb128(val, writer)
+    }
+
+    #[inline]
+    fn size_of_u128(val: u128) -> usize {
+        unsigned_leb128_size(val)
+    }
+
+    #[inline]
+    fn decode_u128<'de>(reader: impl Reader<'de>) -> ReadResult<u128> {
+        decode_unsigned_leb128(reader, u128::BITS)
+    }
+
+    #[inline]
+    fn encode_i16(val: i16, writer: impl Writer) -> WriteResult<()> {
+        encode_unsigned_leb128(zigzag_i16(val) as u128, writer)
+    }
+
+    #[inline]
+    fn size_of_i16(val: i16) -> usize {
+        unsigned_leb128_size(zigzag_i16(val) as u128)
+    }
+
+    #[inline]
+    fn decode_i16<'de>(reader: impl Reader<'de>) -> ReadResult<i16> {
+        Ok(unzigzag_i16(
+            decode_unsigned_leb128(reader, u16::BITS)? as u16
+        ))
+    }
+
+    #[inline]
+    fn encode_i32(val: i32, writer: impl Writer) -> WriteResult<()> {
+        encode_unsigned_leb128(zigzag_i32(val) as u128, writer)
+    }
+
+    #[inline]
+    fn size_of_i32(val: i32) -> usize {
+        unsigned_leb128_size(zigzag_i32(val) as u128)
+    }
+
+    #[inline]
+    fn decode_i32<'de>(reader: impl Reader<'de>) -> ReadResult<i32> {
+        Ok(unzigzag_i32(
+            decode_unsigned_leb128(reader, u32::BITS)? as u32
+        ))
+    }
+
+    #[inline]
+    fn encode_i64(val: i64, writer: impl Writer) -> WriteResult<()> {
+        encode_unsigned_leb128(zigzag_i64(val) as u128, writer)
+    }
+
+    #[inline]
+    fn size_of_i64(val: i64) -> usize {
+        unsigned_leb128_size(zigzag_i64(val) as u128)
+    }
+
+    #[inline]
+    fn decode_i64<'de>(reader: impl Reader<'de>) -> ReadResult<i64> {
+        Ok(unzigzag_i64(
+            decode_unsigned_leb128(reader, u64::BITS)? as u64
+        ))
+    }
+
+    #[inline]
+    fn encode_i128(val: i128, writer: impl Writer) -> WriteResult<()> {
+        encode_unsigned_leb128(zigzag_i128(val), writer)
+    }
+
+    #[inline]
+    fn size_of_i128(val: i128) -> usize {
+        unsigned_leb128_size(zigzag_i128(val))
+    }
+
+    #[inline]
+    fn decode_i128<'de>(reader: impl Reader<'de>) -> ReadResult<i128> {
+        Ok(unzigzag_i128(decode_unsigned_leb128(reader, u128::BITS)?))
+    }
+}
+
+#[inline]
+fn unsigned_leb128_size(mut value: u128) -> usize {
+    let mut size = 1usize;
+    while value >= 0x80 {
+        value >>= 7;
+        size += 1;
+    }
+    size
+}
+
+#[inline]
+fn encode_unsigned_leb128(mut value: u128, mut writer: impl Writer) -> WriteResult<()> {
+    let mut bytes = [0u8; 19];
+    let mut len = 0usize;
+
+    loop {
+        let mut byte = (value & 0x7f) as u8;
+        value >>= 7;
+        if value != 0 {
+            byte |= 0x80;
+        }
+        bytes[len] = byte;
+        len += 1;
+        if value == 0 {
+            break;
+        }
+    }
+
+    writer.write(&bytes[..len])?;
+    Ok(())
+}
+
+#[inline]
+fn decode_unsigned_leb128<'de>(mut reader: impl Reader<'de>, max_bits: u32) -> ReadResult<u128> {
+    let max = if max_bits == u128::BITS {
+        u128::MAX
+    } else {
+        (1u128 << max_bits) - 1
+    };
+    let max_bytes = max_bits.div_ceil(7) as usize;
+    let mut value = 0u128;
+
+    for index in 0..max_bytes {
+        let byte = reader.take_byte()?;
+        let payload = u128::from(byte & 0x7f);
+        let shift = (index * 7) as u32;
+        if payload > (u128::MAX >> shift) {
+            return Err(invalid_value("LEB128 integer overflow"));
+        }
+        value |= payload << shift;
+
+        if byte & 0x80 == 0 {
+            if value > max {
+                return Err(invalid_value("LEB128 integer overflow"));
+            }
+            return Ok(value);
+        }
+    }
+
+    Err(invalid_value("LEB128 integer overflow"))
+}
+
+macro_rules! zigzag_pair {
+    ($encode:ident, $decode:ident, $signed:ty, $unsigned:ty) => {
+        #[inline]
+        fn $encode(value: $signed) -> $unsigned {
+            let unsigned = value as $unsigned;
+            unsigned.wrapping_shl(1) ^ ((value >> (<$signed>::BITS - 1)) as $unsigned)
+        }
+
+        #[inline]
+        fn $decode(value: $unsigned) -> $signed {
+            ((value >> 1) as $signed) ^ (-((value & 1) as $signed))
+        }
+    };
+}
+
+zigzag_pair!(zigzag_i16, unzigzag_i16, i16, u16);
+zigzag_pair!(zigzag_i32, unzigzag_i32, i32, u32);
+zigzag_pair!(zigzag_i64, unzigzag_i64, i64, u64);
+zigzag_pair!(zigzag_i128, unzigzag_i128, i128, u128);
