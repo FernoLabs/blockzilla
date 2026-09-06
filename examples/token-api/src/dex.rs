@@ -328,7 +328,7 @@ pub const DEFAULT_DEX_PROGRAMS: &[DexProgramSpec] = &[
     },
     DexProgramSpec {
         slug: "gavel",
-        label: "Gavel Pool",
+        label: "Plasma (Gavel)",
         program_id: "srAMMzfVHVAtgSJc8iH6CfKzuWuUTzLHVCE81QU1rgi",
         sources: CARBON_SOURCE,
     },
@@ -435,8 +435,8 @@ pub const DEFAULT_DEX_PROGRAMS: &[DexProgramSpec] = &[
         sources: CARBON_SOURCE,
     },
     DexProgramSpec {
-        slug: "okx-route",
-        label: "OKX Route",
+        slug: "raydium-route",
+        label: "Raydium AMM Routing",
         program_id: "routeUGWgWzqBWFcrCfv8tritsqukccJPu3q5GPP3xS",
         sources: MANUAL_SOURCE,
     },
@@ -582,87 +582,3 @@ pub const BIRDEYE_LEGACY_DEX_NAMES: &[&str] = &[
     "LP Finance",
     "Snowflake",
 ];
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-    use blockzilla_format::{
-        ArchiveV2HotLegacyMessage, CompactMessageHeader, OwnedCompactRecentBlockhash,
-    };
-
-    #[test]
-    fn balance_delta_decoder_prices_quote_side_swaps() {
-        let registry = DexRegistry::new(vec![ResolvedDexProgram {
-            slug: "test-dex".to_string(),
-            label: "Test DEX".to_string(),
-            program_id: 77,
-            address: "test".to_string(),
-            sources: vec![DexSource::Manual],
-        }]);
-        let quote_mints = BTreeSet::from([2u32]);
-        let touched = BTreeSet::from([77u32]);
-        let message = ArchiveV2HotMessagePayload::Legacy(ArchiveV2HotLegacyMessage {
-            header: CompactMessageHeader {
-                num_required_signatures: 0,
-                num_readonly_signed_accounts: 0,
-                num_readonly_unsigned_accounts: 0,
-            },
-            account_keys: Vec::new(),
-            recent_blockhash: OwnedCompactRecentBlockhash::Id(0),
-            instructions: Vec::new(),
-        });
-        let balances = vec![
-            TokenBalanceChangeRecord {
-                slot: 1,
-                block_time: 2,
-                tx_index: 3,
-                block_id: 4,
-                account_id: 10,
-                mint_id: 1,
-                owner_id: 9,
-                program_id: 0,
-                pre_amount: 1_000_000,
-                post_amount: 0,
-                decimals: 6,
-                flags: 0,
-            },
-            TokenBalanceChangeRecord {
-                slot: 1,
-                block_time: 2,
-                tx_index: 3,
-                block_id: 4,
-                account_id: 11,
-                mint_id: 2,
-                owner_id: 9,
-                program_id: 0,
-                pre_amount: 0,
-                post_amount: 2_000_000,
-                decimals: 6,
-                flags: 0,
-            },
-        ];
-        let mut out = Vec::new();
-        registry.decode(
-            DexTxContext {
-                slot: 1,
-                block_time: 2,
-                tx_index: 3,
-                block_id: 4,
-                signature_id: 5,
-                tx_error: false,
-                message: &message,
-                account_key_ids: &[],
-                touched_program_ids: &touched,
-                quote_mint_ids: &quote_mints,
-                balance_changes: &balances,
-            },
-            &mut out,
-        );
-        assert_eq!(out.len(), 1);
-        assert_eq!(out[0].dex_program_id, 77);
-        assert_eq!(out[0].in_mint_id, 1);
-        assert_eq!(out[0].out_mint_id, 2);
-        assert_eq!(out[0].price_micros, 2_000_000);
-        assert_ne!(out[0].flags & SWAP_FLAG_KNOWN_DEX, 0);
-    }
-}

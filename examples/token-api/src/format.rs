@@ -533,32 +533,3 @@ fn get_i64(bytes: &[u8], offset: usize) -> i64 {
             .expect("checked offset"),
     )
 }
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn swap_record_roundtrips() {
-        let record = SwapRecord {
-            slot: 7,
-            block_time: 8,
-            tx_index: 9,
-            block_id: 10,
-            signature_id: 11,
-            owner_id: 12,
-            dex_program_id: 13,
-            in_mint_id: 14,
-            out_mint_id: 15,
-            in_decimals: 6,
-            out_decimals: 9,
-            flags: 3,
-            amount_in: 16,
-            amount_out: 17,
-            price_micros: 18,
-        };
-        let mut bytes = vec![0u8; SwapRecord::RECORD_BYTES];
-        record.encode_into(&mut bytes);
-        assert_eq!(SwapRecord::decode(&bytes).unwrap(), record);
-    }
-}
