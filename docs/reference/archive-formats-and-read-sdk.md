@@ -2,27 +2,35 @@
 
 Status: workspace structure and reader entry points checked, 2026-09-06.
 
-Blockzilla has one reader crate and one small example package for each
-stored archive format. Start with the package for the format that you want to
-read. The reader hides object paths, HTTP ranges, cache rules, source checks, and
-wire decoding.
+Select the reader by the stored layout. Canonical Archive V3 is the format
+intended to replace V2. The frozen standalone Indexer V3 prototype has a
+different layout and reader; the two are not interchangeable.
 
 | Format | Reader | Example package |
 |---|---|---|
 | Old Faithful CAR | [`of-car-reader`](../../crates/old-faithful/of-car-reader/Readme.md), with the `archive` feature | [`read-car`](../../examples/read-car/README.md) |
 | Compact V2 | [`blockzilla-compact-v2-reader`](../../crates/compact-v2/blockzilla-compact-v2-reader/README.md) | [`read-compact-v2`](../../examples/read-compact-v2/README.md) |
-| Archive V3 | [`blockzilla-archive-v3-reader`](../../crates/archive-v3/blockzilla-archive-v3-reader/README.md) | [`read-archive-v3`](../../examples/read-archive-v3/README.md) |
+| Frozen standalone Indexer V3 prototype | [`blockzilla-archive-v3-reader`](../../crates/archive-v3/blockzilla-archive-v3-reader/README.md), `IndexerV3Archive` | Standard `read-archive-v3-*` workloads in [`read-archive-v3`](../../examples/read-archive-v3/README.md) |
+| Canonical Archive V3 converter output | [`blockzilla_archive_v3_reader::CanonicalReader`](../../crates/archive-v3/blockzilla-archive-v3-reader/src/canonical.rs), local files only | [`ia-read`](../../examples/read-archive-v3/src/bin/ia-read.rs) in the same example package |
 
 Use `of_car_reader::archive::CarArchive`,
 `blockzilla_compact_v2_reader::CompactV2Archive`, or
-`blockzilla_archive_v3_reader::IndexerV3Archive` for the selected format. Enable
-the Compact V2 reader's `http` feature for network access. Archive V3 keeps the
-`IndexerV3` prefix on its public Rust types for compatibility.
+`blockzilla_archive_v3_reader::IndexerV3Archive` for CAR, Compact V2, or the
+frozen prototype respectively. Enable the Compact V2 reader's `http` feature
+for network access. These APIs hide object paths, HTTP ranges, cache rules,
+source checks, and wire decoding.
 
-The readers publish the same ordered views from
+These three readers publish the same ordered views from
 [`blockzilla-model`](../../crates/blockzilla-model/README.md). This
 lets the three small binaries use the same application rules without a
-run-time format switch.
+run-time format switch. The canonical `CanonicalReader` instead returns
+format-native blocks and transactions. It does not yet implement the common
+`ArchiveInstructionSource` interface or HTTP access.
+
+`IndexerV3Archive` requires `archive-v2-standalone-blocks.index` and the
+standalone payload files. It cannot open canonical converter output, which
+uses `catalog/blocks.wincode`, `ledger/transactions.wincode`, and the other
+objects in the [canonical V3 format](../../crates/archive-v3/blockzilla-archive-v3/README.md).
 
 Use these two references:
 
@@ -31,8 +39,8 @@ Use these two references:
 
 ## Simple start
 
-The beginner workload programs default to epoch 900 and scan the complete
-epoch. During public-source staging, use the matching local folder:
+The CAR, V2, and prototype workload programs default to epoch 900 and scan the
+complete epoch. During public-source staging, use the matching local folder:
 
 ```console
 cargo run --release --locked -p blockzilla-read-car \
@@ -56,8 +64,18 @@ When the public sample is active, omit `--archive-root archive`. All three
 examples use the same configured origin and the same
 `/<format>/<epoch>/<file-name>` layout.
 
-Archive V3 still uses `indexer-v3` in its storage and HTTP paths, for example
+The frozen prototype uses `indexer-v3` in its storage and HTTP paths, for example
 `archive/indexer-v3/900/` and `/indexer-v3/900/<file-name>`.
+
+Read one slot from a canonical V3 converter candidate with:
+
+```console
+cargo run --release --locked -p blockzilla-read-archive-v3 \
+  --bin ia-read -- <candidate-directory> <slot>
+```
+
+Add `--full` to read the runtime effect columns. This local example uses
+`blockzilla_archive_v3_reader::CanonicalReader`.
 
 ## Design summary
 
@@ -65,10 +83,19 @@ Archive V3 still uses `indexer-v3` in its storage and HTTP paths, for example
   direct ordered ranges.
 - Compact V2 stores compressed row-oriented blocks and shared registries. It
   is small and efficient for a complete ordered scan.
-- Archive V3 separates semantic planes and adds adaptive reverse lookup. A
-  sparse query can reject blocks before it reads their payloads.
+- The frozen Indexer V3 prototype separates semantic planes and adds adaptive
+  reverse lookup. A sparse query can reject blocks before it reads their payloads.
+- Canonical Archive V3 uses a fixed-address block catalog, a merged transaction
+  stream, dictionaries, runtime effect files, and separate indexes and sidecars.
 
-These reader paths do not require an archive publication manifest, an archive
-payload hash, a partial hash, or an epoch seal. Network sources use fixed
-object names, exact lengths, and strong ETags. Local sources use pinned files.
+The CAR, V2, and prototype reader paths do not require an archive publication
+manifest, an archive payload hash, a partial hash, or an epoch seal. Network
+sources use fixed object names, exact lengths, and strong ETags. Local sources
+use pinned files.
 Application-output hashes check result parity only.
+
+The dedicated V3 reader owns `CanonicalReader`. The remaining V3 migration
+must add the shared model and byte-source interfaces for canonical output.
+Use small V2-to-V3 conversion fixtures and common-model output comparisons as
+gates before applications migrate. Reader extraction alone does not establish
+cross-format parity or production archive compatibility.

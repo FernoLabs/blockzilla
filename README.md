@@ -16,15 +16,21 @@ pre-1.0, so pin the Git revision used to produce an archive.
 | [`crates/`](crates) | Archive formats, readers, byte sources, and parsers. |
 | [`indexer/`](indexer/README.md) | Index builders, queries, extraction, and audits. |
 | [`runtime/`](runtime/README.md) | Experimental transaction replay. |
-| [`examples/`](examples) | CAR, Compact V2, and Archive V3 reader examples. |
+| [`examples/`](examples) | Archive reader examples and canonical V3 candidate checks. |
 | [`bench/`](bench) | Reader and conversion measurements. |
 | [`web/`](web/spyx-explorer/README.md) | Web applications. |
 | [`docs/`](docs/README.md) | Format specifications, architecture, and operating guides. |
 | [`scripts/`](scripts/README.md) | Build, benchmark, and operational helpers. |
 
-Archive V3 is the intended replacement for Archive V2. Both remain available
-during the transition. See the [workspace structure](docs/design/workspace-restructure.md)
-for crate locations and the remaining migration work.
+Archive V3 is the canonical format intended to replace Archive V2. Its converter
+candidates can be read locally with `ia-read`. The `IndexerV3Archive` API and
+standard `read-archive-v3-*` workloads still read the frozen standalone prototype;
+they cannot read canonical converter output. The dedicated V3 reader crate now
+owns `CanonicalReader`, used by `ia-read` and the converter's index builders.
+The common reader interface and HTTP support for canonical V3 remain to be
+added, with cross-format fixture checks. See the
+[workspace structure](docs/design/workspace-restructure.md) for crate locations
+and the remaining migration work.
 
 The shortest working newcomer path is:
 

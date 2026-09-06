@@ -1,6 +1,6 @@
 //! Source-neutral ordered query types for Blockzilla archive readers.
 //!
-//! Format adapters validate CAR, Compact V2, or Archive V3 data and publish
+//! Format adapters validate CAR, Compact V2, or standalone Indexer V3 data and publish
 //! one canonical transaction stream. A sink can therefore implement one query
 //! without depending on source-specific transaction types.
 

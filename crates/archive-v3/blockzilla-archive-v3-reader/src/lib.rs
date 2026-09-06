@@ -1,4 +1,11 @@
-//! The source-neutral engine and targeted reader for one Blockzilla Archive V3 epoch.
+//! Canonical Archive V3 reads and frozen standalone prototype compatibility.
+//!
+//! [`CanonicalReader`] opens local canonical converter output under `catalog/`
+//! and `ledger/`. It returns format-native blocks, transactions, and effects.
+//! It does not yet provide HTTP access or the common model's scan interface.
+//!
+//! [`IndexerV3Archive`] opens the different, frozen `archive-v2-standalone-*`
+//! prototype layout. The following source and cache APIs apply to that layout.
 //!
 //! [`IndexerV3Archive::open`] derives the V3 Worker route, pins the complete
 //! reader object set with exact lengths and strong ETags, prepares a bounded
@@ -7,6 +14,11 @@
 //! a local copy of the public archive tree. The advanced
 //! [`IndexerV3Archive::open_local_split`] entry point keeps support for
 //! operator layouts that store ledger files and retained sidecars separately.
+
+pub mod canonical;
+pub mod container;
+
+pub use canonical::CanonicalReader;
 
 use std::{
     collections::BTreeSet,

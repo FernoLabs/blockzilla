@@ -1,6 +1,10 @@
 # Compact V2 to Archive V3 converter
 
 This crate converts one immutable Compact V2 generation to Archive V3.
+The canonical local reader and object-decoding helpers are owned by
+[`blockzilla-archive-v3-reader`](../blockzilla-archive-v3-reader/README.md).
+This crate retains compatibility exports at `canonical_reader` and `container`;
+new read applications can depend on the reader directly.
 
 The converter is fail-closed. It writes a conversion candidate only when it
 can reconstruct and verify the exact signed transaction message. It does not

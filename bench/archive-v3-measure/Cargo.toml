@@ -16,12 +16,13 @@ name = "ia-compare-prefix"
 path = "src/bin/ia-compare-prefix.rs"
 
 [dependencies]
+blockzilla-archive-v3-convert = { path = "../../crates/archive-v3/blockzilla-archive-v3-convert" }
+blockzilla-archive-v3-reader = { path = "../../crates/archive-v3/blockzilla-archive-v3-reader" }
 blockzilla-archive-v2 = { path = "../../crates/compact-v2/blockzilla-archive-v2", default-features = false }
 blockzilla-compact = { path = "../../crates/compact-v2/blockzilla-compact", default-features = false }
 blockzilla-primitives = { path = "../../crates/blockzilla-primitives", default-features = false }
 anyhow = "1.0.104"
 blockzilla-archive-v3 = { path = "../../crates/archive-v3/blockzilla-archive-v3" }
-blockzilla-archive-v3-convert = { path = "../../crates/archive-v3/blockzilla-archive-v3-convert" }
 blockzilla-compact-v2-reader = { path = "../../crates/compact-v2/blockzilla-compact-v2-reader" }
 of-car-reader = { path = "../../crates/old-faithful/of-car-reader", version = "0.2.0", default-features = false, features = ["zstd-native"] }
 serde = { version = "1.0.229", features = ["derive"] }

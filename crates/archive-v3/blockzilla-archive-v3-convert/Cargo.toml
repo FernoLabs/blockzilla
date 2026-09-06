@@ -5,7 +5,7 @@ edition.workspace = true
 rust-version.workspace = true
 license.workspace = true
 repository.workspace = true
-description = "Convert an Archive V2 generation into Index Archive planes"
+description = "Convert an Archive V2 generation into canonical Archive V3"
 
 autobins = false
 
@@ -18,6 +18,7 @@ blockzilla-registry = { path = "../../compact-v2/blockzilla-registry", default-f
 anyhow = "1.0.104"
 clap = { version = "4.6.1", features = ["derive"] }
 blockzilla-archive-v3 = { path = "../blockzilla-archive-v3" }
+blockzilla-archive-v3-reader = { path = "../blockzilla-archive-v3-reader" }
 blockzilla-compact-v2-reader = { path = "../../compact-v2/blockzilla-compact-v2-reader" }
 serde = { version = "1.0.228", features = ["derive"] }
 serde_json = "1.0.149"

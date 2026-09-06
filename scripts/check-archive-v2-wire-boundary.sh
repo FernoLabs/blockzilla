@@ -10,7 +10,7 @@ pattern='ArchiveV2HotMessagePayload\s*=\s*wincode::config::deserialize|deseriali
 actual="$({
   rg --count-matches -U "$pattern" \
     --glob '*.rs' \
-    --glob '!crates/blockzilla-format/**' \
+    --glob '!crates/compact-v2/blockzilla-archive-v2/**' \
     --glob '!crates/compact-v2/blockzilla-compact-v2-reader/**' \
     . || true
 } | sed 's#^\./##' | LC_ALL=C sort)"

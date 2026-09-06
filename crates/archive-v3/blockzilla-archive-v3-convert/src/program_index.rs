@@ -24,8 +24,11 @@ use blockzilla_archive_v3::{
     runtime::inner_instructions::TransactionInner,
 };
 
+use blockzilla_archive_v3_reader::canonical::{
+    DEFAULT_MAX_BLOCK_DECODED_BYTES, scan_transactions_with_inner,
+};
+
 use crate::{
-    canonical_reader::{DEFAULT_MAX_BLOCK_DECODED_BYTES, scan_transactions_with_inner},
     container::{HeaderedWriter, decode_zstd_exact, validate_open_file},
     transaction_view::ResolvedAccounts,
 };
@@ -712,9 +715,11 @@ pub fn build_program_index(
         root.display()
     );
 
-    let archive_id =
-        crate::canonical_reader::CanonicalReader::open(root, DEFAULT_MAX_BLOCK_DECODED_BYTES)?
-            .archive_id();
+    let archive_id = blockzilla_archive_v3_reader::canonical::CanonicalReader::open(
+        root,
+        DEFAULT_MAX_BLOCK_DECODED_BYTES,
+    )?
+    .archive_id();
     let pubkey_count = validate_pubkey_dictionary(root, archive_id)?;
 
     let staging = StagingDirectory::create(root)?;

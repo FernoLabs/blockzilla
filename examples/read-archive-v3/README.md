@@ -1,4 +1,9 @@
-# Read Archive V3
+# Read the standalone Indexer V3 prototype
+
+The `read-archive-v3*` programs below read the frozen flat
+`archive-v2-standalone-*` layout. They cannot open canonical Archive V3 converter
+output. Use `ia-read` in this package for the new `catalog/` and `ledger/` layout;
+see the [converter guide](../../crates/archive-v3/blockzilla-archive-v3-convert/README.md).
 
 These four small programs show one job each. They use the Archive V3
 SDK directly and do not select an archive format at run time.

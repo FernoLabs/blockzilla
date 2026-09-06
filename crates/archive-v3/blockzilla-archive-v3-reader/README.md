@@ -1,18 +1,55 @@
 # Archive V3 reader
 
-This crate owns the reader engine and public entry points for one Archive V3
-epoch. It hides Worker
-routes, HTTP range reads, strong ETag checks, object-set binding, cache
-selection, reverse target lookup, local split routing, and the low-level V3
-reader.
+This crate has two explicit entry points for different stored layouts:
 
-The engine, adaptive posting reader, candidate selection, and registry lookup
-are implemented in this crate. `blockzilla-firebase-indexer` retains its prior
-exports for existing consumers. Archive V3 does not depend on that crate.
-Shared compact projection and metadata decoding still use the V2 reader and
-`blockzilla-user-program-index`. The crate is named
-`blockzilla-archive-v3-reader`. Its public Rust types keep the `IndexerV3`
-prefix for compatibility.
+- `CanonicalReader` reads local **canonical Archive V3** candidates. This is
+  the format intended to replace V2. It opens `catalog/blocks.wincode`,
+  `ledger/transactions.wincode`, and the objects defined by
+  [`blockzilla-archive-v3`](../blockzilla-archive-v3/README.md).
+- `IndexerV3Archive` reads the **frozen standalone Indexer V3 prototype**.
+  It requires `archive-v2-standalone-blocks.index`, the standalone transaction
+  directory and payload files, and retained sidecars. It supports local files
+  and HTTP ranges, cache selection, source checks, and reverse target lookup.
+
+`IndexerV3Archive` cannot read canonical converter output. The canonical
+reader returns format-native blocks, transactions, and runtime effects. It
+retains bounded page decoding and exact object-header checks. HTTP access
+and the common `ArchiveInstructionSource` interface remain migration work.
+
+## Canonical local read
+
+```rust,no_run
+use std::path::Path;
+use blockzilla_archive_v3_reader::{CanonicalReader, canonical::DEFAULT_MAX_BLOCK_DECODED_BYTES};
+
+# fn main() -> anyhow::Result<()> {
+let root = Path::new("candidate");
+let reader = CanonicalReader::open(root, DEFAULT_MAX_BLOCK_DECODED_BYTES)?;
+if let Some(replay) = reader.read_slot(100)? {
+    let full = reader.read_full_block(root, replay)?;
+    println!("{} transactions", full.replay.transactions.len());
+}
+# Ok(())
+# }
+```
+
+The [`ia-read` example](../../../examples/read-archive-v3/src/bin/ia-read.rs)
+uses this API. Its replay-only path does not open runtime effect files. The
+converter and index builders depend on this reader. The converter retains
+compatibility exports at `canonical_reader` and `container`; this crate has
+no converter dependency. Writer-backed integration tests remain in the
+converter, including split-frame and absent-versus-recorded-empty checks.
+
+The frozen prototype engine, adaptive posting reader, candidate selection,
+and registry lookup are also implemented here. Firebase retains its prior
+exports for existing consumers. This reader does not depend on Firebase.
+Prototype projection still uses the V2 reader and `blockzilla-user-program-index`.
+The prototype types keep their `IndexerV3` prefix during the transition.
+
+Small conversion fixtures and common-model comparisons must check output
+parity before applications migrate to a canonical shared interface.
+
+All operations below describe the frozen standalone prototype.
 
 ## Sequential scan
 
@@ -44,7 +81,7 @@ println!("{} blocks, {} transactions", receipt.blocks, receipt.transactions);
 ```
 
 The sequential profile caches the block index and the complete transaction
-directory for the selected V3 source. It range-reads signatures, registry
+directory for the selected prototype source. It range-reads signatures, registry
 rows, and required semantic payload planes. The cold setup can be large. A
 later ordered scan can read the transaction directory from the local cache.
 
@@ -231,9 +268,9 @@ let archive = IndexerV3Archive::open_local("archive", 900)?;
 # Ok::<(), blockzilla_archive_v3_reader::Error>(())
 ```
 
-The V3 file header records the encoded message and metadata schema. The reader
-uses those fields for every published sample, so the caller does not supply a
-schema option. The same open call reads every sample epoch.
+The prototype file header records the encoded message and metadata schema.
+The reader uses those fields for every published sample, so the caller does
+not supply a schema option. The same open call reads every sample epoch.
 
 ## Local split candidate
 

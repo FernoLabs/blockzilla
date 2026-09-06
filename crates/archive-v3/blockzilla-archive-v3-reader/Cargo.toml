@@ -6,7 +6,7 @@ rust-version.workspace = true
 license.workspace = true
 repository.workspace = true
 publish = false
-description = "Source-neutral engine and targeted reader for Blockzilla Archive V3"
+description = "Canonical Archive V3 local reader and frozen standalone prototype compatibility"
 readme = "README.md"
 
 [dependencies]

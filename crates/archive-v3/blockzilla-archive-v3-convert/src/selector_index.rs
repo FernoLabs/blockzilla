@@ -13,8 +13,9 @@ use std::{
 use anyhow::{Context, Result, bail, ensure};
 use blockzilla_archive_v3::{ArchiveId, FILE_HEADER_LEN, FileHeader, indexes::selectors};
 
+use blockzilla_archive_v3_reader::canonical::scan_transactions_with_inner;
+
 use crate::{
-    canonical_reader::scan_transactions_with_inner,
     container::{HeaderedWriter, decode_zstd_exact, validate_open_file},
     transaction_view::ResolvedAccounts,
 };
@@ -756,9 +757,11 @@ pub struct SelectorIndexReader {
 
 impl SelectorIndexReader {
     pub fn open(root: &Path) -> Result<Self> {
-        let archive_id =
-            crate::canonical_reader::CanonicalReader::open(root, DEFAULT_MAX_SOURCE_PAGE_BYTES)?
-                .archive_id();
+        let archive_id = blockzilla_archive_v3_reader::canonical::CanonicalReader::open(
+            root,
+            DEFAULT_MAX_SOURCE_PAGE_BYTES,
+        )?
+        .archive_id();
         let path = root.join(selectors::PATH);
         let file = File::open(&path).with_context(|| format!("open {}", path.display()))?;
         let header = validate_open_file(&file, selectors::PATH, archive_id)?;

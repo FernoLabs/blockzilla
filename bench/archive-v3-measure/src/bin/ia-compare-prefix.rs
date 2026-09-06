@@ -21,8 +21,8 @@ use blockzilla_archive_v3::{
     },
     sidecars::{framing, poh, shredding},
 };
-use blockzilla_archive_v3_convert::{
-    canonical_reader::{CanonicalReader, DEFAULT_MAX_BLOCK_DECODED_BYTES, validate_all_effects},
+use blockzilla_archive_v3_reader::{
+    canonical::{CanonicalReader, DEFAULT_MAX_BLOCK_DECODED_BYTES, validate_all_effects},
     container::{decode_zstd_exact, validate_open_file},
 };
 use serde::{Deserialize, Serialize};

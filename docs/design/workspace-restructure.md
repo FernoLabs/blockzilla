@@ -72,13 +72,18 @@ package. The excluded `examples/archive-token-events` source is also retained.
 ## Decisions
 
 - **Archive V3 replaces V2 in the long term.** Index Archive is the former
-  working name for V3. V3 is an archive format, not an indexer product.
-  Both versions remain supported during the transition. Existing archive
-  filenames, format identifiers, routes, and stored bytes are unchanged.
-- **One reader per format.** The CAR archive interface is now
+  working name for the canonical V3 format, with `catalog/blocks.wincode`
+  and `ledger/transactions.wincode`. The converter writes this format.
+  The frozen standalone Indexer V3 prototype is a different format: it uses
+  `archive-v2-standalone-blocks.index` and separate standalone payload files.
+  The folder move changes neither format's stored bytes, filenames, or routes.
+- **One reader per format is the target.** The CAR archive interface is now
   `of_car_reader::archive`, behind the opt-in `archive` feature. The V2
-  interface is `blockzilla_compact_v2_reader::archive`. The V3 engine now
-  belongs to `blockzilla-archive-v3-reader`; Firebase re-exports its old API.
+  interface is `blockzilla_compact_v2_reader::archive`. The dedicated V3
+  reader owns `CanonicalReader` for canonical local files and retains the
+  prototype's `IndexerV3Archive` API, which Firebase re-exports. These APIs open
+  different layouts. The converter retains compatibility exports of the local
+  reader; read applications use the reader crate directly.
 - **Keep the shared model.** `blockzilla-model` provides common block types,
   ordering checks, and sinks used by the examples. The per-format readers
   retain their own optimized operations.
@@ -107,36 +112,86 @@ The working-tree snapshot, branch merge, source extraction, V2 interface merge,
 format split, and migration off `blockzilla-format` are committed. The format
 split includes explicit feature forwarding and `unexpected_cfgs = "deny"`.
 
-The CAR interface is merged into its reader. The V3 engine is extracted from
-Firebase. The V3 converter is callable through
+The CAR interface is merged into its reader. The frozen Indexer V3 prototype
+engine is extracted from Firebase. The canonical V3 converter is callable through
 `blockzilla archive-v3 convert`, alongside the five V3 index commands. The
 standalone converter remains as a compatibility entry point to the same code.
-`ia-read` is now an advanced example. The account-scan and prefix-comparison
+`ia-read` is now an advanced example that reads canonical converter candidates
+through the dedicated reader's `CanonicalReader`. The reader also owns common
+header validation and bounded decompression. Pure account geometry is shared
+by readers and writers in the V3 format crate. Converter-backed tests retain
+the writer-to-reader checks without a reader-to-converter dependency.
+The standard `read-archive-v3-*` workloads still use
+the prototype reader. The account-scan and prefix-comparison
 commands live in the benchmark package. Their executable names are unchanged.
 
 The legacy reader has moved into `compat/`. That is a path change, not proof
 that its consumers have migrated. Package and folder names now match this
 layout. The model error-message edit that existed before this work is retained.
 
+The review also recovered the bounded borrowed decoder and the canonical LEB128
+guard lost during earlier changes. Historical source readers use an explicit
+tolerant integer mode to preserve the supported padded source fields. Both
+modes retain integer bounds and write the same canonical bytes. Canonical
+rewrite, PoH, shredding, and native V3 object validation remain strict.
+Integrity and signature checks now use the
+admitted source descriptor for both trusted and published readers. Parallel
+decoding keeps each block independently available to a worker. Test fixtures
+now supply the current source bindings and distinguish general CAR reconstruction
+from the ordered reader's physical-order contract.
+
 ## Remaining migration work
 
-1. Migrate the six remaining legacy-reader consumers: the CLI, archive gateway,
+1. Add the shared model and byte-source interfaces to the canonical local
+   reader in `blockzilla-archive-v3-reader`. Keep the prototype API explicit
+   during the transition. Gate this work with small V2-to-V3 fixtures that check reader output, metadata coverage,
+   signatures, and hashes, plus cross-format checks through `blockzilla-model`.
+   A reader move alone does not add HTTP support or common-model projection.
+2. Migrate the six remaining legacy-reader consumers: the CLI, archive gateway,
    token dumper, Firebase tools, replay tools, and SPYX query tools. Preserve
    selective metadata, signer projection, compact logs, and batch behavior.
-2. Extract shared record projection and decoding from the V2 reader and
-   user-program index. V3 still depends on these implementations. Removing
-   Firebase ownership does not remove those separate dependencies.
-3. Verify current archive message and metadata schemas, then finish the V2
+3. Extract shared record projection and decoding from the V2 reader and
+   user-program index. The prototype reader still depends on these
+   implementations. Removing Firebase ownership does not remove those
+   separate dependencies.
+4. Verify current archive message and metadata schemas, then finish the V2
    freeze. Only then remove legacy readers and wire-profile migration code.
    Moving a directory does not make it safe to delete.
-4. Restore the parked Firebase controller and the excluded archive-token-events
+5. Restore the parked Firebase controller and the excluded archive-token-events
    example against supported readers. Its old SDK-boundary test is not
    currently part of workspace CI.
-5. Complete cross-format output and performance checks on the archive corpus.
+6. Complete cross-format output and performance checks on the archive corpus.
    Local fixture tests and successful compilation do not prove production
    archive compatibility or release readiness.
 
 ## Verification
+
+The final local workspace run passed **3,703 tests**, with no failures and one
+ignored manual release-mode encoder benchmark. It completed 140 test harnesses.
+The canonical reader extraction also passed its isolated format, reader, and
+converter tests (101, 138, and 121). The final historical-source checks passed
+67 Archive V2 and 118 legacy-reader tests. The ordered-reader scheduling fix
+passed 100 repeated runs of the 12-worker contention test.
+
+Normal binary and all-target workspace builds pass, as do the optional
+contributor builds. The metadata repair and three shred-reconstruction suites
+pass (3, 8, 12, and 22 tests). The Old Faithful reader passes its WebAssembly
+build with `compact-index,zstd-wasm` and no default features.
+
+The command-line fixture check built an Archive V2 archive from the included
+CAR sample, then read it successfully: one block and 4,208 transactions.
+The earlier folder checks also passed the four Hivezilla shell suites, 58 shell
+syntax checks, nine archive-sample Python tests, 28 ingest-status Python tests,
+and the replay helper self-tests. Local Markdown links were checked after the
+moves and the reader documentation update.
+
+These results are from local macOS checks. They do not replace Linux CI,
+Worker release builds, or the production corpus checks listed above.
+
+Formatting and the Archive V2 wire-boundary check pass. The package mapping
+still accounts for all 46 packages, 165 targets, and 105 binaries. Third-party
+lockfile versions and checksums are unchanged. Captured SPYX process evidence
+is unchanged, and the pre-existing model error-message edit remains uncommitted.
 
 Save Cargo metadata before and after changes. Verify the full mapping with:
 

@@ -5,126 +5,15 @@ use std::io::Write;
 use anyhow::{Context, Result, ensure};
 
 use blockzilla_archive_v3::ledger::transactions::{
-    EFFECT_KIND_COUNT, EffectFileIndex, EffectState, LoadedAddresses, Message, MessageHeader,
-    PubkeyId, ROW_RESTART_INTERVAL, RowRestart, Transaction, TransactionBlockHeader,
-    encode_block_prefix,
+    EFFECT_KIND_COUNT, EffectFileIndex, EffectState, ROW_RESTART_INTERVAL, RowRestart, Transaction,
+    TransactionBlockHeader, encode_block_prefix,
 };
 
 use crate::container::decode_zstd_exact;
 
 const TRANSACTION_ARENA_ZSTD_LEVEL: i32 = 3;
 
-/// The resolved runtime account order for one transaction.
-///
-/// Known IDs are always static, loaded writable, then loaded readonly. When a
-/// V0 source did not retain loaded pubkeys, `resolved_len` still includes the
-/// exact width declared by its lookup descriptors, but `get` returns `None`
-/// for those unknown positions.
-#[derive(Debug, Clone, Copy)]
-pub(crate) struct ResolvedAccounts<'a> {
-    static_accounts: &'a [PubkeyId],
-    loaded_writable: &'a [PubkeyId],
-    loaded_readonly: &'a [PubkeyId],
-    resolved_len: usize,
-    complete: bool,
-}
-
-impl<'a> ResolvedAccounts<'a> {
-    pub(crate) fn new(transaction: &'a Transaction) -> Self {
-        match &transaction.message {
-            Message::Legacy {
-                static_accounts, ..
-            } => Self {
-                static_accounts,
-                loaded_writable: &[],
-                loaded_readonly: &[],
-                resolved_len: static_accounts.len(),
-                complete: true,
-            },
-            Message::V0 {
-                static_accounts,
-                loaded_addresses,
-                lookups,
-                ..
-            } => match loaded_addresses {
-                LoadedAddresses::Source { writable, readonly }
-                | LoadedAddresses::Backfilled { writable, readonly } => Self {
-                    static_accounts,
-                    loaded_writable: writable,
-                    loaded_readonly: readonly,
-                    resolved_len: static_accounts.len() + writable.len() + readonly.len(),
-                    complete: true,
-                },
-                LoadedAddresses::Unavailable => {
-                    let (writable, readonly) =
-                        lookups
-                            .iter()
-                            .fold((0_usize, 0_usize), |(writable, readonly), lookup| {
-                                (
-                                    writable + lookup.writable_indexes.len(),
-                                    readonly + lookup.readonly_indexes.len(),
-                                )
-                            });
-                    Self {
-                        static_accounts,
-                        loaded_writable: &[],
-                        loaded_readonly: &[],
-                        resolved_len: static_accounts.len() + writable + readonly,
-                        complete: false,
-                    }
-                }
-            },
-        }
-    }
-
-    pub(crate) fn static_len(self) -> usize {
-        self.static_accounts.len()
-    }
-
-    pub(crate) fn loaded_writable_len(self) -> usize {
-        self.loaded_writable.len()
-    }
-
-    pub(crate) fn resolved_len(self) -> usize {
-        self.resolved_len
-    }
-
-    pub(crate) fn is_complete(self) -> bool {
-        self.complete
-    }
-
-    pub(crate) fn get(self, position: usize) -> Option<u32> {
-        self.iter().nth(position)
-    }
-
-    pub(crate) fn iter(self) -> impl Iterator<Item = u32> + 'a {
-        self.static_accounts
-            .iter()
-            .chain(self.loaded_writable)
-            .chain(self.loaded_readonly)
-            .map(|id| id.0)
-    }
-
-    pub(crate) fn positional_roles(self, header: MessageHeader, position: usize) -> u8 {
-        use blockzilla_archive_v3::indexes::accounts::{ROLE_SIGNER, ROLE_WRITABLE};
-
-        let signer_count = usize::from(header.num_required_signatures);
-        let mut roles = 0;
-        if position < signer_count {
-            roles |= ROLE_SIGNER;
-            if position < signer_count - usize::from(header.num_readonly_signed) {
-                roles |= ROLE_WRITABLE;
-            }
-        } else if position < self.static_len() {
-            if position < self.static_len() - usize::from(header.num_readonly_unsigned) {
-                roles |= ROLE_WRITABLE;
-            }
-        } else if position < self.static_len() + self.loaded_writable_len() {
-            roles |= ROLE_WRITABLE;
-        }
-        roles
-    }
-}
+pub(crate) use blockzilla_archive_v3::ledger::accounts::ResolvedAccounts;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum TransactionArenaEncoding {
@@ -462,6 +351,9 @@ mod tests {
     use super::*;
     use crate::pipeline::{
         OrderedTask, PipelineConfig, run_inline_ordered_encoding_stage, run_ordered_encoding_stage,
+    };
+    use blockzilla_archive_v3::ledger::transactions::{
+        LoadedAddresses, Message, MessageHeader, PubkeyId,
     };
 
     fn empty_effects(transaction_count: usize) -> [EffectFileIndex; EFFECT_KIND_COUNT] {
