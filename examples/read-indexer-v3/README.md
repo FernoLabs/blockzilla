@@ -18,6 +18,10 @@ SDK directly and do not select an archive format at run time.
 Each program reads the complete selected epoch. There is no block-limit flag
 in these examples.
 
+USDC and Pump.fun exclude known failed transactions and report their count.
+Unknown execution status remains a coverage warning. The count example still
+includes all transactions. See the [shared workload rules](../../crates/blockzilla-example-workloads/README.md).
+
 ## Start with local archive files
 
 Build the examples:

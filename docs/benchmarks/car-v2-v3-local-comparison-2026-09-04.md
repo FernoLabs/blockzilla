@@ -69,4 +69,3 @@ these epochs. The other nine sample indexes have the expected number of rows.
 The active CAR reader is mainly single-threaded. V2 and V3 use 12 decode workers.
 This is part of the measured reader comparison and must be stated in an article.
 The final report must replace the projected CAR figures after the run completes.
-

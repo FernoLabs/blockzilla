@@ -11,6 +11,10 @@ Each program opens one Compact V2 archive, builds one query, and streams the
 result to one sink. The format-specific code stays in the program. Shared
 workload code makes the V2 and V3 workload output identical.
 
+USDC and Pump.fun exclude known failed transactions and report their count.
+Unknown execution status remains a coverage warning. The count example still
+includes all transactions. See the [shared workload rules](../../crates/blockzilla-example-workloads/README.md).
+
 ## Start with local archive files
 
 The clean public sample bucket is still being staged. To run the example now,
