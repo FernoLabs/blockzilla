@@ -24,12 +24,12 @@ use blockzilla_archive_v2::{
     WINCODE_ARCHIVE_V2_FLAG_ALL_PUBKEY_REF_COUNTS, WINCODE_ARCHIVE_V2_FLAG_FIRST_SEEN_REGISTRY,
     WINCODE_ARCHIVE_V2_FLAG_LEB128, WINCODE_ARCHIVE_V2_FLAG_NO_REGISTRY,
     WINCODE_ARCHIVE_V2_HOT_BLOCK_VERSION, WincodeArchiveV2Footer, WincodeArchiveV2Genesis,
-    canonicalize_archive_v2_metadata_owned, deserialize_archive_v2_hot_block_blob,
-    deserialize_archive_v2_hot_block_blob_borrowed_current,
+    deserialize_archive_v2_hot_block_blob, deserialize_archive_v2_hot_block_blob_borrowed_current,
     deserialize_archive_v2_hot_block_blob_borrowed_current_without_rewards,
+    normalize_archive_v2_historical_source_metadata_owned,
 };
 use blockzilla_compact::CompactMetaV1;
-use blockzilla_primitives::{CompactPubkey, bounded_wincode_leb128_config};
+use blockzilla_primitives::{CompactPubkey, bounded_historical_source_wincode_leb128_config};
 use rayon::prelude::*;
 use sha2::{Digest, Sha256};
 
@@ -3943,7 +3943,9 @@ fn decode_hot_metadata_record(
 
     wincode::config::deserialize_exact(
         frame,
-        bounded_wincode_leb128_config::<ARCHIVE_V2_DECODE_PREALLOCATION_LIMIT_BYTES>(),
+        bounded_historical_source_wincode_leb128_config::<
+            ARCHIVE_V2_DECODE_PREALLOCATION_LIMIT_BYTES,
+        >(),
     )
     .map_err(|error| Error::InvalidMetadata(format!("decode record {position}: {error}")))
 }
@@ -4331,7 +4333,7 @@ fn metadata_state(
             None
         }
         ArchiveV2MetadataWireProfile::UnmarkedHistoricalCompatibility => Some(
-            canonicalize_archive_v2_metadata_owned(bytes)
+            normalize_archive_v2_historical_source_metadata_owned(bytes)
                 .map_err(|error| Error::InvalidBlock {
                     slot,
                     message: format!("select metadata schema for tx {}: {error}", row.tx_index),
@@ -4342,7 +4344,9 @@ fn metadata_state(
     let decode_bytes = canonical.as_deref().unwrap_or(bytes);
     let metadata = wincode::config::deserialize_exact(
         decode_bytes,
-        bounded_wincode_leb128_config::<ARCHIVE_V2_DECODE_PREALLOCATION_LIMIT_BYTES>(),
+        bounded_historical_source_wincode_leb128_config::<
+            ARCHIVE_V2_DECODE_PREALLOCATION_LIMIT_BYTES,
+        >(),
     )
     .map_err(|error| Error::InvalidBlock {
         slot,
@@ -6901,6 +6905,81 @@ mod tests {
             decode_hot_metadata_record(&mut frame, 1, 1),
             Err(Error::InvalidMetadata(message)) if message.contains("preallocation")
         ));
+    }
+
+    #[test]
+    fn historical_metadata_payload_padding_keeps_frame_lengths_strict() {
+        let record = ArchiveV2HotMetaRecord::Footer(WincodeArchiveV2Footer::default());
+        let mut payload = wincode::config::serialize(&record, wincode_leb128_config()).unwrap();
+        assert_eq!(payload[1], 0);
+        payload.splice(1..2, [0x80, 0]);
+        assert!(
+            wincode::config::deserialize_exact::<ArchiveV2HotMetaRecord, _>(
+                &payload,
+                wincode_leb128_config()
+            )
+            .is_err()
+        );
+        assert!(matches!(
+            decode_hot_metadata_record(&mut payload, 1, 1).unwrap(),
+            ArchiveV2HotMetaRecord::Footer(_)
+        ));
+        assert!(read_frame(&mut [0x80, 0].as_slice(), 1024).is_err());
+    }
+
+    #[test]
+    fn historical_owned_metadata_padding_reads_current_and_compatibility_profiles() {
+        let fixture = Fixture::build();
+        let archive = ArchiveReader::open(fixture.source()).unwrap();
+        let mut block = archive.read_block(1).unwrap().block;
+        let mut row = block.tx_rows[0];
+        let MetadataState::Decoded(mut value) = metadata_state(
+            &block,
+            &row,
+            block.header.slot,
+            true,
+            ArchiveV2MetadataWireProfile::CurrentTypedErrorsV1,
+        )
+        .unwrap() else {
+            panic!("fixture metadata is decoded");
+        };
+        for has_error in [false, true] {
+            value.err = has_error.then_some(
+                blockzilla_compact::CompactTransactionError::InstructionError(
+                    0,
+                    blockzilla_compact::CompactInstructionError::Custom(0),
+                ),
+            );
+            value.fee = 0;
+            let canonical =
+                wincode::config::serialize(value.as_ref(), wincode_leb128_config()).unwrap();
+            let fee_offset = wincode::config::serialize(&value.err, wincode_leb128_config())
+                .unwrap()
+                .len();
+            block.metadata_bytes = canonical.clone();
+            block
+                .metadata_bytes
+                .splice(fee_offset..fee_offset + 1, [0x80, 0]);
+            if has_error {
+                block.metadata_bytes.splice(4..5, [0x80, 0]);
+            }
+            row.metadata_offset = 0;
+            row.metadata_len = block.metadata_bytes.len() as u32;
+            for profile in [
+                ArchiveV2MetadataWireProfile::CurrentTypedErrorsV1,
+                ArchiveV2MetadataWireProfile::UnmarkedHistoricalCompatibility,
+            ] {
+                let MetadataState::Decoded(decoded) =
+                    metadata_state(&block, &row, block.header.slot, true, profile).unwrap()
+                else {
+                    panic!("historical source metadata remains decoded");
+                };
+                assert_eq!(
+                    wincode::config::serialize(decoded.as_ref(), wincode_leb128_config()).unwrap(),
+                    canonical
+                );
+            }
+        }
     }
 
     #[test]

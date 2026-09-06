@@ -7,11 +7,11 @@
 
 use blockzilla_archive_v2::{
     ArchiveV2WireMetadataErrorIndex, ArchiveV2WireMetadataErrorSchema,
-    canonicalize_archive_v2_metadata_owned,
-    validate_archive_v2_metadata_error_prefix_for_selected_schema,
+    normalize_archive_v2_historical_source_metadata_owned,
+    validate_archive_v2_historical_source_metadata_error_prefix_for_selected_schema,
 };
 use blockzilla_compact::{CompactInnerInstruction, CompactTokenBalance, DataArray};
-use blockzilla_primitives::{CompactPubkey, WincodeLeb128Config};
+use blockzilla_primitives::{CompactPubkey, HistoricalSourceWincodeLeb128Config};
 use blockzilla_program_logs::{
     program_logs::system_program::PubkeyOrString, program_logs::system_program::SystemAddress,
     program_logs::system_program::SystemProgramLog, program_logs::token_2022::Token2022Log,
@@ -20,7 +20,8 @@ use wincode::{ReadResult, SchemaRead, error::invalid_tag_encoding, io::Reader};
 
 use crate::MAX_MESSAGE_ACCOUNTS;
 
-type Cfg = WincodeLeb128Config;
+// Current selects the source schema, not a minimal integer spelling.
+type Cfg = HistoricalSourceWincodeLeb128Config;
 const MAX_LOG_TABLE_ITEMS: usize = 1 << 20;
 
 #[derive(Default)]
@@ -1918,7 +1919,7 @@ pub fn visit_archive_v2_token_metadata_exact_ordered_with_selected_error_schema<
         ));
     }
 
-    let selected = validate_archive_v2_metadata_error_prefix_for_selected_schema(
+    let selected = validate_archive_v2_historical_source_metadata_error_prefix_for_selected_schema(
         bytes,
         error_schema,
         bytes.len(),
@@ -2004,7 +2005,7 @@ pub fn visit_archive_v2_compact_logs_exact_with_selected_error_schema<'de>(
         |_, _, _| {},
     )?;
 
-    let selected = validate_archive_v2_metadata_error_prefix_for_selected_schema(
+    let selected = validate_archive_v2_historical_source_metadata_error_prefix_for_selected_schema(
         bytes,
         error_schema,
         bytes.len(),
@@ -2275,8 +2276,8 @@ pub fn validate_archive_v2_metadata_exact(
     registry_entries: u32,
 ) -> ReadResult<ProjectedArchiveV2MetadataPrefix> {
     if bytes.first() != Some(&0) {
-        let (normalized, _schema) =
-            canonicalize_archive_v2_metadata_owned(bytes).map_err(|_| {
+        let (normalized, _schema) = normalize_archive_v2_historical_source_metadata_owned(bytes)
+            .map_err(|_| {
                 wincode::error::invalid_value(
                     "transaction metadata is neither one unambiguous current nor legacy record",
                 )
@@ -2376,6 +2377,75 @@ mod tests {
             return_data: None,
             compute_units_consumed: Some(100),
             cost_units: None,
+        }
+    }
+
+    #[test]
+    fn historical_source_metadata_padding_agrees_in_selected_and_compatibility_paths() {
+        let limits = ArchiveV2MetadataProjectionLimits {
+            total_message_accounts: 3,
+            top_level_instruction_count: 1,
+        };
+        for error in [
+            None,
+            Some(blockzilla_compact::CompactInstructionError::Custom(0)),
+            Some(blockzilla_compact::CompactInstructionError::BorshIoError(
+                "err".into(),
+            )),
+        ] {
+            let mut value = metadata(None);
+            value.err = error.map(|error| CompactTransactionError::InstructionError(0, error));
+            let canonical = wincode::config::serialize(&value, wincode_leb128_config()).unwrap();
+            let count_offset = wincode::config::serialize(&value.err, wincode_leb128_config())
+                .unwrap()
+                .len()
+                + wincode::config::serialize(&value.fee, wincode_leb128_config())
+                    .unwrap()
+                    .len();
+            assert_eq!(canonical[count_offset], 1);
+            let mut source = canonical.clone();
+            source.splice(count_offset..count_offset + 1, [0x81, 0]);
+            if value.err.is_some() {
+                source.splice(4..5, [canonical[4] | 0x80, 0]);
+            }
+            assert!(
+                wincode::config::deserialize_exact::<CompactMetaV1, _>(
+                    &source,
+                    wincode_leb128_config()
+                )
+                .is_err()
+            );
+            let selected =
+                visit_archive_v2_token_metadata_exact_ordered_with_selected_error_schema(
+                    &source,
+                    ArchiveV2WireMetadataErrorSchema::Current,
+                    limits,
+                    100,
+                    LogPayloadValidation::Full,
+                    |_, _| {},
+                    |_, _| {},
+                    |_, _, _| {},
+                )
+                .unwrap();
+            assert_eq!(selected.has_error, value.err.is_some());
+            assert_eq!(selected.pre_balance_count, 1);
+            let compatibility = validate_archive_v2_metadata_exact(&source, limits, 100).unwrap();
+            assert_eq!(compatibility.has_error, value.err.is_some());
+            source.push(0);
+            assert!(validate_archive_v2_metadata_exact(&source, limits, 100).is_err());
+            assert!(
+                visit_archive_v2_token_metadata_exact_ordered_with_selected_error_schema(
+                    &source,
+                    ArchiveV2WireMetadataErrorSchema::Current,
+                    limits,
+                    100,
+                    LogPayloadValidation::Full,
+                    |_, _| {},
+                    |_, _| {},
+                    |_, _, _| {},
+                )
+                .is_err()
+            );
         }
     }
 
@@ -2686,7 +2756,7 @@ mod tests {
             ),
             (legacy.as_slice(), ArchiveV2WireMetadataErrorSchema::Legacy),
         ] {
-            validate_archive_v2_metadata_error_prefix_for_selected_schema(
+            validate_archive_v2_historical_source_metadata_error_prefix_for_selected_schema(
                 bytes,
                 schema,
                 bytes.len(),

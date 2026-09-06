@@ -3,6 +3,8 @@
 //! The verifier recomputes PoH entry hashes from the exact transaction
 //! signature partition in the hot block rows. It does not verify Ed25519
 //! signatures and it does not compute archive seal hashes.
+//! Complete-source reports cover all admitted block rows. They do not assert
+//! that the source has a published manifest or change its trust level.
 
 use std::{
     fs::File,
@@ -235,7 +237,7 @@ impl ArchiveV2PohObserver for NoopPohObserver {
 /// Bounds for the inexpensive Archive V2 blockhash-continuity pass.
 ///
 /// This pass does not read the PoH or signature sidecars. For a nonzero epoch,
-/// callers must supply the immediately preceding published epoch so the full
+/// callers must supply the immediately preceding admitted epoch so the full
 /// 300-row boundary can be checked.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct ArchiveContinuityConfig {
@@ -739,8 +741,8 @@ pub fn preflight_archive_v2_poh(
     let binding = reader.binding();
     let mut report = ArchiveV2PohPreflightReport {
         complete_source: true,
-        cluster_id: reader.manifest().cluster_id.clone(),
-        generation_id: reader.manifest().generation_id.clone(),
+        cluster_id: reader.cluster_id().to_owned(),
+        generation_id: reader.generation_label().to_owned(),
         generation_digest: hex32(&binding.generation_digest),
         epoch: config.epoch,
         slots_per_epoch: config.slots_per_epoch,
@@ -972,8 +974,8 @@ fn validate_preflight_stream_binding(
         .size(ARCHIVE_V2_POH_FILE)?
         .ok_or_else(|| ArchiveIntegrityError::Invalid("poh.wincode is missing".to_owned()))?;
     if !preflight.complete_source
-        || preflight.cluster_id != reader.manifest().cluster_id
-        || preflight.generation_id != reader.manifest().generation_id
+        || preflight.cluster_id != reader.cluster_id()
+        || preflight.generation_id != reader.generation_label()
         || preflight.generation_digest != hex32(&binding.generation_digest)
         || preflight.source_total_blocks != reader.index().rows.len()
         || preflight.frames_bound != reader.index().rows.len() as u64
@@ -1633,11 +1635,11 @@ fn validate_common_config<S: RangeSource>(
             "slots-per-epoch must be positive".to_owned(),
         ));
     }
-    if reader.manifest().epoch != epoch || reader.manifest().slots_per_epoch != slots_per_epoch {
+    if reader.epoch() != epoch || reader.slots_per_epoch() != slots_per_epoch {
         return Err(ArchiveIntegrityError::Invalid(format!(
-            "integrity config epoch/schedule ({epoch}, {slots_per_epoch}) differs from source manifest ({}, {})",
-            reader.manifest().epoch,
-            reader.manifest().slots_per_epoch
+            "integrity config epoch/schedule ({epoch}, {slots_per_epoch}) differs from source descriptor ({}, {})",
+            reader.epoch(),
+            reader.slots_per_epoch()
         )));
     }
     Ok(())
@@ -2163,11 +2165,11 @@ fn validate_genesis_poh_bounds(
                 "epoch-0 genesis uses an unsupported warmup epoch schedule".to_owned(),
             ));
         }
-        if genesis.epoch_schedule.slots_per_epoch != reader.manifest().slots_per_epoch {
+        if genesis.epoch_schedule.slots_per_epoch != reader.slots_per_epoch() {
             return Err(ArchiveIntegrityError::Invalid(format!(
-                "epoch-0 genesis slots-per-epoch {} differs from source manifest {}",
+                "epoch-0 genesis slots-per-epoch {} differs from source descriptor {}",
                 genesis.epoch_schedule.slots_per_epoch,
-                reader.manifest().slots_per_epoch
+                reader.slots_per_epoch()
             )));
         }
         if genesis.ticks_per_slot != bounds.ticks_per_slot {
@@ -2263,16 +2265,16 @@ fn validate_predecessor_boundary<S: RangeSource>(
         ))
     })?;
     let expected_predecessor_epoch = epoch - 1;
-    if predecessor.manifest().epoch != expected_predecessor_epoch {
+    if predecessor.epoch() != expected_predecessor_epoch {
         return Err(ArchiveIntegrityError::Invalid(format!(
             "predecessor source declares epoch {}, expected {expected_predecessor_epoch}",
-            predecessor.manifest().epoch
+            predecessor.epoch()
         )));
     }
-    if predecessor.manifest().slots_per_epoch != slots_per_epoch {
+    if predecessor.slots_per_epoch() != slots_per_epoch {
         return Err(ArchiveIntegrityError::Invalid(format!(
             "predecessor slots-per-epoch {} differs from current verifier {slots_per_epoch}",
-            predecessor.manifest().slots_per_epoch
+            predecessor.slots_per_epoch()
         )));
     }
 
@@ -3260,8 +3262,11 @@ mod tests {
             )
             .unwrap();
             let reader = open_test_archive(source.path(), 2, 1_000);
+            assert!(reader.published_manifest().is_none());
             let report = preflight_archive_v2_poh(&reader, preflight_test_config()).unwrap();
             assert!(report.complete_source);
+            assert_eq!(report.cluster_id, reader.cluster_id());
+            assert_eq!(report.generation_id, reader.generation_label());
             assert_eq!(report.poh_schema, expected_schema);
             assert_eq!(report.frames_bound, 1);
             assert_eq!(report.entries_bound, 1);

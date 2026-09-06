@@ -18,6 +18,27 @@ pub type WincodeLeb128Config = wincode::config::Configuration<
     crate::Leb128,
 >;
 
+/// Historical source traversal accepts non-minimal integer spellings so exact
+/// source fields can be retained. Canonical validation must use
+/// [`WincodeLeb128Config`]. Both configurations write identical minimal bytes.
+pub type HistoricalSourceWincodeLeb128Config = wincode::config::Configuration<
+    true,
+    { wincode::config::PREALLOCATION_SIZE_LIMIT_DISABLED },
+    wincode::len::BincodeLen,
+    wincode::int_encoding::LittleEndian,
+    HistoricalSourceLeb128,
+>;
+
+/// Historical source traversal with an unchanged per-sequence allocation cap.
+pub type BoundedHistoricalSourceWincodeLeb128Config<const LIMIT: usize> =
+    wincode::config::Configuration<
+        true,
+        LIMIT,
+        wincode::len::BincodeLen,
+        wincode::int_encoding::LittleEndian,
+        HistoricalSourceLeb128,
+    >;
+
 /// Archive V2 reader configuration with the same wire grammar and a finite
 /// per-sequence allocation limit. The limit changes admission only; it does
 /// not change encoded bytes.
@@ -34,6 +55,21 @@ pub fn wincode_leb128_config() -> WincodeLeb128Config {
     wincode::config::Configuration::default()
         .disable_preallocation_size_limit()
         .with_int_encoding::<crate::Leb128>()
+}
+
+#[inline]
+pub fn historical_source_wincode_leb128_config() -> HistoricalSourceWincodeLeb128Config {
+    wincode::config::Configuration::default()
+        .disable_preallocation_size_limit()
+        .with_int_encoding::<HistoricalSourceLeb128>()
+}
+
+#[inline]
+pub fn bounded_historical_source_wincode_leb128_config<const LIMIT: usize>()
+-> BoundedHistoricalSourceWincodeLeb128Config<LIMIT> {
+    wincode::config::Configuration::default()
+        .with_preallocation_size_limit::<LIMIT>()
+        .with_int_encoding::<HistoricalSourceLeb128>()
 }
 
 #[inline]
@@ -237,6 +273,150 @@ mod tests {
     use super::*;
 
     #[test]
+    fn historical_source_integers_accept_padding_but_write_canonical_bytes() {
+        for (bytes, canonical, value) in [
+            (&[0x80, 0][..], &[0][..], 0_u64),
+            (&[0x81, 0][..], &[1][..], 1),
+            (&[0x80, 0x81, 0][..], &[0x80, 1][..], 128),
+        ] {
+            assert!(
+                wincode::config::deserialize_exact::<u64, _>(bytes, wincode_leb128_config())
+                    .is_err()
+            );
+            assert_eq!(
+                wincode::config::deserialize_exact::<u64, _>(
+                    bytes,
+                    historical_source_wincode_leb128_config()
+                )
+                .unwrap(),
+                value,
+            );
+            assert_eq!(
+                wincode::config::serialize(&value, historical_source_wincode_leb128_config())
+                    .unwrap(),
+                canonical
+            );
+        }
+        assert_eq!(
+            wincode::config::deserialize_exact::<i64, _>(
+                &[0x81, 0x82, 0],
+                historical_source_wincode_leb128_config()
+            )
+            .unwrap(),
+            -129,
+        );
+    }
+
+    #[test]
+    fn both_leb128_modes_reject_overflow_and_truncation() {
+        for bits in [16_u32, 32, 64, 128] {
+            let max_bytes = bits.div_ceil(7) as usize;
+            let mut overflow = vec![0xff; max_bytes];
+            overflow[max_bytes - 1] = 1 << (bits % 7);
+            for bytes in [
+                &[0x80][..],
+                overflow.as_slice(),
+                vec![0x80; max_bytes].as_slice(),
+            ] {
+                assert!(decode_unsigned_leb128::<true>(bytes, bits).is_err());
+                assert!(decode_unsigned_leb128::<false>(bytes, bits).is_err());
+            }
+        }
+    }
+
+    #[test]
+    fn historical_source_sequence_lengths_keep_allocation_limits() {
+        let config = wincode::config::Configuration::default()
+            .with_preallocation_size_limit::<4>()
+            .with_int_encoding::<HistoricalSourceLeb128>();
+        assert_eq!(
+            wincode::config::deserialize_exact::<Vec<u8>, _>(&[0x81, 0, 0x42], config).unwrap(),
+            [0x42],
+        );
+        let error =
+            wincode::config::deserialize_exact::<Vec<u8>, _>(&[0x85, 0], config).unwrap_err();
+        assert!(matches!(
+            error,
+            wincode::error::ReadError::PreallocationSizeLimit { .. }
+        ));
+    }
+
+    #[test]
+    fn leb128_integer_decoders_reject_non_minimal_encodings() {
+        macro_rules! check_types {
+            ($($ty:ty),+ $(,)?) => {
+                $(
+                    for bytes in [
+                        &[0x80, 0x00][..],
+                        &[0x81, 0x00][..],
+                        &[0xff, 0x00][..],
+                        &[0x80, 0x81, 0x00][..],
+                    ] {
+                        let error = wincode::config::deserialize_exact::<$ty, _>(
+                            bytes,
+                            wincode_leb128_config(),
+                        )
+                        .unwrap_err();
+                        assert!(error.to_string().contains("non-minimal LEB128 integer"));
+                    }
+                )+
+            };
+        }
+        check_types!(u16, u32, u64, u128, i16, i32, i64, i128);
+    }
+
+    #[test]
+    fn leb128_integer_decoders_preserve_canonical_boundaries() {
+        macro_rules! check_types {
+            ($($ty:ty),+ $(,)?) => {
+                $(
+                    for value in [<$ty>::MIN, 0, 1, 127, 128, 16_383, 16_384, <$ty>::MAX] {
+                        let bytes = wincode::config::serialize(&value, wincode_leb128_config())
+                            .unwrap();
+                        let decoded = wincode::config::deserialize_exact::<$ty, _>(
+                            &bytes,
+                            bounded_wincode_leb128_config::<1024>(),
+                        )
+                        .unwrap();
+                        assert_eq!(decoded, value);
+                    }
+                )+
+            };
+        }
+        check_types!(u16, u32, u64, u128, i16, i32, i64, i128);
+        assert_eq!(
+            wincode::config::deserialize_exact::<u64, _>(&[0x80, 0x01], wincode_leb128_config(),)
+                .unwrap(),
+            128,
+        );
+        assert_eq!(
+            wincode::config::deserialize_exact::<i64, _>(&[0x81, 0x02], wincode_leb128_config(),)
+                .unwrap(),
+            -129,
+        );
+    }
+
+    #[test]
+    fn bounded_leb128_decoder_rejects_non_minimal_sequence_lengths() {
+        for bytes in [&[0x80, 0x00][..], &[0x81, 0x00, 0x42][..]] {
+            let error = wincode::config::deserialize_exact::<Vec<u8>, _>(
+                bytes,
+                bounded_wincode_leb128_config::<1024>(),
+            )
+            .unwrap_err();
+            assert!(error.to_string().contains("non-minimal LEB128 integer"));
+        }
+        assert_eq!(
+            wincode::config::deserialize_exact::<Vec<u8>, _>(
+                &[0x01, 0x42],
+                bounded_wincode_leb128_config::<1024>(),
+            )
+            .unwrap(),
+            [0x42],
+        );
+    }
+
+    #[test]
     fn u32_varint_reader_rejects_non_minimal_overflow_and_truncation() {
         assert!(read_u32_varint(&mut [0x80, 0x00].as_slice()).is_err());
         assert!(read_u32_varint(&mut [0xff, 0xff, 0xff, 0xff, 0x10].as_slice()).is_err());
@@ -289,7 +469,7 @@ unsafe impl<B: ByteOrder> IntEncoding<B> for Leb128 {
 
     #[inline]
     fn decode_u16<'de>(reader: impl Reader<'de>) -> ReadResult<u16> {
-        Ok(decode_unsigned_leb128(reader, u16::BITS)? as u16)
+        Ok(decode_unsigned_leb128::<true>(reader, u16::BITS)? as u16)
     }
 
     #[inline]
@@ -304,7 +484,7 @@ unsafe impl<B: ByteOrder> IntEncoding<B> for Leb128 {
 
     #[inline]
     fn decode_u32<'de>(reader: impl Reader<'de>) -> ReadResult<u32> {
-        Ok(decode_unsigned_leb128(reader, u32::BITS)? as u32)
+        Ok(decode_unsigned_leb128::<true>(reader, u32::BITS)? as u32)
     }
 
     #[inline]
@@ -319,7 +499,7 @@ unsafe impl<B: ByteOrder> IntEncoding<B> for Leb128 {
 
     #[inline]
     fn decode_u64<'de>(reader: impl Reader<'de>) -> ReadResult<u64> {
-        Ok(decode_unsigned_leb128(reader, u64::BITS)? as u64)
+        Ok(decode_unsigned_leb128::<true>(reader, u64::BITS)? as u64)
     }
 
     #[inline]
@@ -334,7 +514,7 @@ unsafe impl<B: ByteOrder> IntEncoding<B> for Leb128 {
 
     #[inline]
     fn decode_u128<'de>(reader: impl Reader<'de>) -> ReadResult<u128> {
-        decode_unsigned_leb128(reader, u128::BITS)
+        decode_unsigned_leb128::<true>(reader, u128::BITS)
     }
 
     #[inline]
@@ -350,7 +530,7 @@ unsafe impl<B: ByteOrder> IntEncoding<B> for Leb128 {
     #[inline]
     fn decode_i16<'de>(reader: impl Reader<'de>) -> ReadResult<i16> {
         Ok(unzigzag_i16(
-            decode_unsigned_leb128(reader, u16::BITS)? as u16
+            decode_unsigned_leb128::<true>(reader, u16::BITS)? as u16,
         ))
     }
 
@@ -367,7 +547,7 @@ unsafe impl<B: ByteOrder> IntEncoding<B> for Leb128 {
     #[inline]
     fn decode_i32<'de>(reader: impl Reader<'de>) -> ReadResult<i32> {
         Ok(unzigzag_i32(
-            decode_unsigned_leb128(reader, u32::BITS)? as u32
+            decode_unsigned_leb128::<true>(reader, u32::BITS)? as u32,
         ))
     }
 
@@ -384,7 +564,7 @@ unsafe impl<B: ByteOrder> IntEncoding<B> for Leb128 {
     #[inline]
     fn decode_i64<'de>(reader: impl Reader<'de>) -> ReadResult<i64> {
         Ok(unzigzag_i64(
-            decode_unsigned_leb128(reader, u64::BITS)? as u64
+            decode_unsigned_leb128::<true>(reader, u64::BITS)? as u64,
         ))
     }
 
@@ -400,8 +580,59 @@ unsafe impl<B: ByteOrder> IntEncoding<B> for Leb128 {
 
     #[inline]
     fn decode_i128<'de>(reader: impl Reader<'de>) -> ReadResult<i128> {
-        Ok(unzigzag_i128(decode_unsigned_leb128(reader, u128::BITS)?))
+        Ok(unzigzag_i128(decode_unsigned_leb128::<true>(
+            reader,
+            u128::BITS,
+        )?))
     }
+}
+
+/// Read historical source integers without normalizing their spelling.
+/// Overflow and truncation checks are identical to [`Leb128`]; only minimality
+/// differs. Writers still delegate to the canonical integer encoder.
+#[derive(Debug, Clone, Copy)]
+pub struct HistoricalSourceLeb128;
+
+macro_rules! historical_source_integer {
+    ($ty:ty, $encode:ident, $size:ident, $decode:ident, $convert:expr) => {
+        #[inline]
+        fn $encode(value: $ty, writer: impl Writer) -> WriteResult<()> {
+            <Leb128 as IntEncoding<B>>::$encode(value, writer)
+        }
+
+        #[inline]
+        fn $size(value: $ty) -> usize {
+            <Leb128 as IntEncoding<B>>::$size(value)
+        }
+
+        #[inline]
+        fn $decode<'de>(reader: impl Reader<'de>) -> ReadResult<$ty> {
+            let value = decode_unsigned_leb128::<false>(reader, <$ty>::BITS)?;
+            Ok(($convert)(value))
+        }
+    };
+}
+
+// SAFETY: sizes and writes use the canonical implementation. Reads use its
+// shared bounded loop and the same unsigned or zigzag value conversion.
+unsafe impl<B: ByteOrder> IntEncoding<B> for HistoricalSourceLeb128 {
+    const STATIC: bool = false;
+    const ZERO_COPY: bool = false;
+
+    historical_source_integer!(u16, encode_u16, size_of_u16, decode_u16, |v| v as u16);
+    historical_source_integer!(u32, encode_u32, size_of_u32, decode_u32, |v| v as u32);
+    historical_source_integer!(u64, encode_u64, size_of_u64, decode_u64, |v| v as u64);
+    historical_source_integer!(u128, encode_u128, size_of_u128, decode_u128, |v| v);
+    historical_source_integer!(i16, encode_i16, size_of_i16, decode_i16, |v| unzigzag_i16(
+        v as u16
+    ));
+    historical_source_integer!(i32, encode_i32, size_of_i32, decode_i32, |v| unzigzag_i32(
+        v as u32
+    ));
+    historical_source_integer!(i64, encode_i64, size_of_i64, decode_i64, |v| unzigzag_i64(
+        v as u64
+    ));
+    historical_source_integer!(i128, encode_i128, size_of_i128, decode_i128, unzigzag_i128);
 }
 
 #[inline]
@@ -437,7 +668,10 @@ fn encode_unsigned_leb128(mut value: u128, mut writer: impl Writer) -> WriteResu
 }
 
 #[inline]
-fn decode_unsigned_leb128<'de>(mut reader: impl Reader<'de>, max_bits: u32) -> ReadResult<u128> {
+fn decode_unsigned_leb128<'de, const REQUIRE_MINIMAL: bool>(
+    mut reader: impl Reader<'de>,
+    max_bits: u32,
+) -> ReadResult<u128> {
     let max = if max_bits == u128::BITS {
         u128::MAX
     } else {
@@ -458,6 +692,9 @@ fn decode_unsigned_leb128<'de>(mut reader: impl Reader<'de>, max_bits: u32) -> R
         if byte & 0x80 == 0 {
             if value > max {
                 return Err(invalid_value("LEB128 integer overflow"));
+            }
+            if REQUIRE_MINIMAL && index != 0 && payload == 0 {
+                return Err(invalid_value("non-minimal LEB128 integer"));
             }
             return Ok(value);
         }

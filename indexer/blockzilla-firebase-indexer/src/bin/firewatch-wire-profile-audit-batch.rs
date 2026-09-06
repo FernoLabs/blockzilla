@@ -5715,12 +5715,20 @@ mod tests {
         fs::create_dir(&source).unwrap();
         fs::create_dir(&target).unwrap();
         fs::create_dir_all(&attestation_root).unwrap();
-        fs::write(source.join(ARCHIVE_V2_BLOCKS_FILE), b"blocks").unwrap();
-        fs::write(source.join(ARCHIVE_V2_POH_FILE), b"poh").unwrap();
-        let source_bindings = BTreeMap::from([
-            (ARCHIVE_V2_BLOCKS_FILE.to_owned(), file_binding(b"blocks")),
-            (ARCHIVE_V2_POH_FILE.to_owned(), file_binding(b"poh")),
-        ]);
+        let source_objects = [
+            (ARCHIVE_V2_BLOCKS_FILE, b"blocks".as_slice()),
+            (ARCHIVE_V2_POH_FILE, b"poh".as_slice()),
+            (ARCHIVE_V2_PUBKEY_REGISTRY_FILE, &[0x33; 32][..]),
+            (
+                ARCHIVE_V2_PUBKEY_REGISTRY_INDEX_FILE,
+                b"registry-index".as_slice(),
+            ),
+        ];
+        let mut source_bindings = BTreeMap::new();
+        for (name, bytes) in source_objects {
+            fs::write(source.join(name), bytes).unwrap();
+            source_bindings.insert(name.to_owned(), file_binding(bytes));
+        }
         let mut target_bindings =
             BTreeMap::from([(ARCHIVE_V2_BLOCKS_FILE.to_owned(), file_binding(b"target"))]);
         let post = ArchiveV2WireProfile::PostUnknownInstructionFallbacksV1;
@@ -5891,9 +5899,10 @@ mod tests {
 
         let same_content_source = root.join("same-content-source");
         fs::create_dir(&same_content_source).unwrap();
-        fs::write(same_content_source.join(ARCHIVE_V2_BLOCKS_FILE), b"blocks").unwrap();
-        fs::write(same_content_source.join(ARCHIVE_V2_POH_FILE), b"poh").unwrap();
         let mut receipt: RegistryReceipt = read_bounded_json(receipt_path).unwrap();
+        for name in receipt.source_files.keys() {
+            fs::copy(task.archive.join(name), same_content_source.join(name)).unwrap();
+        }
         receipt.source_dir = same_content_source.to_string_lossy().into_owned();
         fs::write(receipt_path, serde_json::to_vec_pretty(&receipt).unwrap()).unwrap();
         assert!(validate_manifest_task(&task, &root.join("attest")).is_err());

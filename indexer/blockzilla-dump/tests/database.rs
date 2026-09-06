@@ -84,7 +84,7 @@ fn create_open_and_status_bind_the_scope() {
 
     let database = DumpDatabase::create(&path, &spec).unwrap();
     let status = database.status().unwrap();
-    assert_eq!(status.schema_version, 1);
+    assert_eq!(status.schema_version, 2);
     assert_eq!(status.kind, DumpKind::Program);
     assert_eq!(status.state, DumpState::Building);
     assert_eq!(

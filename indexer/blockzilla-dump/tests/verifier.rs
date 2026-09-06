@@ -58,7 +58,7 @@ fn local_and_gateway_verify_continuity_and_every_signature() {
             cache: None,
             allow_insecure_http: false,
             cluster_id: "testnet".into(),
-            local_generation_prefix: None,
+            local_generation_prefix: Some("verifier-test".into()),
             epoch_zero_first_slot: 0,
             slots_per_epoch: 100,
             message_schema: CompactV2MessageSchema::Current,
@@ -481,24 +481,26 @@ fn serve_request(mut stream: TcpStream, root: &Path, epoch: u64) {
         path.strip_prefix(&format!("{prefix}files/"))
     };
     let Some(object) = object else {
-        write_response(&mut stream, 404, &[], None);
+        write_response(&mut stream, 404, &[], None, None);
         return;
     };
     let Ok(bytes) = fs::read(root.join(object)) else {
-        write_response(&mut stream, 404, &[], None);
+        write_response(&mut stream, 404, &[], None, None);
         return;
     };
+    let etag = format!("\"{}\"", hex_lower(&Sha256::digest(&bytes)));
     if method == "HEAD" {
         write_response(
             &mut stream,
             200,
             &[],
             Some((0, 0, bytes.len(), bytes.len())),
+            Some(&etag),
         );
         return;
     }
     if object == GENERATION_MANIFEST_FILE {
-        write_response(&mut stream, 200, &bytes, None);
+        write_response(&mut stream, 200, &bytes, None, Some(&etag));
         return;
     }
     let (start, end) = lines
@@ -515,6 +517,7 @@ fn serve_request(mut stream: TcpStream, root: &Path, epoch: u64) {
         206,
         body,
         Some((start, end, bytes.len(), body.len())),
+        Some(&etag),
     );
 }
 
@@ -523,6 +526,7 @@ fn write_response(
     status: u16,
     body: &[u8],
     range: Option<(usize, usize, usize, usize)>,
+    etag: Option<&str>,
 ) {
     let reason = match status {
         200 => "OK",
@@ -533,6 +537,9 @@ fn write_response(
     let mut header = format!(
         "HTTP/1.1 {status} {reason}\r\nContent-Length: {content_length}\r\nConnection: close\r\n"
     );
+    if let Some(etag) = etag {
+        header.push_str(&format!("ETag: {etag}\r\n"));
+    }
     if status == 206
         && let Some((start, end, total, _)) = range
     {

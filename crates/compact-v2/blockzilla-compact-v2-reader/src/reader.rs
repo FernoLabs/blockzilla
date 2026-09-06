@@ -1648,6 +1648,9 @@ impl<S: RangeSource> ArchiveReader<S> {
                         decode_pool.install(|| {
                             self.index.rows[wave_start..wave_end]
                                 .par_iter()
+                                // Keep each block stealable when another projection waits;
+                                // a sequential leaf must not hold back later callbacks.
+                                .with_max_len(1)
                                 .enumerate()
                                 .map(|(wave_row, row)| {
                                     let row_number = wave_start + wave_row;

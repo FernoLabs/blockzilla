@@ -10,6 +10,9 @@
 //! A projector always carries one [`ArchiveV2WireProfile`]. Callers obtain it
 //! from an admitted [`crate::ArchiveReader`] and use it for the whole
 //! generation. There is no message-level fallback or format probing.
+//! Both source profiles admit padded historical LEB128 integers while keeping
+//! the existing input and semantic bounds. The profile selects the schema,
+//! not integer minimality; the wire-rewrite methods remain canonical.
 
 use blockzilla_archive_v2::{
     ArchiveV2ComputeBudgetInstructionData, ArchiveV2HotInstruction, ArchiveV2HotInstructionData,
@@ -22,14 +25,16 @@ use blockzilla_archive_v2::{
 use blockzilla_compact::{
     CompactMessageHeader, OwnedCompactAddressTableLookup, OwnedCompactRecentBlockhash,
 };
-use blockzilla_primitives::{CompactPubkey, WincodeLeb128Config, wincode_leb128_config};
+use blockzilla_primitives::{
+    CompactPubkey, HistoricalSourceWincodeLeb128Config, historical_source_wincode_leb128_config,
+};
 use smallvec::SmallVec;
 use thiserror::Error;
 use wincode::{ReadResult, SchemaRead, error::invalid_tag_encoding, io::Reader};
 
 use crate::ArchiveV2WireProfile;
 
-type Cfg = WincodeLeb128Config;
+type Cfg = HistoricalSourceWincodeLeb128Config;
 
 /// Every message account is addressed by a one-byte instruction index. This
 /// includes static and address-table-loaded accounts together.
@@ -194,12 +199,14 @@ impl ArchiveV2MessageProjector {
     ) -> MessageProjectionResult<ArchiveV2HotMessagePayload> {
         match self.profile {
             ArchiveV2WireProfile::PostUnknownInstructionFallbacksV1 => {
-                wincode::config::deserialize_exact(bytes, wincode_leb128_config())
+                wincode::config::deserialize_exact(bytes, historical_source_wincode_leb128_config())
                     .map_err(Into::into)
             }
             ArchiveV2WireProfile::PreUnknownInstructionFallbacksV1 => {
-                let historical: HistoricalMessagePayload =
-                    wincode::config::deserialize_exact(bytes, wincode_leb128_config())?;
+                let historical: HistoricalMessagePayload = wincode::config::deserialize_exact(
+                    bytes,
+                    historical_source_wincode_leb128_config(),
+                )?;
                 Ok(historical.into())
             }
         }
@@ -1368,12 +1375,12 @@ mod tests {
         ArchiveV2WireRewriteLimits, transcode_archive_v2_hot_message_wire_pre_to_post,
     };
     use blockzilla_compact::OwnedCompactAddressTableLookup;
-    use blockzilla_primitives::wincode_leb128_config;
+    use blockzilla_primitives::{WincodeLeb128Config, wincode_leb128_config};
     use wincode::SchemaWrite;
 
     use super::*;
 
-    fn serialize<T: SchemaWrite<Cfg, Src = T>>(value: &T) -> Vec<u8> {
+    fn serialize<T: SchemaWrite<WincodeLeb128Config, Src = T>>(value: &T) -> Vec<u8> {
         wincode::config::serialize(value, wincode_leb128_config()).unwrap()
     }
 
@@ -1383,6 +1390,154 @@ mod tests {
 
     fn pre_projector() -> ArchiveV2MessageProjector {
         ArchiveV2MessageProjector::new(ArchiveV2WireProfile::PreUnknownInstructionFallbacksV1)
+    }
+
+    #[test]
+    fn historical_source_padding_preserves_owned_and_borrowed_messages_in_both_profiles() {
+        let header = CompactMessageHeader {
+            num_required_signatures: 1,
+            num_readonly_signed_accounts: 0,
+            num_readonly_unsigned_accounts: 1,
+        };
+        for is_v0 in [false, true] {
+            let account_keys = vec![CompactPubkey::Id(1), CompactPubkey::Id(2)];
+            let recent_blockhash = OwnedCompactRecentBlockhash::Id(0);
+            let instructions = vec![ArchiveV2HotInstruction {
+                program_id_index: 1,
+                accounts: vec![0],
+                data: ArchiveV2HotInstructionData::Raw(vec![9, 8, 7]),
+            }];
+            let expected = if is_v0 {
+                ArchiveV2HotMessagePayload::V0(ArchiveV2HotV0Message {
+                    header,
+                    account_keys,
+                    recent_blockhash,
+                    instructions,
+                    address_table_lookups: vec![],
+                })
+            } else {
+                ArchiveV2HotMessagePayload::Legacy(ArchiveV2HotLegacyMessage {
+                    header,
+                    account_keys,
+                    recent_blockhash,
+                    instructions,
+                })
+            };
+            // Legacy/V0 and Raw have matching tag positions in both profiles.
+            let mut padded = vec![0x80 | u8::from(is_v0), 0];
+            padded.extend(serialize(&header));
+            padded.extend_from_slice(&[0x82, 0]);
+            padded.extend(serialize(&CompactPubkey::Id(1)));
+            padded.extend(serialize(&CompactPubkey::Id(2)));
+            padded.extend(serialize(&OwnedCompactRecentBlockhash::Id(0)));
+            padded.extend_from_slice(&[0x81, 0, 1, 0x81, 0]);
+            let accounts_offset = padded.len();
+            padded.push(0);
+            padded.extend_from_slice(&[0x80, 0, 0x83, 0]);
+            let data_offset = padded.len();
+            padded.extend_from_slice(&[9, 8, 7]);
+            if is_v0 {
+                padded.extend_from_slice(&[0x80, 0]); // Empty lookup list.
+            }
+
+            for reader in [pre_projector(), post_projector()] {
+                assert_eq!(
+                    serialize(&reader.decode_owned_message(&padded).unwrap()),
+                    serialize(&expected)
+                );
+                let mut instructions = Vec::new();
+                let projected = reader
+                    .project(&padded, |instruction| instructions.push(instruction))
+                    .unwrap();
+                assert_eq!(projected.is_v0, is_v0);
+                assert_eq!(
+                    projected.account_keys,
+                    [CompactPubkey::Id(1), CompactPubkey::Id(2)]
+                );
+                assert_eq!(projected.instruction_count, 1);
+                assert_eq!(instructions[0].accounts, [0]);
+                assert_eq!(
+                    instructions[0].accounts.as_ptr(),
+                    padded[accounts_offset..].as_ptr()
+                );
+                let raw = instructions[0].raw_data.unwrap();
+                assert_eq!(raw, [9, 8, 7]);
+                assert_eq!(raw.as_ptr(), padded[data_offset..].as_ptr());
+                assert_eq!(
+                    reader.project_signers(&padded).unwrap().as_slice(),
+                    [CompactPubkey::Id(1)]
+                );
+                let mut visited = Vec::new();
+                reader
+                    .visit_static_accounts_exact(&padded, 2, |position, key| {
+                        visited.push((position, key))
+                    })
+                    .unwrap();
+                assert_eq!(
+                    visited,
+                    [(0, CompactPubkey::Id(1)), (1, CompactPubkey::Id(2))]
+                );
+
+                let mut trailing = padded.clone();
+                trailing.push(0);
+                assert!(reader.decode_owned_message(&trailing).is_err());
+                assert!(matches!(
+                    reader.project(&trailing, |_| {}),
+                    Err(MessageProjectionError::TrailingBytes(1))
+                ));
+                let truncated = &padded[..data_offset + 2];
+                assert!(reader.decode_owned_message(truncated).is_err());
+                assert!(reader.project(truncated, |_| {}).is_err());
+                assert!(
+                    reader
+                        .rewrite_message_wire(
+                            &padded,
+                            &mut Vec::new(),
+                            &mut ArchiveV2WireIdentityVisitor,
+                            ArchiveV2WireRewriteLimits::default()
+                        )
+                        .is_err()
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn historical_source_padding_keeps_message_account_and_integer_bounds() {
+        for reader in [pre_projector(), post_projector()] {
+            let mut prefix = vec![0];
+            prefix.extend(serialize(&CompactMessageHeader {
+                num_required_signatures: 1,
+                num_readonly_signed_accounts: 0,
+                num_readonly_unsigned_accounts: 0,
+            }));
+            let mut too_many = prefix.clone();
+            too_many.extend_from_slice(&[0x81, 0x82, 0]); // Padded 257 keys.
+            let error = reader.project(&too_many, |_| {}).unwrap_err();
+            assert!(
+                error
+                    .to_string()
+                    .contains("static account key count exceeds message account cap")
+            );
+
+            let mut overflow = prefix;
+            overflow.extend_from_slice(&[0xff; 9]);
+            overflow.push(2); // A u64 source length still cannot contain bit 64.
+            assert!(
+                reader
+                    .decode_owned_message(&overflow)
+                    .unwrap_err()
+                    .to_string()
+                    .contains("LEB128 integer overflow")
+            );
+            assert!(
+                reader
+                    .project(&overflow, |_| {})
+                    .unwrap_err()
+                    .to_string()
+                    .contains("LEB128 integer overflow")
+            );
+        }
     }
 
     #[test]

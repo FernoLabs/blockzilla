@@ -4,6 +4,9 @@
 //! exact signed-message reconstruction. It does not deserialize the complete
 //! Wincode message object graph. The selected generation schema is fixed for
 //! the full call. The decoder does not probe or retry another schema.
+//! Historical source integers may use padded LEB128 encodings; all existing
+//! semantic and input bounds still apply. `Current` selects the message schema,
+//! not a requirement that the source integer encoding is minimal.
 
 use blockzilla_archive_v2::{
     ArchiveV2ComputeBudgetInstructionData, ArchiveV2HotInstructionData,
@@ -13,7 +16,7 @@ use blockzilla_archive_v2::{
 use blockzilla_compact::{
     CompactMessageHeader, CompactTransactionConfig, OwnedCompactRecentBlockhash,
 };
-use blockzilla_primitives::{CompactPubkey, WincodeLeb128Config};
+use blockzilla_primitives::{CompactPubkey, HistoricalSourceWincodeLeb128Config};
 use smallvec::{SmallVec, smallvec};
 use thiserror::Error;
 use wincode::{ReadResult, SchemaRead, error::invalid_tag_encoding, io::Reader};
@@ -24,7 +27,7 @@ use crate::{
     VoteHashResolver, reconstruct_instruction_data_candidates,
 };
 
-type Cfg = WincodeLeb128Config;
+type Cfg = HistoricalSourceWincodeLeb128Config;
 
 /// All message account indexes are one byte wide.
 pub const MAX_COMPACT_V2_MESSAGE_ACCOUNTS: usize = u8::MAX as usize + 1;
@@ -1110,7 +1113,7 @@ mod tests {
         ArchiveV2HotV0Message, ArchiveV2HotV1Message,
     };
     use blockzilla_compact::OwnedCompactAddressTableLookup;
-    use blockzilla_primitives::wincode_leb128_config;
+    use blockzilla_primitives::{WincodeLeb128Config, wincode_leb128_config};
     use smallvec::SmallVec;
     use wincode::SchemaWrite;
 
@@ -1577,7 +1580,7 @@ mod tests {
 
     fn append_wire<T>(bytes: &mut Vec<u8>, value: &T)
     where
-        T: SchemaWrite<Cfg, Src = T>,
+        T: SchemaWrite<WincodeLeb128Config, Src = T>,
     {
         bytes.extend(wincode::config::serialize(value, wincode_leb128_config()).unwrap());
     }
@@ -1589,6 +1592,104 @@ mod tests {
         append_wire(bytes, &key(1));
         append_wire(bytes, &key(2));
         append_wire(bytes, &OwnedCompactRecentBlockhash::Nonce([3; 32]));
+    }
+
+    #[test]
+    fn historical_message_lengths_match_owned_and_borrowed_source_reads() {
+        // Both selected schemas have the same Legacy/Raw variant positions.
+        let message = ArchiveV2HotMessagePayload::Legacy(ArchiveV2HotLegacyMessage {
+            header: header(),
+            account_keys: vec![key(1), key(2)],
+            recent_blockhash: OwnedCompactRecentBlockhash::Nonce([3; 32]),
+            instructions: vec![current_instruction(ArchiveV2HotInstructionData::Raw(vec![
+                9, 8, 7,
+            ]))],
+        });
+        let canonical = wincode::config::serialize(&message, wincode_leb128_config()).unwrap();
+        let mut padded = vec![0x80, 0]; // Legacy tag.
+        append_wire(&mut padded, &header());
+        padded.extend_from_slice(&[0x82, 0]); // Two static keys.
+        append_wire(&mut padded, &key(1));
+        append_wire(&mut padded, &key(2));
+        append_wire(&mut padded, &OwnedCompactRecentBlockhash::Nonce([3; 32]));
+        padded.extend_from_slice(&[0x81, 0, 1, 0x81, 0]); // One instruction and one account.
+        let accounts_offset = padded.len();
+        padded.push(0);
+        padded.extend_from_slice(&[0x80, 0, 0x83, 0]); // Raw tag and three data bytes.
+        let data_offset = padded.len();
+        padded.extend_from_slice(&[9, 8, 7]);
+
+        assert!(
+            wincode::config::deserialize_exact::<ArchiveV2HotMessagePayload, _>(
+                &padded,
+                wincode_leb128_config(),
+            )
+            .is_err()
+        );
+        for schema in [
+            CompactV2MessageSchema::Current,
+            CompactV2MessageSchema::May24PreUnknownFallbacks,
+        ] {
+            let owned = crate::decode_compact_v2_message(schema, &padded).unwrap();
+            assert_eq!(
+                wincode::config::serialize(&owned, wincode_leb128_config()).unwrap(),
+                canonical,
+            );
+            let projector = CompactV2MessageProjector::new(schema, 0);
+            let borrowed = projector.project(&padded, None).unwrap();
+            assert_eq!(borrowed.required_signers(), &[key(1)]);
+            let instruction = &borrowed.instructions()[0];
+            assert_eq!(instruction.accounts(), [0]);
+            assert_eq!(
+                instruction.accounts().as_ptr(),
+                padded[accounts_offset..].as_ptr()
+            );
+            let data = &instruction.data_candidates().unwrap()[0].bytes;
+            assert_eq!(data.as_ref(), [9, 8, 7]);
+            assert_eq!(data.as_ptr(), padded[data_offset..].as_ptr());
+            assert_eq!(
+                projector.count_message(&padded).unwrap().count_limits(),
+                borrowed.count_limits()
+            );
+
+            let mut trailing = padded.clone();
+            trailing.push(0);
+            assert!(crate::decode_compact_v2_message(schema, &trailing).is_err());
+            assert!(matches!(
+                projector.project(&trailing, None),
+                Err(CompactV2MessageProjectionError::TrailingBytes(1)),
+            ));
+            assert!(crate::decode_compact_v2_message(schema, &padded[..data_offset + 2]).is_err());
+            assert!(projector.project(&padded[..data_offset + 2], None).is_err());
+        }
+    }
+
+    #[test]
+    fn historical_message_padding_does_not_remove_count_or_overflow_bounds() {
+        for schema in [
+            CompactV2MessageSchema::Current,
+            CompactV2MessageSchema::May24PreUnknownFallbacks,
+        ] {
+            let mut bytes = vec![0];
+            append_wire(&mut bytes, &header());
+            bytes.extend_from_slice(&[0x81, 0x82, 0]); // Padded 257 static keys.
+            let error = CompactV2MessageProjector::new(schema, 0)
+                .project(&bytes, None)
+                .unwrap_err();
+            assert!(!error.to_string().contains("non-minimal"));
+            assert!(error.to_string().contains("static account"));
+
+            // A u64 length still cannot contain bit 64.
+            bytes.truncate(4);
+            bytes.extend_from_slice(&[0xff; 9]);
+            bytes.push(2);
+            let error = crate::decode_compact_v2_message(schema, &bytes).unwrap_err();
+            assert!(error.to_string().contains("LEB128 integer overflow"));
+            let error = CompactV2MessageProjector::new(schema, 0)
+                .project(&bytes, None)
+                .unwrap_err();
+            assert!(error.to_string().contains("LEB128 integer overflow"));
+        }
     }
 
     #[test]

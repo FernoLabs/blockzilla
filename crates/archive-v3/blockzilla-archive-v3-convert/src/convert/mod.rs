@@ -70,7 +70,9 @@ use blockzilla_archive_v2::{
 use blockzilla_compact::{
     CompactLogStream, CompactTokenBalance, OwnedCompactRecentBlockhash, render_logs,
 };
-use blockzilla_primitives::{CompactPubkey, PubkeyResolver, wincode_leb128_config};
+use blockzilla_primitives::{
+    CompactPubkey, PubkeyResolver, historical_source_wincode_leb128_config,
+};
 use blockzilla_registry::{FileBackedKeyIndex, KeyIndex};
 
 const KNOWN_SOURCE_TX_FLAGS: u32 = (1 << 11) - 1;
@@ -1258,8 +1260,10 @@ fn decode_source_block(
         row.slot,
         row.uncompressed_len
     );
+    // Current selects the source schema; padded historical integers are read
+    // without weakening the native V3 output codec.
     let block: blockzilla_archive_v2::ArchiveV2HotBlockBlob =
-        wincode::config::deserialize_exact(&raw, wincode_leb128_config()).with_context(|| {
+        wincode::config::deserialize_exact(&raw, historical_source_wincode_leb128_config()).with_context(|| {
             format!(
                 "decode exact current-hot-v1 block schema at slot {}; legacy trial decoding is disabled",
                 row.slot

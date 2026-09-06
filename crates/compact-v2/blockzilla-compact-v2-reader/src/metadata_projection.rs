@@ -4,12 +4,15 @@
 //! addresses. All other metadata lanes are parsed and validated without
 //! retaining their vectors, strings, or byte buffers. A projector is bound to
 //! one generation schema. It never probes another schema for one record.
+//! Exact source fields, including retained Archive V3 planes, may contain
+//! padded LEB128 integers. `CurrentTypedError` selects the error schema, not
+//! integer minimality; semantic, input, and allocation bounds are unchanged.
 
 use blockzilla_compact::{
     CompactInnerInstruction, CompactMetaV1, CompactReturnData, CompactReward, CompactTokenBalance,
     DataArray,
 };
-use blockzilla_primitives::{CompactPubkey, WincodeLeb128Config};
+use blockzilla_primitives::{CompactPubkey, HistoricalSourceWincodeLeb128Config};
 use blockzilla_program_logs::{
     program_logs::system_program::PubkeyOrString, program_logs::system_program::SystemAddress,
     program_logs::system_program::SystemProgramLog, program_logs::token_2022::Token2022Log,
@@ -19,7 +22,7 @@ use wincode::{ReadResult, SchemaRead, error::invalid_tag_encoding, io::Reader};
 
 use crate::{CompactV2MetadataSchema, message_projection::ProjectedCompactV2Message};
 
-type Cfg = WincodeLeb128Config;
+type Cfg = HistoricalSourceWincodeLeb128Config;
 
 /// Compact message account indexes are one byte wide.
 pub const MAX_COMPACT_V2_METADATA_ACCOUNTS: usize = u8::MAX as usize + 1;
@@ -1721,7 +1724,7 @@ mod tests {
     use blockzilla_compact::{
         CompactInnerInstructions, CompactLogStream, CompactTransactionError, DataTable, LogEvent,
     };
-    use blockzilla_primitives::{StringTable, wincode_leb128_config};
+    use blockzilla_primitives::{StringTable, WincodeLeb128Config, wincode_leb128_config};
     use wincode::SchemaWrite;
 
     use super::*;
@@ -1793,6 +1796,21 @@ mod tests {
         wincode::config::serialize(value, wincode_leb128_config()).unwrap()
     }
 
+    fn padded_integer_field<T: SchemaWrite<WincodeLeb128Config, Src = T>>(
+        value: &T,
+        integer_offset: usize,
+    ) -> Vec<u8> {
+        let mut bytes = wincode::config::serialize(value, wincode_leb128_config()).unwrap();
+        let end = integer_offset
+            + bytes[integer_offset..]
+                .iter()
+                .position(|byte| byte & 0x80 == 0)
+                .unwrap();
+        bytes[end] |= 0x80;
+        bytes.insert(end + 1, 0);
+        bytes
+    }
+
     fn current_split_bytes(value: &CompactMetaV1) -> (Vec<u8>, Vec<u8>, Vec<u8>) {
         let mut outcome = wincode::config::serialize(&value.err, wincode_leb128_config()).unwrap();
         outcome.extend(wincode::config::serialize(&value.fee, wincode_leb128_config()).unwrap());
@@ -1854,6 +1872,161 @@ mod tests {
                 }],
             },
         ]
+    }
+
+    #[test]
+    fn historical_fields_match_owned_full_and_retained_split_source_reads() {
+        for empty in [false, true] {
+            let mut value = full_metadata(None, Some(if empty { vec![] } else { cpi_groups() }));
+            if empty {
+                value.pre_token_balances.clear();
+                value.post_token_balances.clear();
+                value.rewards.clear();
+                value.logs = Some(CompactLogStream {
+                    events: vec![],
+                    strings: StringTable::default(),
+                    data: DataTable::default(),
+                });
+            }
+            macro_rules! canonical {
+                ($field:expr) => {
+                    wincode::config::serialize($field, wincode_leb128_config()).unwrap()
+                };
+            }
+            // Preserve the original field slices, including padded empty
+            // vectors. None errors share the two selected metadata schemas.
+            let fields = [
+                canonical!(&value.err),
+                padded_integer_field(&value.fee, 0),
+                padded_integer_field(&value.pre_balances, 0),
+                padded_integer_field(&value.post_balances, 0),
+                padded_integer_field(&value.inner_instructions, 1),
+                padded_integer_field(&value.logs, 1),
+                padded_integer_field(&value.pre_token_balances, 0),
+                padded_integer_field(&value.post_token_balances, 0),
+                padded_integer_field(&value.rewards, 0),
+                padded_integer_field(&value.loaded_writable_addresses, 0),
+                padded_integer_field(&value.loaded_readonly_addresses, 0),
+                canonical!(&value.return_data),
+                canonical!(&value.compute_units_consumed),
+                canonical!(&value.cost_units),
+            ];
+            let padded = fields.concat();
+            let canonical = current_bytes(&value);
+            assert_eq!(&fields[2][..2], [0x84, 0]);
+            if empty {
+                assert_eq!(fields[4], [1, 0x80, 0]);
+                assert_eq!(fields[6], [0x80, 0]);
+                assert_eq!(fields[8], [0x80, 0]);
+            }
+            assert!(
+                wincode::config::deserialize_exact::<CompactMetaV1, _>(
+                    &padded,
+                    wincode_leb128_config(),
+                )
+                .is_err()
+            );
+            let outcome = [0, 1, 11, 12, 13]
+                .map(|index| fields[index].as_slice())
+                .concat();
+            let loaded = [fields[9].as_slice(), fields[10].as_slice()].concat();
+            let inner = &fields[4];
+            let tokens = [fields[6].as_slice(), fields[7].as_slice()].concat();
+            for schema in [
+                CompactV2MetadataSchema::CurrentTypedError,
+                CompactV2MetadataSchema::LegacyRawError,
+            ] {
+                let owned = crate::decode_compact_v2_metadata(schema, &padded).unwrap();
+                assert_eq!(current_bytes(&owned), canonical);
+                let reader = projector(schema);
+                let expected = reader.project(&canonical, LIMITS).unwrap();
+                let full = reader.project(&padded, LIMITS).unwrap();
+                let split = reader
+                    .project_split_planes(&outcome, &loaded, inner, LIMITS)
+                    .unwrap();
+                assert_eq!(full, expected);
+                assert_eq!(split, expected);
+                let full_counts = reader.count(&padded, LIMITS).unwrap();
+                let split_counts = reader
+                    .count_split_planes(&outcome, &loaded, inner, LIMITS)
+                    .unwrap();
+                assert_eq!(full_counts.execution_status, split_counts.execution_status);
+                assert_eq!(full_counts.inner, Some(if empty { (0, 0) } else { (2, 2) }));
+                assert_eq!(split_counts.inner, full_counts.inner);
+                let full_tokens = reader.project_token_balances(&padded, LIMITS).unwrap();
+                let split_tokens = reader
+                    .project_split_token_balances(&tokens, LIMITS)
+                    .unwrap();
+                assert_eq!(
+                    canonical!(&full_tokens.pre),
+                    canonical!(&value.pre_token_balances)
+                );
+                assert_eq!(canonical!(&split_tokens.pre), canonical!(&full_tokens.pre));
+                assert_eq!(
+                    canonical!(&split_tokens.post),
+                    canonical!(&full_tokens.post)
+                );
+                if !empty {
+                    let full_instruction =
+                        &full.inner_instructions.as_ref().unwrap()[0].instructions[0];
+                    let split_instruction =
+                        &split.inner_instructions.as_ref().unwrap()[0].instructions[0];
+                    assert_eq!(split_instruction.data, [9, 8, 7]);
+                    assert!(
+                        padded
+                            .as_ptr_range()
+                            .contains(&full_instruction.data.as_ptr())
+                    );
+                    assert!(
+                        inner
+                            .as_ptr_range()
+                            .contains(&split_instruction.data.as_ptr())
+                    );
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn historical_split_padding_keeps_semantic_bounds_and_exact_consumption() {
+        let value = full_metadata(None, Some(vec![]));
+        let (outcome, loaded, _) = current_split_bytes(&value);
+        for schema in [
+            CompactV2MetadataSchema::CurrentTypedError,
+            CompactV2MetadataSchema::LegacyRawError,
+        ] {
+            let reader = projector(schema);
+            // Padded count of three groups exceeds the two outer instructions.
+            let inner = [1, 0x83, 0, 0, 0, 0, 0, 0, 0];
+            let error = reader
+                .project_split_planes(&outcome, &loaded, &inner, LIMITS)
+                .unwrap_err();
+            assert!(error.to_string().contains("CPI group count exceeds"));
+            assert!(
+                reader
+                    .count_split_planes(&outcome, &loaded, &inner, LIMITS)
+                    .is_err()
+            );
+            let mut tokens = vec![0x85, 0]; // Five rows exceed four message accounts.
+            tokens.resize(33, 0);
+            let error = reader
+                .project_split_token_balances(&tokens, LIMITS)
+                .unwrap_err();
+            assert!(error.to_string().contains("token-balance count exceeds"));
+            assert!(matches!(
+                reader.project_split_planes(&outcome, &loaded, &[1, 0x80, 0, 0], LIMITS),
+                Err(CompactV2MetadataProjectionError::SplitPlaneTrailingBytes {
+                    plane: "inner-instructions",
+                    remaining: 1,
+                }),
+            ));
+            let mut overflowing_fee = vec![0]; // No transaction error.
+            overflowing_fee.extend_from_slice(&[0xff; 9]);
+            overflowing_fee.push(2);
+            let error = crate::decode_compact_v2_metadata(schema, &overflowing_fee).unwrap_err();
+            assert!(error.to_string().contains("LEB128 integer overflow"));
+            assert!(reader.project(&overflowing_fee, LIMITS).is_err());
+        }
     }
 
     #[test]

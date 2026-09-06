@@ -1,4 +1,4 @@
-//! Full Ed25519 verification for published Archive V2 transaction messages.
+//! Full Ed25519 verification for admitted Archive V2 transaction messages.
 
 use std::{
     collections::{HashMap, VecDeque},
@@ -103,7 +103,7 @@ fn load_blockhash_resolver<S: RangeSource>(
         .source()
         .read_all_bounded(ARCHIVE_V2_BLOCKHASH_REGISTRY_FILE, maximum_bytes)?;
 
-    let previous = if reader.manifest().epoch == 0 || registry_offset == 1 {
+    let previous = if reader.epoch() == 0 || registry_offset == 1 {
         PreviousBlockhashTail {
             schema: PreviousBlockhashTailSchema::CurrentHashAndSlot,
             entries: Vec::new(),
@@ -189,11 +189,13 @@ struct SignatureBlockReport {
     signatures_verified: u64,
 }
 
-/// Verify every required Ed25519 signature in one published Archive V2 epoch.
+/// Verify every required Ed25519 signature in one admitted Archive V2 epoch.
 ///
 /// The first signer selects the unique exact message candidate. The verifier
 /// then checks every required signer against those same bytes. Raw transaction
 /// fallbacks and incomplete or invalid proofs are hard errors.
+/// A successful result verifies the signatures, not source publication, and
+/// retains the reader's existing source trust.
 pub fn verify_archive_v2_signatures<S: RangeSource>(
     reader: &ArchiveReader<S>,
     config: ArchiveSignatureConfig,
@@ -335,7 +337,7 @@ fn verify_signature_block<S: RangeSource>(
         let context = || {
             format!(
                 "epoch {} slot {} transaction {}",
-                reader.manifest().epoch,
+                reader.epoch(),
                 block.index_row.slot,
                 row.tx_index
             )
@@ -534,7 +536,7 @@ fn message_parts(
 fn read_vote_hash_registry<S: RangeSource>(
     reader: &ArchiveReader<S>,
 ) -> SignatureResult<Option<VoteHashRegistry>> {
-    let Some(binding) = reader.manifest().file(ARCHIVE_V2_VOTE_HASH_REGISTRY_FILE) else {
+    let Some(binding_size) = reader.file_size(ARCHIVE_V2_VOTE_HASH_REGISTRY_FILE) else {
         return Ok(None);
     };
     let maximum = reader
@@ -545,7 +547,7 @@ fn read_vote_hash_registry<S: RangeSource>(
         .ok_or_else(|| {
             ArchiveSignatureError::Invalid("vote-hash registry bound overflow".to_owned())
         })?;
-    let size = usize::try_from(binding.size).map_err(|_| {
+    let size = usize::try_from(binding_size).map_err(|_| {
         ArchiveSignatureError::Invalid("vote-hash registry exceeds address space".to_owned())
     })?;
     if size > maximum {
@@ -625,6 +627,7 @@ mod tests {
         let valid = TempDir::new().unwrap();
         write_signature_fixture(valid.path(), false);
         let reader = open_signature_fixture(valid.path());
+        assert!(reader.published_manifest().is_none());
         let report =
             verify_archive_v2_signatures(&reader, ArchiveSignatureConfig { workers: 2 }).unwrap();
         assert_eq!(report.blocks_verified, 1);

@@ -2497,7 +2497,9 @@ mod tests {
         );
     }
 
-    fn serialize<T: wincode::SchemaWrite<decode::Cfg, Src = T>>(value: &T) -> Vec<u8> {
+    fn serialize<T: wincode::SchemaWrite<blockzilla_primitives::WincodeLeb128Config, Src = T>>(
+        value: &T,
+    ) -> Vec<u8> {
         wincode::config::serialize(value, wincode_leb128_config()).unwrap()
     }
 

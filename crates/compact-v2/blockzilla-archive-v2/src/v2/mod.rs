@@ -22,8 +22,11 @@ use blockzilla_compact::{
     OwnedCompactAddressTableLookup, OwnedCompactRecentBlockhash, OwnedCompactTransaction,
     SplitCompactIndexRecord,
 };
-use blockzilla_primitives::bounded_wincode_leb128_config;
-use blockzilla_primitives::{CompactPubkey, WincodeLeb128Config, wincode_leb128_config};
+use blockzilla_primitives::{
+    CompactPubkey, HistoricalSourceWincodeLeb128Config,
+    bounded_historical_source_wincode_leb128_config, historical_source_wincode_leb128_config,
+    wincode_leb128_config,
+};
 
 mod archive;
 pub use archive::*;
@@ -593,23 +596,25 @@ struct ArchiveV2HotBlockSlotTimeHeaderPrefix {
 /// in the remainder of the payload are neither decoded nor allocated.
 pub fn deserialize_archive_v2_hot_block_slot_time(bytes: &[u8]) -> ReadResult<(u64, Option<i64>)> {
     let prefix: ArchiveV2HotBlockSlotTimePrefix =
-        wincode::config::deserialize(bytes, wincode_leb128_config())?;
+        wincode::config::deserialize(bytes, historical_source_wincode_leb128_config())?;
     Ok((prefix.header.slot, prefix.header.block_time))
 }
 
+/// Read a historical hot-block source, preserving its schema fallback support.
+/// Integer spelling tolerance does not change the canonical writer grammar.
 pub fn deserialize_archive_v2_hot_block_blob(bytes: &[u8]) -> ReadResult<ArchiveV2HotBlockBlob> {
-    match wincode::config::deserialize(bytes, wincode_leb128_config()) {
+    match wincode::config::deserialize(bytes, historical_source_wincode_leb128_config()) {
         Ok(block) => Ok(block),
         Err(primary_error) => {
             if let Ok(block) = wincode::config::deserialize::<ArchiveV2HotBlockBlobLegacyShredding, _>(
                 bytes,
-                wincode_leb128_config(),
+                historical_source_wincode_leb128_config(),
             ) {
                 return Ok(block.into());
             }
             match wincode::config::deserialize::<ArchiveV2HotBlockBlobLegacyRewardsVec, _>(
                 bytes,
-                wincode_leb128_config(),
+                historical_source_wincode_leb128_config(),
             ) {
                 Ok(block) => Ok(block.into()),
                 Err(_) => Err(primary_error),
@@ -619,6 +624,9 @@ pub fn deserialize_archive_v2_hot_block_blob(bytes: &[u8]) -> ReadResult<Archive
 }
 
 /// Decode the current hot-block schema while borrowing its large contiguous regions.
+///
+/// Current selects the schema version. Source integers can retain historical
+/// non-minimal spellings; canonical validation uses the strict Wincode config.
 ///
 /// The tuple has the same field-by-field wire layout as [`ArchiveV2HotBlockBlob`]. Using byte
 /// arrays for transaction rows is safe on every target: they have alignment one and every bit
@@ -632,7 +640,7 @@ pub fn deserialize_archive_v2_hot_block_blob_borrowed_current(
         &[[u8; ARCHIVE_V2_HOT_TX_ROW_LEN]],
         &[u8],
         &[u8],
-    ) = wincode::config::deserialize(bytes, wincode_leb128_config())?;
+    ) = wincode::config::deserialize(bytes, historical_source_wincode_leb128_config())?;
     Ok(BorrowedArchiveV2HotBlockBlob {
         header,
         tx_count,
@@ -660,7 +668,7 @@ pub fn deserialize_archive_v2_hot_block_blob_borrowed_current_with_preallocation
         &[u8],
     ) = wincode::config::deserialize_exact(
         bytes,
-        bounded_wincode_leb128_config::<PREALLOCATION_LIMIT_BYTES>(),
+        bounded_historical_source_wincode_leb128_config::<PREALLOCATION_LIMIT_BYTES>(),
     )?;
     Ok(BorrowedArchiveV2HotBlockBlob {
         header,
@@ -712,20 +720,22 @@ unsafe impl<'de, C: Config> SchemaRead<'de, C> for DiscardedArchiveV2HotRewards 
 /// source carried rewards. Use [`deserialize_archive_v2_hot_block_blob_borrowed_current`] when the
 /// caller needs reward values. [`BorrowedArchiveV2HotBlockBlobWithoutRewards::rewards_field_bytes`]
 /// returns the exact original encoded reward-option field without allocating or re-encoding.
+/// Current selects the schema version, while source integers retain the same
+/// historical spelling support as the owned and reward-retaining readers.
 pub fn deserialize_archive_v2_hot_block_blob_borrowed_current_without_rewards(
     bytes: &[u8],
 ) -> ReadResult<BorrowedArchiveV2HotBlockBlobWithoutRewards<'_>> {
     let mut remaining = bytes;
     let header = <ArchiveV2HotBlockHeaderWithoutRewardsPrefix as SchemaRead<
         '_,
-        WincodeLeb128Config,
+        HistoricalSourceWincodeLeb128Config,
     >>::get(remaining.by_ref())?;
 
     let rewards_field_start = remaining;
-    let _rewards =
-        <Option<DiscardedArchiveV2HotRewards> as SchemaRead<'_, WincodeLeb128Config>>::get(
-            remaining.by_ref(),
-        )?;
+    let _rewards = <Option<DiscardedArchiveV2HotRewards> as SchemaRead<
+        '_,
+        HistoricalSourceWincodeLeb128Config,
+    >>::get(remaining.by_ref())?;
     let rewards_field_len = rewards_field_start.len() - remaining.len();
     let rewards_field_bytes = &rewards_field_start[..rewards_field_len];
 
@@ -734,7 +744,7 @@ pub fn deserialize_archive_v2_hot_block_blob_borrowed_current_without_rewards(
         &[[u8; ARCHIVE_V2_HOT_TX_ROW_LEN]],
         &[u8],
         &[u8],
-    ) = wincode::config::deserialize_exact(remaining, wincode_leb128_config())?;
+    ) = wincode::config::deserialize_exact(remaining, historical_source_wincode_leb128_config())?;
     Ok(BorrowedArchiveV2HotBlockBlobWithoutRewards {
         header: ArchiveV2HotBlockHeader {
             slot: header.slot,
@@ -1150,6 +1160,55 @@ mod hot_block_slot_time_tests {
             decoded: Vec::new(),
         });
         assert_exact_rewards_field(block);
+    }
+
+    #[test]
+    fn source_block_decoders_agree_on_historical_nonminimal_rewards() {
+        let mut block = current_hot_block_fixture();
+        block.header.rewards = Some(ArchiveV2HotRewards {
+            num_partitions: None,
+            decoded: Vec::new(),
+        });
+        let canonical = wincode::config::serialize(&block, wincode_leb128_config()).unwrap();
+        let view =
+            deserialize_archive_v2_hot_block_blob_borrowed_current_without_rewards(&canonical)
+                .unwrap();
+        let field = view.rewards_field_bytes();
+        assert_eq!(field, [1, 0, 0]);
+        let start = field.as_ptr() as usize - canonical.as_ptr() as usize;
+        let mut historical = canonical.clone();
+        historical.splice(start + 2..start + 3, [0x80, 0]);
+
+        assert!(
+            wincode::config::deserialize_exact::<ArchiveV2HotBlockBlob, _>(
+                &historical,
+                wincode_leb128_config(),
+            )
+            .is_err()
+        );
+        let owned = deserialize_archive_v2_hot_block_blob(&historical).unwrap();
+        let borrowed = deserialize_archive_v2_hot_block_blob_borrowed_current(&historical).unwrap();
+        let bounded = deserialize_archive_v2_hot_block_blob_borrowed_current_with_preallocation_limit::<4096>(&historical).unwrap();
+        let expected_header =
+            wincode::config::serialize(&block.header, wincode_leb128_config()).unwrap();
+        for header in [&owned.header, &borrowed.header, &bounded.header] {
+            assert_eq!(
+                wincode::config::serialize(header, wincode_leb128_config()).unwrap(),
+                expected_header
+            );
+        }
+        let view =
+            deserialize_archive_v2_hot_block_blob_borrowed_current_without_rewards(&historical)
+                .unwrap();
+        assert_eq!(view.rewards_field_bytes(), [1, 0, 0x80, 0]);
+        assert_eq!(
+            view.rewards_field_bytes().as_ptr(),
+            historical[start..].as_ptr()
+        );
+        assert_replay_view_matches_owned(&view, &block);
+        assert_eq!(borrowed.tx_count, block.tx_count);
+        assert_eq!(bounded.message_bytes, block.message_bytes);
+        assert_eq!(bounded.metadata_bytes, block.metadata_bytes);
     }
 
     #[test]

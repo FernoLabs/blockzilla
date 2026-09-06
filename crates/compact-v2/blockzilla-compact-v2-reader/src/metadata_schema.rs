@@ -10,7 +10,7 @@ use blockzilla_compact::{
     CompactInnerInstructions, CompactLogStream, CompactMetaV1, CompactReturnData, CompactReward,
     CompactTokenBalance, CompactTransactionError,
 };
-use blockzilla_primitives::{CompactPubkey, wincode_leb128_config};
+use blockzilla_primitives::{CompactPubkey, historical_source_wincode_leb128_config};
 use sha2::{Digest as _, Sha256};
 use thiserror::Error;
 use wincode::{SchemaRead, SchemaWrite};
@@ -30,6 +30,7 @@ pub const COMPACT_V2_LEGACY_METADATA_SCHEMA_MARKER_BYTES: &[u8; 58] =
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum CompactV2MetadataSchema {
     /// `CompactMetaV1.err` is `Option<CompactTransactionError>`.
+    /// This selects the schema; source integers may still be padded.
     CurrentTypedError,
     /// `CompactMetaV1.err` is `Option<Vec<u8>>` containing a stored Wincode
     /// transaction error.
@@ -256,27 +257,29 @@ impl TryFrom<LegacyRawErrorCompactMetaV1> for CompactMetaV1 {
 }
 
 /// Decode one complete metadata record with the generation-selected grammar.
+/// Both source schemas admit padded historical integers while still requiring
+/// the complete selected record and rejecting trailing bytes.
 pub fn decode_compact_v2_metadata(
     schema: CompactV2MetadataSchema,
     bytes: &[u8],
 ) -> Result<CompactMetaV1, CompactV2MetadataSchemaError> {
     match schema {
         CompactV2MetadataSchema::CurrentTypedError => {
-            wincode::config::deserialize_exact(bytes, wincode_leb128_config()).map_err(|error| {
-                CompactV2MetadataSchemaError::Decode {
+            wincode::config::deserialize_exact(bytes, historical_source_wincode_leb128_config())
+                .map_err(|error| CompactV2MetadataSchemaError::Decode {
                     schema,
                     message: error.to_string(),
-                }
-            })
+                })
         }
         CompactV2MetadataSchema::LegacyRawError => {
-            let metadata: LegacyRawErrorCompactMetaV1 =
-                wincode::config::deserialize_exact(bytes, wincode_leb128_config()).map_err(
-                    |error| CompactV2MetadataSchemaError::Decode {
-                        schema,
-                        message: error.to_string(),
-                    },
-                )?;
+            let metadata: LegacyRawErrorCompactMetaV1 = wincode::config::deserialize_exact(
+                bytes,
+                historical_source_wincode_leb128_config(),
+            )
+            .map_err(|error| CompactV2MetadataSchemaError::Decode {
+                schema,
+                message: error.to_string(),
+            })?;
             metadata.try_into()
         }
     }
@@ -288,6 +291,7 @@ mod tests {
 
     use super::*;
     use blockzilla_compact::{CompactInstructionError, CompactTransactionError};
+    use blockzilla_primitives::wincode_leb128_config;
     use tempfile::TempDir;
 
     use crate::{

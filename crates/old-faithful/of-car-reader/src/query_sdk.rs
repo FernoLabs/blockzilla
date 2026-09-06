@@ -4,6 +4,10 @@
 //! any `Read` that yields a decoded CAR byte stream. The current CAR wire form
 //! has no explicit raw-transaction or raw-metadata fallback marker, so decoder
 //! failures are archive errors instead of coverage downgrades.
+//! Input must use audited canonical Old Faithful physical order. This adapter
+//! does not resolve transaction or entry CIDs to reorder their nodes. Use
+//! [`CarBlockReader::read_until_block_lossless_bounded`] for a CAR whose physical
+//! node order can differ from its CID reference order.
 //!
 //! The configured entry and block limits apply to decoded CAR payload bytes,
 //! not to total process memory. The raw block, reassembled transaction and
@@ -2005,6 +2009,17 @@ mod tests {
         Ok((receipt, blocks))
     }
 
+    fn read_cid_resolved_block(
+        car: &[u8],
+        limits: CarQueryLimits,
+    ) -> Result<crate::reconstruct::LosslessCarBlock, CarReadError> {
+        let mut reader = CarBlockReader::with_capacity(Cursor::new(car), limits.io_buffer_bytes);
+        reader.skip_header_bounded(limits.max_header_bytes)?;
+        let mut block = crate::reconstruct::LosslessCarBlock::default();
+        assert!(reader.read_until_block_lossless_bounded(&mut block, limits.block_read_limits())?);
+        Ok(block)
+    }
+
     fn car_header() -> Vec<u8> {
         vec![1, 0]
     }
@@ -2411,7 +2426,7 @@ mod tests {
     }
 
     #[test]
-    fn plan_synthesizes_empty_rows_and_cid_order_is_canonical() {
+    fn plan_synthesizes_empty_rows_and_preserves_canonical_physical_order() {
         let plan = vec![FIRST_SLOT, FIRST_SLOT + 2, FIRST_SLOT + 5];
         let first = FixtureTransaction {
             cid: cid(0x21),
@@ -2430,7 +2445,7 @@ mod tests {
             &mut car,
             FIRST_SLOT + 2,
             &[first, second],
-            &[1, 0],
+            &[0, 1],
             &[0, 1],
             0x31,
         );
@@ -2455,6 +2470,44 @@ mod tests {
         assert!(receipt.io.source_read_calls.is_some_and(|calls| calls > 0));
         assert_eq!(receipt.io.source_read_bytes, Some(car_len));
         assert_eq!(receipt.io.decoded_bytes, None);
+    }
+
+    #[test]
+    fn cid_resolved_reader_reorders_nodes_and_ordered_source_rejects_reversed_frames() {
+        let first = FixtureTransaction {
+            cid: cid(0x21),
+            transaction: simple_transaction(1),
+            metadata: empty_exact_metadata(),
+            index: Some(0),
+        };
+        let second = FixtureTransaction {
+            cid: cid(0x22),
+            transaction: simple_transaction(2),
+            metadata: empty_exact_metadata(),
+            index: Some(1),
+        };
+        let mut car = car_header();
+        append_block(
+            &mut car,
+            FIRST_SLOT,
+            &[first, second],
+            &[1, 0],
+            &[0, 1],
+            0x31,
+        );
+
+        let block = read_cid_resolved_block(&car, CarQueryLimits::default()).unwrap();
+        assert_eq!(block.transactions.len(), 2);
+        assert_eq!(block.transactions[0].data.data, simple_transaction(1));
+        assert_eq!(block.transactions[1].data.data, simple_transaction(2));
+        assert_eq!(block.transactions[0].index, Some(0));
+        assert_eq!(block.transactions[1].index, Some(1));
+
+        let error = collect(&mut source(car, vec![FIRST_SLOT]), &ScanRequest::all()).unwrap_err();
+        assert!(
+            format!("{error:?}")
+                .contains("transaction frame index 1 differs from canonical referenced position 0")
+        );
     }
 
     #[test]
@@ -3039,6 +3092,9 @@ mod tests {
             max_transactions_per_block: 1,
             ..CarQueryLimits::default()
         };
+        let error = read_cid_resolved_block(&repeated_transaction_car, limits).unwrap_err();
+        assert!(format!("{error:?}").contains("transaction reference count 2"));
+
         let mut adapter = CarInstructionSource::new(
             Cursor::new(repeated_transaction_car),
             identity(&plan),
@@ -3047,7 +3103,10 @@ mod tests {
         )
         .unwrap();
         let error = collect(&mut adapter, &ScanRequest::all()).unwrap_err();
-        assert!(format!("{error:?}").contains("transaction reference count 2"));
+        assert!(
+            format!("{error:?}")
+                .contains("ordered entries reference 2 transactions but reader collected 1")
+        );
 
         let transaction_cid = cid(0x97);
         let entry_cid = cid(0x98);
@@ -3072,12 +3131,19 @@ mod tests {
             cid(0x99),
             &block_node_entries(FIRST_SLOT, &[entry_cid, entry_cid]),
         );
+        let error =
+            read_cid_resolved_block(&repeated_entry_car, CarQueryLimits::default()).unwrap_err();
+        assert!(format!("{error:?}").contains("entry reference count 2"));
+
         let error = collect(
             &mut source(repeated_entry_car, vec![FIRST_SLOT]),
             &ScanRequest::all(),
         )
         .unwrap_err();
-        assert!(format!("{error:?}").contains("entry reference count 2"));
+        assert!(
+            format!("{error:?}")
+                .contains("ordered block references 2 entries but reader collected 1")
+        );
     }
 
     #[test]

@@ -368,27 +368,29 @@ fn serve_request(mut stream: TcpStream, root: &Path, epoch: u64) {
         path.strip_prefix(&format!("{prefix}files/"))
     };
     let Some(object) = object else {
-        write_response(&mut stream, 404, &[], None);
+        write_response(&mut stream, 404, &[], None, None);
         return;
     };
     let bytes = match fs::read(root.join(object)) {
         Ok(bytes) => bytes,
         Err(_) => {
-            write_response(&mut stream, 404, &[], None);
+            write_response(&mut stream, 404, &[], None, None);
             return;
         }
     };
+    let etag = format!("\"{}\"", hex_lower(&Sha256::digest(&bytes)));
     if method == "HEAD" {
         write_response(
             &mut stream,
             200,
             &[],
             Some((0, 0, bytes.len(), bytes.len())),
+            Some(&etag),
         );
         return;
     }
     if object == GENERATION_MANIFEST_FILE {
-        write_response(&mut stream, 200, &bytes, None);
+        write_response(&mut stream, 200, &bytes, None, Some(&etag));
         return;
     }
     let range = lines
@@ -408,6 +410,7 @@ fn serve_request(mut stream: TcpStream, root: &Path, epoch: u64) {
         206,
         body,
         Some((range.0, range.1, bytes.len(), body.len())),
+        Some(&etag),
     );
 }
 
@@ -416,6 +419,7 @@ fn write_response(
     status: u16,
     body: &[u8],
     range: Option<(usize, usize, usize, usize)>,
+    etag: Option<&str>,
 ) {
     let reason = match status {
         200 => "OK",
@@ -426,6 +430,9 @@ fn write_response(
     let mut header = format!(
         "HTTP/1.1 {status} {reason}\r\nContent-Length: {content_length}\r\nConnection: close\r\n"
     );
+    if let Some(etag) = etag {
+        header.push_str(&format!("ETag: {etag}\r\n"));
+    }
     if status == 206
         && let Some((start, end, total, _)) = range
     {
@@ -538,21 +545,17 @@ fn gateway_program_and_token_scans_store_direct_cpi_and_pre_post_rows() {
     );
 
     let prepared = prepare_epoch(&gateway_source(&gateway, &cache), 7).unwrap();
-    assert_eq!(
-        fs::read(
-            prepared
-                .source_root
-                .join(COMPACT_V2_CURRENT_MESSAGE_SCHEMA_MARKER_FILE)
-        )
-        .unwrap(),
-        COMPACT_V2_CURRENT_MESSAGE_SCHEMA_MARKER_BYTES
-    );
+    let descriptor: serde_json::Value =
+        serde_json::from_str(&prepared.source_descriptor_json).unwrap();
+    assert_eq!(descriptor["source_binding"]["kind"], "strong-etags");
+    assert_eq!(descriptor["message_schema"], "current");
+    assert_eq!(descriptor["metadata_schema"], "current-typed-error");
     let mphf = prepared
         .source_root
         .join(ARCHIVE_V2_PUBKEY_REGISTRY_INDEX_FILE);
     let expected = fs::read(fixture.root.join(ARCHIVE_V2_PUBKEY_REGISTRY_INDEX_FILE)).unwrap();
     let mut corrupt = expected.clone();
-    corrupt[0] ^= 0xff;
+    corrupt.pop();
     fs::write(&mphf, corrupt).unwrap();
     prepare_epoch(&gateway_source(&gateway, &cache), 7).unwrap();
     assert_eq!(fs::read(mphf).unwrap(), expected);
@@ -574,7 +577,8 @@ fn indeterminate_record_and_skip_finish_partial_and_resume_without_duplicates() 
         kind: DumpKind::Program,
         target_pubkey: PUMP,
     };
-    assert!(run_dump(&fail_config).is_err());
+    let failure = run_dump(&fail_config).unwrap_err();
+    assert!(format!("{failure:#}").contains("indeterminate selector result"));
     let failed = DumpDatabase::read_status(&fail_output).unwrap();
     assert_eq!(failed.state, DumpState::Failed);
     assert_eq!(failed.transaction_rows, 1);
@@ -639,7 +643,7 @@ fn local_archive_root_resolves_multiple_epoch_children_and_binds_each_path() {
             cache: None,
             allow_insecure_http: false,
             cluster_id: "testnet".into(),
-            local_generation_prefix: None,
+            local_generation_prefix: Some("scanner-test".into()),
             epoch_zero_first_slot: 0,
             slots_per_epoch: 100,
             message_schema: CompactV2MessageSchema::Current,

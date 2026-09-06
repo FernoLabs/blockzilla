@@ -66,10 +66,12 @@ use blockzilla_compact::{
     CompactTransactionConfig, DataArray, OwnedCompactRecentBlockhash,
 };
 use blockzilla_compact_v2_reader::{CompactV2MessageSchema, CompactV2MetadataSchema};
-use blockzilla_primitives::{CompactPubkey, WincodeLeb128Config};
+use blockzilla_primitives::{CompactPubkey, HistoricalSourceWincodeLeb128Config};
 use wincode::{ReadResult, SchemaRead, error::invalid_tag_encoding, io::Reader};
 
-pub type Cfg = WincodeLeb128Config;
+// This visitor lends exact historical source fields, including non-minimal
+// integer spellings. Canonical archive validation uses the strict codec.
+pub type Cfg = HistoricalSourceWincodeLeb128Config;
 
 /// Every message account is addressed by a one-byte instruction index.
 /// This includes static and address-table-loaded accounts together.
@@ -1498,7 +1500,9 @@ mod tests {
         program_logs::known_programs::phoenix_v1::PhoenixLog,
     };
 
-    fn serialize<T: wincode::SchemaWrite<Cfg, Src = T>>(value: &T) -> Vec<u8> {
+    fn serialize<T: wincode::SchemaWrite<blockzilla_primitives::WincodeLeb128Config, Src = T>>(
+        value: &T,
+    ) -> Vec<u8> {
         wincode::config::serialize(value, wincode_leb128_config()).unwrap()
     }
 
@@ -1626,6 +1630,65 @@ mod tests {
                 "truncated metadata tail length {length} was accepted"
             );
         }
+    }
+
+    #[test]
+    fn source_split_metadata_retains_nonminimal_scalar_bytes() {
+        let metadata = CompactMetaV1 {
+            err: None,
+            fee: 0,
+            pre_balances: Vec::new(),
+            post_balances: Vec::new(),
+            inner_instructions: None,
+            logs: None,
+            pre_token_balances: Vec::new(),
+            post_token_balances: Vec::new(),
+            rewards: Vec::new(),
+            loaded_writable_addresses: Vec::new(),
+            loaded_readonly_addresses: Vec::new(),
+            return_data: None,
+            compute_units_consumed: None,
+            cost_units: None,
+        };
+        let mut bytes = serialize(&metadata);
+        assert_eq!(&bytes[..2], &[0, 0]);
+        bytes.splice(1..2, [0x80, 0]);
+        assert!(
+            wincode::config::deserialize_exact::<CompactMetaV1, _>(&bytes, wincode_leb128_config())
+                .is_err()
+        );
+
+        let mut cursor = bytes.as_slice();
+        let effects = stream_metadata_effects_with_schema(
+            &mut cursor,
+            CompactV2MetadataSchema::CurrentTypedError,
+            MetadataDecodeLimits {
+                total_message_accounts: 0,
+                top_level_instruction_count: 0,
+            },
+            |_| Ok::<(), wincode::error::ReadError>(()),
+        )
+        .unwrap();
+        assert!(cursor.is_empty());
+        assert_eq!(effects.fields.outcome_head, [0, 0x80, 0]);
+        assert_eq!(effects.fields.outcome_head.as_ptr(), bytes.as_ptr());
+        assert_eq!(
+            [
+                effects.fields.outcome_head,
+                effects.fields.pre_balances,
+                effects.fields.post_balances,
+                effects.fields.inner_instructions,
+                effects.fields.logs,
+                effects.fields.pre_token_balances,
+                effects.fields.post_token_balances,
+                effects.fields.transaction_rewards,
+                effects.fields.loaded_writable,
+                effects.fields.loaded_readonly,
+                effects.fields.outcome_tail,
+            ]
+            .concat(),
+            bytes
+        );
     }
 
     #[test]
@@ -1821,7 +1884,10 @@ mod tests {
         );
     }
 
-    fn append<T: wincode::SchemaWrite<Cfg, Src = T>>(bytes: &mut Vec<u8>, value: &T) {
+    fn append<T: wincode::SchemaWrite<blockzilla_primitives::WincodeLeb128Config, Src = T>>(
+        bytes: &mut Vec<u8>,
+        value: &T,
+    ) {
         bytes.extend(serialize(value));
     }
 

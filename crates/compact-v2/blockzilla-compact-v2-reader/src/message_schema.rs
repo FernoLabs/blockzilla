@@ -13,7 +13,7 @@ use blockzilla_archive_v2::{
 use blockzilla_compact::{
     CompactMessageHeader, OwnedCompactAddressTableLookup, OwnedCompactRecentBlockhash,
 };
-use blockzilla_primitives::{CompactPubkey, wincode_leb128_config};
+use blockzilla_primitives::{CompactPubkey, historical_source_wincode_leb128_config};
 use sha2::{Digest as _, Sha256};
 use smallvec::SmallVec;
 use thiserror::Error;
@@ -51,6 +51,7 @@ const MAY24_MAINNET_EPOCHS: [u64; 3] = [0, 1, 2];
 /// The one message grammar selected for a complete Compact V2 generation.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum CompactV2MessageSchema {
+    /// The current message enum order. Source integers may still be padded.
     Current,
     /// The enum order used before `UnknownSystem` and `UnknownVote` existed.
     May24PreUnknownFallbacks,
@@ -356,27 +357,29 @@ fn validate_marker_object<S: RangeSource>(
 }
 
 /// Decode one complete message with the generation-selected exact grammar.
+/// Historical source integers may be padded in either schema. This does not
+/// change the selected enum order or permit trailing bytes.
 pub fn decode_compact_v2_message(
     schema: CompactV2MessageSchema,
     bytes: &[u8],
 ) -> Result<ArchiveV2HotMessagePayload, CompactV2MessageSchemaError> {
     match schema {
         CompactV2MessageSchema::Current => {
-            wincode::config::deserialize_exact(bytes, wincode_leb128_config()).map_err(|error| {
-                CompactV2MessageSchemaError::Decode {
+            wincode::config::deserialize_exact(bytes, historical_source_wincode_leb128_config())
+                .map_err(|error| CompactV2MessageSchemaError::Decode {
                     schema,
                     message: error.to_string(),
-                }
-            })
+                })
         }
         CompactV2MessageSchema::May24PreUnknownFallbacks => {
-            let historical: May24ArchiveV2HotMessagePayload =
-                wincode::config::deserialize_exact(bytes, wincode_leb128_config()).map_err(
-                    |error| CompactV2MessageSchemaError::Decode {
-                        schema,
-                        message: error.to_string(),
-                    },
-                )?;
+            let historical: May24ArchiveV2HotMessagePayload = wincode::config::deserialize_exact(
+                bytes,
+                historical_source_wincode_leb128_config(),
+            )
+            .map_err(|error| CompactV2MessageSchemaError::Decode {
+                schema,
+                message: error.to_string(),
+            })?;
             Ok(historical.into())
         }
     }
@@ -513,6 +516,7 @@ mod tests {
     use std::path::Path;
 
     use blockzilla_archive_v2::{ArchiveV2HotInstructionData, ArchiveV2HotMessagePayload};
+    use blockzilla_primitives::wincode_leb128_config;
     use tempfile::TempDir;
 
     use super::*;

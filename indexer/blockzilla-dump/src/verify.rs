@@ -163,10 +163,8 @@ pub fn run_verify(config: VerifyRunConfig) -> Result<VerifyRunResult> {
         let current = prepare_epoch(&config.source, epoch)
             .with_context(|| format!("open required adjacent epoch {epoch}"))?;
         let started = Instant::now();
-        let predecessor_epoch = previous
-            .as_ref()
-            .map(|value| value.archive.manifest().epoch);
-        let slots_per_epoch = current.archive.manifest().slots_per_epoch;
+        let predecessor_epoch = previous.as_ref().map(|value| value.archive.epoch());
+        let slots_per_epoch = current.archive.slots_per_epoch();
         let poh_max_total_hash_rounds = config
             .poh_bounds
             .map(|bounds| {
@@ -330,8 +328,8 @@ fn verify_local_poh(
         &current_reader,
         predecessor_reader.as_ref(),
         ArchiveIntegrityConfig {
-            epoch: current_reader.manifest().epoch,
-            slots_per_epoch: current_reader.manifest().slots_per_epoch,
+            epoch: current_reader.epoch(),
+            slots_per_epoch: current_reader.slots_per_epoch(),
             selected_blocks: current_reader.index().rows.len(),
             workers,
             poh,
