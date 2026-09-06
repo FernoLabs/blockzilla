@@ -1770,21 +1770,22 @@ fn demo_seed() -> DashboardState {
 }
 
 fn demo_tick(state: &mut DashboardState) {
-    use rand::Rng;
-    let mut rng = rand::thread_rng();
+    use rand::RngExt;
+    let mut rng = rand::rng();
 
     if let Some(eta) = state.runnable_eta_secs.as_mut() {
-        *eta = eta.saturating_sub(rng.gen_range(1..=6));
+        *eta = eta.saturating_sub(rng.random_range(1..=6));
     }
-    state.queued = (state.queued as i32 + rng.gen_range(-1..=1)).max(0) as u32;
-    state.machine.load_1m = (state.machine.load_1m + rng.gen_range(-0.25..=0.25)).max(0.0);
-    state.live_capture_active = rng.gen_bool(0.1) ^ state.live_capture_active && rng.gen_bool(0.15);
+    state.queued = (state.queued as i32 + rng.random_range(-1..=1)).max(0) as u32;
+    state.machine.load_1m = (state.machine.load_1m + rng.random_range(-0.25..=0.25)).max(0.0);
+    state.live_capture_active =
+        rng.random_bool(0.1) ^ state.live_capture_active && rng.random_bool(0.15);
 
     for task in &mut state.epochs {
         if task.pct < 100 {
-            task.pct = (task.pct + rng.gen_range(0..=2)).min(100);
-            task.blocks += rng.gen_range(0..=1200);
-            task.eta_secs = task.eta_secs.saturating_sub(rng.gen_range(0..=4));
+            task.pct = (task.pct + rng.random_range(0..=2)).min(100);
+            task.blocks += rng.random_range(0..=1200);
+            task.eta_secs = task.eta_secs.saturating_sub(rng.random_range(0..=4));
         }
     }
 }

@@ -34,30 +34,30 @@ required-features = ["cli"]
 blockzilla-archive-v2 = { path = "../../crates/compact-v2/blockzilla-archive-v2", default-features = false }
 blockzilla-primitives = { path = "../../crates/blockzilla-primitives", default-features = false }
 blockzilla-registry = { path = "../../crates/compact-v2/blockzilla-registry", default-features = false }
-anyhow = "1.0.102"
+anyhow = "1.0.104"
 blockzilla-compact-v2-reader = { version = "0.2.0", path = "../../crates/compact-v2/blockzilla-compact-v2-reader" }
 bs58 = "0.5.1"
 rustix = { version = "1.1.4", features = ["fs"] }
-serde = { version = "1.0.228", features = ["derive"] }
-serde_json = "1.0.149"
+serde = { version = "1.0.229", features = ["derive"] }
+serde_json = "1.0.151"
 sha2 = "0.11.0"
-smallvec = "1.15.2"
-thiserror = "2.0.18"
+smallvec = "1.16.0"
+thiserror = "2.0.20"
 tracing = "0.1.44"
 
 # Optional operations and benchmarks. These do not enter the default library graph.
 blockzilla-read-sdk-legacy = { path = "../../crates/compat/blockzilla-read-sdk-legacy", optional = true }
-clap = { version = "4.6.1", features = ["derive"], optional = true }
-libc = { version = "0.2.183", optional = true }
+clap = { version = "4.6.6", features = ["derive"], optional = true }
+libc = { version = "0.2.189", optional = true }
 pprof = { version = "0.15.0", features = ["flamegraph"], optional = true }
-reqwest = { version = "0.13.3", default-features = false, features = ["blocking", "json", "rustls"], optional = true }
+reqwest = { version = "0.13.4", default-features = false, features = ["blocking", "json", "rustls"], optional = true }
 tracing-subscriber = { version = "0.3.23", features = ["env-filter"], optional = true }
-zstd = { version = "0.13.3", optional = true }
+zstd = { version = "0.14.0", optional = true }
 
 [dev-dependencies]
 blockzilla-compact = { path = "../../crates/compact-v2/blockzilla-compact", default-features = false }
 wincode = { version = "=0.6.1", features = ["derive"] }
-tempfile = "3.24.0"
+tempfile = "3.27.0"
 
 [[bin]]
 name = "archive-v2-account-projection-verify"

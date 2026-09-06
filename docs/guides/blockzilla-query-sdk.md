@@ -1,12 +1,10 @@
 # Blockzilla query SDK guide
 
-Status: implementation guide, 2026-08-28. The source-neutral contract, the
-three reference adapters, the instruction-only classic Token processor, the
-restart-safe SQLite sink, and the bounded network command are implemented.
-Run-specific network results are not part of this guide.
-
-This guide defines the intended application experience. It does not present a
-format adapter as ready when it is not ready.
+Status: implementation guide, reviewed 2026-09-06. The shared model, three
+format adapters, classic Token processor, and SQLite sink are implemented.
+The old `NetworkEpoch` facade is removed. Its archive-token-events command is
+parked and excluded from the workspace until it is ported to the dedicated
+readers. Use the current reader examples linked below.
 
 ## Goal
 
@@ -33,36 +31,23 @@ The format adapter owns this work.
 
 ## What exists now
 
-The [`blockzilla-model`](../../crates/blockzilla-model/README.md)
-contains the source-neutral models and sink direction.
+[`blockzilla-model`](../../crates/blockzilla-model/README.md) contains the
+source-neutral models, source trait, scan requests, and sink interfaces.
 
 The format-specific readers also exist:
 
 - [`of-car-reader`](../../crates/old-faithful/of-car-reader/Readme.md) for CAR;
-- [`blockzilla-read-sdk`](../../crates/compact-v2/blockzilla-compact-v2-reader/README.md) for
+- [`blockzilla-compact-v2-reader`](../../crates/compact-v2/blockzilla-compact-v2-reader/README.md) for
   Compact V2;
-- the current local and HTTPS Indexer V3 readers, described in the
-  [Indexer V3 section of the product guide](../reference/archive-formats-and-read-sdk.md#indexer-first-standalone-v3).
+- [`blockzilla-archive-v3-reader`](../../crates/archive-v3/blockzilla-archive-v3-reader/README.md),
+  whose `IndexerV3Archive` adapter reads the frozen standalone prototype.
 
-The three adapters are implemented. The network example at
-[`examples/archive-token-events`](../../examples/archive-token-events/README.md)
-selects the format only during source setup. All three paths then use the same
-token scan driver and SQLite sink.
-
-The network example records these exact SDK trust levels:
-
-| Format | Trust level | Meaning |
-|---|---|---|
-| CAR | `operator-trusted` | The operator accepts the CAR object and canonical slot plan. The adapter binds the URL, exact length, strong ETag, and slot-plan digest. |
-| Compact V2 | `published-manifest` | A completed generation manifest binds the published generation. |
-| Indexer V3 | `internal-binding-only` | Internal object bindings and an explicit candidate binding are present, but there is no publication manifest. |
-
-The V3 path explicitly accepts its weaker trust level. The output keeps that
-level. Output parity does not change it.
-
-Selecting CAR through the facade is the application's explicit operator-trust
-decision. CAR remains `operator-trusted`; its strong ETag and slot-plan digest
-do not make it publication-verified.
+The small [CAR](../../examples/read-car/README.md),
+[V2](../../examples/read-compact-v2/README.md), and
+[prototype V3](../../examples/read-archive-v3/README.md) examples use the same
+workload rules. Canonical Archive V3 is the replacement format under migration.
+Its local `CanonicalReader` returns format-native data; common-model and HTTP
+support are still pending. See the [reader entry points](../reference/archive-formats-and-read-sdk.md).
 
 ## Common read model
 
@@ -99,12 +84,11 @@ values.
 `for_each_transaction`. These helpers also work with a runtime-selected
 `dyn ArchiveInstructionSource`.
 
-This example operates on any implemented adapter. For network sources,
-`blockzilla-archive-sdk::NetworkEpoch` opens CAR, Compact V2, or Indexer V3 and
-returns the same runtime `ArchiveSource` type.
+This example operates on any implemented `ArchiveInstructionSource` adapter.
+Open the concrete reader before passing it to this function.
 
 ```rust,no_run
-use blockzilla_query_sdk::{
+use blockzilla_model::{
     ArchiveInstructionSource, ArchiveInstructionSourceExt, Result,
     ScanReceipt, ScanRequest,
 };
@@ -143,9 +127,10 @@ fn inspect(
 }
 ```
 
-The caller prepares `request` before it calls this format-neutral function. A
-request for Indexer V3 must explicitly call `allow_unverified_source`; the
-function must not weaken source policy by itself.
+The caller prepares `request` before it calls this format-neutral function.
+Only a source admitted as `InternalBindingOnly` or `Unverified` needs an
+explicit `allow_unverified_source` request. Inspect the actual source identity;
+do not infer its verification level from the format name.
 
 For a small query that does not need empty-block checkpoints, use
 `for_each_transaction`. The returned `ScanReceipt` still counts every scanned
@@ -164,42 +149,52 @@ does not stop for an unrelated ambiguous vote instruction.
 Source setup has one explicit choice at the edge of the application:
 
 - CAR path or stream;
-- Compact V2 generation directory or gateway URL;
-- Indexer V3, also called the indexer-first candidate, by directory or HTTPS
-  base URL.
+- Compact V2 epoch directory or HTTPS origin;
+- the frozen Indexer V3 prototype by directory or HTTPS origin.
 
 After setup, the query logic receives a common source interface. It must not
 match on the archive format.
 
-The reference adapters are:
+The high-level entry points are:
 
-- `CarInstructionSource<R>` for a local or network `Read` stream;
-- `CompactV2InstructionSource<S>` for a local or HTTP range source;
-- `IndexerV3InstructionSource` for a local or shared range source.
+- `of_car_reader::archive::CarArchive`, with the `archive` feature;
+- `blockzilla_compact_v2_reader::CompactV2Archive`, with the `http` feature
+  for this high-level API, including its local constructor;
+- `blockzilla_archive_v3_reader::IndexerV3Archive` for the prototype.
 
-`blockzilla-archive-sdk::NetworkEpoch` is the common network selector. It
-admits the published Compact V2 epoch, creates the canonical block plan, and
-opens one requested format as an `ArchiveSource`. A direct local tool can
-construct one reference adapter instead. Application query logic does not
-match on format-specific types after setup.
+The lower-level `CarInstructionSource`, `CompactV2InstructionSource`, and
+`IndexerV3InstructionSource` remain available for callers that already own
+the required source and descriptor. The reader guides define their admission
+rules. Sample paths use fixed 432,000-slot archive windows. Direct adapters
+carry explicit first-slot and block-plan geometry; this is not a general
+warm-up-aware Solana epoch selector.
 
-The `NetworkEpoch` facade supports `mainnet-beta` and derives the exact first
-slot from Solana's warm-up-aware epoch schedule. `NetworkEpochOptions` changes
-only the local-fixture transport policy. A custom cluster must construct the
-direct format adapters with an explicit first slot. The facade also checks that
-Indexer V3 block rows are a dense prefix of the Compact V2 canonical slot plan.
-A requested range must fit in that prefix.
+The local CAR reader selects a completed `.car` first, then `.car.zst` if raw
+CAR is absent. It ignores `.partial` files. A compressed CAR is decoded
+sequentially; index offsets refer to decoded CAR bytes.
 
 ## Verification policy
 
 Keep the default fail-closed.
 
-A published Compact V2 generation can use its manifest and generation digest.
-An explicit unpublished Compact V2 fixture can instead be `operator-trusted`.
-A CAR can be an explicitly operator-trusted source, whether it is local or
-remote. Current Indexer V3 has strict internal bindings, but it has no
-publication manifest. It must keep the
-internal-only status.
+The common model has four levels:
+
+| Level | Meaning |
+|---|---|
+| `ObjectSetBound` | The admitted object set is pinned to its source identities. Network readers use exact object names, URLs, lengths, and strong ETags. |
+| `OperatorTrusted` | The caller explicitly accepts the descriptor and its object bindings. This is used for local archive opening and the Old Faithful transport policy. |
+| `InternalBindingOnly` | Internal cross-file bindings exist, but the source lacks stronger admission evidence. |
+| `Unverified` | No accepted source verification is asserted. |
+
+Default requests accept the first two levels. The high-level sample readers
+do not require a publication manifest or a whole-archive hash. The lower-level
+V2 published-generation API separately supports manifest and content checks.
+Keep the admission rules of the API actually used.
+
+`SourceIdentity.binding` can be a descriptive operator or candidate ID. Some
+local or object-set descriptors synthesize a `GenerationBinding` digest; it
+must not be presented as a verified registry-content hash. Scope registry IDs
+to the pinned source and registry, and record the verification strength.
 
 A caller can explicitly accept a weaker source for a benchmark or migration
 test. The scan receipt and output metadata must keep that choice.
@@ -267,13 +262,12 @@ Do not turn these states into no-match results:
 The caller can select a less strict policy, but the receipt must count the
 accepted coverage gaps.
 
-## USDC event example
+## Token events and balance outputs
 
 The USDC processor uses the common instruction stream. It does not use
 pre-token or post-token balance observations. The result is an
-instruction-event ledger. It is not an observed balance ledger. The
-three-format command writes one isolated database and report folder for CAR,
-Compact V2, and Indexer V3. It then compares their canonical ledger rows.
+instruction-event ledger. It is not an observed balance ledger. The processor
+and SQLite writer live in [`blockzilla-dump`](../../indexer/blockzilla-dump/README.md).
 
 It performs these steps for each block:
 
@@ -288,49 +282,25 @@ The processor can send the same event batch to SQLite, another database, or a
 test digest. See
 [USDC token event ledger V1](../reference/usdc-token-event-ledger-v1.md).
 
-Run the public network example with one command:
+The old three-format [archive-token-events example](../../examples/archive-token-events/README.md)
+is parked. Its [port plan](../../examples/archive-token-events/PORT-REQUIRED.md)
+records the work needed to restore the command. Its historical command lines
+are not current workspace entry points.
 
-```bash
-cargo run --locked -p blockzilla-archive-token-events -- \
-  network \
-  --origin https://blockzilla-network-format-benchmark-v1.cheron-augustin.workers.dev \
-  --epoch 0 \
-  --max-blocks 1024 \
-  --output-root /private/tmp/blockzilla-token-events-e0
-```
+The supported `read-*-usdc` examples instead write recorded pre/post token
+balance observations through the shared `UsdcBalanceSink`. They retain the
+`BZUSDC02` binary format. The optional V2 `read-compact-v2-usdc-indexed`
+command writes compact numeric references plus one source-scoped public-key
+dictionary. It resolves a registry reference only at first discovery; the
+actual token account, local account index, and owner remain separate fields.
+This mode uses `IndexedTokenSink` rather than allocating a resolved canonical
+balance for every row.
 
-The output root must be an absolute private path. The command accepts exactly
-these sample epochs: `0`, `100`, `200`, `300`, `400`, `500`, `600`, `700`,
-`800`, `900`, and `1000`. It has a hard limit of 1,024 canonical block rows
-for one run. This limit belongs to the demo, not to the SDK.
-
-The command keeps each archive in its own folder:
-
-```text
-<output-root>/archive-cache/origin-.../compact-v2/
-<output-root>/archive-cache/origin-.../indexer-v3/
-<output-root>/car/epoch-N/
-<output-root>/compact-v2/epoch-N/
-<output-root>/indexer-v3/epoch-N/
-<output-root>/comparison/epoch-N/
-```
-
-Each format result folder has its own SQLite database and report. Compact V2
-and Indexer V3 have separate cache trees under `archive-cache`. The comparison
-command audits each database in read-only mode. It then merge-compares full
-token-event, coverage, tracker, and ledger-control rows. It resolves
-database-local key IDs to the raw 32-byte public keys before it compares the
-rows.
-
-The database keeps one SHA-256 digest for each complete canonical
-`BlockView`. The comparison checks these digests. It does not keep a second
-full source projection. Thus, it reports full-row source-projection parity as
-`not-proved-full-row`.
-
-Epoch 0 is only a structural network example. The current epoch-0 Compact V2
-and Indexer V3 samples have limited metadata, and USDC is absent from this
-range. Do not use an empty epoch-0 result as a throughput result or a
-semantic-completeness result.
+The checked expander recreates `BZUSDC02` from the indexed data, dictionary,
+source sidecar, and completion sidecar. It checks scope, lengths, counts, and
+streaming output-file hashes. It does not authenticate the selected source
+metadata against the original registry. See the
+[indexed output contract](../reference/usdc-indexed-balances-v1.md).
 
 ## Network receipts
 
@@ -350,9 +320,9 @@ receipt keeps source bytes, decoded bytes, and persistent-cache reads. A
 format-specific report can add exact HEAD, GET, cold-cache, and warm-cache
 details.
 
-`ArchiveSource::io_snapshot` is a point-in-time value. After the scan, consume
-the source with `ArchiveSource::finish_io` so background CAR workers stop before
-the final total is recorded. Indexer V3 caches its bounded block index and
+The concrete archive readers' `io_snapshot` methods return point-in-time values.
+After the scan, consume the source with `finish_io` so background CAR workers
+stop before the final total is recorded. The prototype V3 reader caches its bounded block index and
 required registry. Its large transaction directory, optional signatures, and
 semantic payload planes stay as pinned, uncached range reads and remain in the
 network counters.
@@ -378,13 +348,14 @@ format. They belong in the adapter and common publisher.
 ## Validation status
 
 The format adapters have corruption, coverage, ordering, range, and sink-stop
-fixtures. The facade also tests the warm-up-aware first slot and the V3 dense
-slot-plan prefix. The CAR HTTPS stream has local protocol-failure fixtures. The
-SQLite writer has restart, rollback, path, schema, digest, and tracker-state
-fixtures.
+fixtures. CAR HTTPS has local protocol-failure fixtures. The SQLite writer has
+restart, rollback, path, schema, digest, and tracker-state fixtures. The V2
+[rolling pipeline](../design/reader-pipeline-rolling-window.md) additionally
+tests bounded admission, incremental ordered publication, and thread shutdown
+after source, worker, or sink failure.
 
-The public network example has a hard 1,024-block limit. It is a
-correctness and SDK demonstration. It is not a full-epoch throughput tool.
-The report separates setup, scan, request, byte, cache, coverage, and database
-facts. A later benchmark can make a performance claim only after the three
-formats produce the same application rows for the same range.
+The [epoch 300 rolling-pipeline report](../benchmarks/epoch-300-rolling-pipeline-2026-09-06.md)
+records the latest paired V2 NAS comparison. It checks exact USDC, expanded
+indexed-USDC, and Pump.fun output bytes outside timed scans. These results
+apply to the named input and builds; they do not establish canonical Archive
+V3 compatibility or performance on all epochs.

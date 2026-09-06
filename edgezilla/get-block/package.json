@@ -7,6 +7,6 @@
     "rpc-key:generate": "node scripts/generate-rpc-key.mjs"
   },
   "devDependencies": {
-    "wrangler": "4.111.0"
+    "wrangler": "4.129.0"
   }
 }

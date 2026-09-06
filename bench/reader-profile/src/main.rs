@@ -8,8 +8,8 @@ use blockzilla_compact_v2_reader::archive::{
     CompactV2Archive, CompactV2LocalDescriptor, CompactV2ParallelScanConfig,
 };
 use blockzilla_example_workloads::{
-    FirewatchSink, MAINNET_PUMP_FUN_PROGRAM, MAINNET_USDC_MINT, PumpSink, UsdcBalanceSink,
-    firewatch_scan_request, pump_scan_request, usdc_scan_request,
+    FirewatchSink, IndexedUsdcBalanceSink, MAINNET_PUMP_FUN_PROGRAM, MAINNET_USDC_MINT, PumpSink,
+    UsdcBalanceSink, firewatch_scan_request, pump_scan_request, usdc_scan_request,
 };
 use blockzilla_model::{BlockSink, BlockView, ScanRange, ScanReceipt, ScanRequest};
 use clap::{Parser, ValueEnum};
@@ -62,6 +62,9 @@ struct Args {
     warmups: usize,
     #[arg(long, conflicts_with = "flamegraph")]
     allocations: bool,
+    /// Measure the V2 compact-ID USDC projection and its discovery dictionary.
+    #[arg(long)]
+    indexed_usdc: bool,
     #[arg(long)]
     flamegraph: Option<PathBuf>,
     /// Use dense V3 scanning to isolate projection from reverse lookup.
@@ -130,6 +133,10 @@ fn main() -> Result<()> {
     let args = Args::parse();
     ensure!(args.iterations > 0, "iterations must be positive");
     ensure!(args.workers.get() <= 64, "at most 64 workers");
+    ensure!(
+        !args.indexed_usdc || matches!((args.format, args.workload), (Format::V2, Workload::Usdc)),
+        "--indexed-usdc requires --format v2 --workload usdc"
+    );
     let mut wallet = [0; 32];
     ensure!(
         bs58::decode(&args.wallet).onto(&mut wallet)? == 32,
@@ -179,18 +186,25 @@ fn main() -> Result<()> {
             );
         }
         let mut sink = Sink::new(args.workload, wallet)?;
+        // No persistent files are produced here. The full example records the
+        // actual source scope; this diagnostic dictionary is discarded per scan.
+        let mut indexed_sink = args
+            .indexed_usdc
+            .then(|| IndexedUsdcBalanceSink::mainnet(io::sink(), io::sink(), [0; 32]))
+            .transpose()?;
         if measured && args.allocations {
             allocation::start();
         }
         let started = Instant::now();
         let (scan, stages): (ScanReceipt, _) = match &mut archive {
             Archive::V2(a) => {
-                let r = a.scan_ordered_parallel(
-                    &request,
-                    &mut sink,
-                    CompactV2ParallelScanConfig::new(args.workers.get())
-                        .with_full_registry_limit(registry_bytes),
-                )?;
+                let config = CompactV2ParallelScanConfig::new(args.workers.get())
+                    .with_full_registry_limit(registry_bytes);
+                let r = if let Some(indexed) = &mut indexed_sink {
+                    a.scan_token_balances_indexed_parallel(&request, indexed, config)?
+                } else {
+                    a.scan_ordered_parallel(&request, &mut sink, config)?
+                };
                 let p = r.pipeline;
                 (
                     r.scan,
@@ -199,12 +213,36 @@ fn main() -> Result<()> {
                         "input_wait_s":p.coordinator_wait_for_ready_batch_time.as_secs_f64(),
                         "decode_sum_s":p.worker_decompress_decode_sum_time.as_secs_f64(),
                         "projection_sum_s":p.worker_projection_sum_time.as_secs_f64(),
-                    "consume_s":p.coordinator_consume_wall_time.as_secs_f64(),
-                    "projection_buffer_wait_s":p.coordinator_wait_for_projection_buffer_time.as_secs_f64(),
-                    "result_send_wait_s":p.coordinator_wait_to_send_result_time.as_secs_f64(),
-                    "signature_read_s":r.signature_read_wall_time.as_secs_f64(),
-                    "signature_assign_s":r.signature_assign_wall_time.as_secs_f64(),
-                    "publish_s":r.publish_wall_time.as_secs_f64(),
+                        "decode_project_wall_s":p.coordinator_decode_project_wall_time.as_secs_f64(),
+                        "consume_s":p.coordinator_consume_wall_time.as_secs_f64(),
+                        "projection_buffer_wait_s":p.coordinator_wait_for_projection_buffer_time.as_secs_f64(),
+                        "result_send_wait_s":p.coordinator_wait_to_send_result_time.as_secs_f64(),
+                        "producer_buffer_wait_s":p.producer_wait_for_free_buffer_time.as_secs_f64(),
+                        "signature_read_s":r.signature_read_wall_time.as_secs_f64(),
+                        "signature_assign_s":r.signature_assign_wall_time.as_secs_f64(),
+                        "publish_s":r.publish_wall_time.as_secs_f64(),
+                        "requested_workers":r.requested_workers,
+                        "effective_workers":r.effective_workers,
+                        "max_active_workers":r.max_active_workers,
+                        "block_count":p.block_count,
+                        "batch_count":p.batch_count,
+                        "max_blocks_per_batch":p.max_blocks_per_batch,
+                        "max_transactions_per_batch":p.max_transactions_per_batch,
+                        "max_in_flight_blocks":p.max_in_flight_blocks,
+                        "max_in_flight_transactions":p.max_in_flight_transactions,
+                        "max_in_flight_declared_uncompressed_bytes":p.max_in_flight_declared_uncompressed_bytes,
+                        "read_call_count":p.read_call_count,
+                        "compressed_bytes":p.compressed_bytes,
+                        "compressed_buffer_count":r.compressed_buffer_count,
+                        "max_compressed_batch_bytes":p.max_compressed_batch_bytes,
+                        "max_declared_uncompressed_batch_bytes":p.max_declared_uncompressed_batch_bytes,
+                        "max_retained_decompressed_buffer_bytes":p.max_retained_decompressed_buffer_bytes,
+                        "max_projected_block_bytes":r.max_projected_block_bytes,
+                        "max_projected_batch_bytes":r.max_projected_batch_bytes,
+                        "registry_mode":format!("{:?}",r.registry.mode),
+                        "registry_prefetch_read_calls":r.registry.prefetch_read_calls,
+                        "registry_prefetch_read_bytes":r.registry.prefetch_read_bytes,
+                        "registry_resident_bound_bytes":r.registry.resident_bound_bytes,
                     }),
                 )
             }
@@ -241,7 +279,17 @@ fn main() -> Result<()> {
         } else {
             None
         };
-        let result = sink.finish()?;
+        let (result, indexed_dictionary_rows, indexed_dictionary_bytes) =
+            if let Some(indexed) = indexed_sink {
+                let (data, dictionary) = indexed.finish()?;
+                (
+                    format!("{:?}; dictionary={:?}", data.report, dictionary.report),
+                    Some(dictionary.report.row_count),
+                    Some(dictionary.report.output_bytes),
+                )
+            } else {
+                (sink.finish()?, None, None)
+            };
         if let Some(expected) = &oracle {
             ensure!(
                 *expected == result,
@@ -251,12 +299,32 @@ fn main() -> Result<()> {
             oracle = Some(result);
         }
         if measured {
+            // Serialize histogram rows after stop(), so reporting the histogram
+            // cannot itself add allocation requests to its buckets. Buckets are
+            // disjoint; the final null upper bound means greater than 65,536.
+            let allocation_size_buckets = allocations.map(|counts| {
+                counts
+                    .size_buckets
+                    .iter()
+                    .zip(allocation::BUCKET_UPPER_BOUNDS)
+                    .map(|(bucket, upper)| {
+                        json!({
+                            "upper_bound_bytes_inclusive": upper,
+                            "allocation_calls": bucket.allocation_calls,
+                            "allocation_bytes": bucket.allocation_bytes,
+                        })
+                    })
+                    .collect::<Vec<_>>()
+            });
             println!(
                 "{}",
                 json!({"iteration":iteration-args.warmups,"format":format!("{:?}",args.format),"workload":format!("{:?}",args.workload),
                 "workers":args.workers.get(),"seconds":seconds,"transactions":scan.transactions,"instructions":scan.instructions,
                 "tps":scan.transactions as f64/seconds,"source_bytes":scan.io.source_read_bytes,"source_calls":scan.io.source_read_calls,
-                "allocation_calls":allocations.map(|x|x.0),"allocation_bytes":allocations.map(|x|x.1),"stages":stages})
+                "allocation_calls":allocations.map(|x|x.allocation_calls),"allocation_bytes":allocations.map(|x|x.allocation_bytes),
+                "allocation_size_buckets":allocation_size_buckets,"stages":stages,
+                "indexed_usdc":args.indexed_usdc,"indexed_dictionary_rows":indexed_dictionary_rows,
+                "indexed_dictionary_bytes":indexed_dictionary_bytes})
             );
         }
     }

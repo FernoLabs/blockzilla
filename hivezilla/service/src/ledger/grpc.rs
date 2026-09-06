@@ -157,11 +157,10 @@ pub(crate) fn project_grpc_ledger_candidate(
 /// Prove the V0 interpretation of every versioned message retained by the
 /// pinned Yellowstone schema.
 ///
-/// `yellowstone-grpc-proto` 12.4 carries only a `versioned` boolean. A V0
-/// message with no address-table lookups and a current V1 message therefore
-/// have the same retained shape after the V1-only protobuf field is dropped;
-/// a later message version could overlap another retained shape. The fee-payer
-/// signature over the reconstructed V0 bytes proves the exact interpretation.
+/// The schema exposes V1's config, which this adapter rejects before encoding.
+/// Older upstream servers can omit that field, and a later message version can
+/// overlap the retained shape. The fee-payer signature over the reconstructed
+/// V0 bytes proves the exact interpretation in those cases.
 /// Complete multi-signature verification remains a promotion responsibility.
 /// Failure is terminal: this adapter must never silently rewrite a newer signed
 /// message as V0.
@@ -192,6 +191,10 @@ fn verify_versioned_message_is_v0(
 
 /// Encode the canonical Solana Legacy or V0 message bytes covered by signatures.
 fn serialize_grpc_signed_message(message: &GrpcMessage) -> Result<Vec<u8>> {
+    ensure!(
+        message.config.is_none(),
+        "V1 transaction config is not supported by the Legacy/V0 ledger adapter"
+    );
     let header = message.header.as_ref().context("message missing header")?;
     let required_signatures = u8::try_from(header.num_required_signatures)
         .context("num_required_signatures exceeds u8")?;
@@ -321,6 +324,7 @@ mod tests {
             instructions: vec![],
             versioned: false,
             address_table_lookups: vec![],
+            config: None,
         };
         let transaction = SubscribeUpdateTransactionInfo {
             signature: vec![7; 64],
@@ -491,6 +495,27 @@ mod tests {
             .signatures[0][0] ^= 1;
         let error = project_grpc_ledger_candidate(&block).unwrap_err();
         assert!(format!("{error:#}").contains("fee-payer-signature-proven V0 message"));
+    }
+
+    #[test]
+    fn rejects_v1_config_instead_of_dropping_signed_fields() {
+        for versioned in [false, true] {
+            let mut block = complete_block();
+            let transaction = block.transactions[0].transaction.as_mut().unwrap();
+            let message = transaction.message.as_mut().unwrap();
+            message.versioned = versioned;
+            let signing_key = SigningKey::from_bytes(&[0x42; 32]);
+            message.account_keys[0] = signing_key.verifying_key().to_bytes().to_vec();
+            let signed_message_bytes = serialize_grpc_signed_message(message).unwrap();
+            let signature = signing_key.sign(&signed_message_bytes).to_bytes().to_vec();
+            // The pre-config fields have a valid signature. Even an empty V1
+            // config must not be dropped to accept them as Legacy or V0.
+            message.config = Some(Default::default());
+            transaction.signatures[0] = signature.clone();
+            block.transactions[0].signature = signature;
+            let error = project_grpc_ledger_candidate(&block).unwrap_err();
+            assert!(format!("{error:#}").contains("V1 transaction config is not supported"));
+        }
     }
 
     #[test]

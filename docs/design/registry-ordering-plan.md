@@ -1,6 +1,10 @@
 # Making usage-sorted registry order a format invariant
 
-Date: 2026-08-16. Plan, not implemented.
+Date: 2026-08-16. Historical plan, not an implemented registry-order guarantee.
+The converter and registry findings below describe that measured snapshot.
+Current Archive V3 ownership and migration status are in the
+[workspace plan](workspace-restructure.md). Do not reinterpret stored registry
+IDs across sources or reorder a registry without rewriting all references.
 
 **Goal:** every epoch in the Index Archive has a pubkey registry sorted by
 descending reference count, regardless of what its Compact V2 source did.

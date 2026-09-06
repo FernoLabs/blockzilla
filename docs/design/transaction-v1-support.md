@@ -1,6 +1,8 @@
 # Transaction v1 (SIMD-0385) in the archive
 
-Date: 2026-08-18. Implemented, with one verification still open.
+Date: 2026-08-18. Implementation and compatibility evidence from that date,
+with one verification still open. Dependency versions below identify the
+measured build; see `Cargo.toml` and `Cargo.lock` for current versions.
 
 [SIMD-0385][simd] was accepted and merged on 2025-12-17, alongside
 [SIMD-0296][simd296] which raises the transaction size limit. v1 transactions
@@ -92,7 +94,7 @@ carries `address_table_lookups`.
 **Every variant is appended**, so `Legacy` and `V0` keep wincode tags 0 and 1 and
 existing generations decode unchanged. This is the constraint to preserve if
 further versions arrive: **append, never reorder.** The golden tests in
-`blockzilla-format` are what catch a violation.
+`blockzilla-compact` and `blockzilla-archive-v2` are what catch a violation.
 
 ### Signature verification
 
@@ -168,7 +170,7 @@ the design of record**, which still says otherwise.
 
 §7.7 freezes Compact V2 at exact wincode `0.5.5` on the assumption that 0.6
 would move the bytes. It does not, for the shapes Compact V2 uses. The whole
-workspace now runs a single `=0.6.1`, and
+workspace used a single `=0.6.1` in that compatibility check, and
 `legacy_payload_has_exact_golden_bytes_and_hash` — which asserts exact Compact V2
 bytes *and* their hash — passes unchanged.
 

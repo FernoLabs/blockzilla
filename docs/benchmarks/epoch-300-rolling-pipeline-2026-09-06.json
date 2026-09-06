@@ -1,0 +1,2311 @@
+{
+  "state": "VERIFIED",
+  "archive_root": "/volume2/blockzilla-bench/archive",
+  "archive_layout": [
+    "compact-v2/<epoch>",
+    "indexer-v3/<epoch>",
+    "car/<epoch>"
+  ],
+  "epoch": 300,
+  "candidate": {
+    "allocation_counter_source_sha256": "ff6c5d7acb061e74a2f530473c8fd8150fc6ba26cc12606cca5375bc76744442",
+    "binary_sha256": {
+      "blockzilla-reader-profile": "d6f838c87a689198d7cbc425da48665a03422b358e491967806cbdbcb79f067b",
+      "expand-usdc-indexed": "bf063e171fdcbb918459227f73ec0cb1b8c0764d15f65403a9d8b7aedcd4dd94",
+      "read-compact-v2-pumpfun": "b52111c08b0574c1eb31e8631d2af30684d7923599a3c9837e71725f4d64d278",
+      "read-compact-v2-usdc": "bac78eb8bf503fe85a41318d074371c36441ee158d0a05a92188f248fcd5942d",
+      "read-compact-v2-usdc-indexed": "478e9fe4486111713e6bb10340517fda539377fc0d1634d5f3d9d843cb283be0"
+    },
+    "build_command": [
+      "cargo",
+      "build",
+      "--offline",
+      "--locked",
+      "--release",
+      "--target",
+      "x86_64-unknown-linux-musl",
+      "-p",
+      "blockzilla-read-compact-v2",
+      "-p",
+      "blockzilla-reader-profile",
+      "--bins"
+    ],
+    "build_exit_code": 0,
+    "checks": {
+      "archive_sample_matrix_test_exit_code": 0,
+      "archive_sample_matrix_tests": 12,
+      "diff_check": "PASS",
+      "failed": 0,
+      "format_check": "PASS",
+      "harnesses": 131,
+      "ignored": 1,
+      "passed": 3563,
+      "pipeline_regression_tests": 12,
+      "workspace_test_exit_code": 0
+    },
+    "compiler": "rustc 1.98.1 (48a229cea 2026-09-01)\nbinary: rustc\ncommit-hash: 48a229ceaefd4985c50990b14116b6d856af0985\ncommit-date: 2026-09-01\nhost: aarch64-apple-darwin\nrelease: 1.98.1\nLLVM version: 22.1.8\n",
+    "nas_state": "NOT_STARTED_COPY_PAUSE_UNCONFIRMED",
+    "prepared_at": "2026-09-06T18:20:45.607060+00:00",
+    "profile": "release",
+    "rustflags": "-C target-feature=+aes,+sse2",
+    "source_files_after_build_sha256": "1be306b23ec27cacbeb068eaf81de64ba370fafa024168745c7442e51791960e",
+    "source_files_manifest_sha256": "1be306b23ec27cacbeb068eaf81de64ba370fafa024168745c7442e51791960e",
+    "source_patch_includes_preexisting_user_model_edit": true,
+    "source_patch_sha256": "664333c67252bd5de1c49ae513df058da0c9cb121d5b093f6a1da3ce7a2c7851",
+    "source_revision": "2672d42714da7560672b7a99b420c8315eb733e2",
+    "target": "x86_64-unknown-linux-musl",
+    "untracked_files_in_patch": [
+      "crates/blockzilla-model/src/indexed_tokens.rs",
+      "crates/compact-v2/blockzilla-compact-v2-reader/src/account_references.rs",
+      "crates/compact-v2/blockzilla-compact-v2-reader/src/compact_query/indexed_tokens.rs",
+      "crates/compact-v2/blockzilla-compact-v2-reader/src/reader/pipeline_tests.rs",
+      "docs/benchmarks/epoch-300-indexed-usdc-and-allocation-retest-2026-09-06.json",
+      "docs/benchmarks/epoch-300-indexed-usdc-and-allocation-retest-2026-09-06.md",
+      "docs/benchmarks/epoch-300-refactor-2026-09-06-summary.json",
+      "docs/benchmarks/epoch-300-refactor-diagnosis-2026-09-06.md",
+      "docs/benchmarks/epoch-300-usdc-single-pass-fix-2026-09-06.md",
+      "docs/benchmarks/reader-allocation-and-indexed-usdc-2026-09-06.md",
+      "docs/benchmarks/reader-indexed-discovery-review-2026-09-06.md",
+      "docs/benchmarks/refactor-v2-v3-nas-2026-09-06.md",
+      "docs/design/reader-pipeline-rolling-window.md",
+      "docs/reference/usdc-indexed-balances-v1.md",
+      "examples/read-compact-v2/src/bin/expand-usdc-indexed.rs",
+      "examples/read-compact-v2/src/bin/read-compact-v2-usdc-indexed.rs",
+      "examples/workloads/src/usdc_indexed.rs",
+      "scripts/compare_archive_sample_runs.py",
+      "scripts/test_compare_archive_sample_runs.py"
+    ]
+  },
+  "prefix_results": "/volume2/blockzilla-bench/results/epoch300-rolling-prefix-20260906T183306Z",
+  "full_results": "/volume2/blockzilla-bench/results/epoch300-rolling-full-20260906T183521Z",
+  "prefix_validation": {
+    "checked_cases": 24,
+    "checked_records": 60,
+    "invariants": {
+      "usdc": {
+        "transactions": 3274503,
+        "instructions": 0,
+        "source_bytes": 654045903,
+        "source_calls": 69,
+        "indexed_dictionary_rows": null,
+        "indexed_dictionary_bytes": null
+      },
+      "pumpfun": {
+        "transactions": 3274503,
+        "instructions": 3253320,
+        "source_bytes": 221283307,
+        "source_calls": 54,
+        "indexed_dictionary_rows": null,
+        "indexed_dictionary_bytes": null
+      },
+      "indexed-usdc": {
+        "transactions": 3274503,
+        "instructions": 0,
+        "source_bytes": 654045903,
+        "source_calls": 69,
+        "indexed_dictionary_rows": 6279,
+        "indexed_dictionary_bytes": 376816
+      }
+    },
+    "comparisons": [
+      {
+        "workload": "usdc",
+        "workers": 1,
+        "seconds": {
+          "values": {
+            "baseline": [
+              1.848103043,
+              1.8269726720000001,
+              1.86781262
+            ],
+            "candidate": [
+              1.867631568,
+              1.825186579,
+              1.829453803
+            ]
+          },
+          "median": {
+            "baseline": 1.848103043,
+            "candidate": 1.829453803
+          },
+          "percent": -1.0091017419530335
+        },
+        "allocation_calls": {
+          "values": {
+            "baseline": [
+              581,
+              583
+            ],
+            "candidate": [
+              430,
+              430
+            ]
+          },
+          "median": {
+            "baseline": 582.0,
+            "candidate": 430.0
+          },
+          "percent": -26.116838487972505
+        },
+        "allocation_bytes": {
+          "values": {
+            "baseline": [
+              490992537,
+              492098777
+            ],
+            "candidate": [
+              486358251,
+              486358251
+            ]
+          },
+          "median": {
+            "baseline": 491545657.0,
+            "candidate": 486358251.0
+          },
+          "percent": -1.0553253652284877
+        },
+        "timing_stage_means": {
+          "decode_sum_s": {
+            "baseline": 0.513971415,
+            "candidate": 0.514104963
+          },
+          "projection_sum_s": {
+            "baseline": 1.0690967796666668,
+            "candidate": 1.0987704513333334
+          },
+          "consume_s": {
+            "baseline": 0.061522040666666666,
+            "candidate": 0.079174499
+          },
+          "publish_s": {
+            "baseline": 0.04811131766666667,
+            "candidate": 0.06164831633333333
+          },
+          "read_s": {
+            "baseline": 0.030766279333333334,
+            "candidate": 0.030151655666666666
+          },
+          "producer_buffer_wait_s": {
+            "baseline": 1.5921530583333334,
+            "candidate": 1.5960054339999998
+          },
+          "max_projected_batch_bytes": {
+            "baseline": 4961386.666666667,
+            "candidate": 2080746.6666666667
+          },
+          "max_projected_block_bytes": {
+            "baseline": 1353493.3333333333,
+            "candidate": 1213866.6666666667
+          },
+          "max_retained_decompressed_buffer_bytes": {
+            "baseline": 19334930,
+            "candidate": 19334930
+          }
+        },
+        "candidate_peaks": {
+          "max_in_flight_blocks": 8,
+          "max_in_flight_transactions": 20034,
+          "max_in_flight_declared_uncompressed_bytes": 20914414
+        },
+        "sampled_peak_rss_kib": {
+          "baseline": 491168,
+          "candidate": 489960
+        }
+      },
+      {
+        "workload": "usdc",
+        "workers": 12,
+        "seconds": {
+          "values": {
+            "baseline": [
+              0.562515923,
+              0.557827447,
+              0.561810194
+            ],
+            "candidate": [
+              0.500701776,
+              0.512284912,
+              0.502431743
+            ]
+          },
+          "median": {
+            "baseline": 0.561810194,
+            "candidate": 0.502431743
+          },
+          "percent": -10.569130221229116
+        },
+        "allocation_calls": {
+          "values": {
+            "baseline": [
+              3222,
+              3424
+            ],
+            "candidate": [
+              3682,
+              3584
+            ]
+          },
+          "median": {
+            "baseline": 3323.0,
+            "candidate": 3633.0
+          },
+          "percent": 9.328919650917843
+        },
+        "allocation_bytes": {
+          "values": {
+            "baseline": [
+              664781960,
+              676069491
+            ],
+            "candidate": [
+              674567012,
+              668982946
+            ]
+          },
+          "median": {
+            "baseline": 670425725.5,
+            "candidate": 671774979.0
+          },
+          "percent": 0.20125324084092622
+        },
+        "timing_stage_means": {
+          "decode_sum_s": {
+            "baseline": 0.9046484973333333,
+            "candidate": 0.995398867
+          },
+          "projection_sum_s": {
+            "baseline": 2.1570331346666665,
+            "candidate": 2.51287385
+          },
+          "consume_s": {
+            "baseline": 0.15674859366666669,
+            "candidate": 0.15445260466666666
+          },
+          "publish_s": {
+            "baseline": 0.09575259966666667,
+            "candidate": 0.096878643
+          },
+          "read_s": {
+            "baseline": 0.059118377,
+            "candidate": 0.057049393999999996
+          },
+          "producer_buffer_wait_s": {
+            "baseline": 0.2978286593333333,
+            "candidate": 0.24975292066666668
+          },
+          "max_projected_batch_bytes": {
+            "baseline": 44769760,
+            "candidate": 49118133.333333336
+          },
+          "max_projected_block_bytes": {
+            "baseline": 1275306.6666666667,
+            "candidate": 1345706.6666666667
+          },
+          "max_retained_decompressed_buffer_bytes": {
+            "baseline": 19334930,
+            "candidate": 19334930
+          }
+        },
+        "candidate_peaks": {
+          "max_in_flight_blocks": 96,
+          "max_in_flight_transactions": 131072,
+          "max_in_flight_declared_uncompressed_bytes": 50493562
+        },
+        "sampled_peak_rss_kib": {
+          "baseline": 541420,
+          "candidate": 528212
+        }
+      },
+      {
+        "workload": "pumpfun",
+        "workers": 1,
+        "seconds": {
+          "values": {
+            "baseline": [
+              2.163174536,
+              2.121709877,
+              2.121008517
+            ],
+            "candidate": [
+              2.116009052,
+              2.134072495,
+              2.127845366
+            ]
+          },
+          "median": {
+            "baseline": 2.121709877,
+            "candidate": 2.127845366
+          },
+          "percent": 0.28917662431187097
+        },
+        "allocation_calls": {
+          "values": {
+            "baseline": [
+              366182,
+              369211
+            ],
+            "candidate": [
+              304421,
+              297089
+            ]
+          },
+          "median": {
+            "baseline": 367696.5,
+            "candidate": 300755.0
+          },
+          "percent": -18.205639705572395
+        },
+        "allocation_bytes": {
+          "values": {
+            "baseline": [
+              240811434,
+              244783978
+            ],
+            "candidate": [
+              185844508,
+              186552380
+            ]
+          },
+          "median": {
+            "baseline": 242797706.0,
+            "candidate": 186198444.0
+          },
+          "percent": -23.311283674154648
+        },
+        "timing_stage_means": {
+          "decode_sum_s": {
+            "baseline": 0.5223438696666667,
+            "candidate": 0.5258558066666666
+          },
+          "projection_sum_s": {
+            "baseline": 1.517467824,
+            "candidate": 1.547323979
+          },
+          "consume_s": {
+            "baseline": 0.116607056,
+            "candidate": 0.13070060033333333
+          },
+          "publish_s": {
+            "baseline": 0.07246164299999999,
+            "candidate": 0.09105228566666666
+          },
+          "read_s": {
+            "baseline": 0.03560920966666667,
+            "candidate": 0.033739341
+          },
+          "producer_buffer_wait_s": {
+            "baseline": 2.0531978680000003,
+            "candidate": 2.046477789
+          },
+          "max_projected_batch_bytes": {
+            "baseline": 13287837.666666666,
+            "candidate": 10181572.666666666
+          },
+          "max_projected_block_bytes": {
+            "baseline": 5636286,
+            "candidate": 9992522.333333334
+          },
+          "max_retained_decompressed_buffer_bytes": {
+            "baseline": 19334930,
+            "candidate": 19334930
+          }
+        },
+        "candidate_peaks": {
+          "max_in_flight_blocks": 8,
+          "max_in_flight_transactions": 20034,
+          "max_in_flight_declared_uncompressed_bytes": 20914414
+        },
+        "sampled_peak_rss_kib": {
+          "baseline": 84292,
+          "candidate": 80080
+        }
+      },
+      {
+        "workload": "pumpfun",
+        "workers": 12,
+        "seconds": {
+          "values": {
+            "baseline": [
+              0.611331092,
+              0.613758213,
+              0.604528552
+            ],
+            "candidate": [
+              0.539715018,
+              0.531679043,
+              0.54325974
+            ]
+          },
+          "median": {
+            "baseline": 0.611331092,
+            "candidate": 0.539715018
+          },
+          "percent": -11.714776973915153
+        },
+        "allocation_calls": {
+          "values": {
+            "baseline": [
+              437237,
+              442476
+            ],
+            "candidate": [
+              403526,
+              403702
+            ]
+          },
+          "median": {
+            "baseline": 439856.5,
+            "candidate": 403614.0
+          },
+          "percent": -8.239619057579006
+        },
+        "allocation_bytes": {
+          "values": {
+            "baseline": [
+              464246048,
+              473152131
+            ],
+            "candidate": [
+              420027205,
+              423614123
+            ]
+          },
+          "median": {
+            "baseline": 468699089.5,
+            "candidate": 421820664.0
+          },
+          "percent": -10.001817061349339
+        },
+        "timing_stage_means": {
+          "decode_sum_s": {
+            "baseline": 0.9664485606666666,
+            "candidate": 0.976525022
+          },
+          "projection_sum_s": {
+            "baseline": 4.756538476333334,
+            "candidate": 4.977593340333333
+          },
+          "consume_s": {
+            "baseline": 0.3802136583333333,
+            "candidate": 0.38259463466666666
+          },
+          "publish_s": {
+            "baseline": 0.20846318033333333,
+            "candidate": 0.22094953333333334
+          },
+          "read_s": {
+            "baseline": 0.07723716033333333,
+            "candidate": 0.07260661366666667
+          },
+          "producer_buffer_wait_s": {
+            "baseline": 0.474398634,
+            "candidate": 0.41082388466666664
+          },
+          "max_projected_batch_bytes": {
+            "baseline": 80592117.33333333,
+            "candidate": 79170510.66666667
+          },
+          "max_projected_block_bytes": {
+            "baseline": 3626158.6666666665,
+            "candidate": 3650771.3333333335
+          },
+          "max_retained_decompressed_buffer_bytes": {
+            "baseline": 19334930,
+            "candidate": 19334930
+          }
+        },
+        "candidate_peaks": {
+          "max_in_flight_blocks": 96,
+          "max_in_flight_transactions": 131072,
+          "max_in_flight_declared_uncompressed_bytes": 50493562
+        },
+        "sampled_peak_rss_kib": {
+          "baseline": 178636,
+          "candidate": 208160
+        }
+      },
+      {
+        "workload": "indexed-usdc",
+        "workers": 1,
+        "seconds": {
+          "values": {
+            "baseline": [
+              1.898076626,
+              1.851544478,
+              1.8839295329999999
+            ],
+            "candidate": [
+              1.858208953,
+              1.861719381,
+              1.9135234190000001
+            ]
+          },
+          "median": {
+            "baseline": 1.8839295329999999,
+            "candidate": 1.861719381
+          },
+          "percent": -1.1789268977928424
+        },
+        "allocation_calls": {
+          "values": {
+            "baseline": [
+              341,
+              342
+            ],
+            "candidate": [
+              340,
+              339
+            ]
+          },
+          "median": {
+            "baseline": 341.5,
+            "candidate": 339.5
+          },
+          "percent": -0.5856515373352855
+        },
+        "allocation_bytes": {
+          "values": {
+            "baseline": [
+              490342729,
+              490764393
+            ],
+            "candidate": [
+              486508139,
+              485808779
+            ]
+          },
+          "median": {
+            "baseline": 490553561.0,
+            "candidate": 486158459.0
+          },
+          "percent": -0.8959474254025435
+        },
+        "timing_stage_means": {
+          "decode_sum_s": {
+            "baseline": 0.530187571,
+            "candidate": 0.5267643
+          },
+          "projection_sum_s": {
+            "baseline": 1.0847077946666666,
+            "candidate": 1.1295422816666667
+          },
+          "consume_s": {
+            "baseline": 0.08515976133333333,
+            "candidate": 0.08979190066666667
+          },
+          "publish_s": {
+            "baseline": 0.083981717,
+            "candidate": 0.08912797333333333
+          },
+          "read_s": {
+            "baseline": 0.031157414666666668,
+            "candidate": 0.030746912
+          },
+          "producer_buffer_wait_s": {
+            "baseline": 1.636020407,
+            "candidate": 1.6368974456666667
+          },
+          "max_projected_batch_bytes": {
+            "baseline": 4791040,
+            "candidate": 1972629.3333333333
+          },
+          "max_projected_block_bytes": {
+            "baseline": 1279168,
+            "candidate": 1078101.3333333333
+          },
+          "max_retained_decompressed_buffer_bytes": {
+            "baseline": 19334930,
+            "candidate": 19334930
+          }
+        },
+        "candidate_peaks": {
+          "max_in_flight_blocks": 8,
+          "max_in_flight_transactions": 20034,
+          "max_in_flight_declared_uncompressed_bytes": 20914414
+        },
+        "sampled_peak_rss_kib": {
+          "baseline": 491492,
+          "candidate": 489920
+        }
+      },
+      {
+        "workload": "indexed-usdc",
+        "workers": 12,
+        "seconds": {
+          "values": {
+            "baseline": [
+              0.585144399,
+              0.554160785,
+              0.567062634
+            ],
+            "candidate": [
+              0.504528512,
+              0.501856325,
+              0.545841193
+            ]
+          },
+          "median": {
+            "baseline": 0.567062634,
+            "candidate": 0.504528512
+          },
+          "percent": -11.027727494384676
+        },
+        "allocation_calls": {
+          "values": {
+            "baseline": [
+              1580,
+              1499
+            ],
+            "candidate": [
+              1594,
+              1604
+            ]
+          },
+          "median": {
+            "baseline": 1539.5,
+            "candidate": 1599.0
+          },
+          "percent": 3.864891198441045
+        },
+        "allocation_bytes": {
+          "values": {
+            "baseline": [
+              674459466,
+              662702818
+            ],
+            "candidate": [
+              678881657,
+              683652010
+            ]
+          },
+          "median": {
+            "baseline": 668581142.0,
+            "candidate": 681266833.5
+          },
+          "percent": 1.8974049226174516
+        },
+        "timing_stage_means": {
+          "decode_sum_s": {
+            "baseline": 0.9137968316666667,
+            "candidate": 0.9806989833333333
+          },
+          "projection_sum_s": {
+            "baseline": 2.188072886,
+            "candidate": 2.5994927066666667
+          },
+          "consume_s": {
+            "baseline": 0.16499633866666666,
+            "candidate": 0.15321238133333334
+          },
+          "publish_s": {
+            "baseline": 0.143023278,
+            "candidate": 0.14871135800000002
+          },
+          "read_s": {
+            "baseline": 0.064350487,
+            "candidate": 0.054959609
+          },
+          "producer_buffer_wait_s": {
+            "baseline": 0.2987259253333333,
+            "candidate": 0.2601088386666667
+          },
+          "max_projected_batch_bytes": {
+            "baseline": 47361493.333333336,
+            "candidate": 47045568
+          },
+          "max_projected_block_bytes": {
+            "baseline": 1337386.6666666667,
+            "candidate": 1341312
+          },
+          "max_retained_decompressed_buffer_bytes": {
+            "baseline": 19334930,
+            "candidate": 19334930
+          }
+        },
+        "candidate_peaks": {
+          "max_in_flight_blocks": 96,
+          "max_in_flight_transactions": 131072,
+          "max_in_flight_declared_uncompressed_bytes": 50493562
+        },
+        "sampled_peak_rss_kib": {
+          "baseline": 539196,
+          "candidate": 560392
+        }
+      }
+    ]
+  },
+  "limits": [
+    "This is the rolling-pipeline candidate compared with the immediately preceding refactor build, not a fresh oldReader run.",
+    "Allocation-mode elapsed times are excluded from speed results.",
+    "Decode/project wall and two queue timing fields changed meaning; worker elapsed sums are not CPU time."
+  ],
+  "car_baseline": "Epoch 300 raw CAR baseline is intentional. Original restore stopped before the user correction; compressed source and 211,677,609,984-byte partial preserved. The continuation verifies the entire saved prefix, then appends; it must decode from the start and does not rewrite the prefix. Launch follows all V2 timings and output checks.",
+  "full_results_data": [
+    {
+      "case": "usdc-baseline-1",
+      "command": [
+        "/volume2/blockzilla-bench/control/epoch300-allocation-review-20260906T161500Z/bin/read-compact-v2-usdc",
+        "--archive-root",
+        "/volume2/blockzilla-bench/archive",
+        "--epoch",
+        "300",
+        "--threads",
+        "12",
+        "--output",
+        "/volume2/blockzilla-bench/results/epoch300-rolling-full-20260906T183521Z/full/usdc-baseline-1/output.bin"
+      ],
+      "directory": "/volume2/blockzilla-bench/results/epoch300-rolling-full-20260906T183521Z/full/usdc-baseline-1",
+      "exit_code": 0,
+      "kind": "full",
+      "metrics": {
+        "blocks": "408989",
+        "bound_source_size_bytes": "99504005950",
+        "coverage_sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+        "effective_workers": "12",
+        "epoch": "300",
+        "format": "compact-v2",
+        "indeterminate_transactions": "0",
+        "matching_transactions": "6253225",
+        "max_active_workers": "12",
+        "max_batch_blocks": "48",
+        "max_batch_transactions": "65536",
+        "max_projected_batch_bytes": "94078720",
+        "max_projected_block_bytes": "2025600",
+        "output_bytes": "4110523748",
+        "output_complete": "true",
+        "output_path": "/volume2/blockzilla-bench/results/epoch300-rolling-full-20260906T183521Z/full/usdc-baseline-1/output.bin",
+        "output_rows": "30224439",
+        "output_schema": "blockzilla-example-usdc-recorded-balance-exclude-failed/v2",
+        "pipeline": "compact-v2",
+        "pipeline_buffer_wait_s": "55.239200",
+        "pipeline_consume_s": "41.777300",
+        "pipeline_decode_project_wall_s": "85.590554",
+        "pipeline_input_wait_s": "0.023083",
+        "pipeline_projection_buffer_wait_s": "1.289674",
+        "pipeline_publish_s": "28.533337",
+        "pipeline_read_s": "31.736056",
+        "pipeline_result_send_wait_s": "0.053191",
+        "pipeline_signature_assign_s": "0.025307",
+        "pipeline_signature_read_s": "0.037254",
+        "pipeline_worker_decode_sum_s": "219.214033",
+        "pipeline_worker_projection_sum_s": "530.151310",
+        "post_rows": "15132755",
+        "pre_rows": "15091684",
+        "registry_mode": "shared-full",
+        "registry_prefetch_read_bytes": "432762560",
+        "registry_prefetch_read_calls": "13",
+        "registry_resident_bound_bytes": "432762560",
+        "requested_workers": "12",
+        "scan_cache_read_bytes": "0",
+        "scan_local_read_bytes": "44118946554",
+        "scan_local_read_calls": "11268",
+        "scan_local_read_mb_s": "505.877805",
+        "scan_logical_read_bytes": "44118946554",
+        "scan_logical_read_calls": "11268",
+        "scan_logical_read_mb_s": "505.877805",
+        "scan_network_bytes": "0",
+        "scan_network_mb_s": "0.000000",
+        "scan_s": "87.212655",
+        "scan_tps": "8309918.242",
+        "setup_cache_read_bytes": "0",
+        "setup_local_read_bytes": "21267529",
+        "setup_local_read_calls": "2",
+        "setup_network_bytes": "0",
+        "setup_s": "0.021796",
+        "skipped_failed_transactions": "111179816",
+        "source": "local",
+        "threads": "12",
+        "token_balances_unavailable_transactions": "0",
+        "token_mint_unavailable_transactions": "0",
+        "total_cache_read_bytes": "0",
+        "total_local_read_bytes": "44140214083",
+        "total_local_read_calls": "11270",
+        "total_local_read_mb_s": "505.991205",
+        "total_network_bytes": "0",
+        "total_network_mb_s": "0.000000",
+        "total_s": "87.235141",
+        "total_tps": "8307776.267",
+        "transactions": "724730034",
+        "workload": "usdc-recorded-balances"
+      },
+      "repeat": 1,
+      "sampled_peak_rss_kib": 602628,
+      "version": "baseline",
+      "wall_s": 87.25553371300339,
+      "workers": 12,
+      "workload": "usdc"
+    },
+    {
+      "admission_checks": {
+        "limit": "Aggregate peaks cannot prove isolation timing; that rule is covered by local pipeline tests.",
+        "max_blocks": 96,
+        "max_transactions": 131072,
+        "normal_declared_bytes": 67108864,
+        "peaks": {
+          "max_in_flight_blocks": 96,
+          "max_in_flight_declared_uncompressed_bytes": 50493562,
+          "max_in_flight_transactions": 131072
+        },
+        "single_large_block_ceiling": 268435456
+      },
+      "case": "usdc-candidate-1",
+      "command": [
+        "/volume2/blockzilla-bench/control/epoch300-rolling-pipeline-20260906T181908Z/bin/read-compact-v2-usdc",
+        "--archive-root",
+        "/volume2/blockzilla-bench/archive",
+        "--epoch",
+        "300",
+        "--threads",
+        "12",
+        "--output",
+        "/volume2/blockzilla-bench/results/epoch300-rolling-full-20260906T183521Z/full/usdc-candidate-1/output.bin"
+      ],
+      "directory": "/volume2/blockzilla-bench/results/epoch300-rolling-full-20260906T183521Z/full/usdc-candidate-1",
+      "exit_code": 0,
+      "kind": "full",
+      "metrics": {
+        "blocks": "408989",
+        "bound_source_size_bytes": "99504005950",
+        "coverage_sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+        "effective_workers": "12",
+        "epoch": "300",
+        "format": "compact-v2",
+        "indeterminate_transactions": "0",
+        "matching_transactions": "6253225",
+        "max_active_workers": "12",
+        "max_batch_blocks": "48",
+        "max_batch_transactions": "65536",
+        "max_projected_batch_bytes": "90300480",
+        "max_projected_block_bytes": "1999680",
+        "output_bytes": "4110523748",
+        "output_complete": "true",
+        "output_path": "/volume2/blockzilla-bench/results/epoch300-rolling-full-20260906T183521Z/full/usdc-candidate-1/output.bin",
+        "output_rows": "30224439",
+        "output_schema": "blockzilla-example-usdc-recorded-balance-exclude-failed/v2",
+        "pipeline": "compact-v2",
+        "pipeline_buffer_wait_s": "52.964643",
+        "pipeline_consume_s": "47.683981",
+        "pipeline_decode_project_wall_s": "79.361399",
+        "pipeline_input_wait_s": "13.354446",
+        "pipeline_max_in_flight_blocks": "96",
+        "pipeline_max_in_flight_declared_uncompressed_bytes": "50493562",
+        "pipeline_max_in_flight_transactions": "131072",
+        "pipeline_projection_buffer_wait_s": "65.522212",
+        "pipeline_publish_s": "33.240936",
+        "pipeline_read_s": "25.981516",
+        "pipeline_result_send_wait_s": "0.000000",
+        "pipeline_signature_assign_s": "0.022316",
+        "pipeline_signature_read_s": "0.036412",
+        "pipeline_worker_decode_sum_s": "250.373677",
+        "pipeline_worker_projection_sum_s": "643.969733",
+        "post_rows": "15132755",
+        "pre_rows": "15091684",
+        "registry_mode": "shared-full",
+        "registry_prefetch_read_bytes": "432762560",
+        "registry_prefetch_read_calls": "13",
+        "registry_resident_bound_bytes": "432762560",
+        "requested_workers": "12",
+        "scan_cache_read_bytes": "0",
+        "scan_local_read_bytes": "44118946554",
+        "scan_local_read_calls": "11268",
+        "scan_local_read_mb_s": "553.752413",
+        "scan_logical_read_bytes": "44118946554",
+        "scan_logical_read_calls": "11268",
+        "scan_logical_read_mb_s": "553.752413",
+        "scan_network_bytes": "0",
+        "scan_network_mb_s": "0.000000",
+        "scan_s": "79.672694",
+        "scan_tps": "9096341.521",
+        "setup_cache_read_bytes": "0",
+        "setup_local_read_bytes": "21267529",
+        "setup_local_read_calls": "2",
+        "setup_network_bytes": "0",
+        "setup_s": "0.023042",
+        "skipped_failed_transactions": "111179816",
+        "source": "local",
+        "threads": "12",
+        "token_balances_unavailable_transactions": "0",
+        "token_mint_unavailable_transactions": "0",
+        "total_cache_read_bytes": "0",
+        "total_local_read_bytes": "44140214083",
+        "total_local_read_calls": "11270",
+        "total_local_read_mb_s": "553.854168",
+        "total_network_bytes": "0",
+        "total_network_mb_s": "0.000000",
+        "total_s": "79.696456",
+        "total_tps": "9093629.438",
+        "transactions": "724730034",
+        "workload": "usdc-recorded-balances"
+      },
+      "repeat": 1,
+      "sampled_peak_rss_kib": 597240,
+      "version": "candidate",
+      "wall_s": 79.71612657399965,
+      "workers": 12,
+      "workload": "usdc"
+    },
+    {
+      "admission_checks": {
+        "limit": "Aggregate peaks cannot prove isolation timing; that rule is covered by local pipeline tests.",
+        "max_blocks": 96,
+        "max_transactions": 131072,
+        "normal_declared_bytes": 67108864,
+        "peaks": {
+          "max_in_flight_blocks": 96,
+          "max_in_flight_declared_uncompressed_bytes": 50493562,
+          "max_in_flight_transactions": 131072
+        },
+        "single_large_block_ceiling": 268435456
+      },
+      "case": "usdc-candidate-2",
+      "command": [
+        "/volume2/blockzilla-bench/control/epoch300-rolling-pipeline-20260906T181908Z/bin/read-compact-v2-usdc",
+        "--archive-root",
+        "/volume2/blockzilla-bench/archive",
+        "--epoch",
+        "300",
+        "--threads",
+        "12",
+        "--output",
+        "/volume2/blockzilla-bench/results/epoch300-rolling-full-20260906T183521Z/full/usdc-candidate-2/output.bin"
+      ],
+      "directory": "/volume2/blockzilla-bench/results/epoch300-rolling-full-20260906T183521Z/full/usdc-candidate-2",
+      "exit_code": 0,
+      "kind": "full",
+      "metrics": {
+        "blocks": "408989",
+        "bound_source_size_bytes": "99504005950",
+        "coverage_sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+        "effective_workers": "12",
+        "epoch": "300",
+        "format": "compact-v2",
+        "indeterminate_transactions": "0",
+        "matching_transactions": "6253225",
+        "max_active_workers": "12",
+        "max_batch_blocks": "48",
+        "max_batch_transactions": "65536",
+        "max_projected_batch_bytes": "87750720",
+        "max_projected_block_bytes": "2125120",
+        "output_bytes": "4110523748",
+        "output_complete": "true",
+        "output_path": "/volume2/blockzilla-bench/results/epoch300-rolling-full-20260906T183521Z/full/usdc-candidate-2/output.bin",
+        "output_rows": "30224439",
+        "output_schema": "blockzilla-example-usdc-recorded-balance-exclude-failed/v2",
+        "pipeline": "compact-v2",
+        "pipeline_buffer_wait_s": "55.192616",
+        "pipeline_consume_s": "47.203424",
+        "pipeline_decode_project_wall_s": "79.574644",
+        "pipeline_input_wait_s": "12.496756",
+        "pipeline_max_in_flight_blocks": "96",
+        "pipeline_max_in_flight_declared_uncompressed_bytes": "50493562",
+        "pipeline_max_in_flight_transactions": "131072",
+        "pipeline_projection_buffer_wait_s": "66.635181",
+        "pipeline_publish_s": "32.991489",
+        "pipeline_read_s": "24.042445",
+        "pipeline_result_send_wait_s": "0.000000",
+        "pipeline_signature_assign_s": "0.024604",
+        "pipeline_signature_read_s": "0.040364",
+        "pipeline_worker_decode_sum_s": "253.099585",
+        "pipeline_worker_projection_sum_s": "650.439535",
+        "post_rows": "15132755",
+        "pre_rows": "15091684",
+        "registry_mode": "shared-full",
+        "registry_prefetch_read_bytes": "432762560",
+        "registry_prefetch_read_calls": "13",
+        "registry_resident_bound_bytes": "432762560",
+        "requested_workers": "12",
+        "scan_cache_read_bytes": "0",
+        "scan_local_read_bytes": "44118946554",
+        "scan_local_read_calls": "11268",
+        "scan_local_read_mb_s": "552.192862",
+        "scan_logical_read_bytes": "44118946554",
+        "scan_logical_read_calls": "11268",
+        "scan_logical_read_mb_s": "552.192862",
+        "scan_network_bytes": "0",
+        "scan_network_mb_s": "0.000000",
+        "scan_s": "79.897713",
+        "scan_tps": "9070723.184",
+        "setup_cache_read_bytes": "0",
+        "setup_local_read_bytes": "21267529",
+        "setup_local_read_calls": "2",
+        "setup_network_bytes": "0",
+        "setup_s": "0.027783",
+        "skipped_failed_transactions": "111179816",
+        "source": "local",
+        "threads": "12",
+        "token_balances_unavailable_transactions": "0",
+        "token_mint_unavailable_transactions": "0",
+        "total_cache_read_bytes": "0",
+        "total_local_read_bytes": "44140214083",
+        "total_local_read_calls": "11270",
+        "total_local_read_mb_s": "552.261540",
+        "total_network_bytes": "0",
+        "total_network_mb_s": "0.000000",
+        "total_s": "79.926287",
+        "total_tps": "9067480.370",
+        "transactions": "724730034",
+        "workload": "usdc-recorded-balances"
+      },
+      "repeat": 2,
+      "sampled_peak_rss_kib": 596624,
+      "version": "candidate",
+      "wall_s": 79.93870210100431,
+      "workers": 12,
+      "workload": "usdc"
+    },
+    {
+      "case": "usdc-baseline-2",
+      "command": [
+        "/volume2/blockzilla-bench/control/epoch300-allocation-review-20260906T161500Z/bin/read-compact-v2-usdc",
+        "--archive-root",
+        "/volume2/blockzilla-bench/archive",
+        "--epoch",
+        "300",
+        "--threads",
+        "12",
+        "--output",
+        "/volume2/blockzilla-bench/results/epoch300-rolling-full-20260906T183521Z/full/usdc-baseline-2/output.bin"
+      ],
+      "directory": "/volume2/blockzilla-bench/results/epoch300-rolling-full-20260906T183521Z/full/usdc-baseline-2",
+      "exit_code": 0,
+      "kind": "full",
+      "metrics": {
+        "blocks": "408989",
+        "bound_source_size_bytes": "99504005950",
+        "coverage_sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+        "effective_workers": "12",
+        "epoch": "300",
+        "format": "compact-v2",
+        "indeterminate_transactions": "0",
+        "matching_transactions": "6253225",
+        "max_active_workers": "12",
+        "max_batch_blocks": "48",
+        "max_batch_transactions": "65536",
+        "max_projected_batch_bytes": "89504800",
+        "max_projected_block_bytes": "1948160",
+        "output_bytes": "4110523748",
+        "output_complete": "true",
+        "output_path": "/volume2/blockzilla-bench/results/epoch300-rolling-full-20260906T183521Z/full/usdc-baseline-2/output.bin",
+        "output_rows": "30224439",
+        "output_schema": "blockzilla-example-usdc-recorded-balance-exclude-failed/v2",
+        "pipeline": "compact-v2",
+        "pipeline_buffer_wait_s": "69.878120",
+        "pipeline_consume_s": "41.786496",
+        "pipeline_decode_project_wall_s": "88.918286",
+        "pipeline_input_wait_s": "0.029397",
+        "pipeline_projection_buffer_wait_s": "1.288172",
+        "pipeline_publish_s": "28.333009",
+        "pipeline_read_s": "20.434734",
+        "pipeline_result_send_wait_s": "0.049380",
+        "pipeline_signature_assign_s": "0.021386",
+        "pipeline_signature_read_s": "0.034177",
+        "pipeline_worker_decode_sum_s": "229.622941",
+        "pipeline_worker_projection_sum_s": "553.965824",
+        "post_rows": "15132755",
+        "pre_rows": "15091684",
+        "registry_mode": "shared-full",
+        "registry_prefetch_read_bytes": "432762560",
+        "registry_prefetch_read_calls": "13",
+        "registry_resident_bound_bytes": "432762560",
+        "requested_workers": "12",
+        "scan_cache_read_bytes": "0",
+        "scan_local_read_bytes": "44118946554",
+        "scan_local_read_calls": "11268",
+        "scan_local_read_mb_s": "486.553349",
+        "scan_logical_read_bytes": "44118946554",
+        "scan_logical_read_calls": "11268",
+        "scan_logical_read_mb_s": "486.553349",
+        "scan_network_bytes": "0",
+        "scan_network_mb_s": "0.000000",
+        "scan_s": "90.676483",
+        "scan_tps": "7992480.611",
+        "setup_cache_read_bytes": "0",
+        "setup_local_read_bytes": "21267529",
+        "setup_local_read_calls": "2",
+        "setup_network_bytes": "0",
+        "setup_s": "0.023698",
+        "skipped_failed_transactions": "111179816",
+        "source": "local",
+        "threads": "12",
+        "token_balances_unavailable_transactions": "0",
+        "token_mint_unavailable_transactions": "0",
+        "total_cache_read_bytes": "0",
+        "total_local_read_bytes": "44140214083",
+        "total_local_read_calls": "11270",
+        "total_local_read_mb_s": "486.656705",
+        "total_network_bytes": "0",
+        "total_network_mb_s": "0.000000",
+        "total_s": "90.700927",
+        "total_tps": "7990326.680",
+        "transactions": "724730034",
+        "workload": "usdc-recorded-balances"
+      },
+      "repeat": 2,
+      "sampled_peak_rss_kib": 604024,
+      "version": "baseline",
+      "wall_s": 90.72035570800654,
+      "workers": 12,
+      "workload": "usdc"
+    },
+    {
+      "case": "pumpfun-baseline-1",
+      "command": [
+        "/volume2/blockzilla-bench/control/epoch300-allocation-review-20260906T161500Z/bin/read-compact-v2-pumpfun",
+        "--archive-root",
+        "/volume2/blockzilla-bench/archive",
+        "--epoch",
+        "300",
+        "--threads",
+        "12",
+        "--output",
+        "/volume2/blockzilla-bench/results/epoch300-rolling-full-20260906T183521Z/full/pumpfun-baseline-1/output.bin"
+      ],
+      "directory": "/volume2/blockzilla-bench/results/epoch300-rolling-full-20260906T183521Z/full/pumpfun-baseline-1",
+      "exit_code": 0,
+      "kind": "full",
+      "metrics": {
+        "blocks": "408989",
+        "bound_source_size_bytes": "99504005950",
+        "coverage_sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+        "cpi_invocations": "0",
+        "direct_invocations": "0",
+        "effective_workers": "12",
+        "epoch": "300",
+        "format": "compact-v2",
+        "incomplete_cpi_transactions": "0",
+        "incomplete_instruction_transactions": "0",
+        "indeterminate_transactions": "0",
+        "matches_without_primary_signature": "0",
+        "matching_transactions": "0",
+        "max_active_workers": "12",
+        "max_batch_blocks": "48",
+        "max_batch_transactions": "65536",
+        "max_projected_batch_bytes": "201586362",
+        "max_projected_block_bytes": "7504563",
+        "output_bytes": "44",
+        "output_complete": "true",
+        "output_path": "/volume2/blockzilla-bench/results/epoch300-rolling-full-20260906T183521Z/full/pumpfun-baseline-1/output.bin",
+        "output_rows": "0",
+        "output_schema": "blockzilla-example-pump-transaction-exclude-failed/v2",
+        "pipeline": "compact-v2",
+        "pipeline_buffer_wait_s": "102.639391",
+        "pipeline_consume_s": "100.362732",
+        "pipeline_decode_project_wall_s": "132.689863",
+        "pipeline_input_wait_s": "0.028311",
+        "pipeline_projection_buffer_wait_s": "0.450069",
+        "pipeline_publish_s": "57.244939",
+        "pipeline_read_s": "30.590096",
+        "pipeline_result_send_wait_s": "0.053678",
+        "pipeline_signature_assign_s": "0.028761",
+        "pipeline_signature_read_s": "0.062704",
+        "pipeline_worker_decode_sum_s": "235.888651",
+        "pipeline_worker_projection_sum_s": "1091.529323",
+        "registry_mode": "sparse-worker-cache",
+        "registry_prefetch_read_bytes": "0",
+        "registry_prefetch_read_calls": "0",
+        "registry_resident_bound_bytes": "6291456",
+        "requested_workers": "12",
+        "scan_cache_read_bytes": "0",
+        "scan_local_read_bytes": "43686183958",
+        "scan_local_read_calls": "11253",
+        "scan_local_read_mb_s": "327.633916",
+        "scan_logical_read_bytes": "43686183958",
+        "scan_logical_read_calls": "11253",
+        "scan_logical_read_mb_s": "327.633916",
+        "scan_network_bytes": "0",
+        "scan_network_mb_s": "0.000000",
+        "scan_s": "133.338405",
+        "scan_tps": "5435268.492",
+        "setup_cache_read_bytes": "0",
+        "setup_local_read_bytes": "21267529",
+        "setup_local_read_calls": "2",
+        "setup_network_bytes": "0",
+        "setup_s": "0.029129",
+        "skipped_failed_transactions": "111179816",
+        "source": "local",
+        "threads": "12",
+        "total_cache_read_bytes": "0",
+        "total_local_read_bytes": "43707451487",
+        "total_local_read_calls": "11255",
+        "total_local_read_mb_s": "327.718153",
+        "total_network_bytes": "0",
+        "total_network_mb_s": "0.000000",
+        "total_s": "133.369028",
+        "total_tps": "5434020.511",
+        "transactions": "724730034",
+        "workload": "pumpfun-transactions",
+        "written_transactions": "0"
+      },
+      "repeat": 1,
+      "sampled_peak_rss_kib": 374472,
+      "version": "baseline",
+      "wall_s": 133.39013663200603,
+      "workers": 12,
+      "workload": "pumpfun"
+    },
+    {
+      "admission_checks": {
+        "limit": "Aggregate peaks cannot prove isolation timing; that rule is covered by local pipeline tests.",
+        "max_blocks": 96,
+        "max_transactions": 131072,
+        "normal_declared_bytes": 67108864,
+        "peaks": {
+          "max_in_flight_blocks": 96,
+          "max_in_flight_declared_uncompressed_bytes": 50493562,
+          "max_in_flight_transactions": 131072
+        },
+        "single_large_block_ceiling": 268435456
+      },
+      "case": "pumpfun-candidate-1",
+      "command": [
+        "/volume2/blockzilla-bench/control/epoch300-rolling-pipeline-20260906T181908Z/bin/read-compact-v2-pumpfun",
+        "--archive-root",
+        "/volume2/blockzilla-bench/archive",
+        "--epoch",
+        "300",
+        "--threads",
+        "12",
+        "--output",
+        "/volume2/blockzilla-bench/results/epoch300-rolling-full-20260906T183521Z/full/pumpfun-candidate-1/output.bin"
+      ],
+      "directory": "/volume2/blockzilla-bench/results/epoch300-rolling-full-20260906T183521Z/full/pumpfun-candidate-1",
+      "exit_code": 0,
+      "kind": "full",
+      "metrics": {
+        "blocks": "408989",
+        "bound_source_size_bytes": "99504005950",
+        "coverage_sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+        "cpi_invocations": "0",
+        "direct_invocations": "0",
+        "effective_workers": "12",
+        "epoch": "300",
+        "format": "compact-v2",
+        "incomplete_cpi_transactions": "0",
+        "incomplete_instruction_transactions": "0",
+        "indeterminate_transactions": "0",
+        "matches_without_primary_signature": "0",
+        "matching_transactions": "0",
+        "max_active_workers": "12",
+        "max_batch_blocks": "48",
+        "max_batch_transactions": "65536",
+        "max_projected_batch_bytes": "203879088",
+        "max_projected_block_bytes": "7687707",
+        "output_bytes": "44",
+        "output_complete": "true",
+        "output_path": "/volume2/blockzilla-bench/results/epoch300-rolling-full-20260906T183521Z/full/pumpfun-candidate-1/output.bin",
+        "output_rows": "0",
+        "output_schema": "blockzilla-example-pump-transaction-exclude-failed/v2",
+        "pipeline": "compact-v2",
+        "pipeline_buffer_wait_s": "88.470108",
+        "pipeline_consume_s": "103.372541",
+        "pipeline_decode_project_wall_s": "120.530869",
+        "pipeline_input_wait_s": "7.785068",
+        "pipeline_max_in_flight_blocks": "96",
+        "pipeline_max_in_flight_declared_uncompressed_bytes": "50493562",
+        "pipeline_max_in_flight_transactions": "131072",
+        "pipeline_projection_buffer_wait_s": "112.281257",
+        "pipeline_publish_s": "62.475148",
+        "pipeline_read_s": "31.789011",
+        "pipeline_result_send_wait_s": "0.000000",
+        "pipeline_signature_assign_s": "0.031943",
+        "pipeline_signature_read_s": "0.067084",
+        "pipeline_worker_decode_sum_s": "241.363199",
+        "pipeline_worker_projection_sum_s": "1202.290165",
+        "registry_mode": "sparse-worker-cache",
+        "registry_prefetch_read_bytes": "0",
+        "registry_prefetch_read_calls": "0",
+        "registry_resident_bound_bytes": "6291456",
+        "requested_workers": "12",
+        "scan_cache_read_bytes": "0",
+        "scan_local_read_bytes": "43686183958",
+        "scan_local_read_calls": "11253",
+        "scan_local_read_mb_s": "362.266221",
+        "scan_logical_read_bytes": "43686183958",
+        "scan_logical_read_calls": "11253",
+        "scan_logical_read_mb_s": "362.266221",
+        "scan_network_bytes": "0",
+        "scan_network_mb_s": "0.000000",
+        "scan_s": "120.591381",
+        "scan_tps": "6009799.591",
+        "setup_cache_read_bytes": "0",
+        "setup_local_read_bytes": "21267529",
+        "setup_local_read_calls": "2",
+        "setup_network_bytes": "0",
+        "setup_s": "0.025956",
+        "skipped_failed_transactions": "111179816",
+        "source": "local",
+        "threads": "12",
+        "total_cache_read_bytes": "0",
+        "total_local_read_bytes": "43707451487",
+        "total_local_read_calls": "11255",
+        "total_local_read_mb_s": "362.361560",
+        "total_network_bytes": "0",
+        "total_network_mb_s": "0.000000",
+        "total_s": "120.618344",
+        "total_tps": "6008456.152",
+        "transactions": "724730034",
+        "workload": "pumpfun-transactions",
+        "written_transactions": "0"
+      },
+      "repeat": 1,
+      "sampled_peak_rss_kib": 383188,
+      "version": "candidate",
+      "wall_s": 120.63958570800605,
+      "workers": 12,
+      "workload": "pumpfun"
+    },
+    {
+      "admission_checks": {
+        "limit": "Aggregate peaks cannot prove isolation timing; that rule is covered by local pipeline tests.",
+        "max_blocks": 96,
+        "max_transactions": 131072,
+        "normal_declared_bytes": 67108864,
+        "peaks": {
+          "max_in_flight_blocks": 96,
+          "max_in_flight_declared_uncompressed_bytes": 50493562,
+          "max_in_flight_transactions": 131072
+        },
+        "single_large_block_ceiling": 268435456
+      },
+      "case": "pumpfun-candidate-2",
+      "command": [
+        "/volume2/blockzilla-bench/control/epoch300-rolling-pipeline-20260906T181908Z/bin/read-compact-v2-pumpfun",
+        "--archive-root",
+        "/volume2/blockzilla-bench/archive",
+        "--epoch",
+        "300",
+        "--threads",
+        "12",
+        "--output",
+        "/volume2/blockzilla-bench/results/epoch300-rolling-full-20260906T183521Z/full/pumpfun-candidate-2/output.bin"
+      ],
+      "directory": "/volume2/blockzilla-bench/results/epoch300-rolling-full-20260906T183521Z/full/pumpfun-candidate-2",
+      "exit_code": 0,
+      "kind": "full",
+      "metrics": {
+        "blocks": "408989",
+        "bound_source_size_bytes": "99504005950",
+        "coverage_sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+        "cpi_invocations": "0",
+        "direct_invocations": "0",
+        "effective_workers": "12",
+        "epoch": "300",
+        "format": "compact-v2",
+        "incomplete_cpi_transactions": "0",
+        "incomplete_instruction_transactions": "0",
+        "indeterminate_transactions": "0",
+        "matches_without_primary_signature": "0",
+        "matching_transactions": "0",
+        "max_active_workers": "12",
+        "max_batch_blocks": "48",
+        "max_batch_transactions": "65536",
+        "max_projected_batch_bytes": "214939287",
+        "max_projected_block_bytes": "7700334",
+        "output_bytes": "44",
+        "output_complete": "true",
+        "output_path": "/volume2/blockzilla-bench/results/epoch300-rolling-full-20260906T183521Z/full/pumpfun-candidate-2/output.bin",
+        "output_rows": "0",
+        "output_schema": "blockzilla-example-pump-transaction-exclude-failed/v2",
+        "pipeline": "compact-v2",
+        "pipeline_buffer_wait_s": "89.811324",
+        "pipeline_consume_s": "102.850585",
+        "pipeline_decode_project_wall_s": "121.262067",
+        "pipeline_input_wait_s": "8.143488",
+        "pipeline_max_in_flight_blocks": "96",
+        "pipeline_max_in_flight_declared_uncompressed_bytes": "50493562",
+        "pipeline_max_in_flight_transactions": "131072",
+        "pipeline_projection_buffer_wait_s": "112.674598",
+        "pipeline_publish_s": "62.046411",
+        "pipeline_read_s": "31.195451",
+        "pipeline_result_send_wait_s": "0.000000",
+        "pipeline_signature_assign_s": "0.036502",
+        "pipeline_signature_read_s": "0.063925",
+        "pipeline_worker_decode_sum_s": "243.544812",
+        "pipeline_worker_projection_sum_s": "1209.086972",
+        "registry_mode": "sparse-worker-cache",
+        "registry_prefetch_read_bytes": "0",
+        "registry_prefetch_read_calls": "0",
+        "registry_resident_bound_bytes": "6291456",
+        "requested_workers": "12",
+        "scan_cache_read_bytes": "0",
+        "scan_local_read_bytes": "43686183958",
+        "scan_local_read_calls": "11253",
+        "scan_local_read_mb_s": "360.062921",
+        "scan_logical_read_bytes": "43686183958",
+        "scan_logical_read_calls": "11253",
+        "scan_logical_read_mb_s": "360.062921",
+        "scan_network_bytes": "0",
+        "scan_network_mb_s": "0.000000",
+        "scan_s": "121.329305",
+        "scan_tps": "5973248.052",
+        "setup_cache_read_bytes": "0",
+        "setup_local_read_bytes": "21267529",
+        "setup_local_read_calls": "2",
+        "setup_network_bytes": "0",
+        "setup_s": "0.026646",
+        "skipped_failed_transactions": "111179816",
+        "source": "local",
+        "threads": "12",
+        "total_cache_read_bytes": "0",
+        "total_local_read_bytes": "43707451487",
+        "total_local_read_calls": "11255",
+        "total_local_read_mb_s": "360.155379",
+        "total_network_bytes": "0",
+        "total_network_mb_s": "0.000000",
+        "total_s": "121.357209",
+        "total_tps": "5971874.620",
+        "transactions": "724730034",
+        "workload": "pumpfun-transactions",
+        "written_transactions": "0"
+      },
+      "repeat": 2,
+      "sampled_peak_rss_kib": 377192,
+      "version": "candidate",
+      "wall_s": 121.4006258379959,
+      "workers": 12,
+      "workload": "pumpfun"
+    },
+    {
+      "case": "pumpfun-baseline-2",
+      "command": [
+        "/volume2/blockzilla-bench/control/epoch300-allocation-review-20260906T161500Z/bin/read-compact-v2-pumpfun",
+        "--archive-root",
+        "/volume2/blockzilla-bench/archive",
+        "--epoch",
+        "300",
+        "--threads",
+        "12",
+        "--output",
+        "/volume2/blockzilla-bench/results/epoch300-rolling-full-20260906T183521Z/full/pumpfun-baseline-2/output.bin"
+      ],
+      "directory": "/volume2/blockzilla-bench/results/epoch300-rolling-full-20260906T183521Z/full/pumpfun-baseline-2",
+      "exit_code": 0,
+      "kind": "full",
+      "metrics": {
+        "blocks": "408989",
+        "bound_source_size_bytes": "99504005950",
+        "coverage_sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+        "cpi_invocations": "0",
+        "direct_invocations": "0",
+        "effective_workers": "12",
+        "epoch": "300",
+        "format": "compact-v2",
+        "incomplete_cpi_transactions": "0",
+        "incomplete_instruction_transactions": "0",
+        "indeterminate_transactions": "0",
+        "matches_without_primary_signature": "0",
+        "matching_transactions": "0",
+        "max_active_workers": "12",
+        "max_batch_blocks": "48",
+        "max_batch_transactions": "65536",
+        "max_projected_batch_bytes": "178945919",
+        "max_projected_block_bytes": "7095784",
+        "output_bytes": "44",
+        "output_complete": "true",
+        "output_path": "/volume2/blockzilla-bench/results/epoch300-rolling-full-20260906T183521Z/full/pumpfun-baseline-2/output.bin",
+        "output_rows": "0",
+        "output_schema": "blockzilla-example-pump-transaction-exclude-failed/v2",
+        "pipeline": "compact-v2",
+        "pipeline_buffer_wait_s": "105.125164",
+        "pipeline_consume_s": "100.180088",
+        "pipeline_decode_project_wall_s": "133.600325",
+        "pipeline_input_wait_s": "0.028412",
+        "pipeline_projection_buffer_wait_s": "0.413068",
+        "pipeline_publish_s": "57.293705",
+        "pipeline_read_s": "28.962697",
+        "pipeline_result_send_wait_s": "0.045558",
+        "pipeline_signature_assign_s": "0.030191",
+        "pipeline_signature_read_s": "0.064752",
+        "pipeline_worker_decode_sum_s": "237.842222",
+        "pipeline_worker_projection_sum_s": "1098.263639",
+        "registry_mode": "sparse-worker-cache",
+        "registry_prefetch_read_bytes": "0",
+        "registry_prefetch_read_calls": "0",
+        "registry_resident_bound_bytes": "6291456",
+        "requested_workers": "12",
+        "scan_cache_read_bytes": "0",
+        "scan_local_read_bytes": "43686183958",
+        "scan_local_read_calls": "11253",
+        "scan_local_read_mb_s": "325.521040",
+        "scan_logical_read_bytes": "43686183958",
+        "scan_logical_read_calls": "11253",
+        "scan_logical_read_mb_s": "325.521040",
+        "scan_network_bytes": "0",
+        "scan_network_mb_s": "0.000000",
+        "scan_s": "134.203872",
+        "scan_tps": "5400217.023",
+        "setup_cache_read_bytes": "0",
+        "setup_local_read_bytes": "21267529",
+        "setup_local_read_calls": "2",
+        "setup_network_bytes": "0",
+        "setup_s": "0.031188",
+        "skipped_failed_transactions": "111179816",
+        "source": "local",
+        "threads": "12",
+        "total_cache_read_bytes": "0",
+        "total_local_read_bytes": "43707451487",
+        "total_local_read_calls": "11255",
+        "total_local_read_mb_s": "325.601240",
+        "total_network_bytes": "0",
+        "total_network_mb_s": "0.000000",
+        "total_s": "134.236134",
+        "total_tps": "5398919.163",
+        "transactions": "724730034",
+        "workload": "pumpfun-transactions",
+        "written_transactions": "0"
+      },
+      "repeat": 2,
+      "sampled_peak_rss_kib": 375576,
+      "version": "baseline",
+      "wall_s": 134.2490790199954,
+      "workers": 12,
+      "workload": "pumpfun"
+    },
+    {
+      "admission_checks": {
+        "limit": "Aggregate peaks cannot prove isolation timing; that rule is covered by local pipeline tests.",
+        "max_blocks": 96,
+        "max_transactions": 131072,
+        "normal_declared_bytes": 67108864,
+        "peaks": {
+          "max_in_flight_blocks": 96,
+          "max_in_flight_declared_uncompressed_bytes": 50493562,
+          "max_in_flight_transactions": 131072
+        },
+        "single_large_block_ceiling": 268435456
+      },
+      "case": "indexed-usdc-candidate-1",
+      "command": [
+        "/volume2/blockzilla-bench/control/epoch300-rolling-pipeline-20260906T181908Z/bin/read-compact-v2-usdc-indexed",
+        "--archive-root",
+        "/volume2/blockzilla-bench/archive",
+        "--epoch",
+        "300",
+        "--threads",
+        "12",
+        "--output",
+        "/volume2/blockzilla-bench/results/epoch300-rolling-full-20260906T183521Z/full/indexed-usdc-candidate-1/output.ids"
+      ],
+      "directory": "/volume2/blockzilla-bench/results/epoch300-rolling-full-20260906T183521Z/full/indexed-usdc-candidate-1",
+      "exit_code": 0,
+      "kind": "full",
+      "metrics": {
+        "blocks": "408989",
+        "bound_source_size_bytes": "99504005950",
+        "coverage_sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+        "effective_workers": "12",
+        "epoch": "300",
+        "format": "compact-v2",
+        "indeterminate_transactions": "0",
+        "indexed_dictionary_bytes": "23057536",
+        "indexed_dictionary_path": "/volume2/blockzilla-bench/results/epoch300-rolling-full-20260906T183521Z/full/indexed-usdc-candidate-1/output.ids.pubkeys",
+        "indexed_dictionary_rows": "384291",
+        "matching_transactions": "6253225",
+        "max_active_workers": "12",
+        "max_batch_blocks": "48",
+        "max_batch_transactions": "65536",
+        "max_projected_batch_bytes": "90226016",
+        "max_projected_block_bytes": "2290176",
+        "output_bytes": "2115710806",
+        "output_complete": "true",
+        "output_path": "/volume2/blockzilla-bench/results/epoch300-rolling-full-20260906T183521Z/full/indexed-usdc-candidate-1/output.ids",
+        "output_rows": "30224439",
+        "output_schema": "blockzilla-example-usdc-indexed-recorded-balance-exclude-failed/v1",
+        "pipeline": "compact-v2",
+        "pipeline_buffer_wait_s": "57.529974",
+        "pipeline_consume_s": "49.751148",
+        "pipeline_decode_project_wall_s": "80.378307",
+        "pipeline_input_wait_s": "10.736650",
+        "pipeline_max_in_flight_blocks": "96",
+        "pipeline_max_in_flight_declared_uncompressed_bytes": "50493562",
+        "pipeline_max_in_flight_transactions": "131072",
+        "pipeline_projection_buffer_wait_s": "69.208260",
+        "pipeline_publish_s": "46.434768",
+        "pipeline_read_s": "22.608922",
+        "pipeline_result_send_wait_s": "0.000000",
+        "pipeline_signature_assign_s": "0.000000",
+        "pipeline_signature_read_s": "0.000000",
+        "pipeline_worker_decode_sum_s": "256.754692",
+        "pipeline_worker_projection_sum_s": "662.890926",
+        "post_rows": "15132755",
+        "pre_rows": "15091684",
+        "registry_mode": "shared-full",
+        "registry_prefetch_read_bytes": "432762560",
+        "registry_prefetch_read_calls": "13",
+        "registry_resident_bound_bytes": "432762560",
+        "requested_workers": "12",
+        "scan_cache_read_bytes": "0",
+        "scan_local_read_bytes": "44118946554",
+        "scan_local_read_calls": "11268",
+        "scan_local_read_mb_s": "546.861957",
+        "scan_logical_read_bytes": "44118946554",
+        "scan_logical_read_calls": "11268",
+        "scan_logical_read_mb_s": "546.861957",
+        "scan_network_bytes": "0",
+        "scan_network_mb_s": "0.000000",
+        "scan_s": "80.676569",
+        "scan_tps": "8983153.854",
+        "setup_cache_read_bytes": "0",
+        "setup_local_read_bytes": "21267529",
+        "setup_local_read_calls": "2",
+        "setup_network_bytes": "0",
+        "setup_s": "0.029826",
+        "skipped_failed_transactions": "111179816",
+        "source": "local",
+        "source_scope_metadata_sha256": "e4fe9fe8c38df6add7a1699f49ae3605976fa14038b8b951f0f10f51c54976b3",
+        "threads": "12",
+        "token_balances_unavailable_transactions": "0",
+        "token_mint_unavailable_transactions": "0",
+        "total_cache_read_bytes": "0",
+        "total_local_read_bytes": "44140214083",
+        "total_local_read_calls": "11270",
+        "total_local_read_mb_s": "545.993243",
+        "total_network_bytes": "0",
+        "total_network_mb_s": "0.000000",
+        "total_s": "80.843883",
+        "total_tps": "8964562.358",
+        "transactions": "724730034",
+        "workload": "usdc-recorded-balances"
+      },
+      "repeat": 1,
+      "sampled_peak_rss_kib": 601256,
+      "version": "candidate",
+      "wall_s": 80.87129289799486,
+      "workers": 12,
+      "workload": "indexed-usdc"
+    }
+  ],
+  "full_comparisons": {
+    "usdc": {
+      "versions": {
+        "baseline": {
+          "scan_s": [
+            87.212655,
+            90.676483
+          ],
+          "mean_scan_s": 88.944569,
+          "mean_total_s": 88.96803399999999,
+          "repeat_spread_pct": 3.9717034185004607,
+          "sampled_peak_rss_kib": [
+            602628,
+            604024
+          ]
+        },
+        "candidate": {
+          "scan_s": [
+            79.672694,
+            79.897713
+          ],
+          "mean_scan_s": 79.7852035,
+          "mean_total_s": 79.8113715,
+          "repeat_spread_pct": 0.2824292598917033,
+          "sampled_peak_rss_kib": [
+            597240,
+            596624
+          ]
+        }
+      },
+      "scan_time_change_pct": -10.297835610401362
+    },
+    "pumpfun": {
+      "versions": {
+        "baseline": {
+          "scan_s": [
+            133.338405,
+            134.203872
+          ],
+          "mean_scan_s": 133.7711385,
+          "mean_total_s": 133.80258099999998,
+          "repeat_spread_pct": 0.649075560788348,
+          "sampled_peak_rss_kib": [
+            374472,
+            375576
+          ]
+        },
+        "candidate": {
+          "scan_s": [
+            120.591381,
+            121.329305
+          ],
+          "mean_scan_s": 120.960343,
+          "mean_total_s": 120.9877765,
+          "repeat_spread_pct": 0.6119210128292751,
+          "sampled_peak_rss_kib": [
+            383188,
+            377192
+          ]
+        }
+      },
+      "scan_time_change_pct": -9.576651319297858
+    }
+  },
+  "full_verification": {
+    "full_output_checks": [
+      {
+        "bytes": 4110523748,
+        "exact_bytes_equal": true,
+        "left": "/volume2/blockzilla-bench/results/epoch300-rolling-full-20260906T183521Z/full/usdc-baseline-1/output.bin",
+        "right": "/volume2/blockzilla-bench/results/epoch300-rolling-full-20260906T183521Z/full/usdc-candidate-1/output.bin",
+        "sha256": "c307d97f8999ad4cc7a6ad753007c4d6cf4e5a874cfba5da81bd43700ef1d1a2"
+      },
+      {
+        "bytes": 4110523748,
+        "exact_bytes_equal": true,
+        "left": "/volume2/blockzilla-bench/results/epoch300-rolling-full-20260906T183521Z/full/usdc-baseline-1/output.bin",
+        "right": "/volume2/blockzilla-bench/results/epoch300-rolling-full-20260906T183521Z/full/usdc-candidate-2/output.bin",
+        "sha256": "c307d97f8999ad4cc7a6ad753007c4d6cf4e5a874cfba5da81bd43700ef1d1a2"
+      },
+      {
+        "bytes": 4110523748,
+        "exact_bytes_equal": true,
+        "left": "/volume2/blockzilla-bench/results/epoch300-rolling-full-20260906T183521Z/full/usdc-baseline-1/output.bin",
+        "right": "/volume2/blockzilla-bench/results/epoch300-rolling-full-20260906T183521Z/full/usdc-baseline-2/output.bin",
+        "sha256": "c307d97f8999ad4cc7a6ad753007c4d6cf4e5a874cfba5da81bd43700ef1d1a2"
+      },
+      {
+        "bytes": 44,
+        "exact_bytes_equal": true,
+        "left": "/volume2/blockzilla-bench/results/epoch300-rolling-full-20260906T183521Z/full/pumpfun-baseline-1/output.bin",
+        "right": "/volume2/blockzilla-bench/results/epoch300-rolling-full-20260906T183521Z/full/pumpfun-candidate-1/output.bin",
+        "sha256": "06550d3fcd018ae752e35af23e9dbe66ff187dbabc87bbd823726b17c7756386"
+      },
+      {
+        "bytes": 44,
+        "exact_bytes_equal": true,
+        "left": "/volume2/blockzilla-bench/results/epoch300-rolling-full-20260906T183521Z/full/pumpfun-baseline-1/output.bin",
+        "right": "/volume2/blockzilla-bench/results/epoch300-rolling-full-20260906T183521Z/full/pumpfun-candidate-2/output.bin",
+        "sha256": "06550d3fcd018ae752e35af23e9dbe66ff187dbabc87bbd823726b17c7756386"
+      },
+      {
+        "bytes": 44,
+        "exact_bytes_equal": true,
+        "left": "/volume2/blockzilla-bench/results/epoch300-rolling-full-20260906T183521Z/full/pumpfun-baseline-1/output.bin",
+        "right": "/volume2/blockzilla-bench/results/epoch300-rolling-full-20260906T183521Z/full/pumpfun-baseline-2/output.bin",
+        "sha256": "06550d3fcd018ae752e35af23e9dbe66ff187dbabc87bbd823726b17c7756386"
+      },
+      {
+        "bytes": 4110523748,
+        "command": [
+          "/volume2/blockzilla-bench/control/epoch300-rolling-pipeline-20260906T181908Z/bin/expand-usdc-indexed",
+          "/volume2/blockzilla-bench/results/epoch300-rolling-full-20260906T183521Z/full/indexed-usdc-candidate-1/output.ids",
+          "/volume2/blockzilla-bench/results/epoch300-rolling-full-20260906T183521Z/full/indexed-usdc-candidate-1/output.ids.pubkeys",
+          "-"
+        ],
+        "elapsed_s": 9.137368573006825,
+        "exact_bytes_equal": true,
+        "exit_code": 0,
+        "sha256": "c307d97f8999ad4cc7a6ad753007c4d6cf4e5a874cfba5da81bd43700ef1d1a2",
+        "stderr_log": "/volume2/blockzilla-bench/results/epoch300-rolling-full-20260906T183521Z/indexed-expansion.stderr.log"
+      }
+    ],
+    "note": "No automatic speed acceptance threshold; assess repeated scan times and host-load evidence.",
+    "prefix_counter_and_coverage_parity": false,
+    "prefix_parity_scope": "not checked in this full-only directory",
+    "profile_invariants": {},
+    "status": "PASS"
+  },
+  "indexed_stored_hashes": {
+    "status": {
+      "completed": 9,
+      "finished_at": 1788720673.9369524,
+      "state": "VERIFIED",
+      "total": 9
+    },
+    "hashes": {
+      "output.ids": {
+        "sha256": "e6218a3812883c7e1abba1162c2a9d5e5b3f286ca1c27692a0fb70249a889035",
+        "bytes": 2115710806
+      },
+      "output.ids.pubkeys": {
+        "sha256": "2751e3e245e6e10b8eb58f694e9171104f00d5af4685fcac6772fb1f027d80eb",
+        "bytes": 23057536
+      },
+      "output.ids.source.json": {
+        "sha256": "47aa052e5a3132cca313e0c901bc6e5582b49c82f27deb7d0e6f254fcd168b2e",
+        "bytes": 781
+      }
+    },
+    "sizes": {
+      "full/usdc-baseline-1/output.bin": 4110523748,
+      "full/usdc-candidate-1/output.bin": 4110523748,
+      "full/usdc-candidate-2/output.bin": 4110523748,
+      "full/usdc-baseline-2/output.bin": 4110523748,
+      "full/pumpfun-baseline-1/output.bin": 44,
+      "full/pumpfun-candidate-1/output.bin": 44,
+      "full/pumpfun-candidate-2/output.bin": 44,
+      "full/pumpfun-baseline-2/output.bin": 44,
+      "full/indexed-usdc-candidate-1/output.ids": 2115710806
+    }
+  },
+  "historical_oldreader_context": {
+    "fresh_interleaved": false,
+    "usdc_total_s": 76.1920375,
+    "pumpfun_total_s": 125.6428845,
+    "candidate_usdc_change_pct": 4.750278531401664,
+    "candidate_pumpfun_change_pct": -3.7050311432479055
+  },
+  "car_continuation": {
+    "state": "RESTORING_RAW_300",
+    "control": "/volume2/blockzilla-bench/control/car-epoch300-continue-20260906T184423Z",
+    "pid": 1845327,
+    "started_at": "2026-09-06T18:54:09.586636+00:00",
+    "raw_ready": false,
+    "decoded_bytes": 245126135808,
+    "prefix_bytes": 211677609984,
+    "appended_bytes": 33448525824,
+    "elapsed_s": 244.35997266600316,
+    "archive": "/volume2/blockzilla-bench/archive/car",
+    "raw_epoch": 300,
+    "total_bytes": 508337873180,
+    "prefix_verified": true
+  },
+  "independent_full_review": {
+    "status": "PASS",
+    "full_cases": 9,
+    "exact_output_checks": 7,
+    "nas_extra_reads_complete": true,
+    "cases": [
+      {
+        "case": "usdc-baseline-1",
+        "workload": "usdc",
+        "version": "baseline",
+        "scan_s": 87.212655,
+        "total_s": 87.235141,
+        "wall_s": 87.25553371300339,
+        "sampled_peak_rss_kib": 602628,
+        "sampled_peak_rss_mib": 588.50390625,
+        "cpu_sample_count": 44,
+        "sampled_elapsed_s": 87.1720175743103,
+        "sampled_process_cpu_s": 781.17,
+        "sampled_average_cpu_cores": 8.96124721828409,
+        "source_read_calls": 11268,
+        "source_read_bytes": 44118946554,
+        "requested_workers": 12,
+        "effective_workers": 12,
+        "max_active_workers": 12,
+        "inflight": {}
+      },
+      {
+        "case": "usdc-candidate-1",
+        "workload": "usdc",
+        "version": "candidate",
+        "scan_s": 79.672694,
+        "total_s": 79.696456,
+        "wall_s": 79.71612657399965,
+        "sampled_peak_rss_kib": 597240,
+        "sampled_peak_rss_mib": 583.2421875,
+        "cpu_sample_count": 40,
+        "sampled_elapsed_s": 79.36101531982422,
+        "sampled_process_cpu_s": 848.37,
+        "sampled_average_cpu_cores": 10.690009402993095,
+        "source_read_calls": 11268,
+        "source_read_bytes": 44118946554,
+        "requested_workers": 12,
+        "effective_workers": 12,
+        "max_active_workers": 12,
+        "inflight": {
+          "pipeline_max_in_flight_blocks": 96,
+          "pipeline_max_in_flight_transactions": 131072,
+          "pipeline_max_in_flight_declared_uncompressed_bytes": 50493562
+        }
+      },
+      {
+        "case": "usdc-candidate-2",
+        "workload": "usdc",
+        "version": "candidate",
+        "scan_s": 79.897713,
+        "total_s": 79.926287,
+        "wall_s": 79.93870210100431,
+        "sampled_peak_rss_kib": 596624,
+        "sampled_peak_rss_mib": 582.640625,
+        "cpu_sample_count": 40,
+        "sampled_elapsed_s": 79.49254131317139,
+        "sampled_process_cpu_s": 853.3,
+        "sampled_average_cpu_cores": 10.734340428724146,
+        "source_read_calls": 11268,
+        "source_read_bytes": 44118946554,
+        "requested_workers": 12,
+        "effective_workers": 12,
+        "max_active_workers": 12,
+        "inflight": {
+          "pipeline_max_in_flight_blocks": 96,
+          "pipeline_max_in_flight_transactions": 131072,
+          "pipeline_max_in_flight_declared_uncompressed_bytes": 50493562
+        }
+      },
+      {
+        "case": "usdc-baseline-2",
+        "workload": "usdc",
+        "version": "baseline",
+        "scan_s": 90.676483,
+        "total_s": 90.700927,
+        "wall_s": 90.72035570800654,
+        "sampled_peak_rss_kib": 604024,
+        "sampled_peak_rss_mib": 589.8671875,
+        "cpu_sample_count": 45,
+        "sampled_elapsed_s": 89.40972375869751,
+        "sampled_process_cpu_s": 796.85,
+        "sampled_average_cpu_cores": 8.912341594417294,
+        "source_read_calls": 11268,
+        "source_read_bytes": 44118946554,
+        "requested_workers": 12,
+        "effective_workers": 12,
+        "max_active_workers": 12,
+        "inflight": {}
+      },
+      {
+        "case": "pumpfun-baseline-1",
+        "workload": "pumpfun",
+        "version": "baseline",
+        "scan_s": 133.338405,
+        "total_s": 133.369028,
+        "wall_s": 133.39013663200603,
+        "sampled_peak_rss_kib": 374472,
+        "sampled_peak_rss_mib": 365.6953125,
+        "cpu_sample_count": 66,
+        "sampled_elapsed_s": 131.61046814918518,
+        "sampled_process_cpu_s": 1230.64,
+        "sampled_average_cpu_cores": 9.350623983838624,
+        "source_read_calls": 11253,
+        "source_read_bytes": 43686183958,
+        "requested_workers": 12,
+        "effective_workers": 12,
+        "max_active_workers": 12,
+        "inflight": {}
+      },
+      {
+        "case": "pumpfun-candidate-1",
+        "workload": "pumpfun",
+        "version": "candidate",
+        "scan_s": 120.591381,
+        "total_s": 120.618344,
+        "wall_s": 120.63958570800605,
+        "sampled_peak_rss_kib": 383188,
+        "sampled_peak_rss_mib": 374.20703125,
+        "cpu_sample_count": 60,
+        "sampled_elapsed_s": 119.61273169517517,
+        "sampled_process_cpu_s": 1296.29,
+        "sampled_average_cpu_cores": 10.837391485243444,
+        "source_read_calls": 11253,
+        "source_read_bytes": 43686183958,
+        "requested_workers": 12,
+        "effective_workers": 12,
+        "max_active_workers": 12,
+        "inflight": {
+          "pipeline_max_in_flight_blocks": 96,
+          "pipeline_max_in_flight_transactions": 131072,
+          "pipeline_max_in_flight_declared_uncompressed_bytes": 50493562
+        }
+      },
+      {
+        "case": "pumpfun-candidate-2",
+        "workload": "pumpfun",
+        "version": "candidate",
+        "scan_s": 121.329305,
+        "total_s": 121.357209,
+        "wall_s": 121.4006258379959,
+        "sampled_peak_rss_kib": 377192,
+        "sampled_peak_rss_mib": 368.3515625,
+        "cpu_sample_count": 60,
+        "sampled_elapsed_s": 119.8128080368042,
+        "sampled_process_cpu_s": 1294.81,
+        "sampled_average_cpu_cores": 10.806941438199654,
+        "source_read_calls": 11253,
+        "source_read_bytes": 43686183958,
+        "requested_workers": 12,
+        "effective_workers": 12,
+        "max_active_workers": 12,
+        "inflight": {
+          "pipeline_max_in_flight_blocks": 96,
+          "pipeline_max_in_flight_transactions": 131072,
+          "pipeline_max_in_flight_declared_uncompressed_bytes": 50493562
+        }
+      },
+      {
+        "case": "pumpfun-baseline-2",
+        "workload": "pumpfun",
+        "version": "baseline",
+        "scan_s": 134.203872,
+        "total_s": 134.236134,
+        "wall_s": 134.2490790199954,
+        "sampled_peak_rss_kib": 375576,
+        "sampled_peak_rss_mib": 366.7734375,
+        "cpu_sample_count": 67,
+        "sampled_elapsed_s": 133.65695142745972,
+        "sampled_process_cpu_s": 1252.23,
+        "sampled_average_cpu_cores": 9.36898520148897,
+        "source_read_calls": 11253,
+        "source_read_bytes": 43686183958,
+        "requested_workers": 12,
+        "effective_workers": 12,
+        "max_active_workers": 12,
+        "inflight": {}
+      },
+      {
+        "case": "indexed-usdc-candidate-1",
+        "workload": "indexed-usdc",
+        "version": "candidate",
+        "scan_s": 80.676569,
+        "total_s": 80.843883,
+        "wall_s": 80.87129289799486,
+        "sampled_peak_rss_kib": 601256,
+        "sampled_peak_rss_mib": 587.1640625,
+        "cpu_sample_count": 40,
+        "sampled_elapsed_s": 79.407541513443,
+        "sampled_process_cpu_s": 861.3,
+        "sampled_average_cpu_cores": 10.846576831171502,
+        "source_read_calls": 11268,
+        "source_read_bytes": 44118946554,
+        "requested_workers": 12,
+        "effective_workers": 12,
+        "max_active_workers": 12,
+        "inflight": {
+          "pipeline_max_in_flight_blocks": 96,
+          "pipeline_max_in_flight_transactions": 131072,
+          "pipeline_max_in_flight_declared_uncompressed_bytes": 50493562
+        }
+      }
+    ],
+    "comparisons": [
+      {
+        "workload": "usdc",
+        "scan_s": {
+          "values": {
+            "baseline": [
+              87.212655,
+              90.676483
+            ],
+            "candidate": [
+              79.672694,
+              79.897713
+            ]
+          },
+          "means": {
+            "baseline": 88.944569,
+            "candidate": 79.7852035
+          },
+          "candidate_change_percent": -10.297835610401362
+        },
+        "total_s": {
+          "values": {
+            "baseline": [
+              87.235141,
+              90.700927
+            ],
+            "candidate": [
+              79.696456,
+              79.926287
+            ]
+          },
+          "means": {
+            "baseline": 88.96803399999999,
+            "candidate": 79.8113715
+          },
+          "candidate_change_percent": -10.292081423312094
+        },
+        "wall_s": {
+          "values": {
+            "baseline": [
+              87.25553371300339,
+              90.72035570800654
+            ],
+            "candidate": [
+              79.71612657399965,
+              79.93870210100431
+            ]
+          },
+          "means": {
+            "baseline": 88.98794471050496,
+            "candidate": 79.82741433750198
+          },
+          "candidate_change_percent": -10.294125123132092
+        },
+        "sampled_peak_rss_mib": {
+          "values": {
+            "baseline": [
+              588.50390625,
+              589.8671875
+            ],
+            "candidate": [
+              583.2421875,
+              582.640625
+            ]
+          },
+          "means": {
+            "baseline": 589.185546875,
+            "candidate": 582.94140625
+          },
+          "candidate_change_percent": -1.059791886973216
+        },
+        "sampled_average_cpu_cores": {
+          "values": {
+            "baseline": [
+              8.96124721828409,
+              8.912341594417294
+            ],
+            "candidate": [
+              10.690009402993095,
+              10.734340428724146
+            ]
+          },
+          "means": {
+            "baseline": 8.936794406350693,
+            "candidate": 10.71217491585862
+          },
+          "candidate_change_percent": 19.865965678323107
+        }
+      },
+      {
+        "workload": "pumpfun",
+        "scan_s": {
+          "values": {
+            "baseline": [
+              133.338405,
+              134.203872
+            ],
+            "candidate": [
+              120.591381,
+              121.329305
+            ]
+          },
+          "means": {
+            "baseline": 133.7711385,
+            "candidate": 120.960343
+          },
+          "candidate_change_percent": -9.576651319297858
+        },
+        "total_s": {
+          "values": {
+            "baseline": [
+              133.369028,
+              134.236134
+            ],
+            "candidate": [
+              120.618344,
+              121.357209
+            ]
+          },
+          "means": {
+            "baseline": 133.80258099999998,
+            "candidate": 120.9877765
+          },
+          "candidate_change_percent": -9.577397090718287
+        },
+        "wall_s": {
+          "values": {
+            "baseline": [
+              133.39013663200603,
+              134.2490790199954
+            ],
+            "candidate": [
+              120.63958570800605,
+              121.4006258379959
+            ]
+          },
+          "means": {
+            "baseline": 133.81960782600072,
+            "candidate": 121.02010577300098
+          },
+          "candidate_change_percent": -9.56474335931572
+        },
+        "sampled_peak_rss_mib": {
+          "values": {
+            "baseline": [
+              365.6953125,
+              366.7734375
+            ],
+            "candidate": [
+              374.20703125,
+              368.3515625
+            ]
+          },
+          "means": {
+            "baseline": 366.234375,
+            "candidate": 371.279296875
+          },
+          "candidate_change_percent": 1.3775118392422847
+        },
+        "sampled_average_cpu_cores": {
+          "values": {
+            "baseline": [
+              9.350623983838624,
+              9.36898520148897
+            ],
+            "candidate": [
+              10.837391485243444,
+              10.806941438199654
+            ]
+          },
+          "means": {
+            "baseline": 9.359804592663796,
+            "candidate": 10.82216646172155
+          },
+          "candidate_change_percent": 15.623850418885365
+        }
+      }
+    ],
+    "indexed_hashes": {
+      "output.ids": {
+        "sha256": "e6218a3812883c7e1abba1162c2a9d5e5b3f286ca1c27692a0fb70249a889035",
+        "bytes": 2115710806
+      },
+      "output.ids.pubkeys": {
+        "sha256": "2751e3e245e6e10b8eb58f694e9171104f00d5af4685fcac6772fb1f027d80eb",
+        "bytes": 23057536
+      },
+      "output.ids.source.json": {
+        "sha256": "47aa052e5a3132cca313e0c901bc6e5582b49c82f27deb7d0e6f254fcd168b2e",
+        "bytes": 781
+      }
+    },
+    "limits": [
+      "CPU cores are process CPU-time deltas divided by sampled elapsed time; they include coordinator and sink threads. They are not worker idle estimates.",
+      "RSS uses periodic samples and can miss short peaks. In-flight declared bytes do not bound process RSS.",
+      "Allocation-run timings are excluded from speed comparisons. Historical totals are from earlier runs, not the current paired sequence.",
+      "Pump has no matching output rows in epoch 300; byte parity does not provide a positive-match Pump output example."
+    ],
+    "canonical_sha256": "c307d97f8999ad4cc7a6ad753007c4d6cf4e5a874cfba5da81bd43700ef1d1a2",
+    "pump_sha256": "06550d3fcd018ae752e35af23e9dbe66ff187dbabc87bbd823726b17c7756386",
+    "host_samples": {
+      "count": 462,
+      "samples_with_observed_copy_or_compression": 0,
+      "load1_minmax": [
+        2.76806640625,
+        15.8037109375
+      ]
+    },
+    "historical_total_time_comparison": [
+      {
+        "workload": "usdc",
+        "old_reader_mean_total_s": 76.1920375,
+        "initial_refactor_mean_total_s": 109.54698300000001,
+        "rolling_mean_total_s": 79.8113715,
+        "change_vs_old_percent": 4.750278531401664,
+        "change_vs_initial_refactor_percent": -27.14416288397463,
+        "earlier_focus_pair": {
+          "mean_total_s": 76.374256,
+          "runs_total_s": [
+            73.871932,
+            78.87658
+          ],
+          "change_vs_old_percent": 4.500358733445475
+        },
+        "old_reader_reference": "Later single-pass retest, 2026-09-06 15:49/15:53 UTC; totals73.682774 and78.701301 seconds. Both pairs use the same binary; this is repeat variation.",
+        "old_reader_binary_sha256": "ec5f490fe2a47231c60b6d26f47e36eaf2a5493f3adac9e47cfb2ca86f8a2de3"
+      },
+      {
+        "workload": "pumpfun",
+        "old_reader_mean_total_s": 125.64288450000001,
+        "initial_refactor_mean_total_s": 143.87105300000002,
+        "rolling_mean_total_s": 120.9877765,
+        "change_vs_old_percent": -3.7050311432479166,
+        "change_vs_initial_refactor_percent": -15.905406975786862
+      }
+    ],
+    "indexed_historical_total_time": {
+      "earlier_two_run_mean_s": 90.8079315,
+      "current_one_run_s": 80.843883,
+      "change_percent": -10.972663219401701
+    }
+  }
+}

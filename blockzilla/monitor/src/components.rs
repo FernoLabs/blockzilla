@@ -24,7 +24,7 @@
 
 use topcoat::{
     Result,
-    view::{View, component, view},
+    view::{Child, View, component, view},
 };
 
 use crate::state::{
@@ -53,13 +53,13 @@ const FOCUS_RING: &str = "focus-visible:outline-none focus-visible:ring-2 focus-
 pub async fn dashboard_shell(
     state: &DashboardState,
     stream_view: &str,
-    child: View,
-) -> Result<View> {
+    child: Child<'_>,
+) -> Result<impl View> {
     let initial_signals = state.to_signals().to_string();
     let stream_action = format!(
         "@get('/api/stream?view={stream_view}', {{retry: 'always', retryMaxCount: 1000000}})"
     );
-    view! {
+    Ok(view! {
         <div
             id="dashboard"
             data-signals=(initial_signals)
@@ -67,7 +67,7 @@ pub async fn dashboard_shell(
         >
             (child)
         </div>
-    }
+    })
 }
 
 /// Live page chrome shared by every route: a fixed-width column (so
@@ -75,20 +75,24 @@ pub async fn dashboard_shell(
 /// route-specific content. `#dashboard-frame` is deliberately present in
 /// both live and offline renderings and is the structural SSE patch target.
 #[component]
-pub async fn dashboard_frame(state: &DashboardState, active: &str, child: View) -> Result<View> {
-    view! {
+pub async fn dashboard_frame(
+    state: &DashboardState,
+    active: &str,
+    child: Child<'_>,
+) -> Result<impl View> {
+    Ok(view! {
         <div id="dashboard-frame">
             <div class="mx-auto max-w-[1400px] px-6">
                 header_nav(active: active, state: state)
                 <main class="flex flex-col gap-6 py-8">(child)</main>
             </div>
         </div>
-    }
+    })
 }
 
 #[component]
-async fn header_nav(active: &str, state: &DashboardState) -> Result<View> {
-    view! {
+async fn header_nav(active: &str, state: &DashboardState) -> Result<impl View> {
+    Ok(view! {
         <header
             class="flex items-center justify-between py-5 border-b border-zinc-800/70"
         >
@@ -164,11 +168,11 @@ async fn header_nav(active: &str, state: &DashboardState) -> Result<View> {
                 </div>
             </div>
         </header>
-    }
+    })
 }
 
 #[component]
-async fn badge_pill(label: &str, tone: &str) -> Result<View> {
+async fn badge_pill(label: &str, tone: &str) -> Result<impl View> {
     let class = match tone {
         "amber" => {
             "rounded-full border border-amber-700/60 bg-amber-500/10 px-2 py-0.5 text-xs font-medium text-amber-400"
@@ -180,11 +184,11 @@ async fn badge_pill(label: &str, tone: &str) -> Result<View> {
             "rounded-full border border-zinc-700/60 bg-zinc-500/10 px-2 py-0.5 text-xs font-medium text-zinc-400"
         }
     };
-    view! { <span class=(class)>(label)</span> }
+    Ok(view! { <span class=(class)>(label)</span> })
 }
 
 #[component]
-async fn nav_link(label: &str, href: &str, active: bool) -> Result<View> {
+async fn nav_link(label: &str, href: &str, active: bool) -> Result<impl View> {
     let class = if active {
         "border-b-2 border-emerald-400 pb-1 font-medium text-zinc-100".to_string()
     } else {
@@ -192,14 +196,14 @@ async fn nav_link(label: &str, href: &str, active: bool) -> Result<View> {
             "border-b-2 border-transparent pb-1 text-zinc-500 transition-colors hover:text-zinc-300 {FOCUS_RING}"
         )
     };
-    view! { <a href=(href) class=(class)>(label)</a> }
+    Ok(view! { <a href=(href) class=(class)>(label)</a> })
 }
 
 /// Runnable ETA / Queued / Needs action strip.
 #[component]
-pub async fn top_stats(state: &DashboardState) -> Result<View> {
+pub async fn top_stats(state: &DashboardState) -> Result<impl View> {
     let card = CARD;
-    view! {
+    Ok(view! {
         <div class=(format!("grid grid-cols-[2fr_1fr_1fr] overflow-hidden {card}"))>
             <div class="border-l-2 border-emerald-400 px-6 py-4">
                 <div class=(EYEBROW)>"Runnable ETA"</div>
@@ -232,14 +236,14 @@ pub async fn top_stats(state: &DashboardState) -> Result<View> {
                 </div>
             </div>
         </div>
-    }
+    })
 }
 
 #[component]
-pub async fn archive_progress(state: &DashboardState) -> Result<View> {
+pub async fn archive_progress(state: &DashboardState) -> Result<impl View> {
     let pct = state.archive_pct();
     let card = CARD;
-    view! {
+    Ok(view! {
         <div class=(format!("flex items-center gap-6 px-6 py-4 {card}"))>
             <div class="flex items-baseline gap-2 whitespace-nowrap">
                 <span class=(EYEBROW)>"Archive progress"</span>
@@ -270,14 +274,14 @@ pub async fn archive_progress(state: &DashboardState) -> Result<View> {
                 (format!("{pct:.1}%"))
             </div>
         </div>
-    }
+    })
 }
 
 #[component]
-pub async fn poh_migration_progress(state: &DashboardState) -> Result<View> {
+pub async fn poh_migration_progress(state: &DashboardState) -> Result<impl View> {
     let pct = state.poh_migration_pct();
     let card = CARD;
-    view! {
+    Ok(view! {
         <div class=(format!("flex flex-col gap-1 px-6 py-4 {card}"))>
             <div class="flex items-center gap-6">
                 <div class="flex items-baseline gap-2 whitespace-nowrap">
@@ -322,7 +326,7 @@ pub async fn poh_migration_progress(state: &DashboardState) -> Result<View> {
                 (state.poh_migration_bytes_label())
             </div>
         </div>
-    }
+    })
 }
 
 /// Which specific epochs the PoH migration workers are on right now.
@@ -332,9 +336,9 @@ pub async fn poh_migration_progress(state: &DashboardState) -> Result<View> {
 /// Reuses `epoch_row` (the same row `epoch_list` renders for the build
 /// queue) since `EpochTask`'s shape already fits.
 #[component]
-pub async fn poh_migration_lane_list(state: &DashboardState) -> Result<View> {
+pub async fn poh_migration_lane_list(state: &DashboardState) -> Result<impl View> {
     let card = CARD;
-    view! {
+    Ok(view! {
         <div id="poh-migration-lane-list" class="flex flex-col gap-2">
             <span class=(EYEBROW)>"PoH migration workers"</span>
             <div class=(format!("divide-y divide-zinc-800/70 {card}"))>
@@ -349,14 +353,14 @@ pub async fn poh_migration_lane_list(state: &DashboardState) -> Result<View> {
                 }
             </div>
         </div>
-    }
+    })
 }
 
 #[component]
-pub async fn registry_reprocess_progress(state: &DashboardState) -> Result<View> {
+pub async fn registry_reprocess_progress(state: &DashboardState) -> Result<impl View> {
     let pct = state.registry_reprocess_pct();
     let card = CARD;
-    view! {
+    Ok(view! {
         <div class=(format!("flex flex-col gap-1 px-6 py-4 {card}"))>
             <div class="flex items-center gap-6">
                 <div class="flex items-baseline gap-2 whitespace-nowrap">
@@ -393,13 +397,13 @@ pub async fn registry_reprocess_progress(state: &DashboardState) -> Result<View>
                 (state.registry_reprocess_worker_label())
             </div>
         </div>
-    }
+    })
 }
 
 #[component]
-pub async fn registry_reprocess_lane_list(state: &DashboardState) -> Result<View> {
+pub async fn registry_reprocess_lane_list(state: &DashboardState) -> Result<impl View> {
     let card = CARD;
-    view! {
+    Ok(view! {
         <div id="registry-reprocess-lane-list" class="flex flex-col gap-2">
             <span class=(EYEBROW)>"Registry conversion workers"</span>
             <div class=(format!("divide-y divide-zinc-800/70 {card}"))>
@@ -414,17 +418,17 @@ pub async fn registry_reprocess_lane_list(state: &DashboardState) -> Result<View
                 }
             </div>
         </div>
-    }
+    })
 }
 
 /// Firewatch signer-to-program index project. The scheduler owns every value:
 /// this view does not infer parity from build completion or estimate resource
 /// use when a worker has not reported it.
 #[component]
-pub async fn firewatch_project(state: &DashboardState) -> Result<View> {
+pub async fn firewatch_project(state: &DashboardState) -> Result<impl View> {
     let card = CARD;
     let overview_indexes = state.overview_firewatch_indexes();
-    view! {
+    Ok(view! {
         if state.firewatch_enabled {
             <section id="firewatch-project" class=(format!("overflow-hidden {card}"))>
                 <div
@@ -543,15 +547,15 @@ pub async fn firewatch_project(state: &DashboardState) -> Result<View> {
                 </div>
             </section>
         }
-    }
+    })
 }
 
 #[component]
-async fn firewatch_index_row(index: &FirewatchIndexEntry) -> Result<View> {
+async fn firewatch_index_row(index: &FirewatchIndexEntry) -> Result<impl View> {
     let id = format!("firewatch-epoch-{}", index.epoch);
     let sig = format!("firewatch_epoch_{}", index.epoch);
     let dot = state_dot_class(&index.state);
-    view! {
+    Ok(view! {
         <tr id=(id) class="border-b border-zinc-800/70 transition-colors hover:bg-white/[0.02]">
             <td class="px-4 py-3 font-medium tabular-nums text-zinc-100">
                 (index.epoch)
@@ -607,12 +611,12 @@ async fn firewatch_index_row(index: &FirewatchIndexEntry) -> Result<View> {
                 (index.resources_label())
             </td>
         </tr>
-    }
+    })
 }
 
 #[component]
-pub async fn live_capture_banner(state: &DashboardState) -> Result<View> {
-    view! {
+pub async fn live_capture_banner(state: &DashboardState) -> Result<impl View> {
+    Ok(view! {
         <div
             id="live-capture"
             data-text="$live_capture_active ? 'Live capture active' : 'Live capture idle'"
@@ -624,11 +628,11 @@ pub async fn live_capture_banner(state: &DashboardState) -> Result<View> {
                 "Live capture idle"
             })
         </div>
-    }
+    })
 }
 
 #[component]
-pub async fn epoch_list(state: &DashboardState) -> Result<View> {
+pub async fn epoch_list(state: &DashboardState) -> Result<impl View> {
     let card = CARD;
     let visible = state.overview_epochs();
     let hidden_count = state
@@ -638,7 +642,7 @@ pub async fn epoch_list(state: &DashboardState) -> Result<View> {
         .count();
     let eligible_count = state.epochs.len() - hidden_count;
     let overflow_count = eligible_count.saturating_sub(visible.len());
-    view! {
+    Ok(view! {
         <div id="epoch-list" class="flex flex-col gap-2">
             <div class=(format!("divide-y divide-zinc-800/70 {card}"))>
                 if visible.is_empty() {
@@ -682,13 +686,13 @@ pub async fn epoch_list(state: &DashboardState) -> Result<View> {
                 </p>
             }
         </div>
-    }
+    })
 }
 
 #[component]
-pub async fn epoch_table(tasks: &[EpochTask]) -> Result<View> {
+pub async fn epoch_table(tasks: &[EpochTask]) -> Result<impl View> {
     let card = CARD;
-    view! {
+    Ok(view! {
         <section class=(format!("overflow-hidden {card}"))>
             <div class="border-b border-zinc-800/70 px-6 py-4">
                 <h2 class="text-sm font-semibold text-zinc-100">"Epochs"</h2>
@@ -746,11 +750,11 @@ pub async fn epoch_table(tasks: &[EpochTask]) -> Result<View> {
                 </table>
             </div>
         </section>
-    }
+    })
 }
 
 #[component]
-async fn epoch_row(task: &EpochTask) -> Result<View> {
+async fn epoch_row(task: &EpochTask) -> Result<impl View> {
     let id = task.dom_id();
     let bar_id = format!("{id}-bar");
     let blocks_id = format!("{id}-blocks");
@@ -762,7 +766,7 @@ async fn epoch_row(task: &EpochTask) -> Result<View> {
     let sig = format!("epoch_{}", task.epoch);
     let dot = state_dot_class(&task.label);
 
-    view! {
+    Ok(view! {
         <div
             id=(id)
             class="flex items-center gap-6 px-6 py-4 transition-colors hover:bg-white/[0.02]"
@@ -819,11 +823,11 @@ async fn epoch_row(task: &EpochTask) -> Result<View> {
                 </div>
             </div>
         </div>
-    }
+    })
 }
 
 #[component]
-async fn registry_reprocess_row(task: &EpochTask) -> Result<View> {
+async fn registry_reprocess_row(task: &EpochTask) -> Result<impl View> {
     let id = format!("registry-epoch-{}", task.epoch);
     let bar_id = format!("{id}-bar");
     let blocks_id = format!("{id}-blocks");
@@ -833,7 +837,7 @@ async fn registry_reprocess_row(task: &EpochTask) -> Result<View> {
     let sig = format!("registry_epoch_{}", task.epoch);
     let dot = state_dot_class(&task.label);
 
-    view! {
+    Ok(view! {
         <div
             id=(id)
             class="flex items-center gap-6 px-6 py-4 transition-colors hover:bg-white/[0.02]"
@@ -890,13 +894,13 @@ async fn registry_reprocess_row(task: &EpochTask) -> Result<View> {
                 </div>
             </div>
         </div>
-    }
+    })
 }
 
 #[component]
-async fn epoch_table_row(task: &EpochTask) -> Result<View> {
+async fn epoch_table_row(task: &EpochTask) -> Result<impl View> {
     let dot = state_dot_class(&task.label);
-    view! {
+    Ok(view! {
         <tr class="border-b border-zinc-800/70 transition-colors hover:bg-white/[0.02]">
             <td class="py-2 pr-3 font-medium tabular-nums text-zinc-100">
                 "Epoch "
@@ -916,7 +920,7 @@ async fn epoch_table_row(task: &EpochTask) -> Result<View> {
             </td>
             <td class="py-2 pl-3 tabular-nums text-zinc-300">(task.eta_label())</td>
         </tr>
-    }
+    })
 }
 
 /// Maps an epoch/lane state label to a small status-dot color so rows can
@@ -942,7 +946,7 @@ fn state_dot_class(label: &str) -> &'static str {
 /// state is purely client-side via a per-panel Datastar signal; no round
 /// trip needed since the detail is already in the initial payload.
 #[component]
-pub async fn bottom_panels(state: &DashboardState) -> Result<View> {
+pub async fn bottom_panels(state: &DashboardState) -> Result<impl View> {
     let tasks_label = format!(
         "{} active{}",
         state.tasks_active,
@@ -976,7 +980,7 @@ pub async fn bottom_panels(state: &DashboardState) -> Result<View> {
     };
     let card = CARD;
 
-    view! {
+    Ok(view! {
         <div class="flex flex-col gap-3">
             <div
                 class=(format!(
@@ -987,28 +991,28 @@ pub async fn bottom_panels(state: &DashboardState) -> Result<View> {
                 <span class="text-sm tabular-nums text-zinc-400">(tasks_label)</span>
             </div>
             summary_panel(
-                key: "reasoning",
+                panel_key: "reasoning",
                 title: "Scheduler reasoning",
                 trailing: &reasoning_label,
                 open_by_default: reasoning_count > 0,
                 scheduler_reasoning(reasoning: &state.reasoning)
             )
             summary_panel(
-                key: "nas",
+                panel_key: "nas",
                 title: "System resources",
                 trailing: &nas_label,
                 open_by_default: false,
                 machine_summary(machine: &state.machine)
             )
             summary_panel(
-                key: "errors",
+                panel_key: "errors",
                 title: "Recent error log",
                 trailing: &errors_label,
                 open_by_default: false,
                 error_log(errors: &state.errors)
             )
             summary_panel(
-                key: "io",
+                panel_key: "io",
                 title: "External process I/O",
                 trailing: &io_label,
                 open_by_default: false,
@@ -1018,7 +1022,7 @@ pub async fn bottom_panels(state: &DashboardState) -> Result<View> {
                 )
             )
         </div>
-    }
+    })
 }
 
 /// Surfaces the scheduler's own current admission/pause/tuning reasons --
@@ -1029,8 +1033,8 @@ pub async fn bottom_panels(state: &DashboardState) -> Result<View> {
 /// a new backend endpoint (tracked as
 /// docs/operations/blockzilla-monitor-roadmap.md §5).
 #[component]
-async fn scheduler_reasoning(reasoning: &SchedulerReasoning) -> Result<View> {
-    view! {
+async fn scheduler_reasoning(reasoning: &SchedulerReasoning) -> Result<impl View> {
+    Ok(view! {
         if reasoning.is_empty() {
             <p class="text-sm text-zinc-500">
                 "Nothing is currently blocked, auto-paused, or worth flagging."
@@ -1092,17 +1096,17 @@ async fn scheduler_reasoning(reasoning: &SchedulerReasoning) -> Result<View> {
                 }
             </div>
         }
-    }
+    })
 }
 
 #[component]
-async fn reasoning_row(label: &str, text: &str, tone: &str) -> Result<View> {
+async fn reasoning_row(label: &str, text: &str, tone: &str) -> Result<impl View> {
     let dot = match tone {
         "amber" => "bg-amber-400",
         "rose" => "bg-rose-400",
         _ => "bg-zinc-500",
     };
-    view! {
+    Ok(view! {
         <div class="flex items-start gap-2.5">
             <span class=(format!("mt-1.5 h-1.5 w-1.5 shrink-0 rounded-full {dot}"))></span>
             <div class="flex flex-col gap-0.5">
@@ -1110,20 +1114,20 @@ async fn reasoning_row(label: &str, text: &str, tone: &str) -> Result<View> {
                 <span class="text-zinc-200">(text)</span>
             </div>
         </div>
-    }
+    })
 }
 
 #[component]
 async fn summary_panel(
-    key: &str,
+    panel_key: &str,
     title: &str,
     trailing: &str,
     open_by_default: bool,
-    child: View,
-) -> Result<View> {
-    let sig = format!("panel_{key}_open");
+    child: Child<'_>,
+) -> Result<impl View> {
+    let sig = format!("panel_{panel_key}_open");
     let card = CARD;
-    view! {
+    Ok(view! {
         <div data-signals=(format!("{{{sig}: {open_by_default}}}")) class=(card)>
             <button
                 data-on:click=(format!("${sig} = !${sig}"))
@@ -1157,11 +1161,11 @@ async fn summary_panel(
                 (child)
             </div>
         </div>
-    }
+    })
 }
 
 #[component]
-async fn machine_summary(machine: &MachineSnapshot) -> Result<View> {
+async fn machine_summary(machine: &MachineSnapshot) -> Result<impl View> {
     let load = format!("{:.2}", machine.load_1m);
     let memory = format!(
         "{} / {}",
@@ -1186,7 +1190,7 @@ async fn machine_summary(machine: &MachineSnapshot) -> Result<View> {
         "{:.1}% / {:.1}%",
         machine.pressure_memory_full_avg10, machine.pressure_io_full_avg10
     );
-    view! {
+    Ok(view! {
         <div class="grid gap-x-8 gap-y-3 text-sm text-zinc-400 sm:grid-cols-2">
             machine_stat(label: "Load (1m)", value: &load)
             machine_stat(label: "Memory", value: &memory)
@@ -1195,12 +1199,12 @@ async fn machine_summary(machine: &MachineSnapshot) -> Result<View> {
             machine_stat(label: "Archive device I/O", value: &device_io)
             machine_stat(label: "Pressure (mem/io, full avg10)", value: &pressure)
         </div>
-    }
+    })
 }
 
 #[component]
-async fn machine_stat(label: &str, value: &str) -> Result<View> {
-    view! {
+async fn machine_stat(label: &str, value: &str) -> Result<impl View> {
+    Ok(view! {
         <p class="flex items-baseline justify-between gap-4 sm:justify-start">
             <span>
                 (label)
@@ -1208,12 +1212,12 @@ async fn machine_stat(label: &str, value: &str) -> Result<View> {
             </span>
             <span class="font-medium tabular-nums text-zinc-200">(value)</span>
         </p>
-    }
+    })
 }
 
 #[component]
-async fn error_log(errors: &[ErrorEntry]) -> Result<View> {
-    view! {
+async fn error_log(errors: &[ErrorEntry]) -> Result<impl View> {
+    Ok(view! {
         if errors.is_empty() {
             <p class="text-sm text-zinc-500">"No recent errors reported."</p>
         } else {
@@ -1236,7 +1240,7 @@ async fn error_log(errors: &[ErrorEntry]) -> Result<View> {
                 }
             </ul>
         }
-    }
+    })
 }
 
 /// A compact placeholder while the scheduler is unavailable or starting.
@@ -1245,7 +1249,7 @@ pub async fn service_unavailable(
     connection_state: &str,
     connection_message: &str,
     last_updated_label: &str,
-) -> Result<View> {
+) -> Result<impl View> {
     let is_stale = connection_state == "stale";
     let is_retry = connection_state == "retrying" || connection_state == "offline" || is_stale;
     let status_title = if is_stale {
@@ -1262,7 +1266,7 @@ pub async fn service_unavailable(
     } else {
         "Waiting for the first snapshot from the Blockzilla scheduler."
     };
-    view! {
+    Ok(view! {
         <main class="grid min-h-[70vh] place-items-center px-4 py-10">
             <section
                 class="max-w-md rounded-xl border border-zinc-800/70 bg-white/[0.02] p-6 text-center"
@@ -1301,18 +1305,18 @@ pub async fn service_unavailable(
                 </details>
             </section>
         </main>
-    }
+    })
 }
 
 /// Compaction archive history panel.
 #[component]
-pub async fn compaction_history(entries: &[CompactionHistoryEntry]) -> Result<View> {
+pub async fn compaction_history(entries: &[CompactionHistoryEntry]) -> Result<impl View> {
     let show_workflow = entries
         .iter()
         .any(|entry| entry.workflow.as_str() != "historical");
     let colspan = if show_workflow { 4 } else { 3 };
     let card = CARD;
-    view! {
+    Ok(view! {
         <section class=(format!("overflow-hidden {card}"))>
             <div
                 class="flex items-center justify-between border-b border-zinc-800/70 px-6 py-4"
@@ -1355,11 +1359,11 @@ pub async fn compaction_history(entries: &[CompactionHistoryEntry]) -> Result<Vi
                 </table>
             </div>
         </section>
-    }
+    })
 }
 
 #[component]
-async fn history_row(entry: &CompactionHistoryEntry, show_workflow: bool) -> Result<View> {
+async fn history_row(entry: &CompactionHistoryEntry, show_workflow: bool) -> Result<impl View> {
     let workflow = match entry.workflow.as_str() {
         "live" => "Live",
         "recompact" => "Recompact",
@@ -1374,7 +1378,7 @@ async fn history_row(entry: &CompactionHistoryEntry, show_workflow: bool) -> Res
         .duration_secs
         .map(crate::state::format_duration)
         .unwrap_or_else(|| "—".to_string());
-    view! {
+    Ok(view! {
         <tr class="border-b border-zinc-800/70 transition-colors hover:bg-white/[0.02]">
             <td class="px-4 py-3 font-medium tabular-nums text-zinc-100">
                 (entry.epoch)
@@ -1385,7 +1389,7 @@ async fn history_row(entry: &CompactionHistoryEntry, show_workflow: bool) -> Res
             <td class="px-4 py-3 tabular-nums text-zinc-400">(completion)</td>
             <td class="px-4 py-3 tabular-nums text-zinc-400">(duration)</td>
         </tr>
-    }
+    })
 }
 
 /// Machine health + external process I/O -- the `/system` page. This
@@ -1393,9 +1397,9 @@ async fn history_row(entry: &CompactionHistoryEntry, show_workflow: bool) -> Res
 /// stage cards with no backing field); everything below reads from
 /// `machine` / `process_io` on the real snapshot.
 #[component]
-pub async fn system_dashboard(state: &DashboardState) -> Result<View> {
+pub async fn system_dashboard(state: &DashboardState) -> Result<impl View> {
     let card = CARD;
-    view! {
+    Ok(view! {
         <div class="flex flex-col gap-4">
             <section class=(format!("overflow-hidden {card}"))>
                 <div class="border-b border-zinc-800/70 px-6 py-4">
@@ -1425,12 +1429,12 @@ pub async fn system_dashboard(state: &DashboardState) -> Result<View> {
                 </div>
             </section>
         </div>
-    }
+    })
 }
 
 #[component]
-async fn process_table(processes: &[ProcessEntry], hidden: bool) -> Result<View> {
-    view! {
+async fn process_table(processes: &[ProcessEntry], hidden: bool) -> Result<impl View> {
+    Ok(view! {
         if hidden {
             <p class="px-6 py-4 text-sm text-zinc-500">
                 "Process names and PIDs are hidden in the public view (host fingerprinting risk). Available on the full/operator tier."
@@ -1457,11 +1461,11 @@ async fn process_table(processes: &[ProcessEntry], hidden: bool) -> Result<View>
                 </tbody>
             </table>
         }
-    }
+    })
 }
 
 #[component]
-async fn process_row(process: &ProcessEntry) -> Result<View> {
+async fn process_row(process: &ProcessEntry) -> Result<impl View> {
     let cpu_label = process
         .cpu_percent
         .map(|v| format!("{v:.1}%"))
@@ -1470,7 +1474,7 @@ async fn process_row(process: &ProcessEntry) -> Result<View> {
         .rss_bytes
         .map(format_bytes)
         .unwrap_or_else(|| "-".to_string());
-    view! {
+    Ok(view! {
         <tr class="border-b border-zinc-800/70 transition-colors hover:bg-white/[0.02]">
             <td class="px-4 py-2 text-zinc-100">(process.name.clone())</td>
             <td class="px-4 py-2 tabular-nums text-zinc-300">(process.pid)</td>
@@ -1483,7 +1487,7 @@ async fn process_row(process: &ProcessEntry) -> Result<View> {
                 ))
             </td>
         </tr>
-    }
+    })
 }
 
 fn format_io_cell(read: Option<f64>, write: Option<f64>) -> String {

@@ -23,8 +23,8 @@ known-drift = ["blockzilla-program-logs/known-drift"]
 blockzilla-primitives = { path = "../../blockzilla-primitives" }
 blockzilla-compact = { path = "../blockzilla-compact", default-features = false }
 blockzilla-program-logs = { path = "../../parser/blockzilla-program-logs", default-features = false }
-anyhow = "1.0.102"
-serde = { version = "1.0.228", features = ["derive"] }
+anyhow = "1.0.104"
+serde = { version = "1.0.229", features = ["derive"] }
 sha2 = "0.11.0"
 wincode = { version = "=0.6.1", features = ["derive"] }
 of-car-reader = { path = "../../old-faithful/of-car-reader", version = "0.2.0", default-features = false }

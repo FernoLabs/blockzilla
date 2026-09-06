@@ -1939,6 +1939,9 @@ mod tests {
         let tx = wincode::deserialize_exact::<VersionedTransaction<'_>>(&bytes).unwrap();
         let message = message_view(&tx.message).unwrap();
         for compressed in [false, true] {
+            if compressed && !cfg!(any(feature = "zstd-native", feature = "zstd-wasm")) {
+                continue;
+            }
             let meta = TransactionStatusMeta {
                 inner_instructions: vec![InnerInstructions {
                     index: 0,
@@ -1954,7 +1957,18 @@ mod tests {
             };
             let wire = meta.encode_to_vec();
             let frame = if compressed {
-                zstd::bulk::compress(&wire, 1).unwrap()
+                // Fixed zstd 1.5.7 level-1 frame for this protobuf value.
+                // Keep the pure-Rust decoder test independent of native zstd.
+                let frame = vec![
+                    0x28, 0xb5, 0x2f, 0xfd, 0x60, 0xf9, 0x02, 0x15, 0x01, 0x00, 0xd8, 0x2a, 0x0c,
+                    0x12, 0x0a, 0x08, 0x01, 0x12, 0x01, 0x00, 0x1a, 0x01, 0x08, 0x20, 0x02, 0x32,
+                    0xe8, 0x07, 0x75, 0x6e, 0x75, 0x73, 0x65, 0x64, 0x20, 0x6c, 0x6f, 0x67, 0x01,
+                    0x00, 0x6f, 0x6f, 0x55, 0xc6,
+                ];
+                let mut decoder = ZstdReusableDecoder::new();
+                assert!(decoder.decompress_if_zstd(&frame).unwrap());
+                assert_eq!(decoder.output(), wire);
+                frame
             } else {
                 wire
             };

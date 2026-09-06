@@ -4,6 +4,10 @@ A server-rendered task/health dashboard for Blockzilla, built on
 [Topcoat](https://github.com/tokio-rs/topcoat) with live updates pushed
 over Server-Sent Events via `topcoat::datastar`.
 
+The monitor uses Topcoat 0.7 and the workspace Rust 1.98 minimum. Views resolve
+to a complete snapshot before each Datastar patch is sent. The SSE connection
+still owns its capacity permit until its response body is dropped.
+
 It reads the scheduler's private, read-only status API directly. The monitor
 validates that wire data, maps it into an explicitly curated view model, and
 applies public-tier path and credential redaction before serving browsers.

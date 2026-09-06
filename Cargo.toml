@@ -68,7 +68,7 @@ unexpected_cfgs = "deny"
 [workspace.package]
 version = "0.2.0"
 edition = "2024"
-rust-version = "1.96"
+rust-version = "1.98"
 license = "MIT"
 repository = "https://github.com/FernoLabs/blockzilla"
 
@@ -81,6 +81,15 @@ strip = true
 debug = false
 incremental = false
 overflow-checks = false
+
+# wasm-bindgen needs the externref table's symbol name to generate Worker
+# catch wrappers. Strip debug information, but keep names in intermediate WASM.
+# https://github.com/cloudflare/workers-rs/issues/1014
+[profile.release.package.blockzilla-get-block]
+strip = "debuginfo"
+
+[profile.release.package.old-faithful-get-block]
+strip = "debuginfo"
 
 [profile.release-debug]
 inherits = "release"

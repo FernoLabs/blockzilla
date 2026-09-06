@@ -102,11 +102,13 @@ command does not write an artifact, publish a candidate, claim finality, advance
 an ACK, or authorize spool deletion. The existing PoH verifier and its report
 remain unchanged.
 
-The pinned Yellowstone 12.4 schema cannot retain Agave V1's transaction-config
-field. The shadow therefore requires every `versioned = true` transaction's
-fee-payer signature to prove the reconstructed V0 bytes and fails closed on a
-V1 or otherwise ambiguous row. This is an alerting/cutover blocker, not a way to
-recover the field already dropped by known-schema raw capture.
+Yellowstone 12.7 retains Agave V1's transaction-config field. The current raw
+stream rejects that field before encoding and at decode/recovery boundaries;
+payload format 2 and identity schema 1 keep their existing supported block
+schema. V1 capture requires a separate stream schema. The ledger shadow also
+rejects a present config. For config-absent versioned messages, it still requires
+the fee-payer signature to prove the reconstructed V0 bytes. Older 12.4 captures
+cannot recover a field that their known-schema decoder already dropped.
 
 ### Helius finalized block recorder
 

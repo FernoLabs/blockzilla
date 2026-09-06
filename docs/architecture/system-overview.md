@@ -1,6 +1,6 @@
 # Blockzilla system architecture
 
-This document separates what exists on current `main` from the proposed
+This document separates the implemented workspace from the proposed
 multi-source archive system. For the compact target diagram, see the
 [full system schema](full-system-schema.md).
 See also [live ingest and storage](live-ingest-and-storage.md) for the source,
@@ -10,7 +10,7 @@ The normative cross-binary publication boundary is the
 
 ## Current repository and data flow
 
-The complete, usable path today is CAR/CAR.ZST to a local Archive V2 directory.
+The complete, usable build path is CAR/CAR.ZST to a local Archive V2 directory.
 The repository also has a prototype path that finalizes current Hivezilla
 capture directories, plus a read-only Edgezilla Worker for Archive V2 objects
 that have already been placed in R2. A restored experimental CAR-backed Worker
@@ -34,27 +34,34 @@ There is also no `blockzilla sync` or `blockzilla stream` command yet.
 The current top-level layout is:
 
 ```text
-blockzilla/                         Blockzilla CLI and archive builders
-services/
-  hivezilla/                        current live prototype and executable
-  edgezilla/get-block/        read-only Worker and native reader tools
-  edgezilla/of-get-block/      experimental read-only CAR compatibility
-                                    Worker restored from preserved history
+blockzilla/                         CLI, archive gateway, and monitor
+hivezilla/                          live services, protocol, and compatibility
+edgezilla/                         read-only Workers and native reader tools
+indexer/                           query, dump, audit, and user-program tools
+runtime/                           replay experiment
 crates/
-  blockzilla-format/                Archive V2 records, codecs, and indexes
-  blockzilla-log-parser/            reusable Solana log parser
+  blockzilla-model/                 common block views, coverage, and sinks
+  blockzilla-primitives/            shared keys, string table, and framing
+  blockzilla-live-format/           live and candidate formats
+  source/                          local, HTTP, and cached byte sources
+  compact-v2/                      V2 registry, format, and reader
+  archive-v3/                      canonical V3 format, reader, and converter
   old-faithful/
-    car-reader/                     CAR and CAR.ZST reader
-    slot-ranges/                    slot-range indexing support
-examples/
-  token-api/                        optional derived-data example
+    of-car-reader/                  CAR types, reader, and archive interface
+    of-slot-ranges/                 slot-index reader, builder, and validation
+  parser/                          reusable Solana log and DEX parsers
+  solana-codec/                    shared shred codec
+  compat/                          legacy reader during consumer migration
+examples/                          shared workloads and dedicated reader tools
+bench/                             reader profiles and V3 measurements
 scripts/                            contributor benchmarks and checks
 docs/                               public architecture, guides, and references
 ```
 
-This is the canonical description of the repository today. Future crates and
-runtime modules should not be added to this tree in documentation before they
-exist.
+See the [workspace structure](../design/workspace-restructure.md) for the full
+crate map. Canonical Archive V3, formerly Index Archive, is intended to replace
+V2. The frozen standalone Indexer V3 prototype remains a separate supported
+reader layout during that migration.
 
 ## Current capability table
 
@@ -62,6 +69,9 @@ exist.
 | --- | --- |
 | Blockzilla CAR preflight/build/repair/inspect | Implemented |
 | Hot-block Archive V2 writer, indexes, sidecars, and readers | Implemented |
+| Dedicated CAR, V2, and prototype V3 readers with shared ordered model | Implemented |
+| V2 rolling worker pipeline and optional indexed USDC output | Implemented; [epoch 300 comparison](../benchmarks/epoch-300-rolling-pipeline-2026-09-06.md) |
+| Canonical Archive V3 converter and local format-native reader | Implemented; shared-model and HTTP reader migration remain planned |
 | Build from a current live-capture directory | Implemented prototype |
 | Hivezilla Yellowstone capture and repair tools | Implemented prototype |
 | Hivezilla multi-instance gRPC runtime | Planned |

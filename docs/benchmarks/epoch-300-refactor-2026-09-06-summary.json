@@ -1,0 +1,815 @@
+{
+  "epoch": 300,
+  "host": "Blockzilla-00",
+  "current_source": "2672d42714da7560672b7a99b420c8315eb733e2",
+  "current_model_patch_sha256": "11e8bbd1b51a782ea30031b7a2c42f894cd21ae11b651976fdcbb5b30740db64",
+  "v2_baseline_source_base": "b5499e696e79d9ca8c9c55e2c6960361d90e4f62",
+  "v2_baseline_patch_sha256": "d3f10d2a7cc49fcbbeb34c0af8b8871a04cdca5f7051d10e1fac74a6ab08cb90",
+  "nas_results": "/volume2/blockzilla-bench/results/epoch300-focus-20260906T150500Z",
+  "threads": 12,
+  "v2_order": "old/new/new/old per workload",
+  "v2_paired_timings": [
+    {
+      "workload": "usdc",
+      "old_seconds": [
+        73.871932,
+        78.87658
+      ],
+      "new_seconds": [
+        108.648852,
+        110.445114
+      ],
+      "old_mean_seconds": 76.374256,
+      "new_mean_seconds": 109.54698300000001,
+      "elapsed_increase_percent": 43.434435551162686
+    },
+    {
+      "workload": "pumpfun",
+      "old_seconds": [
+        125.764522,
+        125.521247
+      ],
+      "new_seconds": [
+        143.938174,
+        143.803932
+      ],
+      "old_mean_seconds": 125.64288450000001,
+      "new_mean_seconds": 143.87105300000002,
+      "elapsed_increase_percent": 14.507919467576391
+    }
+  ],
+  "v2_stage_means": [
+    {
+      "workload": "usdc",
+      "version": "old",
+      "means": {
+        "total_s": 76.374256,
+        "pipeline_read_s": 20.264238499999998,
+        "pipeline_worker_decode_sum_s": 221.4702125,
+        "pipeline_worker_projection_sum_s": 429.4443715,
+        "pipeline_consume_s": 42.4575115
+      }
+    },
+    {
+      "workload": "usdc",
+      "version": "new",
+      "means": {
+        "total_s": 109.54698300000001,
+        "pipeline_read_s": 19.272024000000002,
+        "pipeline_worker_decode_sum_s": 227.6360005,
+        "pipeline_worker_projection_sum_s": 748.619728,
+        "pipeline_consume_s": 43.697412
+      }
+    },
+    {
+      "workload": "pumpfun",
+      "version": "old",
+      "means": {
+        "total_s": 125.64288450000001,
+        "pipeline_read_s": 29.614541000000003,
+        "pipeline_worker_decode_sum_s": 238.1591605,
+        "pipeline_worker_projection_sum_s": 1016.6679065000001,
+        "pipeline_consume_s": 102.46877599999999
+      }
+    },
+    {
+      "workload": "pumpfun",
+      "version": "new",
+      "means": {
+        "total_s": 143.87105300000002,
+        "pipeline_read_s": 27.81335,
+        "pipeline_worker_decode_sum_s": 235.543087,
+        "pipeline_worker_projection_sum_s": 1217.6405439999999,
+        "pipeline_consume_s": 100.1006975
+      }
+    }
+  ],
+  "v2_output_checks": [
+    {
+      "case": "usdc-old-1",
+      "correctness": "MATCH",
+      "comparability": "RECORDED_METADATA_MATCH",
+      "issues": []
+    },
+    {
+      "case": "usdc-new-1",
+      "correctness": "MATCH",
+      "comparability": "RECORDED_METADATA_MATCH",
+      "issues": []
+    },
+    {
+      "case": "usdc-new-2",
+      "correctness": "MATCH",
+      "comparability": "RECORDED_METADATA_MATCH",
+      "issues": []
+    },
+    {
+      "case": "usdc-old-2",
+      "correctness": "MATCH",
+      "comparability": "RECORDED_METADATA_MATCH",
+      "issues": []
+    },
+    {
+      "case": "pumpfun-old-1",
+      "correctness": "MATCH",
+      "comparability": "RECORDED_METADATA_MATCH",
+      "issues": []
+    },
+    {
+      "case": "pumpfun-new-1",
+      "correctness": "MATCH",
+      "comparability": "RECORDED_METADATA_MATCH",
+      "issues": []
+    },
+    {
+      "case": "pumpfun-new-2",
+      "correctness": "MATCH",
+      "comparability": "RECORDED_METADATA_MATCH",
+      "issues": []
+    },
+    {
+      "case": "pumpfun-old-2",
+      "correctness": "MATCH",
+      "comparability": "RECORDED_METADATA_MATCH",
+      "issues": []
+    }
+  ],
+  "bounded_profile_state": "MATCHING_DIAGNOSTICS",
+  "bounded_profile_comparisons": [
+    {
+      "workload": "usdc",
+      "workers": 1,
+      "errors": [],
+      "timing": {
+        "elapsed_s": {
+          "baseline": 1.608745536,
+          "current": 2.344047083,
+          "current_over_baseline": 1.4570651669550305,
+          "baseline_over_current": 0.6863111017126272
+        },
+        "projection_sum_s": {
+          "baseline": 0.811039999,
+          "current": 1.526164642,
+          "current_over_baseline": 1.8817378228962045,
+          "baseline_over_current": 0.5314236594664864
+        },
+        "decode_sum_s": {
+          "baseline": 0.529286461,
+          "current": 0.54760568,
+          "current_over_baseline": 1.0346111611572093,
+          "baseline_over_current": 0.966546696520752
+        },
+        "read_s": {
+          "baseline": 0.030825385,
+          "current": 0.032379665,
+          "current_over_baseline": 1.0504220790754115,
+          "baseline_over_current": 0.9519982680487892
+        },
+        "consume_s": {
+          "baseline": 0.078696735,
+          "current": 0.057079272,
+          "current_over_baseline": 0.7253067360418447,
+          "baseline_over_current": 1.3787270272122603
+        },
+        "input_wait_s": {
+          "baseline": 0.036823815,
+          "current": 0.038267161,
+          "current_over_baseline": 1.039195993136507,
+          "baseline_over_current": 0.9622823861953073
+        },
+        "projection_buffer_wait_s": {
+          "baseline": 0.000169877,
+          "current": 0.000284824,
+          "current_over_baseline": 1.676648398547184,
+          "baseline_over_current": 0.5964279695531276
+        },
+        "result_send_wait_s": {
+          "baseline": 0.000958377,
+          "current": 0.001234929,
+          "current_over_baseline": 1.2885628515709373,
+          "baseline_over_current": 0.7760583806842336
+        },
+        "signature_read_s": {
+          "baseline": 0.00010382,
+          "current": 9.5164e-05,
+          "current_over_baseline": 0.9166249277595838,
+          "baseline_over_current": 1.0909587659198858
+        },
+        "signature_assign_s": {
+          "baseline": 9.7807e-05,
+          "current": 5.9846e-05,
+          "current_over_baseline": 0.6118784954042145,
+          "baseline_over_current": 1.6343113992580955
+        },
+        "publish_s": {
+          "baseline": 0.063864672,
+          "current": 0.044554061,
+          "current_over_baseline": 0.697632346722144,
+          "baseline_over_current": 1.4334197728911848
+        }
+      },
+      "allocations": {
+        "allocation_calls": {
+          "baseline": 11825,
+          "current": 11849,
+          "current_over_baseline": 1.002029598308668,
+          "baseline_over_current": 0.9979745126170985
+        },
+        "allocation_bytes": {
+          "baseline": 498346091,
+          "current": 499427531,
+          "current_over_baseline": 1.0021700581574342,
+          "baseline_over_current": 0.9978346407979659
+        }
+      },
+      "transactions": 3274503,
+      "source_bytes": 654045903,
+      "oracle_match": true,
+      "state": "MATCHING_DIAGNOSTIC"
+    },
+    {
+      "workload": "usdc",
+      "workers": 12,
+      "errors": [],
+      "timing": {
+        "elapsed_s": {
+          "baseline": 0.519651846,
+          "current": 0.655054759,
+          "current_over_baseline": 1.2605646723710473,
+          "baseline_over_current": 0.7932952762503326
+        },
+        "projection_sum_s": {
+          "baseline": 1.916866782,
+          "current": 3.193316791,
+          "current_over_baseline": 1.6659043919933711,
+          "baseline_over_current": 0.6002745444493547
+        },
+        "decode_sum_s": {
+          "baseline": 0.919709559,
+          "current": 0.940077418,
+          "current_over_baseline": 1.02214596858398,
+          "baseline_over_current": 0.9783338493085683
+        },
+        "read_s": {
+          "baseline": 0.056537652,
+          "current": 0.058720478,
+          "current_over_baseline": 1.0386083596113966,
+          "baseline_over_current": 0.962826835299263
+        },
+        "consume_s": {
+          "baseline": 0.147425771,
+          "current": 0.148651064,
+          "current_over_baseline": 1.008311253803787,
+          "baseline_over_current": 0.9917572537523176
+        },
+        "input_wait_s": {
+          "baseline": 0.008567203,
+          "current": 0.010471371,
+          "current_over_baseline": 1.2222625050439448,
+          "baseline_over_current": 0.8181548528841162
+        },
+        "projection_buffer_wait_s": {
+          "baseline": 0.000847273,
+          "current": 0.000136148,
+          "current_over_baseline": 0.16068964784667988,
+          "baseline_over_current": 6.223176249375679
+        },
+        "result_send_wait_s": {
+          "baseline": 0.000168721,
+          "current": 0.000169653,
+          "current_over_baseline": 1.0055239122575137,
+          "baseline_over_current": 0.9945064337205944
+        },
+        "signature_read_s": {
+          "baseline": 0.000125128,
+          "current": 0.00011867,
+          "current_over_baseline": 0.9483888498177865,
+          "baseline_over_current": 1.054419819667987
+        },
+        "signature_assign_s": {
+          "baseline": 9.4902e-05,
+          "current": 8.4676e-05,
+          "current_over_baseline": 0.8922467387410171,
+          "baseline_over_current": 1.1207662147479804
+        },
+        "publish_s": {
+          "baseline": 0.09449491,
+          "current": 0.095020137,
+          "current_over_baseline": 1.0055582570532107,
+          "baseline_over_current": 0.9944724663994117
+        }
+      },
+      "allocations": {
+        "allocation_calls": {
+          "baseline": 30091,
+          "current": 29973,
+          "current_over_baseline": 0.9960785616961882,
+          "baseline_over_current": 1.0039368765222034
+        },
+        "allocation_bytes": {
+          "baseline": 678495630,
+          "current": 692107799,
+          "current_over_baseline": 1.0200622795462957,
+          "baseline_over_current": 0.980332299361938
+        }
+      },
+      "transactions": 3274503,
+      "source_bytes": 654045903,
+      "oracle_match": true,
+      "state": "MATCHING_DIAGNOSTIC"
+    },
+    {
+      "workload": "pumpfun",
+      "workers": 1,
+      "errors": [],
+      "timing": {
+        "elapsed_s": {
+          "baseline": 1.8341238880000001,
+          "current": 2.220863487,
+          "current_over_baseline": 1.210857947781115,
+          "baseline_over_current": 0.8258607063136431
+        },
+        "projection_sum_s": {
+          "baseline": 1.218458466,
+          "current": 1.596200537,
+          "current_over_baseline": 1.3100163703076935,
+          "baseline_over_current": 0.7633492394947113
+        },
+        "decode_sum_s": {
+          "baseline": 0.530306086,
+          "current": 0.54592267,
+          "current_over_baseline": 1.0294482458570164,
+          "baseline_over_current": 0.9713941463540979
+        },
+        "read_s": {
+          "baseline": 0.031932718,
+          "current": 0.030536941,
+          "current_over_baseline": 0.9562900658816453,
+          "baseline_over_current": 1.0457078199155572
+        },
+        "consume_s": {
+          "baseline": 0.109687795,
+          "current": 0.130793628,
+          "current_over_baseline": 1.1924173332137817,
+          "baseline_over_current": 0.8386325593781985
+        },
+        "input_wait_s": {
+          "baseline": 0.036269771,
+          "current": 0.033686065,
+          "current_over_baseline": 0.9287642042184386,
+          "baseline_over_current": 1.076699549205287
+        },
+        "projection_buffer_wait_s": {
+          "baseline": 0.0002251,
+          "current": 0.000173084,
+          "current_over_baseline": 0.7689204797867615,
+          "baseline_over_current": 1.3005246007718796
+        },
+        "result_send_wait_s": {
+          "baseline": 0.001125086,
+          "current": 0.000963277,
+          "current_over_baseline": 0.8561807719587659,
+          "baseline_over_current": 1.1679776429832747
+        },
+        "signature_read_s": {
+          "baseline": 0.00012652,
+          "current": 0.000129721,
+          "current_over_baseline": 1.0253003477711033,
+          "baseline_over_current": 0.9753239645084452
+        },
+        "signature_assign_s": {
+          "baseline": 6.568e-05,
+          "current": 8.601e-05,
+          "current_over_baseline": 1.3095310596833132,
+          "baseline_over_current": 0.7636321357981629
+        },
+        "publish_s": {
+          "baseline": 0.067884529,
+          "current": 0.08387867,
+          "current_over_baseline": 1.235608042592444,
+          "baseline_over_current": 0.8093181377339436
+        }
+      },
+      "allocations": {
+        "allocation_calls": {
+          "baseline": 361591,
+          "current": 613441,
+          "current_over_baseline": 1.6965051674405613,
+          "baseline_over_current": 0.5894470698893618
+        },
+        "allocation_bytes": {
+          "baseline": 239277838,
+          "current": 323535946,
+          "current_over_baseline": 1.352135027231398,
+          "baseline_over_current": 0.7395711078113095
+        }
+      },
+      "transactions": 3274503,
+      "source_bytes": 221283307,
+      "oracle_match": true,
+      "state": "MATCHING_DIAGNOSTIC"
+    },
+    {
+      "workload": "pumpfun",
+      "workers": 12,
+      "errors": [],
+      "timing": {
+        "elapsed_s": {
+          "baseline": 0.591156923,
+          "current": 0.691900535,
+          "current_over_baseline": 1.1704177149592478,
+          "baseline_over_current": 0.8543958171675644
+        },
+        "projection_sum_s": {
+          "baseline": 4.481580987,
+          "current": 5.71263591,
+          "current_over_baseline": 1.2746921067745953,
+          "baseline_over_current": 0.7845031711464349
+        },
+        "decode_sum_s": {
+          "baseline": 0.996608925,
+          "current": 0.97490846,
+          "current_over_baseline": 0.978225696704452,
+          "baseline_over_current": 1.0222589770120571
+        },
+        "read_s": {
+          "baseline": 0.078931587,
+          "current": 0.068709931,
+          "current_over_baseline": 0.870499803836454,
+          "baseline_over_current": 1.1487653364111223
+        },
+        "consume_s": {
+          "baseline": 0.390155712,
+          "current": 0.355092097,
+          "current_over_baseline": 0.9101291768349146,
+          "baseline_over_current": 1.098745129210803
+        },
+        "input_wait_s": {
+          "baseline": 0.009999989,
+          "current": 0.006687647,
+          "current_over_baseline": 0.6687654356419791,
+          "baseline_over_current": 1.4952925894563516
+        },
+        "projection_buffer_wait_s": {
+          "baseline": 0.003545507,
+          "current": 0.003403817,
+          "current_over_baseline": 0.9600367450973867,
+          "baseline_over_current": 1.0416267972103084
+        },
+        "result_send_wait_s": {
+          "baseline": 0.000175748,
+          "current": 0.000204223,
+          "current_over_baseline": 1.1620217584268384,
+          "baseline_over_current": 0.8605690837956548
+        },
+        "signature_read_s": {
+          "baseline": 0.000259162,
+          "current": 0.000259064,
+          "current_over_baseline": 0.9996218581427831,
+          "baseline_over_current": 1.0003782849025724
+        },
+        "signature_assign_s": {
+          "baseline": 0.000121051,
+          "current": 0.000117117,
+          "current_over_baseline": 0.9675013011044931,
+          "baseline_over_current": 1.033590341282649
+        },
+        "publish_s": {
+          "baseline": 0.213843143,
+          "current": 0.200662461,
+          "current_over_baseline": 0.9383628494461475,
+          "baseline_over_current": 1.0656858384688106
+        }
+      },
+      "allocations": {
+        "allocation_calls": {
+          "baseline": 443152,
+          "current": 681981,
+          "current_over_baseline": 1.5389324656099939,
+          "baseline_over_current": 0.64980109416538
+        },
+        "allocation_bytes": {
+          "baseline": 465103250,
+          "current": 525756459,
+          "current_over_baseline": 1.130408052405568,
+          "baseline_over_current": 0.8846363026802111
+        }
+      },
+      "transactions": 3274503,
+      "source_bytes": 221283307,
+      "oracle_match": true,
+      "state": "MATCHING_DIAGNOSTIC"
+    }
+  ],
+  "bounded_profile_limits": [
+    "The harness discards output bytes. Matching counters and coverage are not output-content proof.",
+    "These are bounded, warmed diagnostic scans. They do not measure a full epoch or output-file write cost.",
+    "Timing medians use allocation counting disabled. Allocation pass elapsed times are not used for performance ratios.",
+    "Rust allocation requests include reallocations and requested sizes, not live or peak memory; C zstd allocations are not counted.",
+    "Worker decode/projection sums and producer read times overlap. Do not add them to elapsed time.",
+    "The harness JSON does not record epoch or first-block arguments. The preserved launcher is needed to establish range identity.",
+    "Oracle normalization removes only known Rust crate/module qualifiers outside quoted strings; counters and digest bytes remain exact."
+  ],
+  "v3_paired_comparisons": [
+    {
+      "format": "indexer-v3",
+      "mode": "local",
+      "epoch": 300,
+      "workload": "slot-hours",
+      "correctness": "MATCH",
+      "comparability": "RECORDED_METADATA_MATCH",
+      "performance": "WITHIN_THRESHOLD",
+      "issues": [],
+      "timing": {
+        "total_s": {
+          "baseline": 55.966263,
+          "current": 59.757373,
+          "ratio": 1.067739202097521,
+          "change_percent": 6.773920209752093
+        },
+        "scan_s": {
+          "baseline": 55.808437,
+          "current": 59.637401,
+          "ratio": 1.0686090527853342,
+          "change_percent": 6.860905278533425
+        },
+        "wall_s": {
+          "baseline": 56.006362058004015,
+          "current": 59.76770609999949,
+          "ratio": 1.0671592280551978,
+          "change_percent": 6.715922805519781
+        }
+      },
+      "baseline_root": "/volume2/blockzilla-bench/results/epoch300-focus-20260906T150500Z/diagnostics/v3-old",
+      "scan_source_bytes": {
+        "baseline": "14149150106",
+        "current": "14149150106"
+      },
+      "scan_local_read_bytes": {
+        "baseline": "14149150106",
+        "current": "14149150106"
+      },
+      "total_tps": {
+        "baseline": "12949408.991",
+        "current": "12127876.419"
+      },
+      "decoded_transactions": {
+        "baseline": null,
+        "current": null
+      },
+      "decoded_scan_tps": {
+        "baseline": null,
+        "current": null
+      },
+      "effective_workers": {
+        "baseline": "12",
+        "current": "12"
+      },
+      "skipped_failed_transactions": {
+        "baseline": null,
+        "current": null
+      },
+      "baseline_resources": {
+        "sampled_max_rss_bytes": 161374208.0,
+        "sampled_cpu_percent": 915.9548322803737,
+        "sampled_storage_read_mb_s": 255.7718524880248
+      },
+      "current_resources": {
+        "sampled_max_rss_bytes": 161411072.0,
+        "sampled_cpu_percent": 908.2842147098329,
+        "sampled_storage_read_mb_s": 237.77343885961335
+      },
+      "slowdown_metrics": [],
+      "state": "PASS"
+    },
+    {
+      "format": "indexer-v3",
+      "mode": "local",
+      "epoch": 300,
+      "workload": "usdc",
+      "correctness": "MATCH",
+      "comparability": "RECORDED_METADATA_MATCH",
+      "performance": "WITHIN_THRESHOLD",
+      "issues": [],
+      "timing": {
+        "total_s": {
+          "baseline": 74.871103,
+          "current": 75.835109,
+          "ratio": 1.0128755415824446,
+          "change_percent": 1.2875541582444638
+        },
+        "scan_s": {
+          "baseline": 74.699287,
+          "current": 75.673494,
+          "ratio": 1.013041717520008,
+          "change_percent": 1.3041717520007934
+        },
+        "wall_s": {
+          "baseline": 74.89297579199774,
+          "current": 75.8446907769976,
+          "ratio": 1.012707666839719,
+          "change_percent": 1.2707666839719023
+        }
+      },
+      "baseline_root": "/volume2/blockzilla-bench/results/epoch300-focus-20260906T150500Z/diagnostics/v3-old",
+      "scan_source_bytes": {
+        "baseline": "14723346231",
+        "current": "14723346231"
+      },
+      "scan_local_read_bytes": {
+        "baseline": "14723346231",
+        "current": "14723346231"
+      },
+      "total_tps": {
+        "baseline": "9679702.969",
+        "current": "9556655.805"
+      },
+      "decoded_transactions": {
+        "baseline": "724730034",
+        "current": "724730034"
+      },
+      "decoded_scan_tps": {
+        "baseline": "9701967.277",
+        "current": "9577065.841"
+      },
+      "effective_workers": {
+        "baseline": "12",
+        "current": "12"
+      },
+      "skipped_failed_transactions": {
+        "baseline": null,
+        "current": "111179816"
+      },
+      "baseline_resources": {
+        "sampled_max_rss_bytes": 754528256.0,
+        "sampled_cpu_percent": 865.7302010960759,
+        "sampled_storage_read_mb_s": 199.04235776107672
+      },
+      "current_resources": {
+        "sampled_max_rss_bytes": 750039040.0,
+        "sampled_cpu_percent": 874.173336037015,
+        "sampled_storage_read_mb_s": 196.65797144467774
+      },
+      "slowdown_metrics": [],
+      "state": "PASS"
+    },
+    {
+      "format": "indexer-v3",
+      "mode": "local",
+      "epoch": 300,
+      "workload": "pumpfun",
+      "correctness": "MATCH",
+      "comparability": "RECORDED_METADATA_MATCH",
+      "performance": "WITHIN_THRESHOLD",
+      "issues": [],
+      "timing": {
+        "total_s": {
+          "baseline": 0.199444,
+          "current": 0.188372,
+          "ratio": 0.9444856701630533,
+          "change_percent": -5.551432983694671
+        },
+        "scan_s": {
+          "baseline": 0.025822,
+          "current": 0.019388,
+          "ratio": 0.7508326233444349,
+          "change_percent": -24.91673766555651
+        },
+        "wall_s": {
+          "baseline": 0.2172451469959924,
+          "current": 0.2178258369967807,
+          "ratio": 1.0026729711057667,
+          "change_percent": 0.2672971105766697
+        }
+      },
+      "baseline_root": "/volume2/blockzilla-bench/results/epoch300-focus-20260906T150500Z/diagnostics/v3-old",
+      "scan_source_bytes": {
+        "baseline": "0",
+        "current": "0"
+      },
+      "scan_local_read_bytes": {
+        "baseline": "5888943",
+        "current": "5888943"
+      },
+      "total_tps": {
+        "baseline": "3633745022.541",
+        "current": "3847336323.712"
+      },
+      "decoded_transactions": {
+        "baseline": "0",
+        "current": "0"
+      },
+      "decoded_scan_tps": {
+        "baseline": "0.000",
+        "current": "0.000"
+      },
+      "effective_workers": {
+        "baseline": "0",
+        "current": "0"
+      },
+      "skipped_failed_transactions": {
+        "baseline": null,
+        "current": "0"
+      },
+      "baseline_resources": {
+        "sampled_max_rss_bytes": 0
+      },
+      "current_resources": {
+        "sampled_max_rss_bytes": 0
+      },
+      "slowdown_metrics": [],
+      "state": "PASS"
+    },
+    {
+      "format": "indexer-v3",
+      "mode": "local",
+      "epoch": 300,
+      "workload": "firewatch",
+      "correctness": "MATCH",
+      "comparability": "RECORDED_METADATA_MATCH",
+      "performance": "WITHIN_THRESHOLD",
+      "issues": [],
+      "timing": {
+        "total_s": {
+          "baseline": 0.14782,
+          "current": 0.153005,
+          "ratio": 1.035076444324178,
+          "change_percent": 3.5076444324178
+        },
+        "scan_s": {
+          "baseline": 0.015997,
+          "current": 0.015936,
+          "ratio": 0.9961867850221915,
+          "change_percent": -0.381321497780851
+        },
+        "wall_s": {
+          "baseline": 0.1652394739940064,
+          "current": 0.16521131599438377,
+          "ratio": 0.999829592778638,
+          "change_percent": -0.017040722136196784
+        }
+      },
+      "baseline_root": "/volume2/blockzilla-bench/results/epoch300-focus-20260906T150500Z/diagnostics/v3-old",
+      "scan_source_bytes": {
+        "baseline": "0",
+        "current": "0"
+      },
+      "scan_local_read_bytes": {
+        "baseline": "5888943",
+        "current": "5888943"
+      },
+      "total_tps": {
+        "baseline": "4902779111.793",
+        "current": "4736647675.917"
+      },
+      "decoded_transactions": {
+        "baseline": "0",
+        "current": "0"
+      },
+      "decoded_scan_tps": {
+        "baseline": "0.000",
+        "current": "0.000"
+      },
+      "effective_workers": {
+        "baseline": "0",
+        "current": "0"
+      },
+      "skipped_failed_transactions": {
+        "baseline": null,
+        "current": null
+      },
+      "baseline_resources": {
+        "sampled_max_rss_bytes": 0
+      },
+      "current_resources": {
+        "sampled_max_rss_bytes": 0
+      },
+      "slowdown_metrics": [],
+      "state": "PASS"
+    }
+  ],
+  "host_samples": {
+    "host-load.jsonl": {
+      "samples": 186,
+      "compressor_states": [
+        "T (stopped)"
+      ],
+      "compressor_cpu_seconds_min": 1154.54,
+      "compressor_cpu_seconds_max": 1154.54
+    },
+    "diagnostics/host-load.jsonl": {
+      "samples": 69,
+      "compressor_states": [
+        "T (stopped)"
+      ],
+      "compressor_cpu_seconds_min": 1154.54,
+      "compressor_cpu_seconds_max": 1154.54
+    }
+  },
+  "full_matrix_state": {
+    "state": "INTERRUPTED",
+    "completed": 29,
+    "total": 88
+  },
+  "conclusion": "V2 projection slowdown confirmed; checked outputs match; V3 epoch300 pair within 10 percent investigation threshold. No reader source changes made in this diagnosis."
+}

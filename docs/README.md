@@ -2,7 +2,9 @@
 
 Start with [Archive formats and the read SDK](reference/archive-formats-and-read-sdk.md).
 It is the main product guide for format choice, the common ordered scan API,
-network setup, cache behavior, trust levels, and reader file layouts.
+network setup, cache behavior, trust levels, and reader file layouts. The
+[workspace map](design/workspace-restructure.md) explains format crates,
+shared byte sources, top-level indexers, and the remaining V3 migration.
 
 The repository [fixture quick start](../README.md#quick-start-build-and-read-the-fixture)
 is the shortest working path through the project.
@@ -18,14 +20,31 @@ recommended read-SDK starting point.
 ## Implemented reference
 
 - [Archive formats and the read SDK](reference/archive-formats-and-read-sdk.md)
-  is the common entry point for CAR, Compact V2, Indexer V3, and the
-  `NetworkEpoch` facade.
+  lists the dedicated CAR, Compact V2, frozen prototype, and canonical V3 readers.
 - [Blockzilla query SDK guide](guides/blockzilla-query-sdk.md) documents the
   implemented source-neutral models, request policy, adapters, sinks, and
   receipts.
 - [Archive V2 hot-block format](reference/archive-v2-hot-block-format.md)
-  documents the files and records implemented by `blockzilla-format` and the
+  documents the files and records implemented by `blockzilla-archive-v2` and the
   Blockzilla builders.
+- [Ordered V2 pipeline](design/reader-pipeline-rolling-window.md) documents
+  continuous worker dispatch, ordered output, resource limits, and cancellation.
+- [Indexed USDC balances](reference/usdc-indexed-balances-v1.md) documents the
+  optional compact balance stream, source-scoped dictionary, and checked expansion.
+- [Dependency review](reference/dependency-review-2026-09-06.md) records current
+  versions, major-release changes, and required protocol compatibility limits.
+- [JavaScript and build tools](reference/js-dependency-review-2026-09-06.md)
+  records package updates and application/Worker build checks.
+- [Test suite review](reference/test-suite-review-2026-09-06.md) explains the
+  removed duplicate checks, shared fixtures, and retained behavior tests.
+- [Old Faithful slot ranges](../crates/old-faithful/of-slot-ranges/README.md)
+  documents the builders, repair tools, and validators beside the CAR reader.
+- [Epoch 300 dependency retest](benchmarks/epoch-300-dependency-review-2026-09-06.md)
+  records the later V2 prefix comparison, exact counters, timings, and allocation
+  changes after the dependency update.
+- [Epoch 300 rolling-pipeline results](benchmarks/epoch-300-rolling-pipeline-2026-09-06.md)
+  records full-epoch V2 timings and exact output checks for that frozen build.
+  Earlier benchmark documents retain the results for their original builds.
 - [Block-time gap sidecar](reference/block-time-gap-sidecar.md) documents the
   locally derived slot/time discontinuity file emitted by current builders.
 - [Blockzilla scheduler](../blockzilla/cli/README.md#scheduler) documents the
@@ -55,10 +74,12 @@ Archive V2 is pre-1.0. Pin the Git revision used to produce and read an archive.
 
 ## Proposed architecture
 
-- [Blockzilla Index Archive](design/blockzilla-index-archive.md): indexer-first
-  replacement for Archive V2 — column planes for replay and filtering, resolved
-  transaction accounts, rebuildable posting indexes, and the migration path
-  from today's V2 generations via an offline column transform.
+- [Blockzilla Index Archive design](design/blockzilla-index-archive.md): the
+  design history for the Archive V3 replacement. Use the
+  [V3 format reference](../crates/archive-v3/blockzilla-archive-v3/README.md) for
+  the implemented canonical layout and its
+  [converter guide](../crates/archive-v3/blockzilla-archive-v3-convert/README.md)
+  for current commands.
 - [Rust runtime boundary](architecture/rust-runtime-boundary.md): ownership
   rule for production logic, the narrow external-tool exceptions, and the
   migration order for remaining Python and shell implementations.

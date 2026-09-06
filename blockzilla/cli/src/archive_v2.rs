@@ -21912,6 +21912,75 @@ mod tests {
     }
 
     #[test]
+    fn historical_vote_instruction_bytes_match_pre_upgrade_sdk() {
+        // Fixed bytes produced with solana-vote-interface 5.1.1 and bincode 1.3.3.
+        // This guards the archive input contract independently of a new-SDK round trip.
+        let lockouts = VecDeque::from([
+            Lockout::new_with_confirmation_count(1_001, 31),
+            Lockout::new_with_confirmation_count(1_031, 1),
+        ]);
+        let mut update = SolanaVoteStateUpdate::new(lockouts.clone(), Some(1_000), [7; 32].into());
+        update.timestamp = Some(1_234_567);
+        let mut tower = SolanaTowerSync::new(lockouts, Some(1_000), [7; 32].into(), [8; 32].into());
+        tower.timestamp = Some(1_234_567);
+        let cases = [
+            (
+                VoteInstruction::CompactUpdateVoteState(update.clone()),
+                concat!(
+                    "0c000000e80300000000000002011f1e01070707070707070707070707070707",
+                    "07070707070707070707070707070707070187d6120000000000",
+                ),
+                12,
+            ),
+            (
+                VoteInstruction::CompactUpdateVoteStateSwitch(update, [9; 32].into()),
+                concat!(
+                    "0d000000e80300000000000002011f1e01070707070707070707070707070707",
+                    "07070707070707070707070707070707070187d6120000000000090909090909",
+                    "0909090909090909090909090909090909090909090909090909",
+                ),
+                13,
+            ),
+            (
+                VoteInstruction::TowerSync(tower.clone()),
+                concat!(
+                    "0e000000e80300000000000002011f1e01070707070707070707070707070707",
+                    "07070707070707070707070707070707070187d6120000000000080808080808",
+                    "0808080808080808080808080808080808080808080808080808",
+                ),
+                14,
+            ),
+            (
+                VoteInstruction::TowerSyncSwitch(tower, [9; 32].into()),
+                concat!(
+                    "0f000000e80300000000000002011f1e01070707070707070707070707070707",
+                    "07070707070707070707070707070707070187d6120000000000080808080808",
+                    "0808080808080808080808080808080808080808080808080808090909090909",
+                    "0909090909090909090909090909090909090909090909090909",
+                ),
+                15,
+            ),
+        ];
+        let mut slots = GxHashMap::with_hasher(GxBuildHasher::default());
+        slots.insert(1_031, 42);
+        for (instruction, golden_hex, expected_tag) in cases {
+            let golden = test_hex_bytes(golden_hex);
+            assert_eq!(bincode::serialize(&instruction).unwrap(), golden);
+            let mut vote_hashes = VoteHashRegistryBuilder::default();
+            let projected =
+                parse_hot_vote_instruction_data(&golden, &slots, &mut vote_hashes).unwrap();
+            let actual_tag = match projected {
+                ArchiveV2HotInstructionData::VoteCompactUpdateVoteState(_) => 12,
+                ArchiveV2HotInstructionData::VoteCompactUpdateVoteStateSwitch { .. } => 13,
+                ArchiveV2HotInstructionData::VoteTowerSync(_) => 14,
+                ArchiveV2HotInstructionData::VoteTowerSyncSwitch { .. } => 15,
+                other => panic!("historical vote stopped compacting: {other:?}"),
+            };
+            assert_eq!(actual_tag, expected_tag);
+        }
+    }
+
+    #[test]
     fn hot_vote_parser_compacts_canonical_solana_vote_instructions() {
         let root = 1_000u64;
         let last_slot = root + 31;

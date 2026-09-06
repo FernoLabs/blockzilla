@@ -1116,7 +1116,7 @@ mod tests {
     fn block_markers_are_retained_instead_of_discarded() {
         use solana_entry::block_component::{BlockHeaderV1, VersionedBlockMarker};
 
-        let marker = VersionedBlockMarker::new_block_header(BlockHeaderV1 {
+        let marker = VersionedBlockMarker::from_block_header(BlockHeaderV1 {
             parent_slot: 42,
             parent_block_id: Default::default(),
         });

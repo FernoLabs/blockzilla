@@ -15,6 +15,46 @@ USDC and Pump.fun exclude known failed transactions and report their count.
 Unknown execution status remains a coverage warning. The count example still
 includes all transactions. See the [shared workload rules](../workloads/README.md).
 
+## Optional compact USDC output
+
+The indexed example keeps registry IDs in balance rows. It resolves an ID only
+when it first writes that ID to the public-key mapping file. It records the
+actual token account separately from its owner and its transaction account
+position. No SQLite database is created.
+
+```console
+cargo run --release --locked -p blockzilla-read-compact-v2 \
+  --bin read-compact-v2-usdc-indexed -- \
+  --archive-root archive --epoch 300 --threads 12 --output usdc-300.ids
+```
+
+The output consists of `usdc-300.ids`, `usdc-300.ids.pubkeys`,
+`usdc-300.ids.source.json`, and `usdc-300.ids.complete.json`. Keep these files
+together. Each must be absent before a run. The completion record is written
+after both binary files finish and the source checks pass. An interrupted run
+must not be used as complete output.
+
+The mapping means **first observation in the selected balances**, not account
+creation. IDs are specific to the recorded source registry. Compare public keys
+when reconciling mappings from different registries or epochs.
+
+Expand a completed indexed output to the existing USDC format:
+
+```console
+cargo run --release --locked -p blockzilla-read-compact-v2 \
+  --bin expand-usdc-indexed -- \
+  usdc-300.ids usdc-300.ids.pubkeys usdc-300.bin
+```
+
+The command requires the source and completion sidecars next to the input. It
+checks both binary files while it reads them and refuses an existing output.
+Use `-` as the output path to stream to stdout. A failed expansion can leave a
+partial output, which must be discarded. Matching hashes bind this output to
+the saved dictionary; they do not authenticate the original archive registry.
+
+The usual `read-compact-v2-usdc` example and its output remain available.
+See the [indexed stream specification](../../docs/reference/usdc-indexed-balances-v1.md).
+
 ## Start with local archive files
 
 The clean public sample bucket is still being staged. To run the example now,
@@ -130,6 +170,12 @@ The three sinks and their record formats are in
 They contain the application rules only. The Compact V2 SDK owns object
 discovery, range reads, cache binding, decoding, block order, and parallel
 projection.
+
+The V2 reader uses a bounded rolling window. Input reads, worker processing,
+and ordered output overlap. It publishes a completed prefix without waiting
+for all later blocks in a fixed group. See the
+[pipeline design](../../docs/design/reader-pipeline-rolling-window.md) and the
+[epoch 300 comparison](../../docs/benchmarks/epoch-300-rolling-pipeline-2026-09-06.md).
 
 For the deterministic transaction exporter, instruction-ledger runner,
 benchmark fields, and memory limits, see

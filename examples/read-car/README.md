@@ -11,7 +11,7 @@ The primary programs are small CAR examples:
 - [`read-car-firewatch`](src/bin/read-car-firewatch.rs) writes the distinct
   programs reached by successful transactions from one signer wallet.
 
-Each program opens one CAR archive through `blockzilla-car-read-sdk` and builds
+Each program opens one CAR archive through `of_car_reader::archive::CarArchive` and builds
 one query. The three application jobs stream to shared workload sinks. The
 ordered reader keeps about 48 slot-window counters in memory. No program
 selects an archive format at run time.
@@ -32,6 +32,17 @@ archive/
       epoch-900.car
       epoch-900-slot-ranges.raw
 ```
+
+The same folder can contain `epoch-900.car.zst` instead of the raw CAR.
+Local discovery selects the final `.car` file when both forms exist. A
+`.partial` file is never selected. The `archive` feature enables native zstd
+decoding; no separate decompression command is needed for a compressed scan.
+The slot index always addresses the decoded CAR byte stream. Compressed local
+reads decode sequentially, so a bounded request can still read earlier bytes.
+
+For a controlled raw-versus-zstd comparison, use two archive roots with the
+same verified slot index and only the intended CAR form in each root. Record
+the selected file, stored bytes, and bytes delivered to the CAR decoder.
 
 Run the three complete epoch-900 jobs:
 
@@ -151,7 +162,7 @@ There is no block-limit option. The program always scans the complete selected
 epoch. It stops if the SDK does not deliver the trusted number of blocks or if
 slots are not in strict increasing order.
 
-The publication gate rejects a CAR when its slot index does not cover the
+The reader rejects a CAR when its slot index does not cover the
 expected block count. Repair the index before publication. This rule prevents
 a quiet block-ordinal shift in cross-format comparisons.
 

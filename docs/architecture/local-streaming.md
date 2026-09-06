@@ -1,9 +1,11 @@
 # Blockzilla Streamer
 
-Status: **partially implemented foundation**. `blockzilla-read-sdk` and the
-read-only archive gateway can validate and Range-read completed immutable
-generations. Current `main` still does not provide `blockzilla sync`,
-`blockzilla stream`, a sink trait, or durable consumer checkpoints.
+Status: **partially implemented foundation**, reviewed 2026-09-06.
+`blockzilla-compact-v2-reader` and the read-only archive gateway can validate
+and range-read completed immutable generations. `blockzilla-model` provides
+the ordered `BlockSink` interface, and `blockzilla-dump` has a restart-safe
+SQLite token-event sink. The general `blockzilla sync` and `blockzilla stream`
+commands, including their product-level checkpoint protocol below, remain planned.
 
 ## Purpose
 
@@ -44,13 +46,15 @@ That command is implemented. It does not stream to an indexer and does not
 publish the result to edge storage. Full epochs can be very large; contributors
 should use the repository's small fixture workflow for initial testing.
 
-The focused `blockzilla-read-sdk` can also open a completed generation from a
+The focused `blockzilla-compact-v2-reader` can also open a completed generation from a
 local or HTTP Range source, bind pubkey filters to its registry and generation,
 decode independent hot-block frames, and fetch selected signatures. The
 `blockzilla-archive-gateway` publishes an authenticated read-only Range surface.
 See the [FireWatch handoff](../guides/firewatch-local-archive-indexing.md) for
-their exact boundary. They do not yet provide database-specific delivery or a
-consumer checkpoint.
+their exact boundary. The common reader and application-sink APIs are described
+in the [query guide](../guides/blockzilla-query-sdk.md). The existing SQLite
+sink is one application implementation; it does not implement the general
+Streamer source-transition and recovery protocol proposed here.
 
 ## Proposed commands
 
@@ -113,8 +117,8 @@ Initial delivery semantics are at least once:
 - conflicting finalized blockhash: stop as a finality conflict;
 - missing slot without authoritative skip evidence: wait for repair.
 
-The initial integration should be a small Rust sink trait plus one example, not
-a database-specific runtime hidden inside Blockzilla.
+Build the Streamer integration on the existing small Rust sink boundary.
+Keep database-specific state in the application sink.
 
 ## Checkpoints
 

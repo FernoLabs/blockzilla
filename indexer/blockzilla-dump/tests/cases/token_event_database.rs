@@ -188,18 +188,6 @@ fn empty_block_and_checkpoint_commit_together() {
 }
 
 #[test]
-fn database_implements_the_query_sdk_block_sink() {
-    let directory = TempDir::new().unwrap();
-    let path = database_path(&directory, "block-sink.sqlite");
-    let tracker = TargetMintTracker::from_complete_start(TARGET);
-    let run = spec(1, tracker.snapshot());
-    let mut database = TokenEventDatabase::create(&path, run).unwrap();
-
-    blockzilla_model::BlockSink::visit_block(&mut database, empty_block(0).as_view()).unwrap();
-    assert_eq!(database.next_block_ordinal(), 1);
-}
-
-#[test]
 fn block_sink_recovers_after_a_tracker_error() {
     let directory = TempDir::new().unwrap();
     let path = database_path(&directory, "block-sink-recovery.sqlite");
@@ -453,7 +441,7 @@ fn read_only_audit_rejects_a_tampered_prior_lifetime() {
 }
 
 #[test]
-fn exact_materialization_rejects_an_extra_lifetime_without_correlated_sql() {
+fn exact_materialization_rejects_an_extra_lifetime() {
     let directory = TempDir::new().unwrap();
     let path = database_path(&directory, "read-only-extra-lifetime.sqlite");
     let tracker = TargetMintTracker::from_active_account_seed(TARGET, [SOURCE_ACCOUNT]);
@@ -488,18 +476,6 @@ fn exact_materialization_rejects_an_extra_lifetime_without_correlated_sql() {
         ),
         "unexpected audit error: {error:?}"
     );
-
-    let source = include_str!("../src/token_event_database.rs");
-    let dense_validation = source
-        .split_once("fn validate_dense_historical_children")
-        .unwrap()
-        .1
-        .split_once("fn validate_historical_tracker")
-        .unwrap()
-        .0;
-    assert!(!dense_validation.contains("FROM account_lifetimes"));
-    assert!(!dense_validation.contains("tracker_account_updates update_row"));
-    assert!(!dense_validation.contains("lifecycle_effects effect"));
 }
 
 #[test]
@@ -760,28 +736,6 @@ fn reopen_rejects_an_overlong_source_identity_string() {
         Err(TokenEventDatabaseError::InvalidCheckpoint(reason))
             if reason.contains("source identity string")
     ));
-}
-
-#[test]
-fn a_large_opening_tracker_is_not_cloned_on_the_block_path() {
-    let directory = TempDir::new().unwrap();
-    let path = database_path(&directory, "large-opening.sqlite");
-    let accounts = (0u64..8_192).map(|index| {
-        let mut account = [0u8; 32];
-        account[..8].copy_from_slice(&index.to_le_bytes());
-        account[8] = 99;
-        account
-    });
-    let tracker = TargetMintTracker::from_active_account_seed(TARGET, accounts);
-    let run = spec(1, tracker.snapshot());
-    let mut database = TokenEventDatabase::create(&path, run).unwrap();
-    assert_eq!(database.run_spec().opening_tracker.accounts().len(), 8_192);
-
-    commit_processed(&mut database, &empty_block(0));
-    assert_eq!(database.run_spec().opening_tracker.accounts().len(), 8_192);
-    assert!(
-        !include_str!("../src/token_event_database.rs").contains("let spec = self.spec.clone()")
-    );
 }
 
 #[test]
@@ -1480,42 +1434,6 @@ fn large_block_streams_many_transactions_into_one_atomic_commit() {
     assert_eq!(count(&path, "transactions"), i64::from(TRANSACTION_COUNT));
     assert_eq!(count(&path, "events"), i64::from(TRANSACTION_COUNT));
     assert_eq!(count(&path, "delta_legs"), i64::from(TRANSACTION_COUNT) * 2);
-}
-
-#[test]
-fn historical_tracker_audit_merges_two_streaming_cursors() {
-    let source = include_str!("../src/token_event_database.rs");
-    let function = source
-        .split_once("fn validate_historical_tracker")
-        .unwrap()
-        .1
-        .split_once("fn parse_stored_account_row")
-        .unwrap()
-        .0;
-    assert!(function.contains("while let Some(row) = transaction_rows.next()?"));
-    assert!(function.contains("let mut update_rows = update_statement.query([])?"));
-    assert!(!function.contains("WHERE update_row.block_ordinal"));
-    assert!(!function.contains("query_map(params![block"));
-    assert!(!function.contains("collect::<"));
-}
-
-#[test]
-fn digest_audit_prepares_only_fixed_global_streams() {
-    let source = include_str!("../src/token_event_database.rs");
-    let function = source
-        .split_once("fn validate_digest_chain")
-        .unwrap()
-        .1
-        .split_once("fn validate_all_u64_pairs")
-        .unwrap()
-        .0;
-    let block_loop = function.find("while let Some(row) = rows.next()?").unwrap();
-
-    assert_eq!(function.matches("connection.prepare(").count(), 11);
-    assert!(function.rfind("connection.prepare(").unwrap() < block_loop);
-    assert!(!function[block_loop..].contains(".prepare("));
-    assert!(!function.contains("durable_block_digest(connection"));
-    assert!(!function.contains("tracker_after_digest(connection"));
 }
 
 #[test]

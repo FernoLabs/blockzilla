@@ -47,7 +47,9 @@ METRICS = ("blocks", "transactions", "recorded_inner_instructions", "setup_s", "
            "pipeline_read_s", "pipeline_input_wait_s", "pipeline_buffer_wait_s", "pipeline_decode_project_wall_s",
            "pipeline_worker_decode_sum_s", "pipeline_worker_projection_sum_s", "pipeline_consume_s",
            "pipeline_projection_buffer_wait_s", "pipeline_result_send_wait_s", "pipeline_signature_read_s",
-           "pipeline_signature_assign_s", "pipeline_publish_s")
+           "pipeline_signature_assign_s", "pipeline_publish_s",
+           "pipeline_max_in_flight_blocks", "pipeline_max_in_flight_transactions",
+           "pipeline_max_in_flight_declared_uncompressed_bytes")
 
 
 def save(path, data):

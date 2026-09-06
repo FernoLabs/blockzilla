@@ -1,7 +1,8 @@
 # Archive Instruction Stream V1
 
-Status: implemented common contract, 2026-08-28. The contract code, its unit
-tests, and the CAR, Compact V2, and Indexer V3 reference adapters exist.
+Status: implemented common contract, reviewed 2026-09-06. The CAR, Compact V2,
+and frozen standalone Indexer V3 adapters implement it. Canonical Archive V3
+common-model support remains migration work.
 
 Archive Instruction Stream V1 is the source-neutral boundary between archive
 readers and application logic. CAR, Compact V2, and Indexer V3 must produce
@@ -56,10 +57,12 @@ Each source has one identity before a scan starts. The identity contains:
 The first slot is explicit. An adapter must not calculate it as
 `epoch * slots_per_epoch`, because a cluster can use a warm-up epoch schedule.
 
-The verification strengths distinguish a published manifest, an
-operator-trusted source, an internal binding, and an unverified source.
+The verification strengths are `object-set-bound`, `operator-trusted`,
+`internal-binding-only`, and `unverified`. Object-set binding fixes each
+required object's URL, length, and strong validator. An operator binding can
+be a descriptive source ID; it is not a content hash.
 
-The default request accepts a published source or an explicitly trusted
+The default request accepts an object-set-bound source or an explicitly trusted
 input. The input can be local or remote. It rejects an internal-only or
 unverified source. A caller must
 make an explicit request to use a weaker source. See

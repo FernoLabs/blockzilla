@@ -4,6 +4,7 @@
 //! validates publication metadata before exposing blocks, reads one independent
 //! zstd frame at a time, and fetches signatures only for selected transactions.
 
+mod account_references;
 #[cfg(feature = "http")]
 pub mod archive;
 pub mod archive_integrity;
@@ -29,6 +30,7 @@ pub mod signed_message;
 mod source;
 pub mod source_decode;
 
+pub use account_references::CompactV2AccountReferences;
 pub use archive_signatures::{
     ArchiveSignatureConfig, ArchiveSignatureError, ArchiveSignatureReport, SignatureResult,
     verify_archive_v2_signatures,

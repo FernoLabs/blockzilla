@@ -13,7 +13,7 @@ blockzilla-source-http = { version = "0.2.0", path = "../blockzilla-source-http"
 rustix = { version = "1.1.4", features = ["fs"] }
 
 [dev-dependencies]
-tempfile = "3.24.0"
+tempfile = "3.27.0"
 
 [lints]
 workspace = true

@@ -6,16 +6,18 @@ use std::{
 };
 
 use futures_core::Stream;
-use futures_util::{StreamExt, stream};
+use futures_util::{StreamExt, stream as futures_stream};
 use tokio::sync::{OwnedSemaphorePermit, Semaphore, broadcast};
 use topcoat::{
     Result,
     context::Cx,
     datastar::{PatchElements, PatchSignals},
     router::{
-        IntoResponse, Response, StatusCode,
+        StatusCode,
         content::sse::{Event, KeepAlive, Sse},
-        query_params, route,
+        query_params,
+        response::{IntoResponse, Response},
+        route,
     },
 };
 
@@ -108,11 +110,11 @@ async fn stream_response(cx: &Cx, page: DashboardPage, limit: Arc<Semaphore>) ->
     // the full resync is preferable to missing that update permanently.
     let rx = subscribe();
     let initial_state = snapshot().await;
-    let initial = stream::iter(full_resync_events(&initial_state));
-    let updates = stream::unfold(rx, |mut rx| async move {
+    let initial = futures_stream::iter(full_resync_events(&initial_state));
+    let updates = futures_stream::unfold(rx, |mut rx| async move {
         next_update_batch(&mut rx).await.map(|events| (events, rx))
     })
-    .flat_map(stream::iter);
+    .flat_map(futures_stream::iter);
     let events = initial
         .chain(updates)
         .then(move |event| encode_event(page, event));
@@ -180,6 +182,24 @@ mod tests {
             .unwrap();
         assert_eq!(first.status(), StatusCode::OK);
         assert_eq!(limit.available_permits(), 0);
+        assert_eq!(first.headers()["content-type"], "text/event-stream");
+        let mut body = first.into_body().into_data_stream();
+        for expected in [
+            "event: datastar-patch-signals",
+            "event: datastar-patch-elements",
+        ] {
+            let bytes = tokio::time::timeout(std::time::Duration::from_secs(5), body.next())
+                .await
+                .expect("initial SSE event must be ready")
+                .expect("stream must remain open")
+                .expect("initial event must render");
+            let event = std::str::from_utf8(&bytes).unwrap();
+            assert!(event.contains(expected), "{event}");
+            if expected.ends_with("elements") {
+                assert!(event.contains("data: selector #dashboard-frame"));
+                assert!(event.contains("id=\"dashboard-frame\""));
+            }
+        }
 
         let rejected = stream_response(cx, DashboardPage::Overview, limit.clone())
             .await
@@ -187,7 +207,7 @@ mod tests {
         assert_eq!(rejected.status(), StatusCode::SERVICE_UNAVAILABLE);
         assert_eq!(limit.available_permits(), 0);
 
-        drop(first);
+        drop(body);
         assert_eq!(limit.available_permits(), 1);
 
         let replacement = stream_response(cx, DashboardPage::Overview, limit.clone())

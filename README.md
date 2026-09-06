@@ -32,6 +32,16 @@ added, with cross-format fixture checks. See the
 [workspace structure](docs/design/workspace-restructure.md) for crate locations
 and the remaining migration work.
 
+For current reader use, start with the [format guide](docs/reference/archive-formats-and-read-sdk.md)
+and the [CAR](examples/read-car/README.md), [V2](examples/read-compact-v2/README.md),
+or [V3](examples/read-archive-v3/README.md) examples. V2 uses a bounded rolling
+pipeline and can write optional [indexed USDC balances](docs/reference/usdc-indexed-balances-v1.md)
+with a source-scoped public-key dictionary. The
+[rolling-pipeline comparison](docs/benchmarks/epoch-300-rolling-pipeline-2026-09-06.md)
+records full-epoch output checks for its frozen build. The later
+[dependency retest](docs/benchmarks/epoch-300-dependency-review-2026-09-06.md)
+checks V2 prefixes after the dependency update.
+
 The shortest working newcomer path is:
 
 ```text
@@ -47,7 +57,8 @@ for the code-to-target gap and ordered build gates.
 
 ## Quick start: build and read the fixture
 
-The repository pins Rust 1.96.0. Clone it and inspect the CLI:
+Use a Rust toolchain that meets the workspace `rust-version` in
+[`Cargo.toml`](Cargo.toml). Clone the repository and inspect the CLI:
 
 ```bash
 git clone https://github.com/FernoLabs/blockzilla.git

@@ -1,12 +1,21 @@
 # blockzilla-monitor: read-only ops dashboard roadmap
 
-> Status: planning. Nothing in this document is implemented yet except where
-> marked "done". Written after a 7-agent research pass (topcoat/Datastar
+> Status: historical roadmap from 2026-08-05. Use the current
+> [monitor guide](../../blockzilla/monitor/README.md) for supported behavior and
+> commands. The dated gaps and field inventory below are not a current list
+> of missing features. Written after a 7-agent research pass (topcoat/Datastar
 > compliance, Datastar security, monitoring-dashboard UX, blockzilla CLI
 > inventory, scheduler explainability, hivezilla/multi-machine architecture,
 > and a public-exposure security audit) on 2026-08-05. Pick tasks from here
 > in any order; each phase lists exact files/fields so a task can be picked
 > up without re-deriving this context.
+
+Update (2026-09-06): the monitor has five pages, vendored CSS and Datastar,
+public-tier redaction, stale/offline recovery, scheduler reasoning, and a
+body-owned SSE connection limit. The Topcoat 0.7 migration retains this behavior.
+Its 113 tests include complete page routing, exact static assets, initial SSE
+patches, and connection-capacity release. Deployment and broader incident-history
+work below remain separate from these local checks.
 
 ## Constraints (from the product owner)
 
@@ -20,12 +29,14 @@
   only, and a separate authenticated tier for the fuller/leakier data. See
   §3.
 
-## 1. Where things stand today
+## 1. Original assessment
 
 `blockzilla-monitor` talks directly to `blockzilla scheduler`'s private
 `GET /api/v1/status` + `GET /api/v1/events` (SSE) endpoints. Four pages
-exist: Overview, History, System, Epochs — all real data, no fabricated
+existed at the original assessment: Overview, History, System, Epochs — all real data, no fabricated
 placeholders, verified end-to-end against the live NAS deployment.
+Calendar is now the fifth page. The later local tests do not assert a new NAS
+monitor deployment.
 
 ### 1.1 Topcoat/Datastar framework compliance
 
@@ -33,15 +44,10 @@ Good: SSE endpoint shape, diffed-signal patching (`state.rs` `diff_signals`),
 escaped attribute interpolation, `.discover()` + explicit-path routing all
 match documented topcoat idioms exactly.
 
-Gaps:
-- `datastar.js` is CDN-loaded (`app.rs`), unpinned by SRI — Datastar's own
-  docs recommend self-hosting for production, and we already did this
-  exercise for Tailwind. Should self-host the same way.
-- `Cargo.toml` declares the `tailwind` feature but nothing uses
-  `BuildConfig::render()`/`AssetBundle` — dead flag, since CSS is a
-  checked-in file served by a hand-written route instead (a deliberate,
-  documented tradeoff — see `README.md`). Worth removing the unused feature
-  flag for clarity.
+Disposition of the original gaps:
+- **Done:** `datastar.js` is vendored and served through `/datastar.js`.
+- **Done:** the unused `tailwind` feature is removed. CSS remains a
+  checked-in asset served through `/app.css`, as described in the package guide.
 - Shared state (`state.rs`, `static SHARED: OnceLock<Shared>`) bypasses
   topcoat's `app_context`, the documented idiom for cross-request
   singletons. Works fine; just off-idiom.
@@ -51,7 +57,10 @@ Gaps:
 The scheduler's live snapshot already carries rich "why" data, populated every
 tick, already served over the wire:
 
-| Field | Where | Currently read by monitor? |
+This table records the original field review. The monitor now maps scheduler
+reasoning and pause details; check `snapshot.rs` and `state.rs` for current fields.
+
+| Field | Original location | Read at the original assessment? |
 |---|---|---|
 | `summary.admission_blocked_reason` | `scheduler/mod.rs:531` | No |
 | `summary.legacy_compact_admission_blocked_reason` | `scheduler/mod.rs:607` | No |
@@ -105,7 +114,8 @@ Hardening completed since the original audit:
 - `/api/stream` uses a body-owned semaphore and
   `--max-stream-connections` limit.
 - `client.rs` bounds full status bodies and SSE lines.
-- Every route emits `X-Robots-Tag: noindex, nofollow`.
+- Normal dashboard, asset, and SSE route responses emit
+  `X-Robots-Tag: noindex, nofollow`. Framework error responses have separate handling.
 
 ## 2. Immediate: security hardening (do this regardless of what else gets built)
 

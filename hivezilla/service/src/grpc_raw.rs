@@ -68,8 +68,34 @@ const JOURNAL_SCHEMA_VERSION: u32 = 1;
 const RESUME_COVERAGE_WARNING_SCHEMA_VERSION: u32 = 1;
 /// The ingress payload is one independently compressed zstd frame containing the full known-schema
 /// `SubscribeUpdate` envelope delivered by tonic. This retains filters and created-at metadata in
-/// addition to the block variant. Prost cannot retain protobuf fields unknown to this build.
+/// addition to the block variant. V1 transaction config is rejected to preserve the established
+/// block schema. Prost cannot retain protobuf fields unknown to this build.
 const PAYLOAD_FORMAT_ZSTD_PROTOBUF_UPDATE_V1: u16 = 2;
+
+/// Keep payload format 2 within the block schema admitted before Yellowstone 12.7.
+/// A future format that retains V1 config needs a separate stream identity.
+fn validate_raw_grpc_update_v1(update: &SubscribeUpdate) -> Result<()> {
+    if let Some(UpdateOneof::Block(block)) = update.update_oneof.as_ref() {
+        for (index, row) in block.transactions.iter().enumerate() {
+            let message = row.transaction.as_ref().and_then(|tx| tx.message.as_ref());
+            ensure!(
+                message.is_none_or(|message| message.config.is_none()),
+                "raw gRPC payload format 2 does not support V1 transaction config at slot {} transaction {index}; a new stream schema is required",
+                block.slot
+            );
+        }
+    }
+    Ok(())
+}
+
+fn encode_raw_grpc_update_v1(update: &SubscribeUpdate, output: &mut Vec<u8>) -> Result<()> {
+    validate_raw_grpc_update_v1(update)?;
+    output.clear();
+    update
+        .encode(output)
+        .context("encode raw gRPC protobuf update")
+}
+
 const IDENTITY_FILE: &str = "identity.json";
 const HANDOFF_JOURNAL_FILE: &str = "raw-blocks.jsonl";
 const WAL_ROOT_DIR: &str = "wal";
@@ -3343,6 +3369,7 @@ fn read_verified_relay_update(
     );
     let update = SubscribeUpdate::decode(raw.as_slice())
         .with_context(|| format!("decode raw gRPC relay preload frame {}", row.frame_id))?;
+    validate_raw_grpc_update_v1(&update)?;
     let Some(UpdateOneof::Block(block)) = update.update_oneof.as_ref() else {
         return Err(anyhow!(
             "raw gRPC relay preload frame {} is not a block update",
@@ -3911,10 +3938,7 @@ async fn record_grpc_raw_blocks_inner(
             })
             .transpose()?;
 
-        raw.clear();
-        update
-            .encode(&mut raw)
-            .context("encode raw gRPC protobuf update")?;
+        encode_raw_grpc_update_v1(&update, &mut raw)?;
         ensure!(
             raw.len() as u64 <= config.max_record_bytes,
             "raw gRPC block at slot {} is {} bytes, over configured maximum {}",
@@ -4222,6 +4246,7 @@ fn read_verified_grpc_raw_committed_record(
     );
     let update = SubscribeUpdate::decode(raw.as_slice())
         .with_context(|| format!("decode committed raw gRPC protobuf frame {}", row.frame_id))?;
+    validate_raw_grpc_update_v1(&update)?;
     let Some(UpdateOneof::Block(block)) = update.update_oneof.as_ref() else {
         return Err(anyhow!(
             "committed raw gRPC frame {} is not a block update",
@@ -4495,6 +4520,7 @@ where
         );
         let update = SubscribeUpdate::decode(raw.as_slice())
             .with_context(|| format!("decode raw gRPC protobuf frame {}", row.frame_id))?;
+        validate_raw_grpc_update_v1(&update)?;
         let Some(UpdateOneof::Block(block)) = update.update_oneof.as_ref() else {
             return Err(anyhow!(
                 "raw gRPC frame {} is not a block update",
@@ -6398,6 +6424,7 @@ fn handoff_record_from_stored(
         .context("decompress orphan raw gRPC WAL frame")?;
     let update =
         SubscribeUpdate::decode(raw.as_slice()).context("decode orphan raw gRPC WAL frame")?;
+    validate_raw_grpc_update_v1(&update)?;
     let Some(UpdateOneof::Block(block)) = update.update_oneof.as_ref() else {
         return Err(anyhow!("orphan raw gRPC WAL frame is not a block update"));
     };
@@ -7205,6 +7232,118 @@ mod tests {
             update_oneof: Some(UpdateOneof::Block(block(slot))),
             created_at: None,
         }
+    }
+
+    fn update_with_v1_config(slot: u64, versioned: bool) -> SubscribeUpdate {
+        use yellowstone_grpc_proto::prelude::{
+            Message as GrpcMessage, SubscribeUpdateTransactionInfo, Transaction,
+        };
+        let mut source = update(slot);
+        let Some(UpdateOneof::Block(block)) = source.update_oneof.as_mut() else {
+            unreachable!()
+        };
+        // Keep a config-absent first row to ensure admission checks every row.
+        block.transactions = vec![
+            SubscribeUpdateTransactionInfo::default(),
+            SubscribeUpdateTransactionInfo {
+                transaction: Some(Transaction {
+                    message: Some(GrpcMessage {
+                        versioned,
+                        config: Some(Default::default()),
+                        ..Default::default()
+                    }),
+                    ..Default::default()
+                }),
+                ..Default::default()
+            },
+        ];
+        source
+    }
+
+    #[test]
+    fn raw_v1_encoder_rejects_new_config_before_changing_output() {
+        for versioned in [false, true] {
+            let mut source = update_with_v1_config(100, versioned);
+            let mut encoded = vec![0xaa];
+            let error = encode_raw_grpc_update_v1(&source, &mut encoded).unwrap_err();
+            assert!(
+                error
+                    .to_string()
+                    .contains("V1 transaction config at slot 100 transaction 1")
+            );
+            assert_eq!(encoded, [0xaa]);
+            let Some(UpdateOneof::Block(block)) = source.update_oneof.as_mut() else {
+                unreachable!()
+            };
+            block.transactions[1]
+                .transaction
+                .as_mut()
+                .unwrap()
+                .message
+                .as_mut()
+                .unwrap()
+                .config = None;
+            encode_raw_grpc_update_v1(&source, &mut encoded).unwrap();
+            assert_eq!(encoded, source.encode_to_vec());
+            let decoded = SubscribeUpdate::decode(encoded.as_slice()).unwrap();
+            validate_raw_grpc_update_v1(&decoded).unwrap();
+            assert_eq!(decoded, source);
+        }
+    }
+
+    #[test]
+    fn raw_v1_readers_and_orphan_recovery_reject_new_config() {
+        let root = temp_dir("unsupported-v1-config");
+        fs::create_dir_all(&root).unwrap();
+        let config = test_config(root.clone());
+        let identity = load_or_create_identity(&config).unwrap();
+        let mut spool = SpoolWriter::open(
+            root.join(WAL_ROOT_DIR),
+            identity.spool_identity(),
+            SpoolOptions {
+                segment_target_bytes: config.segment_target_bytes,
+                max_record_bytes: config.max_record_bytes,
+            },
+        )
+        .unwrap();
+        // Deliberately bypass admission to make a checksummed but unsupported old-format WAL row.
+        let source = update_with_v1_config(100, true);
+        let row = append_fixture(&mut spool, &identity, &source, 0);
+        let error = handoff_record_from_stored(
+            &spool,
+            spool.last_record().unwrap(),
+            config.slots_per_epoch,
+            config.max_record_bytes,
+        )
+        .unwrap_err();
+        assert!(error.to_string().contains("V1 transaction config"));
+        let journal = root.join(HANDOFF_JOURNAL_FILE);
+        recover_handoff_journal(&journal).unwrap();
+        append_handoff_record(&journal, &row).unwrap();
+        let error = read_verified_relay_update(
+            &spool_journal_dir(&root, &identity),
+            &identity,
+            &row,
+            config.max_record_bytes,
+        )
+        .unwrap_err();
+        assert!(error.to_string().contains("V1 transaction config"));
+        let limits = GrpcRawCommittedReadLimits {
+            max_compressed_record_bytes: config.max_record_bytes,
+            max_uncompressed_record_bytes: config.max_record_bytes,
+        };
+        let error = read_grpc_raw_committed_records(&root, limits, |_| {
+            panic!("unsupported record reached committed callback")
+        })
+        .unwrap_err();
+        assert!(error.to_string().contains("V1 transaction config"));
+        drop(spool);
+        let error = replay_grpc_raw_blocks(&root, config.max_record_bytes, |_, _| {
+            panic!("unsupported record reached replay callback")
+        })
+        .unwrap_err();
+        assert!(error.to_string().contains("V1 transaction config"));
+        fs::remove_dir_all(root).unwrap();
     }
 
     fn complete_poh_block(slot: u64) -> SubscribeUpdateBlock {

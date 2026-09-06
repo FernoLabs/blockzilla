@@ -1034,7 +1034,6 @@ fn benchmark_config() -> Config {
         reject_broken_elfs: false,
         noop_instruction_rate: 0,
         aligned_memory_mapping: true,
-        allow_memory_region_zero: false,
         enabled_sbpf_versions: SBPFVersion::V0..=SBPFVersion::V0,
         ..Config::default()
     }

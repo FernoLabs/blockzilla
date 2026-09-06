@@ -10,6 +10,9 @@ for tests and performance reports separate from that first-use path.
   transaction.
 - `read-compact-v2-usdc-instructions` builds a bounded SQLite instruction
   ledger with token-account lifetime tracking.
+- `read-compact-v2-usdc-indexed` writes optional compact recorded balances and
+  a source-scoped account dictionary; `expand-usdc-indexed` checks and expands
+  those files. See the [output guide](README.md#optional-compact-usdc-output).
 
 The transaction exporter keeps its old positional command form because the
 cross-format matrix runner uses it. The instruction-ledger tool has its own
@@ -32,6 +35,19 @@ Small scans use bounded worker-local registry caches. A dense or complete scan
 can share one complete registry when it fits the SDK memory limit. The result
 reports the selected registry mode and measured projected-memory high-water
 values.
+
+The pipeline reports `pipeline_max_in_flight_blocks`,
+`pipeline_max_in_flight_transactions`, and
+`pipeline_max_in_flight_declared_uncompressed_bytes`. These measure admitted
+work through sink completion. They do not measure total process memory.
+
+With the rolling pipeline, `pipeline_decode_project_wall_s` spans first
+admission through last projection completion. `pipeline_projection_buffer_wait_s`
+measures admission waits, and `pipeline_result_send_wait_s` is zero because
+workers own reserved result slots. These fields have different meanings from
+the older group-based implementation. Use total/scan time, worker sums, and
+verified outputs for comparisons across that change. See the
+[pipeline contract](../../docs/design/reader-pipeline-rolling-window.md).
 
 See the [transaction exporter source](src/bin/read-compact-v2-transactions.rs)
 for its command arguments and the

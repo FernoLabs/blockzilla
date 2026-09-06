@@ -17,7 +17,7 @@ Use `of_car_reader::archive::CarArchive`,
 `blockzilla_compact_v2_reader::CompactV2Archive`, or
 `blockzilla_archive_v3_reader::IndexerV3Archive` for CAR, Compact V2, or the
 frozen prototype respectively. Enable the Compact V2 reader's `http` feature
-for network access. These APIs hide object paths, HTTP ranges, cache rules,
+for its high-level archive API, including local opening. These APIs hide object paths, HTTP ranges, cache rules,
 source checks, and wire decoding.
 
 These three readers publish the same ordered views from
@@ -80,9 +80,11 @@ Add `--full` to read the runtime effect columns. This local example uses
 ## Design summary
 
 - CAR preserves the independent source graph. Its slot-to-offset index gives
-  direct ordered ranges.
+  direct ordered ranges. Local opening supports `.car.zst` when completed raw
+  `.car` is absent; compressed scans follow decoded offsets sequentially.
 - Compact V2 stores compressed row-oriented blocks and shared registries. It
-  is small and efficient for a complete ordered scan.
+  uses a bounded rolling worker window for ordered scans. The optional indexed
+  USDC output keeps numeric references and a source-scoped discovery dictionary.
 - The frozen Indexer V3 prototype separates semantic planes and adds adaptive
   reverse lookup. A sparse query can reject blocks before it reads their payloads.
 - Canonical Archive V3 uses a fixed-address block catalog, a merged transaction
@@ -93,6 +95,10 @@ manifest, an archive payload hash, a partial hash, or an epoch seal. Network
 sources use fixed object names, exact lengths, and strong ETags. Local sources
 use pinned files.
 Application-output hashes check result parity only.
+
+See the [rolling pipeline](../design/reader-pipeline-rolling-window.md) and
+[indexed USDC contract](usdc-indexed-balances-v1.md) for the execution and
+output rules. The existing canonical `BZUSDC02` output is unchanged.
 
 The dedicated V3 reader owns `CanonicalReader`. The remaining V3 migration
 must add the shared model and byte-source interfaces for canonical output.

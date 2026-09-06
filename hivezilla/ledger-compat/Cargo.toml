@@ -10,12 +10,12 @@ publish = false
 
 [dependencies]
 solana-shred-codec = { path = "../../crates/solana-codec/solana-shred-codec" }
-solana-pubkey = { version = "4.2.0" }
+solana-pubkey = { version = "4.2.1" }
 solana-signature = { version = "3.4.1", features = ["verify"] }
-sha2 = { version = "0.10.9" }
+sha2 = { version = "0.11.0" }
 
 [dev-dependencies]
-anyhow = "1.0.102"
+anyhow = "1.0.104"
 
 [lints]
 workspace = true

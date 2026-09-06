@@ -1,7 +1,7 @@
 # Blockzilla example workloads
 
-This crate contains three small application rules and one transaction identity
-dump sink. It does not open an archive.
+This crate contains three application rules, an optional indexed USDC writer,
+and a transaction identity dump sink. It does not open an archive.
 A CAR, Compact V2, Indexer V3, or Jetstreamer example supplies records to one
 sink. Equal output files, output counts, and coverage digests prove application
 parity before a speed comparison. Compare the output files outside the timed
@@ -31,6 +31,9 @@ bit. A count alone cannot hide gaps at different positions.
 - `TransactionIdentityDumpSink` writes every transaction coordinate and its
   required primary signature. It is a strict cross-format transaction identity
   parity output.
+- `IndexedUsdcBalanceSink` applies the same recorded-balance rule through the
+  V2 indexed token interface. It writes compact reference rows and a separate
+  source-scoped dictionary. `expand_indexed_usdc` reconstructs `BZUSDC02` bytes.
 
 USDC and Pump.fun report `skipped_failed_transactions`. They keep records with
 unknown execution status and mark their coverage as incomplete. Their request
@@ -38,6 +41,15 @@ helpers let the SDK omit details for known failures before key resolution.
 The count example still counts all transactions and recorded inner instructions.
 This filter changes the example output, not the stored archive. It is not
 suitable for an analysis of fees or durable nonce changes in failed transactions.
+
+The indexed USDC writer records the actual token account separately from its
+owner and transaction-local account position. Registry IDs are resolved only on
+first discovery. Dictionary entries describe first observation in selected
+balances. They do not prove account creation. The
+[format reference](../../docs/reference/usdc-indexed-balances-v1.md) defines the
+binary records and source scope. Use the
+[checked expansion command](../read-compact-v2/README.md#optional-compact-usdc-output)
+to verify completion, hashes, counts, and coverage before a parity comparison.
 
 Each `*_scan_request` helper removes data planes that the workload does not
 use. The format reader can then avoid unnecessary decoding and allocation.
@@ -54,7 +66,7 @@ and digests.
 
 ## Canonical binary records
 
-Each output starts with a 44-byte header:
+The canonical USDC, Pump.fun, and FireWatch outputs start with a 44-byte header:
 
 | Offset | Bytes | Value |
 | --- | ---: | --- |

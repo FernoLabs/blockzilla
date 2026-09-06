@@ -360,7 +360,6 @@ impl KeyIndex {
     }
 }
 
-#[cfg(not(target_arch = "wasm32"))]
 /// Result of proving that every `registry.bin` row has its exact one-based ID
 /// in the retained `registry.mphf` generation.
 #[cfg(not(target_arch = "wasm32"))]
@@ -371,6 +370,7 @@ pub struct RegistryIndexMappingValidation {
     pub registry_index_bytes: u64,
 }
 
+#[cfg(not(target_arch = "wasm32"))]
 impl FileBackedKeyIndex {
     pub fn validate_registry_file_order(
         &self,

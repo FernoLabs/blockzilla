@@ -187,8 +187,8 @@ original transaction framing was stored twice. This admits future message
 versions without weakening source-specific evidence; unsupported versions still
 fail the selected Replay or Archive policy.
 
-The currently pinned `yellowstone-grpc-proto` 12.4 schema has only a
-`versioned` boolean. It cannot retain Agave's V1-only transaction-config field,
+The earlier `yellowstone-grpc-proto` 12.4 schema had only a `versioned` boolean.
+That schema cannot retain Agave's V1-only transaction-config field,
 so a V0 message with no address-table lookups is structurally ambiguous with a
 newer V1 message after decode/re-encode, and a future version could overlap a
 different retained shape. The V1 adapter interprets any `versioned = true` row
@@ -199,7 +199,19 @@ known-schema raw gRPC WAL cannot recover a dropped V1 field, so a schema that
 retains an explicit message version/config must create a new raw stream version
 before V1 observations are admitted.
 
-The runtime-only aliases are typed inner values from `blockzilla-format`:
+Dependency update (2026-09-06): Yellowstone 12.7 adds the optional
+transaction-config field. The current raw recorder rejects a present config
+before encoding and at raw decode/recovery boundaries. It keeps payload format
+2 and identity schema 1 for config-absent blocks. The ledger adapter also rejects
+a present config. Admitting V1 observations requires a separate raw stream schema
+and a version-aware adapter; older ambiguous records still require the signature
+proof described above.
+
+The proposed runtime attachment reuses metadata and reward types from
+`blockzilla-archive-v2` and PoH entries from `blockzilla-compact`. The implemented
+ledger-only candidate and its `PohEntryV1` alias live in
+`blockzilla-live-format::candidate_v1`; the runtime attachment below remains a
+separate design contract.
 
 ```text
 NoRegistryMetaV1   = WincodeArchiveV2NoRegistryMeta

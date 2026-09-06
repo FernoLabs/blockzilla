@@ -4246,6 +4246,11 @@ fn read_borrowed_message(
                     .push(read_borrowed_address_table_lookup(reader.read_bytes()?)?);
                 borrowed_record_timing!(timings, started_at, message_address_table_lookups);
             }
+            tag if tag >> 3 == 7 => {
+                return Err(anyhow!(
+                    "V1 transaction config is not supported by Legacy/V0 archive conversion"
+                ));
+            }
             tag => reader.skip_unknown(tag)?,
         }
     }
@@ -4893,6 +4898,10 @@ fn convert_grpc_message(
     message: &GrpcMessage,
     mut timings: Option<&mut GrpcConvertTimings>,
 ) -> Result<WincodeArchiveV2NoRegistryMessage> {
+    anyhow::ensure!(
+        message.config.is_none(),
+        "V1 transaction config is not supported by Legacy/V0 archive conversion"
+    );
     let header = message.header.as_ref().context("message missing header")?;
     let header = CompactMessageHeader {
         num_required_signatures: u8::try_from(header.num_required_signatures)
@@ -5326,5 +5335,30 @@ mod grpc_parent_blockhash_tests {
         let frame = block.encode_to_vec();
         let borrowed = convert_grpc_block_frame_with_pubkey_cache(&frame, 0, true).unwrap();
         assert_eq!(borrowed.previous_blockhash, None);
+    }
+
+    #[test]
+    fn prost_and_borrowed_conversion_reject_v1_config_without_dropping_it() {
+        for versioned in [false, true] {
+            let mut message = GrpcMessage {
+                header: Some(Default::default()),
+                recent_blockhash: vec![7; 32],
+                versioned,
+                ..Default::default()
+            };
+            let owned = convert_grpc_message(&message, None).unwrap();
+            let borrowed = read_borrowed_message(&message.encode_to_vec(), None).unwrap();
+            assert_eq!(
+                blockzilla_wincode::config::serialize(&owned, wincode_leb128_config()).unwrap(),
+                blockzilla_wincode::config::serialize(&borrowed, wincode_leb128_config()).unwrap()
+            );
+            message.config = Some(Default::default());
+            let owned_error = convert_grpc_message(&message, None).err().unwrap();
+            let borrowed_error = read_borrowed_message(&message.encode_to_vec(), None)
+                .err()
+                .unwrap();
+            assert!(owned_error.to_string().contains("V1 transaction config"));
+            assert!(borrowed_error.to_string().contains("V1 transaction config"));
+        }
     }
 }

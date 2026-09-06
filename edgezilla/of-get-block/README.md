@@ -70,7 +70,7 @@ uses.
 
 ```bash
 rustup target add wasm32-unknown-unknown
-cargo install worker-build --locked --version 0.8.3
+cargo install worker-build --locked --version 0.8.5
 
 cd edgezilla/of-get-block
 npm install

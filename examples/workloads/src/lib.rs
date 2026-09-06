@@ -12,6 +12,7 @@ mod pump;
 mod report;
 pub mod transaction_identity;
 mod usdc;
+mod usdc_indexed;
 
 pub use error::{Error, Result};
 pub use firewatch::{
@@ -37,4 +38,8 @@ pub use usdc::{
     MAINNET_USDC_MINT, MAINNET_USDC_MINT_BASE58, USDC_COVERAGE_TOKEN_BALANCES_UNAVAILABLE,
     USDC_COVERAGE_TOKEN_MINT_UNAVAILABLE, USDC_HEADER_BYTES, USDC_RECORD_BYTES, UsdcBalanceSink,
     UsdcReport, usdc_scan_request,
+};
+pub use usdc_indexed::{
+    INDEXED_USDC_DICTIONARY_RECORD_BYTES, INDEXED_USDC_HEADER_BYTES, INDEXED_USDC_INLINE_ID_START,
+    INDEXED_USDC_RECORD_BYTES, IndexedUsdcBalanceSink, expand_indexed_usdc,
 };

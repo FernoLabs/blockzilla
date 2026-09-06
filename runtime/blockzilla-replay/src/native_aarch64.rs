@@ -309,7 +309,7 @@ impl NativeProgram {
             backend: NativeBackend::CraneliftAarch64Subset,
             target_triple,
             isa_fingerprint,
-            cranelift_version: "0.134.2",
+            cranelift_version: "0.135.1",
             subset_profile_id: SUBSET_PROFILE_ID,
             import_abi_id: IMPORT_ABI_ID,
             watchdog_strategy: "checked host tick before every expanded SBPF instruction",

@@ -16,7 +16,7 @@ use solana_sbpf::{
     ebpf,
     elf::Executable,
     error::EbpfError,
-    memory_region::{AccessType, HostMemoryObject, MemoryMapping, MemoryRegion},
+    memory_region::{AccessType, HostBuffer, HostMemoryObject, MemoryMapping, MemoryRegion},
     program::{BuiltinProgram, SBPFVersion},
     verifier::RequisiteVerifier,
     vm::{CallFrame, Config, ContextObject, EbpfVm, ExecutionMode},
@@ -35,8 +35,8 @@ use std::{
 };
 use thiserror::Error;
 
-const COMPILER_ID: &str = "solana-sbpf-0.21.0";
-const PROFILE_ID: &str = "blockzilla-poc-sbpfv0-launch-pda-cpi-syscalls-no-cu-static-watchdog-native-dispatch-immutable-cpi-metadata-aligned-map-no-region-zero-v7";
+const COMPILER_ID: &str = "solana-sbpf-0.24.0";
+const PROFILE_ID: &str = "blockzilla-poc-sbpfv0-launch-pda-cpi-syscalls-no-cu-static-watchdog-native-dispatch-immutable-cpi-metadata-aligned-map-no-region-zero-v8";
 const NATIVE_ENTRY_ABI_ID: &str = "blockzilla-native-entry-v1-checked-memory-helpers";
 const WATCHDOG_INSTRUCTION_LIMIT: u64 = 100_000;
 const LEGACY_BPF_HEAP_SIZE: usize = 32 * 1024;
@@ -334,12 +334,9 @@ impl ReplayCompiler {
             // slot (program, stack, heap, input). Direct indexing by the high
             // address bits avoids the generic MappingCache probe on every
             // guest load/store while retaining translation, bounds,
-            // writability, and stack-gap checks.
+            // writability, and stack-gap checks. The syscall adapter rejects
+            // zero-length access to the upstream region-zero sentinel too.
             aligned_memory_mapping: true,
-            // The former unaligned SBPFv0 mapper rejected address zero even
-            // for a zero-length translation. Do not make the aligned mapper's
-            // empty sentinel guest-visible.
-            allow_memory_region_zero: false,
             enabled_sbpf_versions: SBPFVersion::V0..=SBPFVersion::V0,
             ..Config::default()
         };
@@ -799,11 +796,12 @@ fn validate_canonical_execution_regions(regions: &[MemoryRegion]) -> Result<(), 
     }
     for (region, expected_start) in regions.iter().zip(expected_starts) {
         let expected_end = expected_start.saturating_add(ebpf::MM_REGION_SIZE);
-        let actual_end = region.vm_addr_range().end;
-        if region.vm_addr < expected_start || actual_end > expected_end {
+        let actual_range = region.vm_addr_range();
+        let actual_end = actual_range.end;
+        if actual_range.start < expected_start || actual_end > expected_end {
             return Err(CompilerError::MemoryMap(format!(
                 "region {:#x}..{actual_end:#x} escapes canonical slot {expected_start:#x}..{expected_end:#x}",
-                region.vm_addr
+                actual_range.start
             )));
         }
     }
@@ -874,8 +872,8 @@ fn compile_native_if_supported(
         .map(|compiled| compiled.machine_code_length());
     Ok(NativeCompilation {
         backend: CompilationBackend::NativeJitX86_64,
-        backend_id: "solana-sbpf-0.21.0-x86_64-jit",
-        artifact_identity: "solana-sbpf-0.21.0-x86_64-jit".to_owned(),
+        backend_id: "solana-sbpf-0.24.0-x86_64-jit",
+        artifact_identity: "solana-sbpf-0.24.0-x86_64-jit".to_owned(),
         isa_fingerprint: None,
         machine_code_len,
         lowered_instruction_count: None,
@@ -918,7 +916,7 @@ fn compile_native_if_supported(
             );
             Ok(NativeCompilation {
                 backend: CompilationBackend::NativeCraneliftAarch64Subset,
-                backend_id: "cranelift-0.134.2-aarch64-sbpfv0-subset-v1",
+                backend_id: "cranelift-0.135.1-aarch64-sbpfv0-subset-v1",
                 artifact_identity,
                 isa_fingerprint: Some(isa_fingerprint),
                 machine_code_len: Some(machine_code_len),
@@ -1829,9 +1827,20 @@ fn launch_syscall_map(
     vm_address: u64,
     len: u64,
 ) -> Result<u64, ReplaySyscallError> {
-    let host_address: Result<u64, EbpfError> =
+    // SBPF 0.24 permits a zero-length translation of its empty region-zero
+    // sentinel. Launch replay rejected that address before the upgrade.
+    // Typed VM loads/stores have nonzero lengths; variable-length syscall
+    // translations need this explicit check to retain the same behavior.
+    if vm_address < ebpf::MM_BYTECODE_START {
+        return Err(ReplaySyscallError::MemoryAccess(
+            EbpfError::AccessViolation(access, vm_address, len, "region zero").to_string(),
+        ));
+    }
+    let host_buffer: Result<HostBuffer, EbpfError> =
         context.memory_mapping.map(access, vm_address, len).into();
-    host_address.map_err(|error| ReplaySyscallError::MemoryAccess(error.to_string()))
+    host_buffer
+        .map(|buffer| buffer.ptr().cast::<u8>().expose_provenance() as u64)
+        .map_err(|error| ReplaySyscallError::MemoryAccess(error.to_string()))
 }
 
 fn launch_syscall_string(
@@ -1918,13 +1927,30 @@ mod tests {
         assert!(aligned.config.enable_address_translation);
         assert!(aligned.config.enable_stack_frame_gaps);
         assert!(aligned.config.aligned_memory_mapping);
-        assert!(!aligned.config.allow_memory_region_zero);
         let mut region_zero_probe = [0_u8];
         let region_zero_probe_ptr: *mut [u8] = &mut region_zero_probe;
-        let region_zero_mapping = input_only_test_mapping(region_zero_probe_ptr, &aligned.config);
-        let region_zero_result: Result<u64, EbpfError> =
-            region_zero_mapping.map(AccessType::Load, 0, 0).into();
-        assert!(region_zero_result.is_err());
+        let region_zero_context = ReplayContext {
+            remaining: WATCHDOG_INSTRUCTION_LIMIT,
+            memory_mapping: input_only_test_mapping(region_zero_probe_ptr, &aligned.config),
+            heap_position: 0,
+            compiler: &aligned,
+            input_len: region_zero_probe.len(),
+            bank_rent: LaunchBpfLoaderRent {
+                lamports_per_byte_year: 0,
+                exemption_threshold: 0.0,
+            },
+            program_stack: SmallVec::new(),
+            cross_program_supported: false,
+            verifier_baselines: LaunchPreAccounts::new(),
+        };
+        for access in [AccessType::Load, AccessType::Store] {
+            for (address, length) in [(0, 0), (0, 1), (1, 0)] {
+                assert!(launch_syscall_map(&region_zero_context, access, address, length).is_err());
+            }
+            assert!(
+                launch_syscall_map(&region_zero_context, access, ebpf::MM_INPUT_START, 0).is_ok()
+            );
+        }
 
         let mut unaligned_config = aligned.config.clone();
         unaligned_config.aligned_memory_mapping = false;
@@ -2763,22 +2789,25 @@ mod tests {
         let frame_size = config.stack_frame_size as u64;
         let mut stack = AlignedMemory::<{ ebpf::HOST_ALIGN }>::zero_filled(config.stack_size());
         let region = stack_memory_region(&mut stack, &config, SBPFVersion::V0);
-
-        assert!(
-            region
-                .vm_to_host(AccessType::Store, ebpf::MM_STACK_START + frame_size - 1, 1,)
-                .is_some()
-        );
-        assert!(
-            region
-                .vm_to_host(AccessType::Store, ebpf::MM_STACK_START + frame_size, 1)
-                .is_none()
-        );
-        assert!(
-            region
-                .vm_to_host(AccessType::Store, ebpf::MM_STACK_START + frame_size * 2, 1,)
-                .is_some()
-        );
+        let regions = vec![
+            MemoryRegion::new_empty(ebpf::MM_BYTECODE_START),
+            region,
+            MemoryRegion::new_empty(ebpf::MM_HEAP_START),
+            MemoryRegion::new_empty(ebpf::MM_INPUT_START),
+        ];
+        // SAFETY: stack stays allocated until the mapping is dropped, and
+        // the other regions expose no bytes.
+        let mapping = unsafe { MemoryMapping::new(regions, &config, SBPFVersion::V0).unwrap() };
+        for (offset, accessible) in [
+            (frame_size - 1, true),
+            (frame_size, false),
+            (frame_size * 2, true),
+        ] {
+            let result: Result<HostBuffer, EbpfError> = mapping
+                .map(AccessType::Store, ebpf::MM_STACK_START + offset, 1)
+                .into();
+            assert_eq!(result.is_ok(), accessible, "stack offset {offset}");
+        }
     }
 
     #[test]

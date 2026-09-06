@@ -218,9 +218,9 @@ Every call site already builds the path as `<dir>.join(CONST)`, and
 directory is a parameter almost everywhere. The change is to make that
 parameter explicit and default it to a separate root.
 
-1. **Add a layout type** in `blockzilla-format` that resolves both roots from a
+1. **Add a layout type** in `blockzilla-archive-v2` that resolves both roots from a
    configured base, rather than assuming the epoch directory. **Done** —
-   `v2/layout.rs`:
+   `crates/compact-v2/blockzilla-archive-v2/src/v2/layout.rs`:
 
    ```rust
    ArchiveLayout::split(base)      // base/archive + base/edgezilla

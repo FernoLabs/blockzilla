@@ -14,7 +14,33 @@ The SDK never asks Blockzilla to reconstruct a Solana block. It returns the
 compact Archive V2 message and metadata values that the application parser can
 consume locally.
 
-## Safety contract
+## Current application entry point
+
+Enable the `http` feature to use `CompactV2Archive` for local and network
+sources. `open_local` takes an absolute epoch directory and an explicit
+`CompactV2LocalDescriptor`; `open` takes a sample origin, epoch, and cache root.
+These paths admit fixed object names and pin local files or HTTP object
+identities. They do not require a publication manifest or hash the full archive.
+See the [working examples](../../../examples/read-compact-v2/README.md).
+
+`scan_ordered_parallel` uses one sequential input producer, reusable private
+workers, and a bounded rolling output window. The ordered sink receives a block
+as soon as that block is ready. A slow later block does not hold back a completed
+prefix. Admission remains charged until the sink returns. Worker threads join
+before the scan returns. See the [pipeline contract](../../../docs/design/reader-pipeline-rolling-window.md)
+for block, transaction, byte, and shutdown limits.
+
+`scan_token_balances_indexed_parallel` is the optional token-only interface.
+It retains registry references in flat balance rows and lets an `IndexedTokenSink`
+resolve keys for new dictionary entries. The [indexed USDC output](../../../docs/reference/usdc-indexed-balances-v1.md)
+can expand to the existing canonical balance format. Status and complete metadata
+validation remain active when the request omits details for known failures.
+
+## Published-generation entry points
+
+The lower-level `ArchiveReader::open` API below reads a published generation.
+Its manifest and hashing policy are separate from the application entry points
+above.
 
 `ArchiveReader` refuses to open a generation unless:
 
@@ -171,6 +197,11 @@ each `Indeterminate` result in the coverage report.
 hash map. Memory use is proportional to the watched pubkey set. The compiled
 filter is bound to both the generation digest and registry SHA-256; using it
 with another generation fails explicitly.
+
+For descriptor-based local and object-set sources, binding values can describe
+the admitted source and registry metadata. They are not proof that the registry
+content was hashed. Keep the reported verification level with any saved filter
+or account dictionary.
 
 Each transaction produces one of:
 

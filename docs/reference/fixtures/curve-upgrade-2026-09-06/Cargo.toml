@@ -1,0 +1,10 @@
+[package]
+name="blockzilla-curve-compare"
+version="0.0.0"
+edition="2024"
+[dependencies]
+old={package="curve25519-dalek",version="=2.1.0"}
+new={package="curve25519-dalek",version="=5.0.0"}
+
+# This one-shot audit is not part of the production workspace.
+[workspace]

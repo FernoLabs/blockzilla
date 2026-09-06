@@ -28,9 +28,9 @@ known-static-programs = []
 
 [dependencies]
 blockzilla-primitives = { path = "../../blockzilla-primitives" }
-data-encoding = "2.11.0"
-serde = { version = "1.0.228", features = ["derive"] }
-solana-pubkey = "4.2.0"
+data-encoding = "2.11.1"
+serde = { version = "1.0.229", features = ["derive"] }
+solana-pubkey = "4.2.1"
 wincode = { version = "=0.6.1", features = ["derive"] }
 
 [lints]

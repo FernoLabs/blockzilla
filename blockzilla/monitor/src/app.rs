@@ -2,8 +2,8 @@ use serde::Deserialize;
 use topcoat::{
     Result,
     context::Cx,
-    router::{layout, page},
-    view::{View, view},
+    router::{Slot, layout, page},
+    view::{View, ViewExt, ViewHandle, view},
 };
 
 use crate::calendar;
@@ -47,8 +47,8 @@ impl DashboardPage {
 const FAVICON: &str = "data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 32 32'%3E%3Crect width='32' height='32' rx='8' fill='%2309090b'/%3E%3Ccircle cx='16' cy='16' r='7' fill='%2334d399'/%3E%3C/svg%3E";
 
 #[layout("/")]
-async fn root(slot: Result) -> Result {
-    view! {
+async fn root(slot: Slot<'_>) -> Result<impl View> {
+    Ok(view! {
         <!DOCTYPE html>
         <html lang="en" class="dark">
             <head>
@@ -60,9 +60,9 @@ async fn root(slot: Result) -> Result {
                 <link rel="stylesheet" href="/app.css" />
                 <script type="module" src="/datastar.js"></script>
             </head>
-            <body class="bg-zinc-950 text-zinc-200 font-sans antialiased">(slot?)</body>
+            <body class="bg-zinc-950 text-zinc-200 font-sans antialiased">(slot)</body>
         </html>
-    }
+    })
 }
 
 /// Render only the stable morph target. The shell and its stream action
@@ -70,7 +70,7 @@ async fn root(slot: Result) -> Result {
 pub(crate) async fn render_dashboard_frame(
     page: DashboardPage,
     state: &DashboardState,
-) -> Result<View> {
+) -> Result<ViewHandle> {
     let cx = &Cx::default();
     if !state.live {
         let last_updated_label = state.last_updated_label();
@@ -82,47 +82,65 @@ pub(crate) async fn render_dashboard_frame(
                     last_updated_label: &last_updated_label
                 )
             </div>
-        };
+        }
+        .single()
+        .await;
     }
 
     match page {
-        DashboardPage::Overview => view! { cx =>
-            dashboard_frame(
-                state: state,
-                active: page.as_str(),
-                top_stats(state: state)
-                archive_progress(state: state)
-                poh_migration_progress(state: state)
-                poh_migration_lane_list(state: state)
-                registry_reprocess_progress(state: state)
-                registry_reprocess_lane_list(state: state)
-                firewatch_project(state: state)
-                live_capture_banner(state: state)
-                epoch_list(state: state)
-                bottom_panels(state: state)
-            )
-        },
-        DashboardPage::History => view! { cx =>
-            dashboard_frame(
-                state: state,
-                active: page.as_str(),
-                compaction_history(entries: &state.compactions)
-            )
-        },
-        DashboardPage::System => view! { cx =>
-            dashboard_frame(
-                state: state,
-                active: page.as_str(),
-                system_dashboard(state: state)
-            )
-        },
-        DashboardPage::Epochs => view! { cx =>
-            dashboard_frame(
-                state: state,
-                active: page.as_str(),
-                epoch_table(tasks: &state.epochs)
-            )
-        },
+        DashboardPage::Overview => {
+            view! { cx =>
+                dashboard_frame(
+                    state: state,
+                    active: page.as_str(),
+                    top_stats(state: state)
+                    archive_progress(state: state)
+                    poh_migration_progress(state: state)
+                    poh_migration_lane_list(state: state)
+                    registry_reprocess_progress(state: state)
+                    registry_reprocess_lane_list(state: state)
+                    firewatch_project(state: state)
+                    live_capture_banner(state: state)
+                    epoch_list(state: state)
+                    bottom_panels(state: state)
+                )
+            }
+            .single()
+            .await
+        }
+        DashboardPage::History => {
+            view! { cx =>
+                dashboard_frame(
+                    state: state,
+                    active: page.as_str(),
+                    compaction_history(entries: &state.compactions)
+                )
+            }
+            .single()
+            .await
+        }
+        DashboardPage::System => {
+            view! { cx =>
+                dashboard_frame(
+                    state: state,
+                    active: page.as_str(),
+                    system_dashboard(state: state)
+                )
+            }
+            .single()
+            .await
+        }
+        DashboardPage::Epochs => {
+            view! { cx =>
+                dashboard_frame(
+                    state: state,
+                    active: page.as_str(),
+                    epoch_table(tasks: &state.epochs)
+                )
+            }
+            .single()
+            .await
+        }
         DashboardPage::Calendar => {
             let (tracked_epochs, live_calendar, now_unix_secs) =
                 crate::state::epochs_for_calendar();
@@ -149,11 +167,13 @@ pub(crate) async fn render_dashboard_frame(
                     )
                 )
             }
+            .single()
+            .await
         }
     }
 }
 
-async fn render_dashboard_page(page: DashboardPage) -> Result<View> {
+async fn render_dashboard_page(page: DashboardPage) -> Result<ViewHandle> {
     // First paint is a normal server render from the current snapshot -- no
     // flash of empty state while the SSE connection spins up. The stable
     // shell exists even when that snapshot is offline, so the same page can
@@ -168,31 +188,33 @@ async fn render_dashboard_page(page: DashboardPage) -> Result<View> {
             (frame)
         )
     }
+    .single()
+    .await
 }
 
 #[page("/")]
-async fn overview() -> Result {
-    render_dashboard_page(DashboardPage::Overview).await
+async fn overview() -> Result<impl View> {
+    Ok(view! { (render_dashboard_page(DashboardPage::Overview).await?) })
 }
 
 #[page("/history")]
-async fn history() -> Result {
-    render_dashboard_page(DashboardPage::History).await
+async fn history() -> Result<impl View> {
+    Ok(view! { (render_dashboard_page(DashboardPage::History).await?) })
 }
 
 #[page("/system")]
-async fn system() -> Result {
-    render_dashboard_page(DashboardPage::System).await
+async fn system() -> Result<impl View> {
+    Ok(view! { (render_dashboard_page(DashboardPage::System).await?) })
 }
 
 #[page("/epochs")]
-async fn epochs() -> Result {
-    render_dashboard_page(DashboardPage::Epochs).await
+async fn epochs() -> Result<impl View> {
+    Ok(view! { (render_dashboard_page(DashboardPage::Epochs).await?) })
 }
 
 #[page("/calendar")]
-async fn calendar_route() -> Result {
-    render_dashboard_page(DashboardPage::Calendar).await
+async fn calendar_route() -> Result<impl View> {
+    Ok(view! { (render_dashboard_page(DashboardPage::Calendar).await?) })
 }
 
 #[cfg(test)]
@@ -219,6 +241,8 @@ mod tests {
                 (frame)
             )
         }
+        .single()
+        .await
         .unwrap()
         .render(cx);
 

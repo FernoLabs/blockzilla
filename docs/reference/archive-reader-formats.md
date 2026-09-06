@@ -1,11 +1,15 @@
 # Archive reader formats
 
-Status: implemented reader reference, 2026-08-31.
+Status: implemented reader reference, reviewed 2026-09-06.
 
-CAR, Compact V2, and Indexer V3 have different physical layouts. Each format
+CAR, Compact V2, and the frozen standalone Indexer V3 prototype have different physical layouts. Each format
 has a dedicated SDK. Each SDK publishes the ordered block and transaction
 views from
 [`blockzilla-model`](../../crates/blockzilla-model/README.md).
+
+Canonical Archive V3 is a separate format intended to replace V2. Its local
+`CanonicalReader` returns format-native records; it does not yet implement
+the common model or HTTP access. See [all reader entry points](archive-formats-and-read-sdk.md).
 
 Use the [sample layout and design guide](archive-sample-layout-and-design.md)
 for the complete public object names and the matching local folder layout.
@@ -22,7 +26,7 @@ The small reference applications are:
 
 - [`read-car`](../../examples/read-car/README.md)
 - [`read-compact-v2`](../../examples/read-compact-v2/README.md)
-- [`read-indexer-v3`](../../examples/read-archive-v3/README.md)
+- [`read-archive-v3`](../../examples/read-archive-v3/README.md)
 
 Each application selects one format at build time. It does not use a large
 run-time format switch.
@@ -49,6 +53,11 @@ the full index before it schedules CAR ranges.
 The SDK hides CAR node traversal, bounded HTTP ranges, and historical CAR
 metadata normalization. The application receives the common ordered view.
 
+Local opening also accepts `epoch-E.car.zst` beside the same slot index. A
+completed raw CAR takes priority when both forms exist; `.partial` files are
+ignored. Index offsets always name decoded CAR bytes. Compressed local reads
+decode the stream sequentially, including any prefix before a requested range.
+
 CAR remains an independent source representation and a useful sequential
 reference. A direct slot read uses the slot-to-offset index.
 
@@ -67,11 +76,21 @@ A full scan can load one bounded registry image and share it between workers.
 The reader reuses compressed and decompressed buffers. The callback stays in
 canonical block order even when decode work runs in parallel.
 
+The [rolling pipeline](../design/reader-pipeline-rolling-window.md) publishes
+each ready ordered prefix without a whole-group barrier. Its block, transaction,
+and declared-byte admission limits include output until the sink returns.
+Workers and the input producer stop and join before the scan returns.
+
+The optional [indexed token-balance interface](usdc-indexed-balances-v1.md)
+keeps registry references through selection. Its USDC writer resolves each new
+reference once and appends a source-scoped dictionary entry. The standard
+resolved output remains available and has unchanged bytes.
+
 Compact V2 is row-oriented. A query can omit signatures or instruction data
 that it does not use. A sparse target query must still inspect the applicable
 blocks because Compact V2 has no general application reverse index.
 
-## Indexer V3
+## Frozen standalone Indexer V3 prototype
 
 Indexer V3 separates its block index, transaction directory, messages,
 loaded addresses, inner instructions, logs, token balances, lamport balances,
@@ -114,7 +133,7 @@ coverage result.
 
 ## Source binding
 
-The readers do not require an archive publication manifest, a partial archive
+The high-level sample readers do not require an archive publication manifest, a partial archive
 hash, a complete archive hash, or an epoch seal.
 
 For Compact V2 and Indexer V3 network sources, `object-set-bound` means that
@@ -127,6 +146,10 @@ strong ETags.
 Local readers pin the opened files and check that they did not change before
 the result is accepted. Structural checks validate headers, lengths, offsets,
 counts, codecs, and cross-file relations.
+
+A descriptive source binding or a synthesized descriptor digest is not a
+verified registry-content hash. Registry IDs are local to the admitted source
+and registry; retain that scope when storing them outside a callback.
 
 For the beginner workloads, compare output row and byte counts, then compare
 the output files byte-for-byte outside the timed reader run. The coverage

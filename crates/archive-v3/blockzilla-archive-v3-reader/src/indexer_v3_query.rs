@@ -3124,14 +3124,9 @@ impl IndexerV3InstructionSource {
         pre: &[CompactTokenBalance],
         post: &[CompactTokenBalance],
     ) -> IndexerV3InstructionSourceResult<Vec<RecordedTokenBalance>> {
-        let mut output = context.output_pool.balances();
-        if matches!(requirement, TokenBalanceRequirement::All) {
-            reserve_exact(
-                &mut output,
-                pre.len().saturating_add(post.len()),
-                "projected V3 token balances",
-            )?;
-        }
+        // Empty and nonmatching transactions must leave retained buffers in the
+        // pool so a later selected transaction can reuse their allocation.
+        let mut output = None;
         for (side, balances) in [(TokenBalanceSide::Pre, pre), (TokenBalanceSide::Post, post)] {
             for (balance_index, balance) in balances.iter().enumerate() {
                 let mint = match (balance.mint, requirement) {
@@ -3156,6 +3151,18 @@ impl IndexerV3InstructionSource {
                     .program_id
                     .map(|reference| context.resolve_pubkey(reference))
                     .transpose()?;
+                if output.is_none() {
+                    let mut buffer = context.output_pool.balances();
+                    if matches!(requirement, TokenBalanceRequirement::All) {
+                        reserve_exact(
+                            &mut buffer,
+                            pre.len().saturating_add(post.len()),
+                            "projected V3 token balances",
+                        )?;
+                    }
+                    output = Some(buffer);
+                }
+                let output = output.as_mut().expect("selected balance acquired a buffer");
                 if output.len() == output.capacity() {
                     output.try_reserve(1).map_err(|source| {
                         IndexerV3InstructionSourceError::Allocation {
@@ -3180,7 +3187,7 @@ impl IndexerV3InstructionSource {
                 });
             }
         }
-        Ok(output)
+        Ok(output.unwrap_or_default())
     }
 
     fn project_requested_message<'a>(
@@ -6554,6 +6561,92 @@ mod tests {
         assert_eq!(receipt.instructions, 0);
         assert_eq!(receipt.transactions_with_incomplete_token_balances, 0);
         assert!(receipt.io.source_read_bytes.is_some_and(|bytes| bytes > 0));
+    }
+
+    #[test]
+    fn empty_and_nonmatching_balances_preserve_the_next_matching_output_buffer() {
+        let fixture = Fixture::new();
+        let mut source = fixture.open("token-output-pool");
+        let request = TokenBalanceRequirement::Mints(vec![TARGET_MINT]);
+        let selected = CompactTokenBalance {
+            account_index: 0,
+            mint: Some(CompactPubkey::Raw(TARGET_MINT)),
+            owner: Some(CompactPubkey::Raw(TOKEN_OWNER)),
+            program_id: Some(CompactPubkey::Raw(PROGRAM)),
+            amount: 42,
+            decimals: 6,
+        };
+        let mut balances = IndexerV3InstructionSource::resolve_token_balances(
+            &mut source.context,
+            &request,
+            std::slice::from_ref(&selected),
+            &[],
+        )
+        .unwrap();
+        balances.try_reserve(2).unwrap();
+        let retained_pointer = balances.as_ptr();
+        let mut block = CanonicalBlock {
+            header: BlockHeader {
+                epoch: 0,
+                block_ordinal: 0,
+                slot: 0,
+            },
+            counts: None,
+            transactions: vec![CanonicalTransaction {
+                header: TransactionHeader {
+                    tx_index: 0,
+                    status: ExecutionStatus::Succeeded,
+                    failed_outer_instruction_index: None,
+                    instruction_coverage: InstructionCoverage::Complete,
+                    cpi_coverage: CpiCoverage::NotRecorded,
+                },
+                primary_signature: None,
+                required_signers: Vec::new(),
+                instructions: Vec::new(),
+                token_balance_coverage: TokenBalanceCoverage::Complete,
+                token_balances: balances,
+            }],
+        };
+        source.context.output_pool.recycle_block(&mut block);
+
+        let nonmatching = CompactTokenBalance {
+            mint: Some(CompactPubkey::Raw(OTHER_MINT)),
+            ..selected.clone()
+        };
+        let skipped = IndexerV3InstructionSource::resolve_token_balances(
+            &mut source.context,
+            &request,
+            std::slice::from_ref(&nonmatching),
+            &[],
+        )
+        .unwrap();
+        let empty = IndexerV3InstructionSource::resolve_token_balances(
+            &mut source.context,
+            &TokenBalanceRequirement::All,
+            &[],
+            &[],
+        )
+        .unwrap();
+        let unknown_mint = CompactTokenBalance {
+            mint: None,
+            ..selected.clone()
+        };
+        let reused = IndexerV3InstructionSource::resolve_token_balances(
+            &mut source.context,
+            &request,
+            &[nonmatching, selected, unknown_mint],
+            &[],
+        )
+        .unwrap();
+        // Keep both empty results alive: neither may take the retained buffer.
+        assert!(skipped.is_empty());
+        assert!(empty.is_empty());
+        assert_eq!(reused.as_ptr(), retained_pointer);
+        assert_eq!(reused.len(), 2);
+        assert_eq!(reused[0].balance_index, 1);
+        assert_eq!(reused[0].mint, Some(TARGET_MINT));
+        assert_eq!(reused[1].balance_index, 2);
+        assert_eq!(reused[1].mint, None);
     }
 
     #[test]

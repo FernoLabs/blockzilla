@@ -8,7 +8,7 @@ repository.workspace = true
 description = "Shared byte-range contract and object-name validation"
 
 [dependencies]
-thiserror = "2.0.18"
+thiserror = "2.0.20"
 
 [lints]
 workspace = true

@@ -1,16 +1,10 @@
 use blockzilla_compact_v2_reader::{CompactV2MessageSchema, CompactV2MetadataSchema};
 use std::{
     fs,
-    io::{Read, Write},
-    net::{TcpListener, TcpStream},
     path::{Path, PathBuf},
-    sync::{
-        Arc,
-        atomic::{AtomicBool, Ordering},
-    },
-    thread,
-    time::Duration,
 };
+
+use super::support::{MockGateway, hex_lower};
 
 use blockzilla_archive_v2::{
     ARCHIVE_V2_BLOCK_INDEX_FILE, ARCHIVE_V2_BLOCKS_FILE, ARCHIVE_V2_META_FILE,
@@ -295,154 +289,6 @@ fn write_varint(output: &mut Vec<u8>, mut value: u32) {
     output.push(value as u8);
 }
 
-struct MockGateway {
-    base_url: String,
-    stop: Arc<AtomicBool>,
-    address: std::net::SocketAddr,
-    thread: Option<thread::JoinHandle<()>>,
-}
-
-impl MockGateway {
-    fn start(fixture: &ArchiveFixture) -> Self {
-        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
-        listener.set_nonblocking(true).unwrap();
-        let address = listener.local_addr().unwrap();
-        let root = fixture.root.clone();
-        let epoch = fixture.epoch;
-        let stop = Arc::new(AtomicBool::new(false));
-        let thread_stop = stop.clone();
-        let thread = thread::spawn(move || {
-            while !thread_stop.load(Ordering::Acquire) {
-                match listener.accept() {
-                    Ok((stream, _)) => serve_request(stream, &root, epoch),
-                    Err(error) if error.kind() == std::io::ErrorKind::WouldBlock => {
-                        thread::sleep(Duration::from_millis(2));
-                    }
-                    Err(_) => break,
-                }
-            }
-        });
-        Self {
-            base_url: format!("http://{address}"),
-            stop,
-            address,
-            thread: Some(thread),
-        }
-    }
-}
-
-impl Drop for MockGateway {
-    fn drop(&mut self) {
-        self.stop.store(true, Ordering::Release);
-        let _ = TcpStream::connect(self.address);
-        if let Some(thread) = self.thread.take() {
-            let _ = thread.join();
-        }
-    }
-}
-
-fn serve_request(mut stream: TcpStream, root: &Path, epoch: u64) {
-    stream.set_nonblocking(false).unwrap();
-    stream
-        .set_read_timeout(Some(Duration::from_secs(2)))
-        .unwrap();
-    let mut request = Vec::new();
-    let mut buffer = [0u8; 4096];
-    while !request.windows(4).any(|window| window == b"\r\n\r\n") {
-        let count = stream.read(&mut buffer).unwrap();
-        if count == 0 {
-            return;
-        }
-        request.extend_from_slice(&buffer[..count]);
-    }
-    let request = String::from_utf8(request).unwrap();
-    let mut lines = request.split("\r\n");
-    let first = lines.next().unwrap();
-    let mut first_parts = first.split_whitespace();
-    let method = first_parts.next().unwrap();
-    let path = first_parts.next().unwrap();
-    let prefix = format!("/v1/epochs/{epoch}/");
-    let object = if path == format!("{prefix}manifest") {
-        Some(GENERATION_MANIFEST_FILE)
-    } else {
-        path.strip_prefix(&format!("{prefix}files/"))
-    };
-    let Some(object) = object else {
-        write_response(&mut stream, 404, &[], None, None);
-        return;
-    };
-    let bytes = match fs::read(root.join(object)) {
-        Ok(bytes) => bytes,
-        Err(_) => {
-            write_response(&mut stream, 404, &[], None, None);
-            return;
-        }
-    };
-    let etag = format!("\"{}\"", hex_lower(&Sha256::digest(&bytes)));
-    if method == "HEAD" {
-        write_response(
-            &mut stream,
-            200,
-            &[],
-            Some((0, 0, bytes.len(), bytes.len())),
-            Some(&etag),
-        );
-        return;
-    }
-    if object == GENERATION_MANIFEST_FILE {
-        write_response(&mut stream, 200, &bytes, None, Some(&etag));
-        return;
-    }
-    let range = lines
-        .find_map(|line| {
-            let lower = line.to_ascii_lowercase();
-            let range = lower.strip_prefix("range: bytes=")?;
-            let (start, end) = range.split_once('-')?;
-            Some((
-                start.parse::<usize>().unwrap(),
-                end.parse::<usize>().unwrap(),
-            ))
-        })
-        .unwrap();
-    let body = &bytes[range.0..=range.1];
-    write_response(
-        &mut stream,
-        206,
-        body,
-        Some((range.0, range.1, bytes.len(), body.len())),
-        Some(&etag),
-    );
-}
-
-fn write_response(
-    stream: &mut TcpStream,
-    status: u16,
-    body: &[u8],
-    range: Option<(usize, usize, usize, usize)>,
-    etag: Option<&str>,
-) {
-    let reason = match status {
-        200 => "OK",
-        206 => "Partial Content",
-        _ => "Not Found",
-    };
-    let content_length = range.map(|value| value.3).unwrap_or(body.len());
-    let mut header = format!(
-        "HTTP/1.1 {status} {reason}\r\nContent-Length: {content_length}\r\nConnection: close\r\n"
-    );
-    if let Some(etag) = etag {
-        header.push_str(&format!("ETag: {etag}\r\n"));
-    }
-    if status == 206
-        && let Some((start, end, total, _)) = range
-    {
-        header.push_str(&format!("Content-Range: bytes {start}-{end}/{total}\r\n"));
-    }
-    header.push_str("\r\n");
-    stream.write_all(header.as_bytes()).unwrap();
-    stream.write_all(body).unwrap();
-}
-
 fn gateway_source(gateway: &MockGateway, cache: &Path) -> SourceOptions {
     SourceOptions {
         archive: None,
@@ -469,7 +315,7 @@ fn query_count(path: &Path, sql: &str) -> i64 {
 #[test]
 fn gateway_program_and_token_scans_store_direct_cpi_and_pre_post_rows() {
     let fixture = ArchiveFixture::temporary(7, false);
-    let gateway = MockGateway::start(&fixture);
+    let gateway = MockGateway::start(&fixture.root, fixture.epoch);
     let work = TempDir::new().unwrap();
     let cache = work.path().join("cache");
 
@@ -564,7 +410,7 @@ fn gateway_program_and_token_scans_store_direct_cpi_and_pre_post_rows() {
 #[test]
 fn indeterminate_record_and_skip_finish_partial_and_resume_without_duplicates() {
     let fixture = ArchiveFixture::temporary(8, true);
-    let gateway = MockGateway::start(&fixture);
+    let gateway = MockGateway::start(&fixture.root, fixture.epoch);
     let work = TempDir::new().unwrap();
     let cache = work.path().join("cache");
     let fail_output = work.path().join("fail.sqlite");
@@ -675,13 +521,4 @@ fn local_archive_root_resolves_multiple_epoch_children_and_binds_each_path() {
             .unwrap()
             .contains(second.root.to_str().unwrap())
     );
-}
-
-fn hex_lower(bytes: &[u8]) -> String {
-    let mut output = String::with_capacity(bytes.len() * 2);
-    for byte in bytes {
-        output.push(char::from_digit(u32::from(byte >> 4), 16).unwrap());
-        output.push(char::from_digit(u32::from(byte & 0x0f), 16).unwrap());
-    }
-    output
 }

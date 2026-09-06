@@ -1,6 +1,6 @@
 # Archive sample layout and format design
 
-Status: public sample contract, 2026-08-31.
+Status: public sample contract, reviewed 2026-09-06.
 
 This guide defines one folder layout for the public sample source and for a
 local mirror. It also explains why CAR, Compact V2, and Indexer V3 have
@@ -14,6 +14,10 @@ The sample epochs are:
 
 There are three stored formats. Jetstreamer is a CAR reader. It reads the CAR
 objects and does not need a fourth stored copy.
+
+`indexer-v3` below is the frozen standalone prototype. Canonical Archive V3
+converter output has a separate layout and local reader; see the
+[format and reader map](archive-formats-and-read-sdk.md).
 
 ## One path for HTTPS and local files
 
@@ -79,6 +83,14 @@ little-endian CAR offset and a 4-byte little-endian byte length. A zero length
 means that the row has no CAR range.
 
 The index is part of the CAR folder. A CAR sample is not complete without it.
+
+A local mirror can keep `epoch-<epoch>.car.zst` instead of raw CAR. The native
+CAR example accepts this compressed form. It selects a completed `.car` first
+when both forms exist, and ignores `.partial` files. The index still uses
+decoded CAR offsets, so compressed bounded scans decode the preceding stream.
+The public HTTP routes above continue to name raw `.car` objects. For a raw
+versus compressed benchmark, use separate roots with the same index and only
+the intended CAR form, and record which source file was selected.
 
 ### Compact V2
 
@@ -214,7 +226,7 @@ switch in these beginner examples.
 |---|---|---|
 | CAR | [`of-car-reader`](../../crates/old-faithful/of-car-reader/Readme.md) | [`read-car`](../../examples/read-car/README.md) |
 | Compact V2 | [`blockzilla-compact-v2-reader`](../../crates/compact-v2/blockzilla-compact-v2-reader/README.md) | [`read-compact-v2`](../../examples/read-compact-v2/README.md) |
-| Indexer V3 | [`blockzilla-archive-v3-reader`](../../crates/archive-v3/blockzilla-archive-v3-reader/README.md) | [`read-indexer-v3`](../../examples/read-archive-v3/README.md) |
+| Indexer V3 | [`blockzilla-archive-v3-reader`](../../crates/archive-v3/blockzilla-archive-v3-reader/README.md) | [`read-archive-v3`](../../examples/read-archive-v3/README.md) |
 
 The three application jobs are separate source files for each format:
 
@@ -222,14 +234,14 @@ The three application jobs are separate source files for each format:
 |---|---|---|---|
 | CAR | [`read-car-usdc`](../../examples/read-car/src/bin/read-car-usdc.rs) | [`read-car-pumpfun`](../../examples/read-car/src/bin/read-car-pumpfun.rs) | [`read-car-firewatch`](../../examples/read-car/src/bin/read-car-firewatch.rs) |
 | Compact V2 | [`read-compact-v2-usdc`](../../examples/read-compact-v2/src/bin/read-compact-v2-usdc.rs) | [`read-compact-v2-pumpfun`](../../examples/read-compact-v2/src/bin/read-compact-v2-pumpfun.rs) | [`read-compact-v2-firewatch`](../../examples/read-compact-v2/src/bin/read-compact-v2-firewatch.rs) |
-| Indexer V3 | [`read-indexer-v3-usdc`](../../examples/read-archive-v3/src/bin/read-archive-v3-usdc.rs) | [`read-indexer-v3-pumpfun`](../../examples/read-archive-v3/src/bin/read-archive-v3-pumpfun.rs) | [`read-indexer-v3-firewatch`](../../examples/read-archive-v3/src/bin/read-archive-v3-firewatch.rs) |
+| Indexer V3 | [`read-archive-v3-usdc`](../../examples/read-archive-v3/src/bin/read-archive-v3-usdc.rs) | [`read-archive-v3-pumpfun`](../../examples/read-archive-v3/src/bin/read-archive-v3-pumpfun.rs) | [`read-archive-v3-firewatch`](../../examples/read-archive-v3/src/bin/read-archive-v3-firewatch.rs) |
 
 The Compact V2 and Indexer V3 packages also have a small ordered slot-hour
 reader. It scans the complete epoch and prints one count row for each fixed
 9,000-slot window:
 
 - [`read-compact-v2-slot-hours`](../../examples/read-compact-v2/src/bin/read-compact-v2-slot-hours.rs)
-- [`read-indexer-v3-slot-hours`](../../examples/read-archive-v3/src/bin/read-archive-v3-slot-hours.rs)
+- [`read-archive-v3-slot-hours`](../../examples/read-archive-v3/src/bin/read-archive-v3-slot-hours.rs)
 
 Read the starter guide for the exact build and run commands. The default is
 epoch 900 and the complete epoch. Use `--archive-root archive` for the folder

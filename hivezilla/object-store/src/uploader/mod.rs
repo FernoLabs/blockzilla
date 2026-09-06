@@ -123,7 +123,7 @@ pub(crate) fn api_error_code(body: &[u8]) -> String {
 /// response-controlled text must never change recorder capacity-stop exits.
 fn xml_api_error_code(body: &[u8]) -> Option<String> {
     let mut reader = Reader::from_reader(body);
-    reader.trim_text(false);
+    reader.config_mut().trim_text(false);
     let mut buffer = Vec::new();
     let mut depth = 0usize;
     let mut root_seen = false;
@@ -131,7 +131,7 @@ fn xml_api_error_code(body: &[u8]) -> Option<String> {
     let mut direct_code_seen = false;
     let mut code_depth = None;
     let mut code = String::new();
-    let mut elements = Vec::<Vec<u8>>::new();
+    let mut elements = Vec::<String>::new();
     loop {
         match reader.read_event_into(&mut buffer).ok()? {
             Event::Start(event) => {
@@ -144,11 +144,11 @@ fn xml_api_error_code(body: &[u8]) -> Option<String> {
                     return None;
                 }
                 if depth == 1 {
-                    if root_seen || name.as_ref() != b"Error" {
+                    if root_seen || name.as_ref() != "Error" {
                         return None;
                     }
                     root_seen = true;
-                } else if depth == 2 && matches!(name.as_ref(), b"Code" | b"code") {
+                } else if depth == 2 && matches!(name.as_ref(), "Code" | "code") {
                     if direct_code_seen {
                         return None;
                     }
@@ -157,13 +157,13 @@ fn xml_api_error_code(body: &[u8]) -> Option<String> {
                 } else if code_depth.is_some() {
                     return None;
                 }
-                elements.push(name.as_ref().to_vec());
+                elements.push(name.as_ref().to_owned());
             }
             Event::Empty(event) => {
                 if depth == 0 || code_depth.is_some() {
                     return None;
                 }
-                if depth == 1 && matches!(event.local_name().as_ref(), b"Code" | b"code") {
+                if depth == 1 && matches!(event.local_name().as_ref(), "Code" | "code") {
                     return None;
                 }
             }
@@ -184,10 +184,30 @@ fn xml_api_error_code(body: &[u8]) -> Option<String> {
                 }
             }
             Event::Text(text) => {
-                let decoded = text.unescape().ok()?;
+                let decoded = text.as_ref();
                 if code_depth.is_some() {
-                    code.push_str(&decoded);
+                    code.push_str(decoded);
                 } else if (depth == 0 || root_closed) && !decoded.trim().is_empty() {
+                    return None;
+                }
+            }
+            Event::GeneralRef(reference) => {
+                // quick-xml emits references separately from text. Keep the
+                // same XML character/entity decoding as the older reader.
+                let decoded = match reference.resolve_char_ref().ok()? {
+                    Some(character) => character,
+                    None => match reference.as_ref() {
+                        "lt" => '<',
+                        "gt" => '>',
+                        "amp" => '&',
+                        "apos" => '\'',
+                        "quot" => '"',
+                        _ => return None,
+                    },
+                };
+                if code_depth.is_some() {
+                    code.push(decoded);
+                } else if (depth == 0 || root_closed) && !decoded.is_whitespace() {
                     return None;
                 }
             }
@@ -561,6 +581,15 @@ mod tests {
             api_error_code(b"<Error><Code>cap_exceeded</Code><Message>secret</Message></Error>"),
             "cap_exceeded"
         );
+        assert_eq!(
+            api_error_code(
+                b"<Error><Code>&#99;ap&#x5f;exceeded</Code><Message>a &amp; b</Message></Error>"
+            ),
+            "cap_exceeded"
+        );
+        assert!(api_error_code(b"<Error><Code>cap&unknown;exceeded</Code></Error>").is_empty());
+        assert!(api_error_code(b"<Error><Code>cap&amp;exceeded</Code></Error>").is_empty());
+        assert!(api_error_code(b"&#65;<Error><Code>cap_exceeded</Code></Error>").is_empty());
         assert!(api_error_code(b"<Error><Code>a</Code><Code>b</Code></Error>").is_empty());
         assert!(
             api_error_code(

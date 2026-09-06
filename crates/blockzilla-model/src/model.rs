@@ -279,8 +279,8 @@ impl CanonicalTransaction {
                         && coordinate.outer_index > failed
                     {
                         return Err(Error::InvalidTransaction(format!(
-                            "inner instruction belongs to outer index {}, after failed outer index {failed}",
-                            coordinate.outer_index
+                            "transaction {}: inner instruction belongs to outer index {}, after failed outer index {failed}",
+                            self.header.tx_index, coordinate.outer_index
                         )));
                     }
                     next_inner = Some((

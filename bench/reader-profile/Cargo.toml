@@ -9,15 +9,15 @@ publish = false
 frame-profiler = ["pprof/frame-pointer"]
 
 [dependencies]
-anyhow = "1.0.102"
+anyhow = "1.0.104"
 blockzilla-compact-v2-reader = { path = "../../crates/compact-v2/blockzilla-compact-v2-reader", features = ["http"] }
 blockzilla-archive-v3-reader = { path = "../../crates/archive-v3/blockzilla-archive-v3-reader" }
 blockzilla-model = { path = "../../crates/blockzilla-model" }
 blockzilla-example-workloads = { path = "../../examples/workloads" }
 bs58 = "0.5.1"
-clap = { version = "4.6.1", features = ["derive"] }
+clap = { version = "4.6.6", features = ["derive"] }
 pprof = { version = "0.15.0", features = ["flamegraph"] }
-serde_json = "1.0.149"
+serde_json = "1.0.151"
 
 [lints]
 workspace = true

@@ -617,6 +617,57 @@ impl CompactV2Archive {
         }
     }
 
+    /// Token-only projection with source registry IDs and a discovery resolver.
+    /// The ordered consumer resolves only references it has not seen before.
+    pub fn scan_token_balances_indexed_parallel(
+        &mut self,
+        request: &ScanRequest,
+        sink: &mut dyn blockzilla_model::IndexedTokenSink,
+        config: CompactV2ParallelScanConfig,
+    ) -> QueryResult<CompactV2ParallelScanReceipt> {
+        let config = parallel_config_for_admitted_transport(self.transport_kind, config);
+        match &mut self.source {
+            CompactV2ArchiveSource::Network(source) => {
+                source.scan_token_balances_indexed_parallel(request, sink, config)
+            }
+            CompactV2ArchiveSource::Local(source) => {
+                source.scan_token_balances_indexed_parallel(request, sink, config)
+            }
+        }
+    }
+
+    /// Describe the admitted registry for a separate indexed output and mapping log.
+    ///
+    /// This is source and file/HTTP metadata, not an archive or registry content
+    /// hash. Local identities bind the retained file's device, inode, length,
+    /// and timestamps. Network identities bind the exact URL, length, and strong
+    /// ETag admitted at open. This method neither hashes archive bytes nor probes
+    /// the network. The caller must still check local files after the scan.
+    pub fn indexed_registry_scope(&self) -> QueryResult<serde_json::Value> {
+        let (registry_entries, registry_admission) = match &self.source {
+            CompactV2ArchiveSource::Local(source) => (
+                source.reader().registry_entries(),
+                indexed_local_registry_admission(source.reader().source())?,
+            ),
+            CompactV2ArchiveSource::Network(source) => {
+                let object_set = source.reader().source();
+                (
+                    source.reader().registry_entries(),
+                    indexed_network_registry_admission(
+                        object_set.cache.http().base_url(),
+                        object_set.cache.http().epoch(),
+                        &object_set.inventory,
+                    )?,
+                )
+            }
+        };
+        Ok(indexed_registry_scope_value(
+            &self.identity,
+            registry_entries,
+            registry_admission,
+        ))
+    }
+
     /// Current normalized network and persistent-cache counters.
     pub fn io_snapshot(&self) -> ArchiveIoSnapshot {
         self.transport_snapshot().http_and_cache
@@ -666,6 +717,69 @@ impl CompactV2Archive {
         drop(self.source);
         snapshot
     }
+}
+
+fn indexed_registry_scope_value(
+    identity: &SourceIdentity,
+    registry_entries: u32,
+    registry_admission: serde_json::Value,
+) -> serde_json::Value {
+    serde_json::json!({
+        "schema": "blockzilla-indexed-registry-scope/v1",
+        "source_identity": identity,
+        "registry_entries": registry_entries,
+        "registry_admission": registry_admission,
+    })
+}
+
+fn indexed_local_registry_admission(
+    source: &PinnedLocalRangeSource,
+) -> QueryResult<serde_json::Value> {
+    source
+        .verify_unchanged()
+        .map_err(|error| QueryError::source(ArchiveFormat::CompactV2, error))?;
+    let registry = source
+        .pinned_object_identities()
+        .map_err(|error| QueryError::source(ArchiveFormat::CompactV2, error))?
+        .into_iter()
+        .find(|identity| identity.object == blockzilla_archive_v2::ARCHIVE_V2_PUBKEY_REGISTRY_FILE)
+        .ok_or_else(|| {
+            QueryError::source(
+                ArchiveFormat::CompactV2,
+                SourceError::Protocol(
+                    "indexed registry was not admitted by the pinned source".into(),
+                ),
+            )
+        })?;
+    Ok(serde_json::json!({
+        "kind": "pinned-local-file-metadata",
+        "identity": registry,
+    }))
+}
+
+fn indexed_network_registry_admission(
+    base_url: &Url,
+    epoch: u64,
+    inventory: &NetworkObjectInventory,
+) -> QueryResult<serde_json::Value> {
+    let registry = blockzilla_archive_v2::ARCHIVE_V2_PUBKEY_REGISTRY_FILE;
+    let identity = inventory.identity(registry).ok_or_else(|| {
+        QueryError::source(
+            ArchiveFormat::CompactV2,
+            SourceError::Protocol("indexed registry was not admitted by the HTTP inventory".into()),
+        )
+    })?;
+    // CompactV2Archive constructs this source with the fixed FlatEpoch layout.
+    let url = base_url
+        .join(&format!("{epoch}/{registry}"))
+        .map_err(|error| QueryError::source(ArchiveFormat::CompactV2, error))?;
+    Ok(serde_json::json!({
+        "kind": "strong-etag-object-metadata",
+        "object": registry,
+        "url": url.as_str(),
+        "length": identity.length,
+        "strong_etag": identity.strong_etag,
+    }))
 }
 
 fn parallel_config_for_admitted_transport(
@@ -837,6 +951,83 @@ mod tests {
                 .map(|(name, identity)| ((*name).to_owned(), identity.clone()))
                 .collect(),
         }
+    }
+
+    #[test]
+    fn indexed_scope_changes_when_the_same_candidate_pins_a_replacement_registry() {
+        let temporary = tempfile::tempdir().unwrap();
+        let registry = blockzilla_archive_v2::ARCHIVE_V2_PUBKEY_REGISTRY_FILE;
+        let path = temporary.path().join(registry);
+        std::fs::write(&path, [1; 32]).unwrap();
+        let first = PinnedLocalRangeSource::new_anchored(temporary.path(), &[registry]).unwrap();
+        assert_eq!(first.size(registry).unwrap(), Some(32));
+        let identity = SourceIdentity {
+            format: ArchiveFormat::CompactV2,
+            label: "same-candidate".into(),
+            cluster_id: Some("mainnet-beta".into()),
+            epoch: 900,
+            first_slot: 388_800_000,
+            slots_per_epoch: MAINNET_ARCHIVE_SLOTS_PER_EPOCH,
+            block_count: 0,
+            verification: SourceVerification::OperatorTrusted,
+            binding: Some("operator-trusted-candidate-id=same-candidate".into()),
+        };
+        let first_scope = indexed_registry_scope_value(
+            &identity,
+            1,
+            indexed_local_registry_admission(&first).unwrap(),
+        );
+        std::fs::rename(&path, temporary.path().join("retained-registry.bin")).unwrap();
+        std::fs::write(&path, [2; 32]).unwrap();
+        let replacement =
+            PinnedLocalRangeSource::new_anchored(temporary.path(), &[registry]).unwrap();
+        assert_eq!(replacement.size(registry).unwrap(), Some(32));
+        let replacement_scope = indexed_registry_scope_value(
+            &identity,
+            1,
+            indexed_local_registry_admission(&replacement).unwrap(),
+        );
+        assert_eq!(
+            first_scope["source_identity"],
+            replacement_scope["source_identity"]
+        );
+        assert_ne!(first_scope, replacement_scope);
+        assert_ne!(
+            first_scope["registry_admission"]["identity"]["inode"],
+            replacement_scope["registry_admission"]["identity"]["inode"],
+        );
+        assert!(indexed_local_registry_admission(&first).is_err());
+        assert_eq!(first.stats().read_calls, 0);
+        assert_eq!(replacement.stats().read_calls, 0);
+    }
+
+    #[test]
+    fn indexed_network_registry_scope_binds_origin_length_and_etag_without_io() {
+        let registry = blockzilla_archive_v2::ARCHIVE_V2_PUBKEY_REGISTRY_FILE;
+        let first_inventory = inventory(&[(registry, identity(32, "\"first\""))]);
+        let first_url = Url::parse("https://one.example/compact-v2/").unwrap();
+        let second_url = Url::parse("https://two.example/compact-v2/").unwrap();
+        let first = indexed_network_registry_admission(&first_url, 900, &first_inventory).unwrap();
+        assert_eq!(
+            first["url"],
+            "https://one.example/compact-v2/900/registry.bin"
+        );
+        assert_ne!(
+            first,
+            indexed_network_registry_admission(&second_url, 900, &first_inventory).unwrap()
+        );
+        for changed in [identity(64, "\"first\""), identity(32, "\"second\"")] {
+            assert_ne!(
+                first,
+                indexed_network_registry_admission(
+                    &first_url,
+                    900,
+                    &inventory(&[(registry, changed)])
+                )
+                .unwrap()
+            );
+        }
+        assert!(indexed_network_registry_admission(&first_url, 900, &inventory(&[])).is_err());
     }
 
     #[test]

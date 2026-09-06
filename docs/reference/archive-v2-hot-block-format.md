@@ -30,7 +30,7 @@ product-level boundary.
 
 Wincode schemas encode enums, sequences, and optional fields according to the
 workspace-resolved `wincode` implementation. Consumers should use
-`blockzilla-format::wincode_leb128_config()` rather than reproduce the schema by
+`blockzilla_primitives::wincode_leb128_config()` rather than reproduce the schema by
 hand.
 
 The metadata, PoH, and shredding streams are framed as:

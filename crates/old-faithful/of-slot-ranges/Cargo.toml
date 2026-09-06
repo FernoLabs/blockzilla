@@ -48,18 +48,18 @@ cli = [
 ]
 
 [dependencies]
-anyhow = "1.0.102"
-of-car-reader = { version = "=0.2.0", default-features = false, features = ["compact-index"] }
+anyhow = "1.0.104"
+of-car-reader = { path = "../of-car-reader", version = "=0.2.0", default-features = false, features = ["compact-index"] }
 bs58 = { version = "0.5.1", optional = true }
-clap = { version = "4.6.1", features = ["derive"], optional = true }
-futures = { version = "0.3.32", features = ["executor"], optional = true }
-reqwest = { version = "0.13.3", default-features = false, features = ["rustls", "http2", "blocking"], optional = true }
+clap = { version = "4.6.6", features = ["derive"], optional = true }
+futures = { version = "0.3.34", features = ["executor"], optional = true }
+reqwest = { version = "0.13.4", default-features = false, features = ["rustls", "http2", "blocking"], optional = true }
 sha2 = { version = "0.11.0", optional = true }
-time = { version = "0.3.44", features = ["formatting", "macros"], optional = true }
-zstd = { version = "0.13.3", optional = true }
+time = { version = "0.3.55", features = ["formatting", "macros"], optional = true }
+zstd = { version = "0.14.0", optional = true }
 
 [dev-dependencies]
-tempfile = "3.23"
+tempfile = "3.27.0"
 
 [[bin]]
 name = "debug_epoch_gap"

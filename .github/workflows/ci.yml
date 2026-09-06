@@ -9,6 +9,9 @@ on:
 permissions:
   contents: read
 
+env:
+  RUSTUP_TOOLCHAIN: 1.98.1
+
 concurrency:
   group: ci-${{ github.ref }}
   cancel-in-progress: true
@@ -20,9 +23,9 @@ jobs:
     env:
       RUSTFLAGS: -C target-cpu=native
     steps:
-      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7
-      - name: Install Rust components
-        run: rustup component add rustfmt
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - name: Install Rust toolchain and formatter
+        run: rustup toolchain install 1.98.1 --profile minimal --component rustfmt
       - name: Check formatting
         run: cargo fmt --all -- --check
       - name: Check Archive V2 wire boundary
@@ -68,11 +71,11 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 30
     steps:
-      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
       - name: Install Worker build tools
         run: |
-          rustup target add wasm32-unknown-unknown
-          cargo install worker-build --locked --version 0.8.3
+          rustup toolchain install 1.98.1 --profile minimal --target wasm32-unknown-unknown
+          cargo install worker-build --locked --version 0.8.5
       - name: Build Archive V2 Edgezilla Worker
         working-directory: edgezilla/get-block
         run: worker-build --release . --no-default-features --features worker
@@ -88,7 +91,9 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 30
     steps:
-      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - name: Install Rust toolchain
+        run: rustup toolchain install 1.98.1 --profile minimal
       - name: Check portable launch scripts
         run: |
           /bin/sh -n \
@@ -116,7 +121,7 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 10
     steps:
-      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
       - name: Check local Markdown links
         uses: lycheeverse/lychee-action@e7477775783ea5526144ba13e8db5eec57747ce8 # v2.9.0
         with:
@@ -127,7 +132,7 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 10
     steps:
-      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           fetch-depth: 0
       - name: Scan reachable history with Gitleaks

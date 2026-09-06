@@ -29,7 +29,7 @@ smaller committed generations.
 
 ## Components and trust boundary
 
-- [`blockzilla-read-sdk`](../../crates/compact-v2/blockzilla-compact-v2-reader/README.md) parses and
+- [`blockzilla-compact-v2-reader`](../../crates/compact-v2/blockzilla-compact-v2-reader/README.md) parses and
   validates generation manifests, indexes, registries, metadata, compact block
   frames, filters, and signature ranges.
 - [`blockzilla-archive-gateway`](../../blockzilla/archive-gateway/README.md)
@@ -303,7 +303,7 @@ read-only for this handoff:
 
 Useful Blockzilla decoding references are the
 [hot-block format](../reference/archive-v2-hot-block-format.md), the validated
-index reader in `crates/blockzilla-format/src/v2/archive.rs`, and the existing
+index reader in `crates/compact-v2/blockzilla-archive-v2/src/v2/archive.rs`, and the existing
 message/metadata rendering path in
 `edgezilla/get-block/src/worker.rs`.
 

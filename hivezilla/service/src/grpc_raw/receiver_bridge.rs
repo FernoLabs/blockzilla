@@ -657,6 +657,7 @@ fn decode_receiver_record(
     );
     let update = SubscribeUpdate::decode(raw.as_slice())
         .context("decode receiver bridge SubscribeUpdate")?;
+    validate_raw_grpc_update_v1(&update)?;
     let Some(UpdateOneof::Block(block)) = update.update_oneof.as_ref() else {
         return Err(anyhow!("receiver bridge record is not a block update"));
     };

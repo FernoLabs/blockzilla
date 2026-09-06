@@ -1,0 +1,4815 @@
+{
+  "admission": [
+    {
+      "limits": {
+        "blocks": 8,
+        "normal_declared_bytes": 67108864,
+        "transactions": 131072
+      },
+      "observed_ranges": {
+        "max_in_flight_blocks": [
+          8,
+          8
+        ],
+        "max_in_flight_declared_uncompressed_bytes": [
+          20914414,
+          20914414
+        ],
+        "max_in_flight_transactions": [
+          20034,
+          20034
+        ]
+      },
+      "workers": 1
+    },
+    {
+      "limits": {
+        "blocks": 96,
+        "normal_declared_bytes": 67108864,
+        "transactions": 131072
+      },
+      "observed_ranges": {
+        "max_in_flight_blocks": [
+          96,
+          96
+        ],
+        "max_in_flight_declared_uncompressed_bytes": [
+          50493562,
+          50493562
+        ],
+        "max_in_flight_transactions": [
+          131070,
+          131072
+        ]
+      },
+      "workers": 12
+    }
+  ],
+  "allocation_counter_source_sha256": "ff6c5d7acb061e74a2f530473c8fd8150fc6ba26cc12606cca5375bc76744442",
+  "candidate_lock_sha256": "3aebe00fe33070a00f89a58d35f5aae51da321526651c10eff75ff794295d734",
+  "checks": {
+    "completed_cases": 24,
+    "elapsed_investigation_threshold": 1.1,
+    "full_epoch_scanned": false,
+    "full_output_bytes_checked": false,
+    "historical_oracles_match": true,
+    "measured_iterations": 60,
+    "note": "Bounded receipts and semantic oracles passed. Timing flags are separate from correctness checks.",
+    "oracles": {
+      "indexed-usdc": "workload_oracle=UsdcReport { blocks_seen: 2048, transactions_seen: 3274503, skipped_failed_transactions: 554678, matching_transactions: 22505, pre_rows: 55273, post_rows: 55534, token_balances_unavailable_transactions: 0, token_mint_unavailable_transactions: 0, output_complete: true, coverage: CoverageReport { indeterminate_transactions: 0, sha256: [227, 176, 196, 66, 152, 252, 28, 20, 154, 251, 244, 200, 153, 111, 185, 36, 39, 174, 65, 228, 100, 155, 147, 76, 164, 149, 153, 27, 120, 82, 184, 85] }, output: OutputReport { schema: \"blockzilla-example-usdc-indexed-recorded-balance-exclude-failed/v1\", row_count: 110807, output_bytes: 7756566 } }; dictionary=OutputReport { schema: \"blockzilla-example-usdc-source-account-dictionary/v1\", row_count: 6279, output_bytes: 376816 }",
+      "pumpfun": "workload_oracle=PumpReport { blocks_seen: 2048, transactions_seen: 3274503, skipped_failed_transactions: 554678, matching_transactions: 0, written_transactions: 0, direct_invocations: 0, cpi_invocations: 0, incomplete_instruction_transactions: 0, incomplete_cpi_transactions: 0, matches_without_primary_signature: 0, output_complete: true, coverage: CoverageReport { indeterminate_transactions: 0, sha256: [227, 176, 196, 66, 152, 252, 28, 20, 154, 251, 244, 200, 153, 111, 185, 36, 39, 174, 65, 228, 100, 155, 147, 76, 164, 149, 153, 27, 120, 82, 184, 85] }, output: OutputReport { schema: \"blockzilla-example-pump-transaction-exclude-failed/v2\", row_count: 0, output_bytes: 44 } }",
+      "usdc": "workload_oracle=UsdcReport { blocks_seen: 2048, transactions_seen: 3274503, skipped_failed_transactions: 554678, matching_transactions: 22505, pre_rows: 55273, post_rows: 55534, token_balances_unavailable_transactions: 0, token_mint_unavailable_transactions: 0, output_complete: true, coverage: CoverageReport { indeterminate_transactions: 0, sha256: [227, 176, 196, 66, 152, 252, 28, 20, 154, 251, 244, 200, 153, 111, 185, 36, 39, 174, 65, 228, 100, 155, 147, 76, 164, 149, 153, 27, 120, 82, 184, 85] }, output: OutputReport { schema: \"blockzilla-example-usdc-recorded-balance-exclude-failed/v2\", row_count: 110807, output_bytes: 15069796 } }"
+    },
+    "prefix_counter_and_coverage_parity": true,
+    "profile_invariants": {
+      "indexed-usdc": {
+        "indexed_dictionary_bytes": 376816,
+        "indexed_dictionary_rows": 6279,
+        "instructions": 0,
+        "source_bytes": 654045903,
+        "source_calls": 69,
+        "transactions": 3274503
+      },
+      "pumpfun": {
+        "indexed_dictionary_bytes": null,
+        "indexed_dictionary_rows": null,
+        "instructions": 3253320,
+        "source_bytes": 221283307,
+        "source_calls": 54,
+        "transactions": 3274503
+      },
+      "usdc": {
+        "indexed_dictionary_bytes": null,
+        "indexed_dictionary_rows": null,
+        "instructions": 0,
+        "source_bytes": 654045903,
+        "source_calls": 69,
+        "transactions": 3274503
+      }
+    },
+    "source": {
+      "historical_stat_continuity": true,
+      "scope": "Size and mtime continuity plus small control-file hashes; no new full payload or registry content hash.",
+      "v2_small_file_sha256": {
+        "archive-v2-blocks.index": "78570dbf0ce8e183ebbe895a1096f20802d1fcd1504971110803b39d9ffbab80",
+        "archive-v2-meta.wincode": "36fbc15de3d4f6b169f8769c170cf1c1b2a2d74e118dcfa503755b12038c85d4"
+      }
+    },
+    "status": "PASS",
+    "timing_investigation_flags": []
+  },
+  "comparison_rows": [
+    {
+      "allocation_bytes": {
+        "baseline": {
+          "max": 488615051,
+          "median": 487486651.0,
+          "min": 486358251,
+          "values": [
+            486358251,
+            488615051
+          ]
+        },
+        "candidate": {
+          "max": 486358347,
+          "median": 486143067.0,
+          "min": 485927787,
+          "values": [
+            485927787,
+            486358347
+          ]
+        },
+        "candidate_over_baseline": 0.9972438547860872
+      },
+      "allocation_calls": {
+        "baseline": {
+          "max": 432,
+          "median": 431.0,
+          "min": 430,
+          "values": [
+            430,
+            432
+          ]
+        },
+        "candidate": {
+          "max": 430,
+          "median": 429.5,
+          "min": 429,
+          "values": [
+            429,
+            430
+          ]
+        },
+        "candidate_over_baseline": 0.9965197215777262
+      },
+      "sampled_peak_rss_kib": {
+        "baseline": 489828,
+        "candidate": 490544
+      },
+      "seconds": {
+        "baseline": {
+          "max": 1.8458002260000002,
+          "median": 1.8379056820000002,
+          "min": 1.784385372,
+          "values": [
+            1.8458002260000002,
+            1.784385372,
+            1.8379056820000002
+          ]
+        },
+        "candidate": {
+          "max": 1.800910976,
+          "median": 1.793072384,
+          "min": 1.754612232,
+          "values": [
+            1.754612232,
+            1.800910976,
+            1.793072384
+          ]
+        },
+        "candidate_over_baseline": 0.9756063118803721
+      },
+      "timing_stages": {
+        "baseline": {
+          "batch_count": {
+            "max": 51,
+            "median": 51,
+            "min": 51,
+            "values": [
+              51,
+              51,
+              51
+            ]
+          },
+          "block_count": {
+            "max": 2048,
+            "median": 2048,
+            "min": 2048,
+            "values": [
+              2048,
+              2048,
+              2048
+            ]
+          },
+          "compressed_buffer_count": {
+            "max": 1,
+            "median": 1,
+            "min": 1,
+            "values": [
+              1,
+              1,
+              1
+            ]
+          },
+          "compressed_bytes": {
+            "max": 217634044,
+            "median": 217634044,
+            "min": 217634044,
+            "values": [
+              217634044,
+              217634044,
+              217634044
+            ]
+          },
+          "consume_s": {
+            "max": 0.083043439,
+            "median": 0.082310397,
+            "min": 0.072761647,
+            "values": [
+              0.082310397,
+              0.083043439,
+              0.072761647
+            ]
+          },
+          "decode_project_wall_s": {
+            "max": 1.6518804980000001,
+            "median": 1.625497304,
+            "min": 1.596578075,
+            "values": [
+              1.625497304,
+              1.596578075,
+              1.6518804980000001
+            ]
+          },
+          "decode_sum_s": {
+            "max": 0.516940029,
+            "median": 0.506887116,
+            "min": 0.494508986,
+            "values": [
+              0.506887116,
+              0.494508986,
+              0.516940029
+            ]
+          },
+          "effective_workers": {
+            "max": 1,
+            "median": 1,
+            "min": 1,
+            "values": [
+              1,
+              1,
+              1
+            ]
+          },
+          "input_wait_s": {
+            "max": 0.34539983,
+            "median": 0.341407055,
+            "min": 0.334230632,
+            "values": [
+              0.341407055,
+              0.334230632,
+              0.34539983
+            ]
+          },
+          "max_active_workers": {
+            "max": 1,
+            "median": 1,
+            "min": 1,
+            "values": [
+              1,
+              1,
+              1
+            ]
+          },
+          "max_blocks_per_batch": {
+            "max": 4,
+            "median": 4,
+            "min": 4,
+            "values": [
+              4,
+              4,
+              4
+            ]
+          },
+          "max_compressed_batch_bytes": {
+            "max": 22291532,
+            "median": 22291532,
+            "min": 22291532,
+            "values": [
+              22291532,
+              22291532,
+              22291532
+            ]
+          },
+          "max_declared_uncompressed_batch_bytes": {
+            "max": 33438523,
+            "median": 33438523,
+            "min": 33438523,
+            "values": [
+              33438523,
+              33438523,
+              33438523
+            ]
+          },
+          "max_in_flight_blocks": {
+            "max": 8,
+            "median": 8,
+            "min": 8,
+            "values": [
+              8,
+              8,
+              8
+            ]
+          },
+          "max_in_flight_declared_uncompressed_bytes": {
+            "max": 20914414,
+            "median": 20914414,
+            "min": 20914414,
+            "values": [
+              20914414,
+              20914414,
+              20914414
+            ]
+          },
+          "max_in_flight_transactions": {
+            "max": 20034,
+            "median": 20034,
+            "min": 20034,
+            "values": [
+              20034,
+              20034,
+              20034
+            ]
+          },
+          "max_projected_batch_bytes": {
+            "max": 2345600,
+            "median": 2317440,
+            "min": 1979840,
+            "values": [
+              2317440,
+              2345600,
+              1979840
+            ]
+          },
+          "max_projected_block_bytes": {
+            "max": 1489920,
+            "median": 1460800,
+            "min": 1178560,
+            "values": [
+              1460800,
+              1489920,
+              1178560
+            ]
+          },
+          "max_retained_decompressed_buffer_bytes": {
+            "max": 19334930,
+            "median": 19334930,
+            "min": 19334930,
+            "values": [
+              19334930,
+              19334930,
+              19334930
+            ]
+          },
+          "max_transactions_per_batch": {
+            "max": 12208,
+            "median": 12208,
+            "min": 12208,
+            "values": [
+              12208,
+              12208,
+              12208
+            ]
+          },
+          "producer_buffer_wait_s": {
+            "max": 1.59924089,
+            "median": 1.576956461,
+            "min": 1.5463824879999999,
+            "values": [
+              1.576956461,
+              1.5463824879999999,
+              1.59924089
+            ]
+          },
+          "projection_buffer_wait_s": {
+            "max": 1.308320435,
+            "median": 1.286161465,
+            "min": 1.263760336,
+            "values": [
+              1.286161465,
+              1.263760336,
+              1.308320435
+            ]
+          },
+          "projection_sum_s": {
+            "max": 1.1017331989999999,
+            "median": 1.086219352,
+            "min": 1.06882017,
+            "values": [
+              1.086219352,
+              1.06882017,
+              1.1017331989999999
+            ]
+          },
+          "publish_s": {
+            "max": 0.065856459,
+            "median": 0.064308024,
+            "min": 0.056542322,
+            "values": [
+              0.064308024,
+              0.065856459,
+              0.056542322
+            ]
+          },
+          "read_call_count": {
+            "max": 51,
+            "median": 51,
+            "min": 51,
+            "values": [
+              51,
+              51,
+              51
+            ]
+          },
+          "read_s": {
+            "max": 0.030502969,
+            "median": 0.029952949,
+            "min": 0.028455029,
+            "values": [
+              0.028455029,
+              0.029952949,
+              0.030502969
+            ]
+          },
+          "registry_prefetch_read_bytes": {
+            "max": 432762560,
+            "median": 432762560,
+            "min": 432762560,
+            "values": [
+              432762560,
+              432762560,
+              432762560
+            ]
+          },
+          "registry_prefetch_read_calls": {
+            "max": 13,
+            "median": 13,
+            "min": 13,
+            "values": [
+              13,
+              13,
+              13
+            ]
+          },
+          "registry_resident_bound_bytes": {
+            "max": 432762560,
+            "median": 432762560,
+            "min": 432762560,
+            "values": [
+              432762560,
+              432762560,
+              432762560
+            ]
+          },
+          "requested_workers": {
+            "max": 1,
+            "median": 1,
+            "min": 1,
+            "values": [
+              1,
+              1,
+              1
+            ]
+          },
+          "result_send_wait_s": {
+            "max": 0.0,
+            "median": 0.0,
+            "min": 0.0,
+            "values": [
+              0.0,
+              0.0,
+              0.0
+            ]
+          },
+          "signature_assign_s": {
+            "max": 0.000136552,
+            "median": 0.000135845,
+            "min": 0.000117887,
+            "values": [
+              0.000135845,
+              0.000136552,
+              0.000117887
+            ]
+          },
+          "signature_read_s": {
+            "max": 0.000133734,
+            "median": 0.000122945,
+            "min": 0.000122782,
+            "values": [
+              0.000122782,
+              0.000122945,
+              0.000133734
+            ]
+          }
+        },
+        "candidate": {
+          "batch_count": {
+            "max": 51,
+            "median": 51,
+            "min": 51,
+            "values": [
+              51,
+              51,
+              51
+            ]
+          },
+          "block_count": {
+            "max": 2048,
+            "median": 2048,
+            "min": 2048,
+            "values": [
+              2048,
+              2048,
+              2048
+            ]
+          },
+          "compressed_buffer_count": {
+            "max": 1,
+            "median": 1,
+            "min": 1,
+            "values": [
+              1,
+              1,
+              1
+            ]
+          },
+          "compressed_bytes": {
+            "max": 217634044,
+            "median": 217634044,
+            "min": 217634044,
+            "values": [
+              217634044,
+              217634044,
+              217634044
+            ]
+          },
+          "consume_s": {
+            "max": 0.087694603,
+            "median": 0.083211919,
+            "min": 0.074714116,
+            "values": [
+              0.087694603,
+              0.083211919,
+              0.074714116
+            ]
+          },
+          "decode_project_wall_s": {
+            "max": 1.6126489689999999,
+            "median": 1.607699623,
+            "min": 1.5695314740000001,
+            "values": [
+              1.5695314740000001,
+              1.6126489689999999,
+              1.607699623
+            ]
+          },
+          "decode_sum_s": {
+            "max": 0.518234569,
+            "median": 0.516859287,
+            "min": 0.50001349,
+            "values": [
+              0.50001349,
+              0.516859287,
+              0.518234569
+            ]
+          },
+          "effective_workers": {
+            "max": 1,
+            "median": 1,
+            "min": 1,
+            "values": [
+              1,
+              1,
+              1
+            ]
+          },
+          "input_wait_s": {
+            "max": 0.339138277,
+            "median": 0.334305311,
+            "min": 0.328197565,
+            "values": [
+              0.328197565,
+              0.339138277,
+              0.334305311
+            ]
+          },
+          "max_active_workers": {
+            "max": 1,
+            "median": 1,
+            "min": 1,
+            "values": [
+              1,
+              1,
+              1
+            ]
+          },
+          "max_blocks_per_batch": {
+            "max": 4,
+            "median": 4,
+            "min": 4,
+            "values": [
+              4,
+              4,
+              4
+            ]
+          },
+          "max_compressed_batch_bytes": {
+            "max": 22291532,
+            "median": 22291532,
+            "min": 22291532,
+            "values": [
+              22291532,
+              22291532,
+              22291532
+            ]
+          },
+          "max_declared_uncompressed_batch_bytes": {
+            "max": 33438523,
+            "median": 33438523,
+            "min": 33438523,
+            "values": [
+              33438523,
+              33438523,
+              33438523
+            ]
+          },
+          "max_in_flight_blocks": {
+            "max": 8,
+            "median": 8,
+            "min": 8,
+            "values": [
+              8,
+              8,
+              8
+            ]
+          },
+          "max_in_flight_declared_uncompressed_bytes": {
+            "max": 20914414,
+            "median": 20914414,
+            "min": 20914414,
+            "values": [
+              20914414,
+              20914414,
+              20914414
+            ]
+          },
+          "max_in_flight_transactions": {
+            "max": 20034,
+            "median": 20034,
+            "min": 20034,
+            "values": [
+              20034,
+              20034,
+              20034
+            ]
+          },
+          "max_projected_batch_bytes": {
+            "max": 2353920,
+            "median": 2053120,
+            "min": 1997760,
+            "values": [
+              2053120,
+              1997760,
+              2353920
+            ]
+          },
+          "max_projected_block_bytes": {
+            "max": 1298240,
+            "median": 1289600,
+            "min": 1136800,
+            "values": [
+              1298240,
+              1136800,
+              1289600
+            ]
+          },
+          "max_retained_decompressed_buffer_bytes": {
+            "max": 19334930,
+            "median": 19334930,
+            "min": 19334930,
+            "values": [
+              19334930,
+              19334930,
+              19334930
+            ]
+          },
+          "max_transactions_per_batch": {
+            "max": 12208,
+            "median": 12208,
+            "min": 12208,
+            "values": [
+              12208,
+              12208,
+              12208
+            ]
+          },
+          "producer_buffer_wait_s": {
+            "max": 1.564754111,
+            "median": 1.560077639,
+            "min": 1.521994033,
+            "values": [
+              1.521994033,
+              1.564754111,
+              1.560077639
+            ]
+          },
+          "projection_buffer_wait_s": {
+            "max": 1.277170093,
+            "median": 1.276667035,
+            "min": 1.243424464,
+            "values": [
+              1.243424464,
+              1.276667035,
+              1.277170093
+            ]
+          },
+          "projection_sum_s": {
+            "max": 1.062004766,
+            "median": 1.059980437,
+            "min": 1.035702193,
+            "values": [
+              1.035702193,
+              1.062004766,
+              1.059980437
+            ]
+          },
+          "publish_s": {
+            "max": 0.06730351,
+            "median": 0.064391531,
+            "min": 0.056669166,
+            "values": [
+              0.06730351,
+              0.064391531,
+              0.056669166
+            ]
+          },
+          "read_call_count": {
+            "max": 51,
+            "median": 51,
+            "min": 51,
+            "values": [
+              51,
+              51,
+              51
+            ]
+          },
+          "read_s": {
+            "max": 0.030104919,
+            "median": 0.029644842,
+            "min": 0.028320215,
+            "values": [
+              0.028320215,
+              0.029644842,
+              0.030104919
+            ]
+          },
+          "registry_prefetch_read_bytes": {
+            "max": 432762560,
+            "median": 432762560,
+            "min": 432762560,
+            "values": [
+              432762560,
+              432762560,
+              432762560
+            ]
+          },
+          "registry_prefetch_read_calls": {
+            "max": 13,
+            "median": 13,
+            "min": 13,
+            "values": [
+              13,
+              13,
+              13
+            ]
+          },
+          "registry_resident_bound_bytes": {
+            "max": 432762560,
+            "median": 432762560,
+            "min": 432762560,
+            "values": [
+              432762560,
+              432762560,
+              432762560
+            ]
+          },
+          "requested_workers": {
+            "max": 1,
+            "median": 1,
+            "min": 1,
+            "values": [
+              1,
+              1,
+              1
+            ]
+          },
+          "result_send_wait_s": {
+            "max": 0.0,
+            "median": 0.0,
+            "min": 0.0,
+            "values": [
+              0.0,
+              0.0,
+              0.0
+            ]
+          },
+          "signature_assign_s": {
+            "max": 0.000165707,
+            "median": 0.000130711,
+            "min": 0.000118964,
+            "values": [
+              0.000165707,
+              0.000130711,
+              0.000118964
+            ]
+          },
+          "signature_read_s": {
+            "max": 0.0002094,
+            "median": 0.000202477,
+            "min": 0.000180318,
+            "values": [
+              0.0002094,
+              0.000202477,
+              0.000180318
+            ]
+          }
+        }
+      },
+      "workers": 1,
+      "workload": "usdc"
+    },
+    {
+      "allocation_bytes": {
+        "baseline": {
+          "max": 680182246,
+          "median": 672487600.0,
+          "min": 664792954,
+          "values": [
+            680182246,
+            664792954
+          ]
+        },
+        "candidate": {
+          "max": 682484097,
+          "median": 670010088.5,
+          "min": 657536080,
+          "values": [
+            682484097,
+            657536080
+          ]
+        },
+        "candidate_over_baseline": 0.996315900099868
+      },
+      "allocation_calls": {
+        "baseline": {
+          "max": 3541,
+          "median": 3413.5,
+          "min": 3286,
+          "values": [
+            3541,
+            3286
+          ]
+        },
+        "candidate": {
+          "max": 3701,
+          "median": 3506.5,
+          "min": 3312,
+          "values": [
+            3701,
+            3312
+          ]
+        },
+        "candidate_over_baseline": 1.0272447634392852
+      },
+      "sampled_peak_rss_kib": {
+        "baseline": 30836,
+        "candidate": 27480
+      },
+      "seconds": {
+        "baseline": {
+          "max": 0.504680125,
+          "median": 0.501321366,
+          "min": 0.489867189,
+          "values": [
+            0.489867189,
+            0.504680125,
+            0.501321366
+          ]
+        },
+        "candidate": {
+          "max": 0.49738233,
+          "median": 0.495962371,
+          "min": 0.487793454,
+          "values": [
+            0.487793454,
+            0.49738233,
+            0.495962371
+          ]
+        },
+        "candidate_over_baseline": 0.9893102601176588
+      },
+      "timing_stages": {
+        "baseline": {
+          "batch_count": {
+            "max": 51,
+            "median": 51,
+            "min": 51,
+            "values": [
+              51,
+              51,
+              51
+            ]
+          },
+          "block_count": {
+            "max": 2048,
+            "median": 2048,
+            "min": 2048,
+            "values": [
+              2048,
+              2048,
+              2048
+            ]
+          },
+          "compressed_buffer_count": {
+            "max": 3,
+            "median": 3,
+            "min": 3,
+            "values": [
+              3,
+              3,
+              3
+            ]
+          },
+          "compressed_bytes": {
+            "max": 217634044,
+            "median": 217634044,
+            "min": 217634044,
+            "values": [
+              217634044,
+              217634044,
+              217634044
+            ]
+          },
+          "consume_s": {
+            "max": 0.157932937,
+            "median": 0.1578378,
+            "min": 0.132784379,
+            "values": [
+              0.132784379,
+              0.1578378,
+              0.157932937
+            ]
+          },
+          "decode_project_wall_s": {
+            "max": 0.31130117,
+            "median": 0.310167479,
+            "min": 0.30212209,
+            "values": [
+              0.30212209,
+              0.31130117,
+              0.310167479
+            ]
+          },
+          "decode_sum_s": {
+            "max": 0.966234163,
+            "median": 0.961394122,
+            "min": 0.958495759,
+            "values": [
+              0.958495759,
+              0.961394122,
+              0.966234163
+            ]
+          },
+          "effective_workers": {
+            "max": 12,
+            "median": 12,
+            "min": 12,
+            "values": [
+              12,
+              12,
+              12
+            ]
+          },
+          "input_wait_s": {
+            "max": 0.0563579,
+            "median": 0.029528701,
+            "min": 0.029060621,
+            "values": [
+              0.0563579,
+              0.029528701,
+              0.029060621
+            ]
+          },
+          "max_active_workers": {
+            "max": 12,
+            "median": 12,
+            "min": 12,
+            "values": [
+              12,
+              12,
+              12
+            ]
+          },
+          "max_blocks_per_batch": {
+            "max": 48,
+            "median": 48,
+            "min": 48,
+            "values": [
+              48,
+              48,
+              48
+            ]
+          },
+          "max_compressed_batch_bytes": {
+            "max": 22291532,
+            "median": 22291532,
+            "min": 22291532,
+            "values": [
+              22291532,
+              22291532,
+              22291532
+            ]
+          },
+          "max_declared_uncompressed_batch_bytes": {
+            "max": 33438523,
+            "median": 33438523,
+            "min": 33438523,
+            "values": [
+              33438523,
+              33438523,
+              33438523
+            ]
+          },
+          "max_in_flight_blocks": {
+            "max": 96,
+            "median": 96,
+            "min": 96,
+            "values": [
+              96,
+              96,
+              96
+            ]
+          },
+          "max_in_flight_declared_uncompressed_bytes": {
+            "max": 50493562,
+            "median": 50493562,
+            "min": 50493562,
+            "values": [
+              50493562,
+              50493562,
+              50493562
+            ]
+          },
+          "max_in_flight_transactions": {
+            "max": 131072,
+            "median": 131072,
+            "min": 131070,
+            "values": [
+              131070,
+              131072,
+              131072
+            ]
+          },
+          "max_projected_batch_bytes": {
+            "max": 50870560,
+            "median": 50597280,
+            "min": 36530080,
+            "values": [
+              36530080,
+              50597280,
+              50870560
+            ]
+          },
+          "max_projected_block_bytes": {
+            "max": 1434880,
+            "median": 1331840,
+            "min": 1188800,
+            "values": [
+              1188800,
+              1434880,
+              1331840
+            ]
+          },
+          "max_retained_decompressed_buffer_bytes": {
+            "max": 19334930,
+            "median": 19334930,
+            "min": 19334930,
+            "values": [
+              19334930,
+              19334930,
+              19334930
+            ]
+          },
+          "max_transactions_per_batch": {
+            "max": 65432,
+            "median": 65432,
+            "min": 65432,
+            "values": [
+              65432,
+              65432,
+              65432
+            ]
+          },
+          "producer_buffer_wait_s": {
+            "max": 0.252738483,
+            "median": 0.248733073,
+            "min": 0.246013056,
+            "values": [
+              0.246013056,
+              0.252738483,
+              0.248733073
+            ]
+          },
+          "projection_buffer_wait_s": {
+            "max": 0.282088136,
+            "median": 0.281376491,
+            "min": 0.243579498,
+            "values": [
+              0.243579498,
+              0.282088136,
+              0.281376491
+            ]
+          },
+          "projection_sum_s": {
+            "max": 2.482603612,
+            "median": 2.40868561,
+            "min": 2.387029394,
+            "values": [
+              2.40868561,
+              2.482603612,
+              2.387029394
+            ]
+          },
+          "publish_s": {
+            "max": 0.096248354,
+            "median": 0.095381309,
+            "min": 0.0900324,
+            "values": [
+              0.0900324,
+              0.095381309,
+              0.096248354
+            ]
+          },
+          "read_call_count": {
+            "max": 51,
+            "median": 51,
+            "min": 51,
+            "values": [
+              51,
+              51,
+              51
+            ]
+          },
+          "read_s": {
+            "max": 0.060048907,
+            "median": 0.052784077,
+            "min": 0.052662871,
+            "values": [
+              0.052662871,
+              0.052784077,
+              0.060048907
+            ]
+          },
+          "registry_prefetch_read_bytes": {
+            "max": 432762560,
+            "median": 432762560,
+            "min": 432762560,
+            "values": [
+              432762560,
+              432762560,
+              432762560
+            ]
+          },
+          "registry_prefetch_read_calls": {
+            "max": 13,
+            "median": 13,
+            "min": 13,
+            "values": [
+              13,
+              13,
+              13
+            ]
+          },
+          "registry_resident_bound_bytes": {
+            "max": 432762560,
+            "median": 432762560,
+            "min": 432762560,
+            "values": [
+              432762560,
+              432762560,
+              432762560
+            ]
+          },
+          "requested_workers": {
+            "max": 12,
+            "median": 12,
+            "min": 12,
+            "values": [
+              12,
+              12,
+              12
+            ]
+          },
+          "result_send_wait_s": {
+            "max": 0.0,
+            "median": 0.0,
+            "min": 0.0,
+            "values": [
+              0.0,
+              0.0,
+              0.0
+            ]
+          },
+          "signature_assign_s": {
+            "max": 7.2774e-05,
+            "median": 7.1641e-05,
+            "min": 6.8042e-05,
+            "values": [
+              6.8042e-05,
+              7.1641e-05,
+              7.2774e-05
+            ]
+          },
+          "signature_read_s": {
+            "max": 0.000134219,
+            "median": 0.000128854,
+            "min": 0.000127158,
+            "values": [
+              0.000127158,
+              0.000134219,
+              0.000128854
+            ]
+          }
+        },
+        "candidate": {
+          "batch_count": {
+            "max": 51,
+            "median": 51,
+            "min": 51,
+            "values": [
+              51,
+              51,
+              51
+            ]
+          },
+          "block_count": {
+            "max": 2048,
+            "median": 2048,
+            "min": 2048,
+            "values": [
+              2048,
+              2048,
+              2048
+            ]
+          },
+          "compressed_buffer_count": {
+            "max": 3,
+            "median": 3,
+            "min": 3,
+            "values": [
+              3,
+              3,
+              3
+            ]
+          },
+          "compressed_bytes": {
+            "max": 217634044,
+            "median": 217634044,
+            "min": 217634044,
+            "values": [
+              217634044,
+              217634044,
+              217634044
+            ]
+          },
+          "consume_s": {
+            "max": 0.168097741,
+            "median": 0.144562747,
+            "min": 0.140949906,
+            "values": [
+              0.168097741,
+              0.140949906,
+              0.144562747
+            ]
+          },
+          "decode_project_wall_s": {
+            "max": 0.309201315,
+            "median": 0.301234871,
+            "min": 0.293698142,
+            "values": [
+              0.293698142,
+              0.309201315,
+              0.301234871
+            ]
+          },
+          "decode_sum_s": {
+            "max": 0.977339624,
+            "median": 0.974960587,
+            "min": 0.936836926,
+            "values": [
+              0.936836926,
+              0.974960587,
+              0.977339624
+            ]
+          },
+          "effective_workers": {
+            "max": 12,
+            "median": 12,
+            "min": 12,
+            "values": [
+              12,
+              12,
+              12
+            ]
+          },
+          "input_wait_s": {
+            "max": 0.043863377,
+            "median": 0.032676961,
+            "min": 0.025577518,
+            "values": [
+              0.032676961,
+              0.025577518,
+              0.043863377
+            ]
+          },
+          "max_active_workers": {
+            "max": 12,
+            "median": 12,
+            "min": 12,
+            "values": [
+              12,
+              12,
+              12
+            ]
+          },
+          "max_blocks_per_batch": {
+            "max": 48,
+            "median": 48,
+            "min": 48,
+            "values": [
+              48,
+              48,
+              48
+            ]
+          },
+          "max_compressed_batch_bytes": {
+            "max": 22291532,
+            "median": 22291532,
+            "min": 22291532,
+            "values": [
+              22291532,
+              22291532,
+              22291532
+            ]
+          },
+          "max_declared_uncompressed_batch_bytes": {
+            "max": 33438523,
+            "median": 33438523,
+            "min": 33438523,
+            "values": [
+              33438523,
+              33438523,
+              33438523
+            ]
+          },
+          "max_in_flight_blocks": {
+            "max": 96,
+            "median": 96,
+            "min": 96,
+            "values": [
+              96,
+              96,
+              96
+            ]
+          },
+          "max_in_flight_declared_uncompressed_bytes": {
+            "max": 50493562,
+            "median": 50493562,
+            "min": 50493562,
+            "values": [
+              50493562,
+              50493562,
+              50493562
+            ]
+          },
+          "max_in_flight_transactions": {
+            "max": 131072,
+            "median": 131072,
+            "min": 131071,
+            "values": [
+              131072,
+              131072,
+              131071
+            ]
+          },
+          "max_projected_batch_bytes": {
+            "max": 52238720,
+            "median": 50014880,
+            "min": 44785280,
+            "values": [
+              44785280,
+              50014880,
+              52238720
+            ]
+          },
+          "max_projected_block_bytes": {
+            "max": 1379520,
+            "median": 1378240,
+            "min": 1367840,
+            "values": [
+              1378240,
+              1379520,
+              1367840
+            ]
+          },
+          "max_retained_decompressed_buffer_bytes": {
+            "max": 19334930,
+            "median": 19334930,
+            "min": 19334930,
+            "values": [
+              19334930,
+              19334930,
+              19334930
+            ]
+          },
+          "max_transactions_per_batch": {
+            "max": 65432,
+            "median": 65432,
+            "min": 65432,
+            "values": [
+              65432,
+              65432,
+              65432
+            ]
+          },
+          "producer_buffer_wait_s": {
+            "max": 0.246992136,
+            "median": 0.244509304,
+            "min": 0.231249589,
+            "values": [
+              0.231249589,
+              0.246992136,
+              0.244509304
+            ]
+          },
+          "projection_buffer_wait_s": {
+            "max": 0.282336969,
+            "median": 0.257529702,
+            "min": 0.257308635,
+            "values": [
+              0.257308635,
+              0.282336969,
+              0.257529702
+            ]
+          },
+          "projection_sum_s": {
+            "max": 2.423999505,
+            "median": 2.406587235,
+            "min": 2.398171161,
+            "values": [
+              2.398171161,
+              2.423999505,
+              2.406587235
+            ]
+          },
+          "publish_s": {
+            "max": 0.10217406,
+            "median": 0.101095163,
+            "min": 0.088904843,
+            "values": [
+              0.101095163,
+              0.088904843,
+              0.10217406
+            ]
+          },
+          "read_call_count": {
+            "max": 51,
+            "median": 51,
+            "min": 51,
+            "values": [
+              51,
+              51,
+              51
+            ]
+          },
+          "read_s": {
+            "max": 0.056985769,
+            "median": 0.056871664,
+            "min": 0.054401693,
+            "values": [
+              0.056985769,
+              0.056871664,
+              0.054401693
+            ]
+          },
+          "registry_prefetch_read_bytes": {
+            "max": 432762560,
+            "median": 432762560,
+            "min": 432762560,
+            "values": [
+              432762560,
+              432762560,
+              432762560
+            ]
+          },
+          "registry_prefetch_read_calls": {
+            "max": 13,
+            "median": 13,
+            "min": 13,
+            "values": [
+              13,
+              13,
+              13
+            ]
+          },
+          "registry_resident_bound_bytes": {
+            "max": 432762560,
+            "median": 432762560,
+            "min": 432762560,
+            "values": [
+              432762560,
+              432762560,
+              432762560
+            ]
+          },
+          "requested_workers": {
+            "max": 12,
+            "median": 12,
+            "min": 12,
+            "values": [
+              12,
+              12,
+              12
+            ]
+          },
+          "result_send_wait_s": {
+            "max": 0.0,
+            "median": 0.0,
+            "min": 0.0,
+            "values": [
+              0.0,
+              0.0,
+              0.0
+            ]
+          },
+          "signature_assign_s": {
+            "max": 8.8075e-05,
+            "median": 7.6279e-05,
+            "min": 6.9066e-05,
+            "values": [
+              8.8075e-05,
+              7.6279e-05,
+              6.9066e-05
+            ]
+          },
+          "signature_read_s": {
+            "max": 0.000170185,
+            "median": 0.000145347,
+            "min": 0.000137351,
+            "values": [
+              0.000137351,
+              0.000145347,
+              0.000170185
+            ]
+          }
+        }
+      },
+      "workers": 12,
+      "workload": "usdc"
+    },
+    {
+      "allocation_bytes": {
+        "baseline": {
+          "max": 187698684,
+          "median": 186358940.0,
+          "min": 185019196,
+          "values": [
+            187698684,
+            185019196
+          ]
+        },
+        "candidate": {
+          "max": 187050460,
+          "median": 186936668.0,
+          "min": 186822876,
+          "values": [
+            187050460,
+            186822876
+          ]
+        },
+        "candidate_over_baseline": 1.003100082024506
+      },
+      "allocation_calls": {
+        "baseline": {
+          "max": 303373,
+          "median": 302878.0,
+          "min": 302383,
+          "values": [
+            303373,
+            302383
+          ]
+        },
+        "candidate": {
+          "max": 309662,
+          "median": 307652.5,
+          "min": 305643,
+          "values": [
+            309662,
+            305643
+          ]
+        },
+        "candidate_over_baseline": 1.0157637728722455
+      },
+      "sampled_peak_rss_kib": {
+        "baseline": 79924,
+        "candidate": 79752
+      },
+      "seconds": {
+        "baseline": {
+          "max": 2.081277169,
+          "median": 2.050578893,
+          "min": 2.046248648,
+          "values": [
+            2.081277169,
+            2.046248648,
+            2.050578893
+          ]
+        },
+        "candidate": {
+          "max": 2.046279071,
+          "median": 2.035040587,
+          "min": 2.010945142,
+          "values": [
+            2.046279071,
+            2.035040587,
+            2.010945142
+          ]
+        },
+        "candidate_over_baseline": 0.9924224783289038
+      },
+      "timing_stages": {
+        "baseline": {
+          "batch_count": {
+            "max": 51,
+            "median": 51,
+            "min": 51,
+            "values": [
+              51,
+              51,
+              51
+            ]
+          },
+          "block_count": {
+            "max": 2048,
+            "median": 2048,
+            "min": 2048,
+            "values": [
+              2048,
+              2048,
+              2048
+            ]
+          },
+          "compressed_buffer_count": {
+            "max": 1,
+            "median": 1,
+            "min": 1,
+            "values": [
+              1,
+              1,
+              1
+            ]
+          },
+          "compressed_bytes": {
+            "max": 217634044,
+            "median": 217634044,
+            "min": 217634044,
+            "values": [
+              217634044,
+              217634044,
+              217634044
+            ]
+          },
+          "consume_s": {
+            "max": 0.129100571,
+            "median": 0.127004586,
+            "min": 0.123639422,
+            "values": [
+              0.129100571,
+              0.123639422,
+              0.127004586
+            ]
+          },
+          "decode_project_wall_s": {
+            "max": 2.065228595,
+            "median": 2.032428524,
+            "min": 2.032142946,
+            "values": [
+              2.065228595,
+              2.032142946,
+              2.032428524
+            ]
+          },
+          "decode_sum_s": {
+            "max": 0.513228567,
+            "median": 0.512956552,
+            "min": 0.509914464,
+            "values": [
+              0.513228567,
+              0.512956552,
+              0.509914464
+            ]
+          },
+          "effective_workers": {
+            "max": 1,
+            "median": 1,
+            "min": 1,
+            "values": [
+              1,
+              1,
+              1
+            ]
+          },
+          "input_wait_s": {
+            "max": 0.429435431,
+            "median": 0.422875141,
+            "min": 0.418362738,
+            "values": [
+              0.429435431,
+              0.418362738,
+              0.422875141
+            ]
+          },
+          "max_active_workers": {
+            "max": 1,
+            "median": 1,
+            "min": 1,
+            "values": [
+              1,
+              1,
+              1
+            ]
+          },
+          "max_blocks_per_batch": {
+            "max": 4,
+            "median": 4,
+            "min": 4,
+            "values": [
+              4,
+              4,
+              4
+            ]
+          },
+          "max_compressed_batch_bytes": {
+            "max": 22291532,
+            "median": 22291532,
+            "min": 22291532,
+            "values": [
+              22291532,
+              22291532,
+              22291532
+            ]
+          },
+          "max_declared_uncompressed_batch_bytes": {
+            "max": 33438523,
+            "median": 33438523,
+            "min": 33438523,
+            "values": [
+              33438523,
+              33438523,
+              33438523
+            ]
+          },
+          "max_in_flight_blocks": {
+            "max": 8,
+            "median": 8,
+            "min": 8,
+            "values": [
+              8,
+              8,
+              8
+            ]
+          },
+          "max_in_flight_declared_uncompressed_bytes": {
+            "max": 20914414,
+            "median": 20914414,
+            "min": 20914414,
+            "values": [
+              20914414,
+              20914414,
+              20914414
+            ]
+          },
+          "max_in_flight_transactions": {
+            "max": 20034,
+            "median": 20034,
+            "min": 20034,
+            "values": [
+              20034,
+              20034,
+              20034
+            ]
+          },
+          "max_projected_batch_bytes": {
+            "max": 10963497,
+            "median": 10045694,
+            "min": 10002023,
+            "values": [
+              10045694,
+              10002023,
+              10963497
+            ]
+          },
+          "max_projected_block_bytes": {
+            "max": 10446270,
+            "median": 10045694,
+            "min": 9885118,
+            "values": [
+              10045694,
+              9885118,
+              10446270
+            ]
+          },
+          "max_retained_decompressed_buffer_bytes": {
+            "max": 19334930,
+            "median": 19334930,
+            "min": 19334930,
+            "values": [
+              19334930,
+              19334930,
+              19334930
+            ]
+          },
+          "max_transactions_per_batch": {
+            "max": 12208,
+            "median": 12208,
+            "min": 12208,
+            "values": [
+              12208,
+              12208,
+              12208
+            ]
+          },
+          "producer_buffer_wait_s": {
+            "max": 2.004018093,
+            "median": 1.9713735369999998,
+            "min": 1.9712896309999999,
+            "values": [
+              2.004018093,
+              1.9712896309999999,
+              1.9713735369999998
+            ]
+          },
+          "projection_buffer_wait_s": {
+            "max": 1.638241251,
+            "median": 1.614282399,
+            "min": 1.612214245,
+            "values": [
+              1.638241251,
+              1.614282399,
+              1.612214245
+            ]
+          },
+          "projection_sum_s": {
+            "max": 1.5188718049999999,
+            "median": 1.489641378,
+            "min": 1.486722784,
+            "values": [
+              1.5188718049999999,
+              1.486722784,
+              1.489641378
+            ]
+          },
+          "publish_s": {
+            "max": 0.08926258,
+            "median": 0.088222798,
+            "min": 0.086147536,
+            "values": [
+              0.088222798,
+              0.086147536,
+              0.08926258
+            ]
+          },
+          "read_call_count": {
+            "max": 51,
+            "median": 51,
+            "min": 51,
+            "values": [
+              51,
+              51,
+              51
+            ]
+          },
+          "read_s": {
+            "max": 0.034446292,
+            "median": 0.033397627,
+            "min": 0.031247753,
+            "values": [
+              0.033397627,
+              0.031247753,
+              0.034446292
+            ]
+          },
+          "registry_prefetch_read_bytes": {
+            "max": 0,
+            "median": 0,
+            "min": 0,
+            "values": [
+              0,
+              0,
+              0
+            ]
+          },
+          "registry_prefetch_read_calls": {
+            "max": 0,
+            "median": 0,
+            "min": 0,
+            "values": [
+              0,
+              0,
+              0
+            ]
+          },
+          "registry_resident_bound_bytes": {
+            "max": 524288,
+            "median": 524288,
+            "min": 524288,
+            "values": [
+              524288,
+              524288,
+              524288
+            ]
+          },
+          "requested_workers": {
+            "max": 1,
+            "median": 1,
+            "min": 1,
+            "values": [
+              1,
+              1,
+              1
+            ]
+          },
+          "result_send_wait_s": {
+            "max": 0.0,
+            "median": 0.0,
+            "min": 0.0,
+            "values": [
+              0.0,
+              0.0,
+              0.0
+            ]
+          },
+          "signature_assign_s": {
+            "max": 0.000151131,
+            "median": 0.000128531,
+            "min": 0.000121122,
+            "values": [
+              0.000151131,
+              0.000121122,
+              0.000128531
+            ]
+          },
+          "signature_read_s": {
+            "max": 0.000209212,
+            "median": 0.000154933,
+            "min": 0.000149456,
+            "values": [
+              0.000209212,
+              0.000149456,
+              0.000154933
+            ]
+          }
+        },
+        "candidate": {
+          "batch_count": {
+            "max": 51,
+            "median": 51,
+            "min": 51,
+            "values": [
+              51,
+              51,
+              51
+            ]
+          },
+          "block_count": {
+            "max": 2048,
+            "median": 2048,
+            "min": 2048,
+            "values": [
+              2048,
+              2048,
+              2048
+            ]
+          },
+          "compressed_buffer_count": {
+            "max": 1,
+            "median": 1,
+            "min": 1,
+            "values": [
+              1,
+              1,
+              1
+            ]
+          },
+          "compressed_bytes": {
+            "max": 217634044,
+            "median": 217634044,
+            "min": 217634044,
+            "values": [
+              217634044,
+              217634044,
+              217634044
+            ]
+          },
+          "consume_s": {
+            "max": 0.133868174,
+            "median": 0.121619653,
+            "min": 0.096303166,
+            "values": [
+              0.133868174,
+              0.121619653,
+              0.096303166
+            ]
+          },
+          "decode_project_wall_s": {
+            "max": 2.029053965,
+            "median": 2.019284881,
+            "min": 1.994439867,
+            "values": [
+              2.029053965,
+              2.019284881,
+              1.994439867
+            ]
+          },
+          "decode_sum_s": {
+            "max": 0.523988898,
+            "median": 0.514481889,
+            "min": 0.51238845,
+            "values": [
+              0.51238845,
+              0.514481889,
+              0.523988898
+            ]
+          },
+          "effective_workers": {
+            "max": 1,
+            "median": 1,
+            "min": 1,
+            "values": [
+              1,
+              1,
+              1
+            ]
+          },
+          "input_wait_s": {
+            "max": 0.424022112,
+            "median": 0.417868025,
+            "min": 0.413333894,
+            "values": [
+              0.424022112,
+              0.417868025,
+              0.413333894
+            ]
+          },
+          "max_active_workers": {
+            "max": 1,
+            "median": 1,
+            "min": 1,
+            "values": [
+              1,
+              1,
+              1
+            ]
+          },
+          "max_blocks_per_batch": {
+            "max": 4,
+            "median": 4,
+            "min": 4,
+            "values": [
+              4,
+              4,
+              4
+            ]
+          },
+          "max_compressed_batch_bytes": {
+            "max": 22291532,
+            "median": 22291532,
+            "min": 22291532,
+            "values": [
+              22291532,
+              22291532,
+              22291532
+            ]
+          },
+          "max_declared_uncompressed_batch_bytes": {
+            "max": 33438523,
+            "median": 33438523,
+            "min": 33438523,
+            "values": [
+              33438523,
+              33438523,
+              33438523
+            ]
+          },
+          "max_in_flight_blocks": {
+            "max": 8,
+            "median": 8,
+            "min": 8,
+            "values": [
+              8,
+              8,
+              8
+            ]
+          },
+          "max_in_flight_declared_uncompressed_bytes": {
+            "max": 20914414,
+            "median": 20914414,
+            "min": 20914414,
+            "values": [
+              20914414,
+              20914414,
+              20914414
+            ]
+          },
+          "max_in_flight_transactions": {
+            "max": 20034,
+            "median": 20034,
+            "min": 20034,
+            "values": [
+              20034,
+              20034,
+              20034
+            ]
+          },
+          "max_projected_batch_bytes": {
+            "max": 10009639,
+            "median": 9938599,
+            "min": 9783976,
+            "values": [
+              10009639,
+              9783976,
+              9938599
+            ]
+          },
+          "max_projected_block_bytes": {
+            "max": 9890942,
+            "median": 9848382,
+            "min": 9783976,
+            "values": [
+              9890942,
+              9783976,
+              9848382
+            ]
+          },
+          "max_retained_decompressed_buffer_bytes": {
+            "max": 19334930,
+            "median": 19334930,
+            "min": 19334930,
+            "values": [
+              19334930,
+              19334930,
+              19334930
+            ]
+          },
+          "max_transactions_per_batch": {
+            "max": 12208,
+            "median": 12208,
+            "min": 12208,
+            "values": [
+              12208,
+              12208,
+              12208
+            ]
+          },
+          "producer_buffer_wait_s": {
+            "max": 1.968187165,
+            "median": 1.959537705,
+            "min": 1.934901676,
+            "values": [
+              1.968187165,
+              1.959537705,
+              1.934901676
+            ]
+          },
+          "projection_buffer_wait_s": {
+            "max": 1.607968338,
+            "median": 1.6041391310000002,
+            "min": 1.583790761,
+            "values": [
+              1.607968338,
+              1.6041391310000002,
+              1.583790761
+            ]
+          },
+          "projection_sum_s": {
+            "max": 1.4800145900000001,
+            "median": 1.469525022,
+            "min": 1.435527789,
+            "values": [
+              1.4800145900000001,
+              1.469525022,
+              1.435527789
+            ]
+          },
+          "publish_s": {
+            "max": 0.092946597,
+            "median": 0.083748431,
+            "min": 0.066146128,
+            "values": [
+              0.092946597,
+              0.083748431,
+              0.066146128
+            ]
+          },
+          "read_call_count": {
+            "max": 51,
+            "median": 51,
+            "min": 51,
+            "values": [
+              51,
+              51,
+              51
+            ]
+          },
+          "read_s": {
+            "max": 0.035807389,
+            "median": 0.034519591,
+            "min": 0.03446559,
+            "values": [
+              0.035807389,
+              0.03446559,
+              0.034519591
+            ]
+          },
+          "registry_prefetch_read_bytes": {
+            "max": 0,
+            "median": 0,
+            "min": 0,
+            "values": [
+              0,
+              0,
+              0
+            ]
+          },
+          "registry_prefetch_read_calls": {
+            "max": 0,
+            "median": 0,
+            "min": 0,
+            "values": [
+              0,
+              0,
+              0
+            ]
+          },
+          "registry_resident_bound_bytes": {
+            "max": 524288,
+            "median": 524288,
+            "min": 524288,
+            "values": [
+              524288,
+              524288,
+              524288
+            ]
+          },
+          "requested_workers": {
+            "max": 1,
+            "median": 1,
+            "min": 1,
+            "values": [
+              1,
+              1,
+              1
+            ]
+          },
+          "result_send_wait_s": {
+            "max": 0.0,
+            "median": 0.0,
+            "min": 0.0,
+            "values": [
+              0.0,
+              0.0,
+              0.0
+            ]
+          },
+          "signature_assign_s": {
+            "max": 0.000136482,
+            "median": 0.000128608,
+            "min": 6.9303e-05,
+            "values": [
+              0.000136482,
+              0.000128608,
+              6.9303e-05
+            ]
+          },
+          "signature_read_s": {
+            "max": 0.000204897,
+            "median": 0.000196829,
+            "min": 0.00015638,
+            "values": [
+              0.000196829,
+              0.000204897,
+              0.00015638
+            ]
+          }
+        }
+      },
+      "workers": 1,
+      "workload": "pumpfun"
+    },
+    {
+      "allocation_bytes": {
+        "baseline": {
+          "max": 420236092,
+          "median": 417813484.0,
+          "min": 415390876,
+          "values": [
+            415390876,
+            420236092
+          ]
+        },
+        "candidate": {
+          "max": 436488942,
+          "median": 435622922.5,
+          "min": 434756903,
+          "values": [
+            436488942,
+            434756903
+          ]
+        },
+        "candidate_over_baseline": 1.0426253320728156
+      },
+      "allocation_calls": {
+        "baseline": {
+          "max": 404538,
+          "median": 402264.0,
+          "min": 399990,
+          "values": [
+            404538,
+            399990
+          ]
+        },
+        "candidate": {
+          "max": 419885,
+          "median": 417416.0,
+          "min": 414947,
+          "values": [
+            419885,
+            414947
+          ]
+        },
+        "candidate_over_baseline": 1.0376668058787264
+      },
+      "sampled_peak_rss_kib": {
+        "baseline": 203448,
+        "candidate": 211192
+      },
+      "seconds": {
+        "baseline": {
+          "max": 0.537800708,
+          "median": 0.531309893,
+          "min": 0.530463268,
+          "values": [
+            0.531309893,
+            0.530463268,
+            0.537800708
+          ]
+        },
+        "candidate": {
+          "max": 0.53221985,
+          "median": 0.524272483,
+          "min": 0.519519096,
+          "values": [
+            0.524272483,
+            0.519519096,
+            0.53221985
+          ]
+        },
+        "candidate_over_baseline": 0.9867546038710783
+      },
+      "timing_stages": {
+        "baseline": {
+          "batch_count": {
+            "max": 51,
+            "median": 51,
+            "min": 51,
+            "values": [
+              51,
+              51,
+              51
+            ]
+          },
+          "block_count": {
+            "max": 2048,
+            "median": 2048,
+            "min": 2048,
+            "values": [
+              2048,
+              2048,
+              2048
+            ]
+          },
+          "compressed_buffer_count": {
+            "max": 3,
+            "median": 3,
+            "min": 3,
+            "values": [
+              3,
+              3,
+              3
+            ]
+          },
+          "compressed_bytes": {
+            "max": 217634044,
+            "median": 217634044,
+            "min": 217634044,
+            "values": [
+              217634044,
+              217634044,
+              217634044
+            ]
+          },
+          "consume_s": {
+            "max": 0.386955421,
+            "median": 0.382568448,
+            "min": 0.370763039,
+            "values": [
+              0.382568448,
+              0.370763039,
+              0.386955421
+            ]
+          },
+          "decode_project_wall_s": {
+            "max": 0.502658794,
+            "median": 0.496274605,
+            "min": 0.493859442,
+            "values": [
+              0.496274605,
+              0.493859442,
+              0.502658794
+            ]
+          },
+          "decode_sum_s": {
+            "max": 0.983859535,
+            "median": 0.980380506,
+            "min": 0.978549441,
+            "values": [
+              0.978549441,
+              0.983859535,
+              0.980380506
+            ]
+          },
+          "effective_workers": {
+            "max": 12,
+            "median": 12,
+            "min": 12,
+            "values": [
+              12,
+              12,
+              12
+            ]
+          },
+          "input_wait_s": {
+            "max": 0.023501585,
+            "median": 0.021367528,
+            "min": 0.017644101,
+            "values": [
+              0.017644101,
+              0.023501585,
+              0.021367528
+            ]
+          },
+          "max_active_workers": {
+            "max": 12,
+            "median": 12,
+            "min": 12,
+            "values": [
+              12,
+              12,
+              12
+            ]
+          },
+          "max_blocks_per_batch": {
+            "max": 48,
+            "median": 48,
+            "min": 48,
+            "values": [
+              48,
+              48,
+              48
+            ]
+          },
+          "max_compressed_batch_bytes": {
+            "max": 22291532,
+            "median": 22291532,
+            "min": 22291532,
+            "values": [
+              22291532,
+              22291532,
+              22291532
+            ]
+          },
+          "max_declared_uncompressed_batch_bytes": {
+            "max": 33438523,
+            "median": 33438523,
+            "min": 33438523,
+            "values": [
+              33438523,
+              33438523,
+              33438523
+            ]
+          },
+          "max_in_flight_blocks": {
+            "max": 96,
+            "median": 96,
+            "min": 96,
+            "values": [
+              96,
+              96,
+              96
+            ]
+          },
+          "max_in_flight_declared_uncompressed_bytes": {
+            "max": 50493562,
+            "median": 50493562,
+            "min": 50493562,
+            "values": [
+              50493562,
+              50493562,
+              50493562
+            ]
+          },
+          "max_in_flight_transactions": {
+            "max": 131072,
+            "median": 131071,
+            "min": 131071,
+            "values": [
+              131071,
+              131071,
+              131072
+            ]
+          },
+          "max_projected_batch_bytes": {
+            "max": 80383669,
+            "median": 74070603,
+            "min": 69181131,
+            "values": [
+              80383669,
+              74070603,
+              69181131
+            ]
+          },
+          "max_projected_block_bytes": {
+            "max": 3981246,
+            "median": 3934910,
+            "min": 3671891,
+            "values": [
+              3934910,
+              3671891,
+              3981246
+            ]
+          },
+          "max_retained_decompressed_buffer_bytes": {
+            "max": 19334930,
+            "median": 19334930,
+            "min": 19334930,
+            "values": [
+              19334930,
+              19334930,
+              19334930
+            ]
+          },
+          "max_transactions_per_batch": {
+            "max": 65432,
+            "median": 65432,
+            "min": 65432,
+            "values": [
+              65432,
+              65432,
+              65432
+            ]
+          },
+          "producer_buffer_wait_s": {
+            "max": 0.417607209,
+            "median": 0.408333074,
+            "min": 0.403428599,
+            "values": [
+              0.403428599,
+              0.408333074,
+              0.417607209
+            ]
+          },
+          "projection_buffer_wait_s": {
+            "max": 0.476818811,
+            "median": 0.47256545,
+            "min": 0.466193826,
+            "values": [
+              0.47256545,
+              0.466193826,
+              0.476818811
+            ]
+          },
+          "projection_sum_s": {
+            "max": 5.029491067,
+            "median": 4.948296127,
+            "min": 4.925020998,
+            "values": [
+              4.948296127,
+              4.925020998,
+              5.029491067
+            ]
+          },
+          "publish_s": {
+            "max": 0.222561278,
+            "median": 0.213554424,
+            "min": 0.206417196,
+            "values": [
+              0.213554424,
+              0.206417196,
+              0.222561278
+            ]
+          },
+          "read_call_count": {
+            "max": 51,
+            "median": 51,
+            "min": 51,
+            "values": [
+              51,
+              51,
+              51
+            ]
+          },
+          "read_s": {
+            "max": 0.077883891,
+            "median": 0.072372295,
+            "min": 0.071209445,
+            "values": [
+              0.077883891,
+              0.072372295,
+              0.071209445
+            ]
+          },
+          "registry_prefetch_read_bytes": {
+            "max": 0,
+            "median": 0,
+            "min": 0,
+            "values": [
+              0,
+              0,
+              0
+            ]
+          },
+          "registry_prefetch_read_calls": {
+            "max": 0,
+            "median": 0,
+            "min": 0,
+            "values": [
+              0,
+              0,
+              0
+            ]
+          },
+          "registry_resident_bound_bytes": {
+            "max": 6291456,
+            "median": 6291456,
+            "min": 6291456,
+            "values": [
+              6291456,
+              6291456,
+              6291456
+            ]
+          },
+          "requested_workers": {
+            "max": 12,
+            "median": 12,
+            "min": 12,
+            "values": [
+              12,
+              12,
+              12
+            ]
+          },
+          "result_send_wait_s": {
+            "max": 0.0,
+            "median": 0.0,
+            "min": 0.0,
+            "values": [
+              0.0,
+              0.0,
+              0.0
+            ]
+          },
+          "signature_assign_s": {
+            "max": 0.000109595,
+            "median": 0.000106798,
+            "min": 9.9675e-05,
+            "values": [
+              9.9675e-05,
+              0.000109595,
+              0.000106798
+            ]
+          },
+          "signature_read_s": {
+            "max": 0.000233917,
+            "median": 0.00023249,
+            "min": 0.000227639,
+            "values": [
+              0.000227639,
+              0.000233917,
+              0.00023249
+            ]
+          }
+        },
+        "candidate": {
+          "batch_count": {
+            "max": 51,
+            "median": 51,
+            "min": 51,
+            "values": [
+              51,
+              51,
+              51
+            ]
+          },
+          "block_count": {
+            "max": 2048,
+            "median": 2048,
+            "min": 2048,
+            "values": [
+              2048,
+              2048,
+              2048
+            ]
+          },
+          "compressed_buffer_count": {
+            "max": 3,
+            "median": 3,
+            "min": 3,
+            "values": [
+              3,
+              3,
+              3
+            ]
+          },
+          "compressed_bytes": {
+            "max": 217634044,
+            "median": 217634044,
+            "min": 217634044,
+            "values": [
+              217634044,
+              217634044,
+              217634044
+            ]
+          },
+          "consume_s": {
+            "max": 0.381018555,
+            "median": 0.374474974,
+            "min": 0.374165348,
+            "values": [
+              0.374474974,
+              0.374165348,
+              0.381018555
+            ]
+          },
+          "decode_project_wall_s": {
+            "max": 0.492698326,
+            "median": 0.488748982,
+            "min": 0.485847517,
+            "values": [
+              0.488748982,
+              0.485847517,
+              0.492698326
+            ]
+          },
+          "decode_sum_s": {
+            "max": 0.973574731,
+            "median": 0.972759304,
+            "min": 0.971643291,
+            "values": [
+              0.972759304,
+              0.973574731,
+              0.971643291
+            ]
+          },
+          "effective_workers": {
+            "max": 12,
+            "median": 12,
+            "min": 12,
+            "values": [
+              12,
+              12,
+              12
+            ]
+          },
+          "input_wait_s": {
+            "max": 0.029634729,
+            "median": 0.024422009,
+            "min": 0.022818581,
+            "values": [
+              0.022818581,
+              0.024422009,
+              0.029634729
+            ]
+          },
+          "max_active_workers": {
+            "max": 12,
+            "median": 12,
+            "min": 12,
+            "values": [
+              12,
+              12,
+              12
+            ]
+          },
+          "max_blocks_per_batch": {
+            "max": 48,
+            "median": 48,
+            "min": 48,
+            "values": [
+              48,
+              48,
+              48
+            ]
+          },
+          "max_compressed_batch_bytes": {
+            "max": 22291532,
+            "median": 22291532,
+            "min": 22291532,
+            "values": [
+              22291532,
+              22291532,
+              22291532
+            ]
+          },
+          "max_declared_uncompressed_batch_bytes": {
+            "max": 33438523,
+            "median": 33438523,
+            "min": 33438523,
+            "values": [
+              33438523,
+              33438523,
+              33438523
+            ]
+          },
+          "max_in_flight_blocks": {
+            "max": 96,
+            "median": 96,
+            "min": 96,
+            "values": [
+              96,
+              96,
+              96
+            ]
+          },
+          "max_in_flight_declared_uncompressed_bytes": {
+            "max": 50493562,
+            "median": 50493562,
+            "min": 50493562,
+            "values": [
+              50493562,
+              50493562,
+              50493562
+            ]
+          },
+          "max_in_flight_transactions": {
+            "max": 131072,
+            "median": 131072,
+            "min": 131072,
+            "values": [
+              131072,
+              131072,
+              131072
+            ]
+          },
+          "max_projected_batch_bytes": {
+            "max": 78362431,
+            "median": 64980904,
+            "min": 64889217,
+            "values": [
+              78362431,
+              64980904,
+              64889217
+            ]
+          },
+          "max_projected_block_bytes": {
+            "max": 4113854,
+            "median": 3956586,
+            "min": 3948238,
+            "values": [
+              3956586,
+              4113854,
+              3948238
+            ]
+          },
+          "max_retained_decompressed_buffer_bytes": {
+            "max": 19334930,
+            "median": 19334930,
+            "min": 19334930,
+            "values": [
+              19334930,
+              19334930,
+              19334930
+            ]
+          },
+          "max_transactions_per_batch": {
+            "max": 65432,
+            "median": 65432,
+            "min": 65432,
+            "values": [
+              65432,
+              65432,
+              65432
+            ]
+          },
+          "producer_buffer_wait_s": {
+            "max": 0.39949112,
+            "median": 0.3992484,
+            "min": 0.39827017,
+            "values": [
+              0.39949112,
+              0.39827017,
+              0.3992484
+            ]
+          },
+          "projection_buffer_wait_s": {
+            "max": 0.458488888,
+            "median": 0.458336771,
+            "min": 0.452908502,
+            "values": [
+              0.458488888,
+              0.452908502,
+              0.458336771
+            ]
+          },
+          "projection_sum_s": {
+            "max": 4.912402276,
+            "median": 4.867832821,
+            "min": 4.828749561,
+            "values": [
+              4.867832821,
+              4.828749561,
+              4.912402276
+            ]
+          },
+          "publish_s": {
+            "max": 0.219409263,
+            "median": 0.215888636,
+            "min": 0.208766105,
+            "values": [
+              0.208766105,
+              0.215888636,
+              0.219409263
+            ]
+          },
+          "read_call_count": {
+            "max": 51,
+            "median": 51,
+            "min": 51,
+            "values": [
+              51,
+              51,
+              51
+            ]
+          },
+          "read_s": {
+            "max": 0.077766823,
+            "median": 0.076317323,
+            "min": 0.073031924,
+            "values": [
+              0.076317323,
+              0.073031924,
+              0.077766823
+            ]
+          },
+          "registry_prefetch_read_bytes": {
+            "max": 0,
+            "median": 0,
+            "min": 0,
+            "values": [
+              0,
+              0,
+              0
+            ]
+          },
+          "registry_prefetch_read_calls": {
+            "max": 0,
+            "median": 0,
+            "min": 0,
+            "values": [
+              0,
+              0,
+              0
+            ]
+          },
+          "registry_resident_bound_bytes": {
+            "max": 6291456,
+            "median": 6291456,
+            "min": 6291456,
+            "values": [
+              6291456,
+              6291456,
+              6291456
+            ]
+          },
+          "requested_workers": {
+            "max": 12,
+            "median": 12,
+            "min": 12,
+            "values": [
+              12,
+              12,
+              12
+            ]
+          },
+          "result_send_wait_s": {
+            "max": 0.0,
+            "median": 0.0,
+            "min": 0.0,
+            "values": [
+              0.0,
+              0.0,
+              0.0
+            ]
+          },
+          "signature_assign_s": {
+            "max": 0.000113764,
+            "median": 0.000107276,
+            "min": 0.000105664,
+            "values": [
+              0.000107276,
+              0.000113764,
+              0.000105664
+            ]
+          },
+          "signature_read_s": {
+            "max": 0.00025052,
+            "median": 0.000247455,
+            "min": 0.000246705,
+            "values": [
+              0.000246705,
+              0.000247455,
+              0.00025052
+            ]
+          }
+        }
+      },
+      "workers": 12,
+      "workload": "pumpfun"
+    },
+    {
+      "allocation_bytes": {
+        "baseline": {
+          "max": 486903403,
+          "median": 486461931.0,
+          "min": 486020459,
+          "values": [
+            486903403,
+            486020459
+          ]
+        },
+        "candidate": {
+          "max": 485607387,
+          "median": 485590187.0,
+          "min": 485572987,
+          "values": [
+            485572987,
+            485607387
+          ]
+        },
+        "candidate_over_baseline": 0.9982079913258413
+      },
+      "allocation_calls": {
+        "baseline": {
+          "max": 351,
+          "median": 345.0,
+          "min": 339,
+          "values": [
+            351,
+            339
+          ]
+        },
+        "candidate": {
+          "max": 339,
+          "median": 339.0,
+          "min": 339,
+          "values": [
+            339,
+            339
+          ]
+        },
+        "candidate_over_baseline": 0.9826086956521739
+      },
+      "sampled_peak_rss_kib": {
+        "baseline": 489916,
+        "candidate": 489936
+      },
+      "seconds": {
+        "baseline": {
+          "max": 1.901230187,
+          "median": 1.8981499149999999,
+          "min": 1.85552858,
+          "values": [
+            1.85552858,
+            1.8981499149999999,
+            1.901230187
+          ]
+        },
+        "candidate": {
+          "max": 1.8254476020000001,
+          "median": 1.820100321,
+          "min": 1.777370081,
+          "values": [
+            1.820100321,
+            1.777370081,
+            1.8254476020000001
+          ]
+        },
+        "candidate_over_baseline": 0.9588812277769957
+      },
+      "timing_stages": {
+        "baseline": {
+          "batch_count": {
+            "max": 51,
+            "median": 51,
+            "min": 51,
+            "values": [
+              51,
+              51,
+              51
+            ]
+          },
+          "block_count": {
+            "max": 2048,
+            "median": 2048,
+            "min": 2048,
+            "values": [
+              2048,
+              2048,
+              2048
+            ]
+          },
+          "compressed_buffer_count": {
+            "max": 1,
+            "median": 1,
+            "min": 1,
+            "values": [
+              1,
+              1,
+              1
+            ]
+          },
+          "compressed_bytes": {
+            "max": 217634044,
+            "median": 217634044,
+            "min": 217634044,
+            "values": [
+              217634044,
+              217634044,
+              217634044
+            ]
+          },
+          "consume_s": {
+            "max": 0.094622913,
+            "median": 0.092058114,
+            "min": 0.083847154,
+            "values": [
+              0.083847154,
+              0.092058114,
+              0.094622913
+            ]
+          },
+          "decode_project_wall_s": {
+            "max": 1.711428038,
+            "median": 1.7096411310000001,
+            "min": 1.666467827,
+            "values": [
+              1.666467827,
+              1.7096411310000001,
+              1.711428038
+            ]
+          },
+          "decode_sum_s": {
+            "max": 0.533236863,
+            "median": 0.533039735,
+            "min": 0.525345882,
+            "values": [
+              0.525345882,
+              0.533236863,
+              0.533039735
+            ]
+          },
+          "effective_workers": {
+            "max": 1,
+            "median": 1,
+            "min": 1,
+            "values": [
+              1,
+              1,
+              1
+            ]
+          },
+          "input_wait_s": {
+            "max": 0.358901175,
+            "median": 0.35747657,
+            "min": 0.351952054,
+            "values": [
+              0.351952054,
+              0.358901175,
+              0.35747657
+            ]
+          },
+          "max_active_workers": {
+            "max": 1,
+            "median": 1,
+            "min": 1,
+            "values": [
+              1,
+              1,
+              1
+            ]
+          },
+          "max_blocks_per_batch": {
+            "max": 4,
+            "median": 4,
+            "min": 4,
+            "values": [
+              4,
+              4,
+              4
+            ]
+          },
+          "max_compressed_batch_bytes": {
+            "max": 22291532,
+            "median": 22291532,
+            "min": 22291532,
+            "values": [
+              22291532,
+              22291532,
+              22291532
+            ]
+          },
+          "max_declared_uncompressed_batch_bytes": {
+            "max": 33438523,
+            "median": 33438523,
+            "min": 33438523,
+            "values": [
+              33438523,
+              33438523,
+              33438523
+            ]
+          },
+          "max_in_flight_blocks": {
+            "max": 8,
+            "median": 8,
+            "min": 8,
+            "values": [
+              8,
+              8,
+              8
+            ]
+          },
+          "max_in_flight_declared_uncompressed_bytes": {
+            "max": 20914414,
+            "median": 20914414,
+            "min": 20914414,
+            "values": [
+              20914414,
+              20914414,
+              20914414
+            ]
+          },
+          "max_in_flight_transactions": {
+            "max": 20034,
+            "median": 20034,
+            "min": 20034,
+            "values": [
+              20034,
+              20034,
+              20034
+            ]
+          },
+          "max_projected_batch_bytes": {
+            "max": 2366976,
+            "median": 2094016,
+            "min": 2082816,
+            "values": [
+              2366976,
+              2082816,
+              2094016
+            ]
+          },
+          "max_projected_block_bytes": {
+            "max": 1435648,
+            "median": 1273088,
+            "min": 1151488,
+            "values": [
+              1435648,
+              1151488,
+              1273088
+            ]
+          },
+          "max_retained_decompressed_buffer_bytes": {
+            "max": 19334930,
+            "median": 19334930,
+            "min": 19334930,
+            "values": [
+              19334930,
+              19334930,
+              19334930
+            ]
+          },
+          "max_transactions_per_batch": {
+            "max": 12208,
+            "median": 12208,
+            "min": 12208,
+            "values": [
+              12208,
+              12208,
+              12208
+            ]
+          },
+          "producer_buffer_wait_s": {
+            "max": 1.661046335,
+            "median": 1.659714747,
+            "min": 1.615858531,
+            "values": [
+              1.615858531,
+              1.659714747,
+              1.661046335
+            ]
+          },
+          "projection_buffer_wait_s": {
+            "max": 1.355621296,
+            "median": 1.352391484,
+            "min": 1.317915288,
+            "values": [
+              1.317915288,
+              1.352391484,
+              1.355621296
+            ]
+          },
+          "projection_sum_s": {
+            "max": 1.14555524,
+            "median": 1.141419005,
+            "min": 1.107046412,
+            "values": [
+              1.107046412,
+              1.141419005,
+              1.14555524
+            ]
+          },
+          "publish_s": {
+            "max": 0.093996456,
+            "median": 0.091419286,
+            "min": 0.083315976,
+            "values": [
+              0.083315976,
+              0.091419286,
+              0.093996456
+            ]
+          },
+          "read_call_count": {
+            "max": 51,
+            "median": 51,
+            "min": 51,
+            "values": [
+              51,
+              51,
+              51
+            ]
+          },
+          "read_s": {
+            "max": 0.030920917,
+            "median": 0.029018586,
+            "min": 0.028909139,
+            "values": [
+              0.030920917,
+              0.029018586,
+              0.028909139
+            ]
+          },
+          "registry_prefetch_read_bytes": {
+            "max": 432762560,
+            "median": 432762560,
+            "min": 432762560,
+            "values": [
+              432762560,
+              432762560,
+              432762560
+            ]
+          },
+          "registry_prefetch_read_calls": {
+            "max": 13,
+            "median": 13,
+            "min": 13,
+            "values": [
+              13,
+              13,
+              13
+            ]
+          },
+          "registry_resident_bound_bytes": {
+            "max": 432762560,
+            "median": 432762560,
+            "min": 432762560,
+            "values": [
+              432762560,
+              432762560,
+              432762560
+            ]
+          },
+          "requested_workers": {
+            "max": 1,
+            "median": 1,
+            "min": 1,
+            "values": [
+              1,
+              1,
+              1
+            ]
+          },
+          "result_send_wait_s": {
+            "max": 0.0,
+            "median": 0.0,
+            "min": 0.0,
+            "values": [
+              0.0,
+              0.0,
+              0.0
+            ]
+          },
+          "signature_assign_s": {
+            "max": 0.0,
+            "median": 0.0,
+            "min": 0.0,
+            "values": [
+              0.0,
+              0.0,
+              0.0
+            ]
+          },
+          "signature_read_s": {
+            "max": 0.0,
+            "median": 0.0,
+            "min": 0.0,
+            "values": [
+              0.0,
+              0.0,
+              0.0
+            ]
+          }
+        },
+        "candidate": {
+          "batch_count": {
+            "max": 51,
+            "median": 51,
+            "min": 51,
+            "values": [
+              51,
+              51,
+              51
+            ]
+          },
+          "block_count": {
+            "max": 2048,
+            "median": 2048,
+            "min": 2048,
+            "values": [
+              2048,
+              2048,
+              2048
+            ]
+          },
+          "compressed_buffer_count": {
+            "max": 1,
+            "median": 1,
+            "min": 1,
+            "values": [
+              1,
+              1,
+              1
+            ]
+          },
+          "compressed_bytes": {
+            "max": 217634044,
+            "median": 217634044,
+            "min": 217634044,
+            "values": [
+              217634044,
+              217634044,
+              217634044
+            ]
+          },
+          "consume_s": {
+            "max": 0.090758368,
+            "median": 0.08608947,
+            "min": 0.080707601,
+            "values": [
+              0.090758368,
+              0.080707601,
+              0.08608947
+            ]
+          },
+          "decode_project_wall_s": {
+            "max": 1.635704142,
+            "median": 1.628362057,
+            "min": 1.5903720350000001,
+            "values": [
+              1.628362057,
+              1.5903720350000001,
+              1.635704142
+            ]
+          },
+          "decode_sum_s": {
+            "max": 0.532524876,
+            "median": 0.529773815,
+            "min": 0.520050925,
+            "values": [
+              0.532524876,
+              0.520050925,
+              0.529773815
+            ]
+          },
+          "effective_workers": {
+            "max": 1,
+            "median": 1,
+            "min": 1,
+            "values": [
+              1,
+              1,
+              1
+            ]
+          },
+          "input_wait_s": {
+            "max": 0.342251991,
+            "median": 0.341843808,
+            "min": 0.330365786,
+            "values": [
+              0.341843808,
+              0.330365786,
+              0.342251991
+            ]
+          },
+          "max_active_workers": {
+            "max": 1,
+            "median": 1,
+            "min": 1,
+            "values": [
+              1,
+              1,
+              1
+            ]
+          },
+          "max_blocks_per_batch": {
+            "max": 4,
+            "median": 4,
+            "min": 4,
+            "values": [
+              4,
+              4,
+              4
+            ]
+          },
+          "max_compressed_batch_bytes": {
+            "max": 22291532,
+            "median": 22291532,
+            "min": 22291532,
+            "values": [
+              22291532,
+              22291532,
+              22291532
+            ]
+          },
+          "max_declared_uncompressed_batch_bytes": {
+            "max": 33438523,
+            "median": 33438523,
+            "min": 33438523,
+            "values": [
+              33438523,
+              33438523,
+              33438523
+            ]
+          },
+          "max_in_flight_blocks": {
+            "max": 8,
+            "median": 8,
+            "min": 8,
+            "values": [
+              8,
+              8,
+              8
+            ]
+          },
+          "max_in_flight_declared_uncompressed_bytes": {
+            "max": 20914414,
+            "median": 20914414,
+            "min": 20914414,
+            "values": [
+              20914414,
+              20914414,
+              20914414
+            ]
+          },
+          "max_in_flight_transactions": {
+            "max": 20034,
+            "median": 20034,
+            "min": 20034,
+            "values": [
+              20034,
+              20034,
+              20034
+            ]
+          },
+          "max_projected_batch_bytes": {
+            "max": 2395136,
+            "median": 2221696,
+            "min": 2094016,
+            "values": [
+              2221696,
+              2395136,
+              2094016
+            ]
+          },
+          "max_projected_block_bytes": {
+            "max": 1463808,
+            "median": 1290368,
+            "min": 1273088,
+            "values": [
+              1290368,
+              1463808,
+              1273088
+            ]
+          },
+          "max_retained_decompressed_buffer_bytes": {
+            "max": 19334930,
+            "median": 19334930,
+            "min": 19334930,
+            "values": [
+              19334930,
+              19334930,
+              19334930
+            ]
+          },
+          "max_transactions_per_batch": {
+            "max": 12208,
+            "median": 12208,
+            "min": 12208,
+            "values": [
+              12208,
+              12208,
+              12208
+            ]
+          },
+          "producer_buffer_wait_s": {
+            "max": 1.584263551,
+            "median": 1.5797678990000001,
+            "min": 1.542493646,
+            "values": [
+              1.5797678990000001,
+              1.542493646,
+              1.584263551
+            ]
+          },
+          "projection_buffer_wait_s": {
+            "max": 1.29564794,
+            "median": 1.288757573,
+            "min": 1.262671832,
+            "values": [
+              1.288757573,
+              1.262671832,
+              1.29564794
+            ]
+          },
+          "projection_sum_s": {
+            "max": 1.074016862,
+            "median": 1.0660759,
+            "min": 1.045258409,
+            "values": [
+              1.0660759,
+              1.045258409,
+              1.074016862
+            ]
+          },
+          "publish_s": {
+            "max": 0.090223482,
+            "median": 0.085503139,
+            "min": 0.080142965,
+            "values": [
+              0.090223482,
+              0.080142965,
+              0.085503139
+            ]
+          },
+          "read_call_count": {
+            "max": 51,
+            "median": 51,
+            "min": 51,
+            "values": [
+              51,
+              51,
+              51
+            ]
+          },
+          "read_s": {
+            "max": 0.031207016,
+            "median": 0.028837671,
+            "min": 0.028617205,
+            "values": [
+              0.028617205,
+              0.028837671,
+              0.031207016
+            ]
+          },
+          "registry_prefetch_read_bytes": {
+            "max": 432762560,
+            "median": 432762560,
+            "min": 432762560,
+            "values": [
+              432762560,
+              432762560,
+              432762560
+            ]
+          },
+          "registry_prefetch_read_calls": {
+            "max": 13,
+            "median": 13,
+            "min": 13,
+            "values": [
+              13,
+              13,
+              13
+            ]
+          },
+          "registry_resident_bound_bytes": {
+            "max": 432762560,
+            "median": 432762560,
+            "min": 432762560,
+            "values": [
+              432762560,
+              432762560,
+              432762560
+            ]
+          },
+          "requested_workers": {
+            "max": 1,
+            "median": 1,
+            "min": 1,
+            "values": [
+              1,
+              1,
+              1
+            ]
+          },
+          "result_send_wait_s": {
+            "max": 0.0,
+            "median": 0.0,
+            "min": 0.0,
+            "values": [
+              0.0,
+              0.0,
+              0.0
+            ]
+          },
+          "signature_assign_s": {
+            "max": 0.0,
+            "median": 0.0,
+            "min": 0.0,
+            "values": [
+              0.0,
+              0.0,
+              0.0
+            ]
+          },
+          "signature_read_s": {
+            "max": 0.0,
+            "median": 0.0,
+            "min": 0.0,
+            "values": [
+              0.0,
+              0.0,
+              0.0
+            ]
+          }
+        }
+      },
+      "workers": 1,
+      "workload": "indexed-usdc"
+    },
+    {
+      "allocation_bytes": {
+        "baseline": {
+          "max": 692981197,
+          "median": 681315784.5,
+          "min": 669650372,
+          "values": [
+            692981197,
+            669650372
+          ]
+        },
+        "candidate": {
+          "max": 695903784,
+          "median": 691989253.0,
+          "min": 688074722,
+          "values": [
+            695903784,
+            688074722
+          ]
+        },
+        "candidate_over_baseline": 1.0156659639227836
+      },
+      "allocation_calls": {
+        "baseline": {
+          "max": 1661,
+          "median": 1608.5,
+          "min": 1556,
+          "values": [
+            1661,
+            1556
+          ]
+        },
+        "candidate": {
+          "max": 1685,
+          "median": 1672.0,
+          "min": 1659,
+          "values": [
+            1685,
+            1659
+          ]
+        },
+        "candidate_over_baseline": 1.0394777743239043
+      },
+      "sampled_peak_rss_kib": {
+        "baseline": 557804,
+        "candidate": 213352
+      },
+      "seconds": {
+        "baseline": {
+          "max": 0.520699884,
+          "median": 0.51213024,
+          "min": 0.509850063,
+          "values": [
+            0.509850063,
+            0.520699884,
+            0.51213024
+          ]
+        },
+        "candidate": {
+          "max": 0.514288269,
+          "median": 0.499565011,
+          "min": 0.497821326,
+          "values": [
+            0.499565011,
+            0.497821326,
+            0.514288269
+          ]
+        },
+        "candidate_over_baseline": 0.9754647782564061
+      },
+      "timing_stages": {
+        "baseline": {
+          "batch_count": {
+            "max": 51,
+            "median": 51,
+            "min": 51,
+            "values": [
+              51,
+              51,
+              51
+            ]
+          },
+          "block_count": {
+            "max": 2048,
+            "median": 2048,
+            "min": 2048,
+            "values": [
+              2048,
+              2048,
+              2048
+            ]
+          },
+          "compressed_buffer_count": {
+            "max": 3,
+            "median": 3,
+            "min": 3,
+            "values": [
+              3,
+              3,
+              3
+            ]
+          },
+          "compressed_bytes": {
+            "max": 217634044,
+            "median": 217634044,
+            "min": 217634044,
+            "values": [
+              217634044,
+              217634044,
+              217634044
+            ]
+          },
+          "consume_s": {
+            "max": 0.1736887,
+            "median": 0.162057937,
+            "min": 0.153194556,
+            "values": [
+              0.153194556,
+              0.1736887,
+              0.162057937
+            ]
+          },
+          "decode_project_wall_s": {
+            "max": 0.325470662,
+            "median": 0.316713414,
+            "min": 0.310008814,
+            "values": [
+              0.316713414,
+              0.325470662,
+              0.310008814
+            ]
+          },
+          "decode_sum_s": {
+            "max": 1.013161437,
+            "median": 0.996534861,
+            "min": 0.969159845,
+            "values": [
+              1.013161437,
+              0.996534861,
+              0.969159845
+            ]
+          },
+          "effective_workers": {
+            "max": 12,
+            "median": 12,
+            "min": 12,
+            "values": [
+              12,
+              12,
+              12
+            ]
+          },
+          "input_wait_s": {
+            "max": 0.041938429,
+            "median": 0.041145837,
+            "min": 0.032439328,
+            "values": [
+              0.041145837,
+              0.041938429,
+              0.032439328
+            ]
+          },
+          "max_active_workers": {
+            "max": 12,
+            "median": 12,
+            "min": 12,
+            "values": [
+              12,
+              12,
+              12
+            ]
+          },
+          "max_blocks_per_batch": {
+            "max": 48,
+            "median": 48,
+            "min": 48,
+            "values": [
+              48,
+              48,
+              48
+            ]
+          },
+          "max_compressed_batch_bytes": {
+            "max": 22291532,
+            "median": 22291532,
+            "min": 22291532,
+            "values": [
+              22291532,
+              22291532,
+              22291532
+            ]
+          },
+          "max_declared_uncompressed_batch_bytes": {
+            "max": 33438523,
+            "median": 33438523,
+            "min": 33438523,
+            "values": [
+              33438523,
+              33438523,
+              33438523
+            ]
+          },
+          "max_in_flight_blocks": {
+            "max": 96,
+            "median": 96,
+            "min": 96,
+            "values": [
+              96,
+              96,
+              96
+            ]
+          },
+          "max_in_flight_declared_uncompressed_bytes": {
+            "max": 50493562,
+            "median": 50493562,
+            "min": 50493562,
+            "values": [
+              50493562,
+              50493562,
+              50493562
+            ]
+          },
+          "max_in_flight_transactions": {
+            "max": 131072,
+            "median": 131072,
+            "min": 131072,
+            "values": [
+              131072,
+              131072,
+              131072
+            ]
+          },
+          "max_projected_batch_bytes": {
+            "max": 61861728,
+            "median": 52790496,
+            "min": 52422944,
+            "values": [
+              52422944,
+              52790496,
+              61861728
+            ]
+          },
+          "max_projected_block_bytes": {
+            "max": 1394944,
+            "median": 1383424,
+            "min": 1359424,
+            "values": [
+              1383424,
+              1394944,
+              1359424
+            ]
+          },
+          "max_retained_decompressed_buffer_bytes": {
+            "max": 19334930,
+            "median": 19334930,
+            "min": 19334930,
+            "values": [
+              19334930,
+              19334930,
+              19334930
+            ]
+          },
+          "max_transactions_per_batch": {
+            "max": 65432,
+            "median": 65432,
+            "min": 65432,
+            "values": [
+              65432,
+              65432,
+              65432
+            ]
+          },
+          "producer_buffer_wait_s": {
+            "max": 0.270359516,
+            "median": 0.258115369,
+            "min": 0.254687161,
+            "values": [
+              0.258115369,
+              0.270359516,
+              0.254687161
+            ]
+          },
+          "projection_buffer_wait_s": {
+            "max": 0.283680952,
+            "median": 0.283232006,
+            "min": 0.275877049,
+            "values": [
+              0.275877049,
+              0.283680952,
+              0.283232006
+            ]
+          },
+          "projection_sum_s": {
+            "max": 2.5215963759999998,
+            "median": 2.514025012,
+            "min": 2.474681753,
+            "values": [
+              2.514025012,
+              2.5215963759999998,
+              2.474681753
+            ]
+          },
+          "publish_s": {
+            "max": 0.162996129,
+            "median": 0.150456532,
+            "min": 0.145107658,
+            "values": [
+              0.145107658,
+              0.162996129,
+              0.150456532
+            ]
+          },
+          "read_call_count": {
+            "max": 51,
+            "median": 51,
+            "min": 51,
+            "values": [
+              51,
+              51,
+              51
+            ]
+          },
+          "read_s": {
+            "max": 0.056521858,
+            "median": 0.053046079,
+            "min": 0.050231737,
+            "values": [
+              0.056521858,
+              0.053046079,
+              0.050231737
+            ]
+          },
+          "registry_prefetch_read_bytes": {
+            "max": 432762560,
+            "median": 432762560,
+            "min": 432762560,
+            "values": [
+              432762560,
+              432762560,
+              432762560
+            ]
+          },
+          "registry_prefetch_read_calls": {
+            "max": 13,
+            "median": 13,
+            "min": 13,
+            "values": [
+              13,
+              13,
+              13
+            ]
+          },
+          "registry_resident_bound_bytes": {
+            "max": 432762560,
+            "median": 432762560,
+            "min": 432762560,
+            "values": [
+              432762560,
+              432762560,
+              432762560
+            ]
+          },
+          "requested_workers": {
+            "max": 12,
+            "median": 12,
+            "min": 12,
+            "values": [
+              12,
+              12,
+              12
+            ]
+          },
+          "result_send_wait_s": {
+            "max": 0.0,
+            "median": 0.0,
+            "min": 0.0,
+            "values": [
+              0.0,
+              0.0,
+              0.0
+            ]
+          },
+          "signature_assign_s": {
+            "max": 0.0,
+            "median": 0.0,
+            "min": 0.0,
+            "values": [
+              0.0,
+              0.0,
+              0.0
+            ]
+          },
+          "signature_read_s": {
+            "max": 0.0,
+            "median": 0.0,
+            "min": 0.0,
+            "values": [
+              0.0,
+              0.0,
+              0.0
+            ]
+          }
+        },
+        "candidate": {
+          "batch_count": {
+            "max": 51,
+            "median": 51,
+            "min": 51,
+            "values": [
+              51,
+              51,
+              51
+            ]
+          },
+          "block_count": {
+            "max": 2048,
+            "median": 2048,
+            "min": 2048,
+            "values": [
+              2048,
+              2048,
+              2048
+            ]
+          },
+          "compressed_buffer_count": {
+            "max": 3,
+            "median": 3,
+            "min": 3,
+            "values": [
+              3,
+              3,
+              3
+            ]
+          },
+          "compressed_bytes": {
+            "max": 217634044,
+            "median": 217634044,
+            "min": 217634044,
+            "values": [
+              217634044,
+              217634044,
+              217634044
+            ]
+          },
+          "consume_s": {
+            "max": 0.173372511,
+            "median": 0.170468226,
+            "min": 0.1612353,
+            "values": [
+              0.173372511,
+              0.1612353,
+              0.170468226
+            ]
+          },
+          "decode_project_wall_s": {
+            "max": 0.316773071,
+            "median": 0.305455289,
+            "min": 0.302460387,
+            "values": [
+              0.302460387,
+              0.305455289,
+              0.316773071
+            ]
+          },
+          "decode_sum_s": {
+            "max": 0.978970031,
+            "median": 0.955145101,
+            "min": 0.952969556,
+            "values": [
+              0.952969556,
+              0.955145101,
+              0.978970031
+            ]
+          },
+          "effective_workers": {
+            "max": 12,
+            "median": 12,
+            "min": 12,
+            "values": [
+              12,
+              12,
+              12
+            ]
+          },
+          "input_wait_s": {
+            "max": 0.038265811,
+            "median": 0.030320163,
+            "min": 0.022370186,
+            "values": [
+              0.022370186,
+              0.038265811,
+              0.030320163
+            ]
+          },
+          "max_active_workers": {
+            "max": 12,
+            "median": 12,
+            "min": 12,
+            "values": [
+              12,
+              12,
+              12
+            ]
+          },
+          "max_blocks_per_batch": {
+            "max": 48,
+            "median": 48,
+            "min": 48,
+            "values": [
+              48,
+              48,
+              48
+            ]
+          },
+          "max_compressed_batch_bytes": {
+            "max": 22291532,
+            "median": 22291532,
+            "min": 22291532,
+            "values": [
+              22291532,
+              22291532,
+              22291532
+            ]
+          },
+          "max_declared_uncompressed_batch_bytes": {
+            "max": 33438523,
+            "median": 33438523,
+            "min": 33438523,
+            "values": [
+              33438523,
+              33438523,
+              33438523
+            ]
+          },
+          "max_in_flight_blocks": {
+            "max": 96,
+            "median": 96,
+            "min": 96,
+            "values": [
+              96,
+              96,
+              96
+            ]
+          },
+          "max_in_flight_declared_uncompressed_bytes": {
+            "max": 50493562,
+            "median": 50493562,
+            "min": 50493562,
+            "values": [
+              50493562,
+              50493562,
+              50493562
+            ]
+          },
+          "max_in_flight_transactions": {
+            "max": 131072,
+            "median": 131072,
+            "min": 131072,
+            "values": [
+              131072,
+              131072,
+              131072
+            ]
+          },
+          "max_projected_batch_bytes": {
+            "max": 54215136,
+            "median": 47672000,
+            "min": 44395552,
+            "values": [
+              44395552,
+              54215136,
+              47672000
+            ]
+          },
+          "max_projected_block_bytes": {
+            "max": 1326464,
+            "median": 1317888,
+            "min": 1298944,
+            "values": [
+              1298944,
+              1317888,
+              1326464
+            ]
+          },
+          "max_retained_decompressed_buffer_bytes": {
+            "max": 19334930,
+            "median": 19334930,
+            "min": 19334930,
+            "values": [
+              19334930,
+              19334930,
+              19334930
+            ]
+          },
+          "max_transactions_per_batch": {
+            "max": 65432,
+            "median": 65432,
+            "min": 65432,
+            "values": [
+              65432,
+              65432,
+              65432
+            ]
+          },
+          "producer_buffer_wait_s": {
+            "max": 0.255656421,
+            "median": 0.248326199,
+            "min": 0.239548794,
+            "values": [
+              0.248326199,
+              0.239548794,
+              0.255656421
+            ]
+          },
+          "projection_buffer_wait_s": {
+            "max": 0.292748973,
+            "median": 0.282539932,
+            "min": 0.266408031,
+            "values": [
+              0.282539932,
+              0.266408031,
+              0.292748973
+            ]
+          },
+          "projection_sum_s": {
+            "max": 2.5449518209999997,
+            "median": 2.377189248,
+            "min": 2.374363138,
+            "values": [
+              2.377189248,
+              2.374363138,
+              2.5449518209999997
+            ]
+          },
+          "publish_s": {
+            "max": 0.160911834,
+            "median": 0.156296319,
+            "min": 0.137055589,
+            "values": [
+              0.137055589,
+              0.156296319,
+              0.160911834
+            ]
+          },
+          "read_call_count": {
+            "max": 51,
+            "median": 51,
+            "min": 51,
+            "values": [
+              51,
+              51,
+              51
+            ]
+          },
+          "read_s": {
+            "max": 0.060021346,
+            "median": 0.05516424,
+            "min": 0.05068437,
+            "values": [
+              0.05068437,
+              0.060021346,
+              0.05516424
+            ]
+          },
+          "registry_prefetch_read_bytes": {
+            "max": 432762560,
+            "median": 432762560,
+            "min": 432762560,
+            "values": [
+              432762560,
+              432762560,
+              432762560
+            ]
+          },
+          "registry_prefetch_read_calls": {
+            "max": 13,
+            "median": 13,
+            "min": 13,
+            "values": [
+              13,
+              13,
+              13
+            ]
+          },
+          "registry_resident_bound_bytes": {
+            "max": 432762560,
+            "median": 432762560,
+            "min": 432762560,
+            "values": [
+              432762560,
+              432762560,
+              432762560
+            ]
+          },
+          "requested_workers": {
+            "max": 12,
+            "median": 12,
+            "min": 12,
+            "values": [
+              12,
+              12,
+              12
+            ]
+          },
+          "result_send_wait_s": {
+            "max": 0.0,
+            "median": 0.0,
+            "min": 0.0,
+            "values": [
+              0.0,
+              0.0,
+              0.0
+            ]
+          },
+          "signature_assign_s": {
+            "max": 0.0,
+            "median": 0.0,
+            "min": 0.0,
+            "values": [
+              0.0,
+              0.0,
+              0.0
+            ]
+          },
+          "signature_read_s": {
+            "max": 0.0,
+            "median": 0.0,
+            "min": 0.0,
+            "values": [
+              0.0,
+              0.0,
+              0.0
+            ]
+          }
+        }
+      },
+      "workers": 12,
+      "workload": "indexed-usdc"
+    }
+  ],
+  "evidence": {
+    "local_full_package": "target/nas-validation/epoch300-dependency-review-20260906T200823Z",
+    "local_results": "target/nas-validation/dependency-review/nas-results",
+    "minimal_bundle_sha256": "b2b6cbcceb63d80aeff28491cfc8ecfd094352c15ad767e1917e07fc8621831c",
+    "nas_control": "/volume2/blockzilla-bench/control/epoch300-dependency-review-20260906T200823Z",
+    "nas_results": "/volume2/blockzilla-bench/results/epoch300-dependency-review-20260906T200823Z",
+    "principal_result_file_sha256": {
+      "completed.json": "f1004e42868bacae3950429cf32c6d859df45c6759e37f26aeb71462822a8625",
+      "experiment.json": "a4317e7b4e755feb37812d35f31160dbda1fbbf2e0f1a57562138ac0fddc952a",
+      "host-load.jsonl": "38930ed9802a0c9c2b8376c8873f5fd35869297d415ce23dcee4d2efe7d4049a",
+      "postflight.json": "1dd83e22a237ac4c92dbb4c5405c7f7d9195e45e08fca41d08a221d16d07d825",
+      "preflight.json": "7716b0797d712467ce9509fb9b1e30b8aea17add5578e13004cca959e4386178",
+      "status.json": "4269b7f72a48fc0f77144fc2b9b63aa403f2a63f177c81f0dae42b71d04e93d7",
+      "summary.json": "5e7155ee35b56f8f65d8874e9b06776859906983ff12c4169bb0f809475f009e",
+      "verification.json": "507c902de61c9b26eba7cdf52152e9a9093b9d0f25f0a5c3bf7ba33be8348e51"
+    },
+    "retrieved_results_tar_sha256": "566890a8405d92a167d0bce3df320ff5fec62452b0bcfd61cbfcd4e0cbc16524",
+    "source_evidence_location": "Full candidate source patch, source manifests and build/test logs remain local; the NAS received their relevant digests and only the executable/control files needed for this run."
+  },
+  "host": {
+    "cpu_pressure_full_avg10_range": [
+      0.0,
+      0.0
+    ],
+    "cpu_pressure_some_avg10_range": [
+      0.45,
+      7.85
+    ],
+    "io_pressure_full_avg10_range": [
+      0.0,
+      0.5
+    ],
+    "io_pressure_some_avg10_range": [
+      0.0,
+      0.5
+    ],
+    "load_1m_range": [
+      0.11962890625,
+      2.669921875
+    ],
+    "mem_available_kib_range": [
+      3051540,
+      3643860
+    ],
+    "memory_pressure_full_avg10_range": [
+      0.0,
+      0.0
+    ],
+    "memory_pressure_some_avg10_range": [
+      0.0,
+      0.0
+    ],
+    "observed_copy_or_compression": [],
+    "sampled_peak_rss_kib": 557804,
+    "samples": 62
+  },
+  "input_invariants": {
+    "indexed-usdc": {
+      "indexed_dictionary_bytes": 376816,
+      "indexed_dictionary_rows": 6279,
+      "instructions": 0,
+      "source_bytes": 654045903,
+      "source_calls": 69,
+      "transactions": 3274503
+    },
+    "pumpfun": {
+      "indexed_dictionary_bytes": null,
+      "indexed_dictionary_rows": null,
+      "instructions": 3253320,
+      "source_bytes": 221283307,
+      "source_calls": 54,
+      "transactions": 3274503
+    },
+    "usdc": {
+      "indexed_dictionary_bytes": null,
+      "indexed_dictionary_rows": null,
+      "instructions": 0,
+      "source_bytes": 654045903,
+      "source_calls": 69,
+      "transactions": 3274503
+    }
+  },
+  "interpretation": {
+    "allocation_increase_observed": "Pump.fun allocation call ranges are higher without overlap at both worker counts; requested-byte ranges are higher without overlap at twelve workers. The run does not identify the cause.",
+    "allocation_time_is_not_speed_evidence": true,
+    "cache_and_host_load_controlled": false,
+    "elapsed_investigation_flags": 0,
+    "elapsed_investigation_threshold_ratio": 1.1,
+    "no_full_epoch_speed_claim": true,
+    "pumpfun_zero_matches": true,
+    "rust_allocation_requested_bytes_are_not_live_memory_or_c_zstd_allocations": true
+  },
+  "measured_utc": {
+    "first_sample": "2026-09-06T20:20:02.244814+00:00",
+    "last_sample": "2026-09-06T20:21:43.282589+00:00"
+  },
+  "oracles": {
+    "indexed-usdc": "workload_oracle=UsdcReport { blocks_seen: 2048, transactions_seen: 3274503, skipped_failed_transactions: 554678, matching_transactions: 22505, pre_rows: 55273, post_rows: 55534, token_balances_unavailable_transactions: 0, token_mint_unavailable_transactions: 0, output_complete: true, coverage: CoverageReport { indeterminate_transactions: 0, sha256: [227, 176, 196, 66, 152, 252, 28, 20, 154, 251, 244, 200, 153, 111, 185, 36, 39, 174, 65, 228, 100, 155, 147, 76, 164, 149, 153, 27, 120, 82, 184, 85] }, output: OutputReport { schema: \"blockzilla-example-usdc-indexed-recorded-balance-exclude-failed/v1\", row_count: 110807, output_bytes: 7756566 } }; dictionary=OutputReport { schema: \"blockzilla-example-usdc-source-account-dictionary/v1\", row_count: 6279, output_bytes: 376816 }",
+    "pumpfun": "workload_oracle=PumpReport { blocks_seen: 2048, transactions_seen: 3274503, skipped_failed_transactions: 554678, matching_transactions: 0, written_transactions: 0, direct_invocations: 0, cpi_invocations: 0, incomplete_instruction_transactions: 0, incomplete_cpi_transactions: 0, matches_without_primary_signature: 0, output_complete: true, coverage: CoverageReport { indeterminate_transactions: 0, sha256: [227, 176, 196, 66, 152, 252, 28, 20, 154, 251, 244, 200, 153, 111, 185, 36, 39, 174, 65, 228, 100, 155, 147, 76, 164, 149, 153, 27, 120, 82, 184, 85] }, output: OutputReport { schema: \"blockzilla-example-pump-transaction-exclude-failed/v2\", row_count: 0, output_bytes: 44 } }",
+    "usdc": "workload_oracle=UsdcReport { blocks_seen: 2048, transactions_seen: 3274503, skipped_failed_transactions: 554678, matching_transactions: 22505, pre_rows: 55273, post_rows: 55534, token_balances_unavailable_transactions: 0, token_mint_unavailable_transactions: 0, output_complete: true, coverage: CoverageReport { indeterminate_transactions: 0, sha256: [227, 176, 196, 66, 152, 252, 28, 20, 154, 251, 244, 200, 153, 111, 185, 36, 39, 174, 65, 228, 100, 155, 147, 76, 164, 149, 153, 27, 120, 82, 184, 85] }, output: OutputReport { schema: \"blockzilla-example-usdc-recorded-balance-exclude-failed/v2\", row_count: 110807, output_bytes: 15069796 } }"
+  },
+  "provenance": {
+    "baseline": {
+      "compiler": "rustc 1.98.1 (48a229cea 2026-09-01)\nbinary: rustc\ncommit-hash: 48a229ceaefd4985c50990b14116b6d856af0985\ncommit-date: 2026-09-01\nhost: aarch64-apple-darwin\nrelease: 1.98.1\nLLVM version: 22.1.8\n",
+      "profile": "release",
+      "profiler_sha256": "d6f838c87a689198d7cbc425da48665a03422b358e491967806cbdbcb79f067b",
+      "rustflags": "-C target-feature=+aes,+sse2",
+      "source_patch_sha256": "664333c67252bd5de1c49ae513df058da0c9cb121d5b093f6a1da3ce7a2c7851",
+      "source_revision": "2672d42714da7560672b7a99b420c8315eb733e2",
+      "target": "x86_64-unknown-linux-musl"
+    },
+    "candidate": {
+      "compiler": "rustc 1.98.1 (48a229cea 2026-09-01)\nbinary: rustc\ncommit-hash: 48a229ceaefd4985c50990b14116b6d856af0985\ncommit-date: 2026-09-01\nhost: aarch64-apple-darwin\nrelease: 1.98.1\nLLVM version: 22.1.8\n",
+      "profile": "release",
+      "profiler_sha256": "843beafbfca4ed00754fb6264431e5ce1d0644b3cf3574d6250e2b46de11be76",
+      "rustflags": "-C target-feature=+aes,+sse2",
+      "source_patch_sha256": "2146529336ab0319de070a4373ce4936dde13b3c882bb45d9acfd756ed9ff15e",
+      "source_revision": "2672d42714da7560672b7a99b420c8315eb733e2",
+      "target": "x86_64-unknown-linux-musl"
+    }
+  },
+  "schema": "blockzilla-epoch300-bounded-dependency-review/v1",
+  "scope": {
+    "allocation_iterations": 2,
+    "blocks": 2048,
+    "epoch": 300,
+    "first_block": 0,
+    "format": "V2",
+    "full_epoch_scanned": false,
+    "full_output_bytes_checked": false,
+    "measured_records": 60,
+    "process_order": "baseline then candidate at one worker; candidate then baseline at twelve workers",
+    "processes": 24,
+    "timing_iterations": 3,
+    "warmups_per_process": 1,
+    "workers": [
+      1,
+      12
+    ],
+    "workloads": [
+      "usdc",
+      "pumpfun",
+      "indexed-usdc"
+    ]
+  },
+  "source_evidence": {
+    "historical_stat_continuity": true,
+    "raw_car_observed_bytes": 508337873180,
+    "raw_car_scanned": false,
+    "scope": "Size and mtime continuity plus small control-file hashes; no new full payload or registry content hash.",
+    "v2_file_stat_records_unchanged": true,
+    "v2_files": [
+      {
+        "bytes": 21267464,
+        "ctime_ns": 1788624360960995551,
+        "device": 73,
+        "inode": 273,
+        "mtime": 1788220756.5637343,
+        "mtime_ns": 1788220756563734389,
+        "path": "archive-v2-blocks.index",
+        "symlink": false
+      },
+      {
+        "bytes": 43682534695,
+        "ctime_ns": 1788624360960995551,
+        "device": 73,
+        "inode": 274,
+        "mtime": 1788220756.4117339,
+        "mtime_ns": 1788220756411733760,
+        "path": "archive-v2-blocks.zstd",
+        "symlink": false
+      },
+      {
+        "bytes": 65,
+        "ctime_ns": 1788624360960995551,
+        "device": 73,
+        "inode": 275,
+        "mtime": 1788217547.0864248,
+        "mtime_ns": 1788217547086424752,
+        "path": "archive-v2-meta.wincode",
+        "symlink": false
+      },
+      {
+        "bytes": 13087648,
+        "ctime_ns": 1788624360960995551,
+        "device": 73,
+        "inode": 291,
+        "mtime": 1788218262.3214784,
+        "mtime_ns": 1788218262321478357,
+        "path": "blockhash_registry.bin",
+        "symlink": false
+      },
+      {
+        "bytes": 7149393229,
+        "ctime_ns": 1788624360960995551,
+        "device": 73,
+        "inode": 292,
+        "mtime": 1788218435.0142124,
+        "mtime_ns": 1788218435014212284,
+        "path": "poh.wincode",
+        "symlink": false
+      },
+      {
+        "bytes": 12000,
+        "ctime_ns": 1788624360960995551,
+        "device": 73,
+        "inode": 293,
+        "mtime": 1788218262.3454785,
+        "mtime_ns": 1788218262345478460,
+        "path": "prev_blockhash_tail.bin",
+        "symlink": false
+      },
+      {
+        "bytes": 432762560,
+        "ctime_ns": 1788624360960995551,
+        "device": 73,
+        "inode": 294,
+        "mtime": 1788217553.3784518,
+        "mtime_ns": 1788217553378451785,
+        "path": "registry.bin",
+        "symlink": false
+      },
+      {
+        "bytes": 165935215,
+        "ctime_ns": 1788624360960995551,
+        "device": 73,
+        "inode": 295,
+        "mtime": 1788217557.0544677,
+        "mtime_ns": 1788217557054467576,
+        "path": "registry.mphf",
+        "symlink": false
+      },
+      {
+        "bytes": 689345845,
+        "ctime_ns": 1788624360960995551,
+        "device": 73,
+        "inode": 296,
+        "mtime": 1788218444.5502527,
+        "mtime_ns": 1788218444550252791,
+        "path": "shredding.wincode",
+        "symlink": false
+      },
+      {
+        "bytes": 47323082944,
+        "ctime_ns": 1788624360960995551,
+        "device": 73,
+        "inode": 297,
+        "mtime": 1788218261.8814764,
+        "mtime_ns": 1788218261881476486,
+        "path": "signatures.bin",
+        "symlink": false
+      },
+      {
+        "bytes": 26584285,
+        "ctime_ns": 1788624360960995551,
+        "device": 73,
+        "inode": 301,
+        "mtime": 1788218262.9094808,
+        "mtime_ns": 1788218262909480857,
+        "path": "vote_hash_registry.bin",
+        "symlink": false
+      }
+    ],
+    "v2_small_file_sha256": {
+      "archive-v2-blocks.index": "78570dbf0ce8e183ebbe895a1096f20802d1fcd1504971110803b39d9ffbab80",
+      "archive-v2-meta.wincode": "36fbc15de3d4f6b169f8769c170cf1c1b2a2d74e118dcfa503755b12038c85d4"
+    }
+  },
+  "status": "VERIFIED_PREFIXES",
+  "sum_process_wall_seconds": 102.23813550594787,
+  "workspace_validation": {
+    "exit_code": 0,
+    "failed": 0,
+    "harnesses": 128,
+    "ignored": 1,
+    "log_sha256": "a1b6c622d6d21508a47e29cf2ae2858bf7915181bbc72983f18d478cda46f43e",
+    "passed": 3568
+  }
+}

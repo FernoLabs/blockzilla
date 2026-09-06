@@ -13,7 +13,7 @@
 
 use topcoat::{
     Result,
-    view::{View, component, view},
+    view::{BoxView, View, ViewExt, component, view},
 };
 
 use crate::calendar::{CalendarDay, CalendarYear, InterruptionCoverage};
@@ -29,8 +29,8 @@ pub async fn calendar_page(
     years: &[CalendarYear],
     gap_index_error: Option<&str>,
     has_interruption_data: bool,
-) -> Result<View> {
-    view! {
+) -> Result<impl View> {
+    Ok(view! {
         <section class=(format!("overflow-hidden {CARD}"))>
             <div class="border-b border-zinc-800/70 px-6 py-4">
                 <h2 class="text-sm font-semibold text-zinc-100">"Archive calendar"</h2>
@@ -57,11 +57,11 @@ pub async fn calendar_page(
                 </div>
             }
         </section>
-    }
+    })
 }
 
 #[component]
-async fn interruption_status_banner(error: &str, has_interruption_data: bool) -> Result<View> {
+async fn interruption_status_banner(error: &str, has_interruption_data: bool) -> Result<impl View> {
     let message = if has_interruption_data {
         format!(
             "Interruption overlay is showing the last successful fetch; most recent refresh failed: {error}"
@@ -71,17 +71,17 @@ async fn interruption_status_banner(error: &str, has_interruption_data: bool) ->
             "Interruption overlay (slot-time-drift outage markers) isn't available yet -- the block-time-gap sidecar hasn't been built/served: {error}"
         )
     };
-    view! {
+    Ok(view! {
         <div
             class="border-b border-zinc-800/70 bg-amber-500/5 px-6 py-3 text-xs text-amber-400"
         >
             (message)
         </div>
-    }
+    })
 }
 
 #[component]
-async fn legend() -> Result<View> {
+async fn legend() -> Result<impl View> {
     const ENTRIES: [(&str, &str); 5] = [
         ("emerald", "archived"),
         ("cyan", "in progress"),
@@ -89,7 +89,7 @@ async fn legend() -> Result<View> {
         ("amber", "needs attention"),
         ("rose", "failed"),
     ];
-    view! {
+    Ok(view! {
         <div
             class="flex flex-wrap items-center gap-x-4 gap-y-2 border-b border-zinc-800/70 px-6 py-3 text-xs text-zinc-400"
         >
@@ -116,11 +116,11 @@ async fn legend() -> Result<View> {
             ></span>
             <span>"interruption index unavailable for that day"</span>
         </div>
-    }
+    })
 }
 
 #[component]
-async fn year_block(year: &CalendarYear) -> Result<View> {
+async fn year_block(year: &CalendarYear) -> Result<impl View> {
     let grid_width = year.week_count * (CELL_PX + GAP_PX);
     let grid_style = format!(
         "display:grid; grid-template-columns: repeat({}, {CELL_PX}px); grid-template-rows: {MONTH_ROW_PX}px repeat(7, {CELL_PX}px); column-gap: {GAP_PX}px; row-gap: {GAP_PX}px; width: {grid_width}px;",
@@ -153,7 +153,7 @@ async fn year_block(year: &CalendarYear) -> Result<View> {
         None
     };
 
-    view! {
+    Ok(view! {
         <div class="flex flex-col gap-2 px-6 py-4 sm:flex-row sm:items-start">
             <div class="flex shrink-0 flex-col gap-0.5 sm:w-28">
                 <h3 class="text-sm font-semibold tabular-nums text-zinc-200">
@@ -189,11 +189,11 @@ async fn year_block(year: &CalendarYear) -> Result<View> {
                 </div>
             </div>
         </div>
-    }
+    })
 }
 
 #[component]
-async fn day_cell(day: &CalendarDay) -> Result<View> {
+async fn day_cell(day: &CalendarDay) -> Result<BoxView<'_>> {
     let position = format!(
         "grid-column: {}; grid-row: {};",
         day.week + 1,
@@ -207,7 +207,7 @@ async fn day_cell(day: &CalendarDay) -> Result<View> {
             "{position} opacity: {};",
             if day.future { 0.25 } else { 0.6 }
         );
-        return view! { <span style=(style) class="rounded-[1px] bg-zinc-800"></span> };
+        return Ok(view! { <span style=(style) class="rounded-[1px] bg-zinc-800"></span> }.boxed());
     };
 
     let mut box_shadow_layers = Vec::new();
@@ -234,13 +234,14 @@ async fn day_cell(day: &CalendarDay) -> Result<View> {
     };
     let style = format!("{position} {box_shadow} {outline} {opacity}");
 
-    view! {
+    Ok(view! {
         <span
             style=(style)
             class=(format!("rounded-[1px] {}", tone_bg_class(content.color)))
             title=(day_title(day, content))
         ></span>
     }
+    .boxed())
 }
 
 fn day_title(day: &CalendarDay, content: &crate::calendar::CalendarDayContent) -> String {

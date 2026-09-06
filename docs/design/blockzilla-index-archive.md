@@ -1,10 +1,19 @@
 # Blockzilla Index Archive
 
-Status: **format proposal + migration path**. Nothing here is frozen. Widths,
+Status: **historical format proposal and migration record**. For the implemented
+canonical Archive V3 layout, use the [format reference](../../crates/archive-v3/blockzilla-archive-v3/README.md),
+[converter](../../crates/archive-v3/blockzilla-archive-v3-convert/README.md), and
+[reader](../../crates/archive-v3/blockzilla-archive-v3-reader/README.md).
+Index Archive is now named Archive V3 and is intended to replace V2.
+
+The proposal below is retained as design evidence. Its widths,
 page sizes, and codec settings are provisional and are decided by the
 measurements named in §7.
 
-> **Active migration correction (2026-08-25).** The normalized transaction and
+> **Historical migration correction (2026-08-25).** This mechanical split became
+> the frozen standalone Indexer V3 prototype. It is a separate layout from the
+> canonical converter output described in the current references above.
+> The normalized transaction and
 > runtime codecs below remain a possible final read format. They are not the
 > active conversion contract. The fast migration first performs a mechanical,
 > source-preserving split: it retains exact `CompactPubkey::{Id, Raw}` and
@@ -14,7 +23,7 @@ measurements named in §7.
 > separate later jobs. See
 > [the fast-converter review](indexer-archive-fast-converter-review-2026-08-25.md).
 
-This replaces Archive V2 as the published archive format. It is written for two
+The design goal is to replace Archive V2 as the published archive format. It is written for two
 readers: an **indexer** filtering by account/program/instruction, and a
 **replayer** loading transactions into a runtime. Everything else — get-block
 serving, PoH verification, shredding — is served without penalising those two.

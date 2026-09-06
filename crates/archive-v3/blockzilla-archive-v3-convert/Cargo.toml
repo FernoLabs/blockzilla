@@ -16,20 +16,20 @@ blockzilla-primitives = { path = "../../blockzilla-primitives", default-features
 blockzilla-program-logs = { path = "../../parser/blockzilla-program-logs", default-features = false }
 blockzilla-registry = { path = "../../compact-v2/blockzilla-registry", default-features = false }
 anyhow = "1.0.104"
-clap = { version = "4.6.1", features = ["derive"] }
+clap = { version = "4.6.6", features = ["derive"] }
 blockzilla-archive-v3 = { path = "../blockzilla-archive-v3" }
 blockzilla-archive-v3-reader = { path = "../blockzilla-archive-v3-reader" }
 blockzilla-compact-v2-reader = { path = "../../compact-v2/blockzilla-compact-v2-reader" }
-serde = { version = "1.0.228", features = ["derive"] }
-serde_json = "1.0.149"
+serde = { version = "1.0.229", features = ["derive"] }
+serde_json = "1.0.151"
 wincode = { version = "=0.6.1", features = ["derive"] }
-zstd = "0.13.3"
+zstd = "0.14.0"
 sha2 = "0.11.0"
 solana-signature = { version = "3.4.1", features = ["verify"] }
-solana-pubkey = "4.2.0"
+solana-pubkey = "4.2.1"
 
 [dev-dependencies]
-tempfile = "3.24.0"
+tempfile = "3.27.0"
 
 [lints]
 workspace = true

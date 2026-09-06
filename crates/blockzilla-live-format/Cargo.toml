@@ -19,7 +19,7 @@ known-program-logs = [
 [dependencies]
 blockzilla-archive-v2 = { path = "../compact-v2/blockzilla-archive-v2", default-features = false }
 blockzilla-compact = { path = "../compact-v2/blockzilla-compact", default-features = false }
-serde = { version = "1.0.228", features = ["derive"] }
+serde = { version = "1.0.229", features = ["derive"] }
 wincode = { version = "=0.6.1", features = ["derive"] }
 
 [dev-dependencies]

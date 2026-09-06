@@ -528,7 +528,7 @@ pub fn print_run(report: RunReport<'_>) {
 fn print_pipeline(receipt: &CompactV2ParallelScanReceipt) {
     let p = &receipt.pipeline;
     println!(
-        "pipeline=compact-v2 pipeline_read_s={:.6} pipeline_input_wait_s={:.6} pipeline_buffer_wait_s={:.6} pipeline_decode_project_wall_s={:.6} pipeline_worker_decode_sum_s={:.6} pipeline_worker_projection_sum_s={:.6} pipeline_consume_s={:.6} pipeline_projection_buffer_wait_s={:.6} pipeline_result_send_wait_s={:.6} pipeline_signature_read_s={:.6} pipeline_signature_assign_s={:.6} pipeline_publish_s={:.6}",
+        "pipeline=compact-v2 pipeline_read_s={:.6} pipeline_input_wait_s={:.6} pipeline_buffer_wait_s={:.6} pipeline_decode_project_wall_s={:.6} pipeline_worker_decode_sum_s={:.6} pipeline_worker_projection_sum_s={:.6} pipeline_consume_s={:.6} pipeline_projection_buffer_wait_s={:.6} pipeline_result_send_wait_s={:.6} pipeline_signature_read_s={:.6} pipeline_signature_assign_s={:.6} pipeline_publish_s={:.6} pipeline_max_in_flight_blocks={} pipeline_max_in_flight_transactions={} pipeline_max_in_flight_declared_uncompressed_bytes={}",
         p.producer_read_wall_time.as_secs_f64(),
         p.coordinator_wait_for_ready_batch_time.as_secs_f64(),
         p.producer_wait_for_free_buffer_time.as_secs_f64(),
@@ -540,7 +540,10 @@ fn print_pipeline(receipt: &CompactV2ParallelScanReceipt) {
         p.coordinator_wait_to_send_result_time.as_secs_f64(),
         receipt.signature_read_wall_time.as_secs_f64(),
         receipt.signature_assign_wall_time.as_secs_f64(),
-        receipt.publish_wall_time.as_secs_f64()
+        receipt.publish_wall_time.as_secs_f64(),
+        p.max_in_flight_blocks,
+        p.max_in_flight_transactions,
+        p.max_in_flight_declared_uncompressed_bytes
     );
 }
 

@@ -1,7 +1,6 @@
 # Workspace structure
 
-Updated 2026-09-06 on branch `refactor`. The layout is applied: 44 workspace
-packages, 163 targets, and 105 binaries. The former CAR SDK is merged into
+Updated 2026-09-06. The layout is applied. The former CAR SDK is merged into
 `of-car-reader`. No binary was deleted by the folder move.
 
 ## Layout
@@ -127,6 +126,13 @@ The standard `read-archive-v3-*` workloads still use
 the prototype reader. The account-scan and prefix-comparison
 commands live in the benchmark package. Their executable names are unchanged.
 
+The later V2 work adds a [rolling worker pipeline](reader-pipeline-rolling-window.md)
+and an additive [indexed USDC output](../reference/usdc-indexed-balances-v1.md).
+The original canonical USDC format stays available. Local CAR opening now
+accepts `.car.zst`, prefers completed raw `.car` when both forms exist, and
+ignores incomplete `.partial` files. The [epoch 300 paired NAS report](../benchmarks/epoch-300-rolling-pipeline-2026-09-06.md)
+records exact output checks and performance for the measured V2 builds.
+
 The legacy reader has moved into `compat/`. That is a path change, not proof
 that its consumers have migrated. Package and folder names now match this
 layout. The model error-message edit that existed before this work is retained.
@@ -159,8 +165,8 @@ from the ordered reader's physical-order contract.
    freeze. Only then remove legacy readers and wire-profile migration code.
    Moving a directory does not make it safe to delete.
 5. Restore the parked Firewatch controller and the excluded archive-token-events
-   example against supported readers. Its old SDK-boundary test is not
-   currently part of workspace CI.
+   example against supported readers. Its obsolete source-spelling SDK test
+   was removed; the example remains outside workspace CI until the port.
 6. Complete cross-format output and performance checks on the archive corpus.
    Local fixture tests and successful compilation do not prove production
    archive compatibility or release readiness.
@@ -178,9 +184,9 @@ local main and the sample-reader fixes, including the current test results and
 output-version changes. The checks below describe the completed structural
 refactor before that integration.
 
-## Verification
+## Historical structural-refactor verification
 
-The final local workspace run passed **3,703 tests**, with no failures and one
+The structural-refactor local workspace run passed **3,703 tests**, with no failures and one
 ignored manual release-mode encoder benchmark. It completed 140 test harnesses.
 The canonical reader extraction also passed its isolated format, reader, and
 converter tests (101, 138, and 121). The final historical-source checks passed
@@ -205,9 +211,10 @@ Worker release builds, or the production corpus checks listed above.
 For the structural refactor, formatting and the Archive V2 wire-boundary check
 passed, and the package mapping accounted for 46 packages, 165 targets, and
 105 binaries. The later consolidation reduced this to 44 packages and 163
-targets, with all 105 binaries retained. Third-party
-lockfile versions and checksums are unchanged. Captured SPYX process evidence
-is unchanged, and the pre-existing model error-message edit remains uncommitted.
+targets, with all 105 binaries retained. That structural phase did not update
+third-party lockfile versions. The later dependency and test cleanup has a
+separate validation run; these historical totals are not a current suite count.
+Captured SPYX process evidence is retained.
 
 Save Cargo metadata before and after changes. Verify the full mapping with:
 

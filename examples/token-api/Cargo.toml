@@ -16,18 +16,18 @@ blockzilla-archive-v2 = { path = "../../crates/compact-v2/blockzilla-archive-v2"
 blockzilla-compact = { path = "../../crates/compact-v2/blockzilla-compact", default-features = false }
 blockzilla-primitives = { path = "../../crates/blockzilla-primitives", default-features = false }
 blockzilla-registry = { path = "../../crates/compact-v2/blockzilla-registry", default-features = false }
-anyhow = "1.0.102"
+anyhow = "1.0.104"
 axum = { version = "0.8.9", features = ["json"] }
 bs58 = "0.5.1"
-clap = { version = "4.6.1", features = ["derive", "env"] }
-serde = { version = "1.0.228", features = ["derive"] }
-serde_json = "1.0.149"
-time = { version = "0.3.44", features = ["formatting"] }
-tokio = { version = "1.52.3", features = ["macros", "net", "rt-multi-thread"] }
+clap = { version = "4.6.6", features = ["derive", "env"] }
+serde = { version = "1.0.229", features = ["derive"] }
+serde_json = "1.0.151"
+time = { version = "0.3.55", features = ["formatting"] }
+tokio = { version = "1.53.1", features = ["macros", "net", "rt-multi-thread"] }
 tracing = "0.1.44"
 tracing-subscriber = { version = "0.3.23", features = ["env-filter"] }
 wincode = "=0.6.1"
-zstd = "0.13.3"
+zstd = "0.14.0"
 
 [lints]
 workspace = true

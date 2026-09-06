@@ -9,7 +9,7 @@ source checks, and reader file layouts.
 CAR, Compact V2, and the frozen standalone Indexer V3 reader.
 
 The new canonical Archive V3 reader does not yet implement this stream API.
-Its current local entry point is `blockzilla_archive_v3_convert::canonical_reader::CanonicalReader`.
+Its current local entry point is `blockzilla_archive_v3_reader::CanonicalReader`.
 
 The crate contains no archive decoder. Each format adapter must validate its
 source and convert it to the canonical types in this crate. Applications can
@@ -18,6 +18,13 @@ then use one callback API without importing format-specific transaction types.
 The block callback includes empty block rows. This gives applications a safe
 checkpoint boundary. A short transaction callback is also available for simple
 queries.
+
+The additive `IndexedTokenSink` interface keeps compact account references in
+flat token-balance rows. Its `AccountResolver` resolves a reference when a sink
+needs the public key. The V2 indexed scan implements this interface; the other
+readers continue to use resolved common records. The
+[indexed USDC example](../../examples/read-compact-v2/README.md#optional-compact-usdc-output)
+uses it to write a source-scoped dictionary once per discovered reference.
 
 The first application is the implemented instruction-derived classic USDC
 event processor. It does not use pre-token or post-token balance observations.

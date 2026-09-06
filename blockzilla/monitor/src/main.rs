@@ -2,7 +2,7 @@ use std::num::NonZeroUsize;
 
 use clap::{Parser, ValueEnum};
 use topcoat::router::{
-    HeaderName, HeaderValue, Path, Router, RouterBuilderDiscoverExt, tower::TowerLayer,
+    HeaderName, HeaderValue, Router, RouterBuilderDiscoverExt, tower::TowerLayer,
 };
 use tower_http::set_header::SetResponseHeaderLayer;
 
@@ -106,25 +106,94 @@ async fn main() {
         }
     }
 
-    let router = Router::builder()
+    topcoat::start(monitor_router()).await.unwrap();
+}
+
+fn monitor_router() -> Router {
+    Router::builder()
         .discover()
         // Operational telemetry has no business in a search index, on
         // either tier.
-        .layer(TowerLayer::new(
-            Path::new("/"),
-            SetResponseHeaderLayer::overriding(
+        .layer(
+            TowerLayer::new(SetResponseHeaderLayer::overriding(
                 HeaderName::from_static("x-robots-tag"),
                 HeaderValue::from_static("noindex, nofollow"),
-            ),
-        ))
-        .build();
-
-    topcoat::start(router).await.unwrap();
+            ))
+            .at("/"),
+        )
+        .build()
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[tokio::test]
+    async fn router_serves_complete_pages_and_assets_with_noindex_headers() {
+        use topcoat::router::{Body, StatusCode, request::Request, to_bytes};
+
+        let router = monitor_router();
+        for (path, view) in [
+            ("/", "overview"),
+            ("/history", "history"),
+            ("/system", "system"),
+            ("/epochs", "epochs"),
+            ("/calendar", "calendar"),
+        ] {
+            let response = router
+                .handle(Request::builder().uri(path).body(Body::empty()).unwrap())
+                .await;
+            assert_eq!(response.status(), StatusCode::OK, "{path}");
+            assert_eq!(response.headers()["x-robots-tag"], "noindex, nofollow");
+            let body = to_bytes(response.into_body(), 4 * 1024 * 1024)
+                .await
+                .unwrap();
+            let html = std::str::from_utf8(&body).unwrap();
+            assert!(html.contains("<title>Blockzilla Monitor</title>"), "{path}");
+            assert_eq!(html.matches("id=\"dashboard\"").count(), 1, "{path}");
+            assert_eq!(html.matches("id=\"dashboard-frame\"").count(), 1, "{path}");
+            assert!(html.contains(&format!("/api/stream?view={view}")), "{path}");
+            assert!(
+                html.ends_with("</body></html>"),
+                "{path}: incomplete SSR body"
+            );
+        }
+
+        for (path, content_type, expected) in [
+            (
+                "/app.css",
+                "text/css; charset=utf-8",
+                include_str!("assets/app.css"),
+            ),
+            (
+                "/datastar.js",
+                "text/javascript; charset=utf-8",
+                include_str!("assets/datastar.js"),
+            ),
+        ] {
+            let response = router
+                .handle(Request::builder().uri(path).body(Body::empty()).unwrap())
+                .await;
+            assert_eq!(response.status(), StatusCode::OK, "{path}");
+            assert_eq!(response.headers()["x-robots-tag"], "noindex, nofollow");
+            assert_eq!(response.headers()["content-type"], content_type);
+            assert_eq!(response.headers()["cache-control"], "public, max-age=3600");
+            let body = to_bytes(response.into_body(), 4 * 1024 * 1024)
+                .await
+                .unwrap();
+            assert_eq!(body.as_ref(), expected.as_bytes(), "{path}");
+        }
+
+        let missing = router
+            .handle(
+                Request::builder()
+                    .uri("/missing")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await;
+        assert_eq!(missing.status(), StatusCode::NOT_FOUND);
+    }
 
     #[test]
     fn zero_stream_limit_is_rejected_by_cli() {

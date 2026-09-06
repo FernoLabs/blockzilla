@@ -60,6 +60,21 @@ transaction iterators, raw entry scanning, rewards, and feature flags:
 - `compact-index` enables compact Old Faithful index parsing.
 - `query-sdk` enables `CarInstructionSource` and the common ordered query API.
 - `query-sdk-http` adds the bounded concurrent HTTPS stream for that adapter.
+- `archive` adds `archive::CarArchive`, fixed sample object discovery, local
+  raw/zstd selection, HTTP source checks, and the common ordered query API.
+  It includes native zstd support.
 - `reader` builds the diagnostic `reader` binary.
 
 Default features: `genesis`, `zstd-native`.
+
+## Archive and slot-index tools
+
+`CarArchive::open_local` reads `car/<epoch>/epoch-<epoch>.car` or
+`epoch-<epoch>.car.zst`, plus `epoch-<epoch>-slot-ranges.raw`. It prefers a
+final raw CAR when both forms exist. Compressed files are decoded sequentially;
+slot offsets refer to the decoded stream. See the
+[CAR examples](../../../examples/read-car/README.md) for source setup and output checks.
+
+The [of-slot-ranges package](../of-slot-ranges/README.md) stays beside this
+reader. It contains slot-index construction, bounded repair, and validation
+commands. Its tools are part of the Old Faithful format family.

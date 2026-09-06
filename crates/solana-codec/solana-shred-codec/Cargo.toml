@@ -9,9 +9,9 @@ description = "Shared Shred payload constants, header parser, and compact codec 
 publish = false
 
 [dependencies]
-anyhow = "1.0.102"
-serde = { version = "1.0.228", features = ["derive"] }
-zstd = "0.13.3"
+anyhow = "1.0.104"
+serde = { version = "1.0.229", features = ["derive"] }
+zstd = "0.14.0"
 
 [lints]
 workspace = true

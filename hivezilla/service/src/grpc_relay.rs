@@ -20,9 +20,10 @@ use yellowstone_grpc_proto::{
         CommitmentLevel, GetBlockHeightRequest, GetBlockHeightResponse, GetLatestBlockhashRequest,
         GetLatestBlockhashResponse, GetSlotRequest, GetSlotResponse, GetVersionRequest,
         GetVersionResponse, IsBlockhashValidRequest, IsBlockhashValidResponse, PingRequest,
-        PongResponse, SubscribeDeshredRequest, SubscribeReplayInfoRequest,
+        PongResponse, SubscribeDeshredRequest, SubscribeGossipRequest, SubscribeReplayInfoRequest,
         SubscribeReplayInfoResponse, SubscribeRequest, SubscribeUpdate, SubscribeUpdateDeshred,
-        SubscribeUpdatePong, geyser_server::Geyser, subscribe_update::UpdateOneof,
+        SubscribeUpdateGossip, SubscribeUpdatePong, geyser_server::Geyser,
+        subscribe_update::UpdateOneof,
     },
     tonic::{Request, Response, Status, metadata::MetadataMap},
 };
@@ -37,6 +38,8 @@ type SubscribeStream =
     Pin<Box<dyn Stream<Item = Result<SubscribeUpdate, Status>> + Send + 'static>>;
 type SubscribeDeshredStream =
     Pin<Box<dyn Stream<Item = Result<SubscribeUpdateDeshred, Status>> + Send + 'static>>;
+type SubscribeGossipStream =
+    Pin<Box<dyn Stream<Item = Result<SubscribeUpdateGossip, Status>> + Send + 'static>>;
 
 /// Hard memory/concurrency limits for a relay instance.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -759,6 +762,18 @@ impl Geyser for YellowstoneBlockRelay {
         ))
     }
 
+    type SubscribeGossipStream = SubscribeGossipStream;
+
+    async fn subscribe_gossip(
+        &self,
+        request: Request<SubscribeGossipRequest>,
+    ) -> Result<Response<Self::SubscribeGossipStream>, Status> {
+        self.authenticate(request.metadata())?;
+        Err(Status::unimplemented(
+            "block relay does not implement SubscribeGossip",
+        ))
+    }
+
     async fn subscribe_replay_info(
         &self,
         request: Request<SubscribeReplayInfoRequest>,
@@ -1181,6 +1196,34 @@ mod tests {
             status.code(),
             yellowstone_grpc_proto::tonic::Code::Unimplemented
         );
+    }
+
+    #[tokio::test]
+    async fn unsupported_gossip_is_authenticated_then_unimplemented() {
+        let relay = relay(8, 1024 * 1024);
+        for (token, expected) in [
+            (None, yellowstone_grpc_proto::tonic::Code::Unauthenticated),
+            (
+                Some("wrong"),
+                yellowstone_grpc_proto::tonic::Code::Unauthenticated,
+            ),
+            (
+                Some(TOKEN),
+                yellowstone_grpc_proto::tonic::Code::Unimplemented,
+            ),
+        ] {
+            let mut request = Request::new(SubscribeGossipRequest::default());
+            if let Some(token) = token {
+                request
+                    .metadata_mut()
+                    .insert(YELLOWSTONE_X_TOKEN_HEADER, token.parse().unwrap());
+            }
+            let status = match Geyser::subscribe_gossip(&relay, request).await {
+                Ok(_) => panic!("unsupported gossip request returned a stream"),
+                Err(status) => status,
+            };
+            assert_eq!(status.code(), expected);
+        }
     }
 
     #[tokio::test]

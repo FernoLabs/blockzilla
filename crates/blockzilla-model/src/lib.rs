@@ -6,6 +6,7 @@
 
 mod error;
 mod fingerprint;
+mod indexed_tokens;
 mod model;
 pub mod projection_pool;
 mod source;
@@ -13,6 +14,9 @@ pub mod token;
 
 pub use error::{Error, Result};
 pub use fingerprint::BlockUniverseFingerprint;
+pub use indexed_tokens::{
+    AccountReference, AccountResolver, IndexedTokenBalance, IndexedTokenSink,
+};
 pub use model::{
     BlockCounts, BlockHeader, BlockView, CanonicalBlock, CanonicalTransaction, CoverageReason,
     CpiCoverage, ExecutionStatus, InstructionCoordinate, InstructionCoverage,

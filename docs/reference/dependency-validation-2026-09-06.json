@@ -1,0 +1,391 @@
+{
+  "review_date": "2026-09-06",
+  "rust_toolchain": "1.98.1",
+  "native_target": "aarch64-apple-darwin",
+  "workspace": {
+    "command": [
+      "cargo",
+      "test",
+      "--offline",
+      "--workspace",
+      "--all-targets",
+      "--locked"
+    ],
+    "exit_code": 0,
+    "observed_completion_utc": "2026-09-06T20:07:32.816415+00:00",
+    "log_path": "/tmp/blockzilla-main-final-tests.log",
+    "log_sha256": "a1b6c622d6d21508a47e29cf2ae2858bf7915181bbc72983f18d478cda46f43e",
+    "harnesses": 128,
+    "passed": 3568,
+    "failed": 0,
+    "ignored": 1,
+    "summed_harness_seconds": 68.15,
+    "build_line": "    Finished `test` profile [unoptimized + debuginfo] target(s) in 2m 11s",
+    "lock_sha256": "3aebe00fe33070a00f89a58d35f5aae51da321526651c10eff75ff794295d734",
+    "head": "2672d42714da7560672b7a99b420c8315eb733e2",
+    "note": "Includes final production dependency changes. The optional shred test constructor rename is validated separately; the last formatter edit changes test layout only."
+  },
+  "optional_features": {
+    "status": "PASS",
+    "finished_utc": "2026-09-06T20:08:33.796402+00:00",
+    "environment": {
+      "unset": [
+        "RUSTFLAGS",
+        "CPATH",
+        "C_INCLUDE_PATH",
+        "CPLUS_INCLUDE_PATH",
+        "LIBRARY_PATH",
+        "SDKROOT"
+      ],
+      "CARGO_INCREMENTAL": "0",
+      "RUST_TEST_THREADS": "4"
+    },
+    "cases": [
+      {
+        "name": "01-blockzilla-check",
+        "command": [
+          "cargo",
+          "check",
+          "-p",
+          "blockzilla",
+          "--features",
+          "developer-tools,archive-repair-tools",
+          "--all-targets",
+          "--locked",
+          "--offline"
+        ],
+        "log": "/tmp/blockzilla-optional-ci-20260906/01-blockzilla-check.log",
+        "started_utc": "2026-09-06T19:47:45.473636+00:00",
+        "exit_code": 0,
+        "elapsed_seconds": 113.0735149999964,
+        "finished_utc": "2026-09-06T19:49:38.551095+00:00",
+        "harnesses": 0,
+        "passed": 0,
+        "failed": 0,
+        "ignored": 0,
+        "log_sha256": "654518b6dbe4f6d210ff09d65d7c5435a65faeb2888a5a22a8de87abef054183"
+      },
+      {
+        "name": "02-user-program-index-check",
+        "command": [
+          "cargo",
+          "check",
+          "-p",
+          "blockzilla-user-program-index",
+          "--features",
+          "developer-tools",
+          "--all-targets",
+          "--locked",
+          "--offline"
+        ],
+        "log": "/tmp/blockzilla-optional-ci-20260906/02-user-program-index-check.log",
+        "started_utc": "2026-09-06T19:49:38.553662+00:00",
+        "exit_code": 0,
+        "elapsed_seconds": 41.13344333402347,
+        "finished_utc": "2026-09-06T19:50:19.688321+00:00",
+        "harnesses": 0,
+        "passed": 0,
+        "failed": 0,
+        "ignored": 0,
+        "log_sha256": "2523dd6bffc98da9cd5617f84c95de192f0e3b3a646aa9458601c59b4d0891c8"
+      },
+      {
+        "name": "03-user-program-index-tests",
+        "command": [
+          "cargo",
+          "test",
+          "-p",
+          "blockzilla-user-program-index",
+          "--features",
+          "developer-tools",
+          "--all-targets",
+          "--locked",
+          "--offline"
+        ],
+        "log": "/tmp/blockzilla-optional-ci-20260906/03-user-program-index-tests.log",
+        "started_utc": "2026-09-06T19:50:19.689936+00:00",
+        "exit_code": 0,
+        "elapsed_seconds": 480.38718274998246,
+        "finished_utc": "2026-09-06T19:58:20.090990+00:00",
+        "harnesses": 11,
+        "passed": 247,
+        "failed": 0,
+        "ignored": 0,
+        "log_sha256": "217d685e9528a2c29e419f0b44fa86a21749f62fee41ad248f3e66294bebd7e2"
+      },
+      {
+        "name": "04-metadata-repair-tests",
+        "command": [
+          "cargo",
+          "test",
+          "-p",
+          "blockzilla",
+          "--features",
+          "archive-repair-tools",
+          "--bin",
+          "archive-v2-normalize-metadata-trusted",
+          "--locked",
+          "--offline"
+        ],
+        "log": "/tmp/blockzilla-optional-ci-20260906/04-metadata-repair-tests.log",
+        "started_utc": "2026-09-06T19:58:20.094328+00:00",
+        "exit_code": 0,
+        "elapsed_seconds": 80.77318379102508,
+        "finished_utc": "2026-09-06T19:59:40.869931+00:00",
+        "harnesses": 1,
+        "passed": 3,
+        "failed": 0,
+        "ignored": 0,
+        "log_sha256": "a20f98ed1ac2dca45523657b740a86b8fabe4d489491eeaee9ea51a2b2c1ba79"
+      },
+      {
+        "name": "05-shred-compact-tests-retry",
+        "command": [
+          "cargo",
+          "test",
+          "-p",
+          "hivezilla",
+          "--features",
+          "shred-reconstruction",
+          "--lib",
+          "ingest::shred_compact::tests",
+          "--locked",
+          "--offline"
+        ],
+        "log": "/tmp/blockzilla-optional-ci-20260906/05-shred-compact-tests-retry.log",
+        "started_utc": "2026-09-06T20:06:03.725483+00:00",
+        "exit_code": 0,
+        "elapsed_seconds": 57.54818833398167,
+        "finished_utc": "2026-09-06T20:07:01.275894+00:00",
+        "harnesses": 1,
+        "passed": 8,
+        "failed": 0,
+        "ignored": 0,
+        "log_sha256": "0a9f8e25822cb14a729cb9285fb62a2ec25dac607637829cf8b1246361b6cb96"
+      },
+      {
+        "name": "06-shred-fec-gap-trial-tests",
+        "command": [
+          "cargo",
+          "test",
+          "-p",
+          "hivezilla",
+          "--features",
+          "shred-reconstruction",
+          "--bin",
+          "shred-fec-gap-trial",
+          "--locked",
+          "--offline"
+        ],
+        "log": "/tmp/blockzilla-optional-ci-20260906/06-shred-fec-gap-trial-tests.log",
+        "started_utc": "2026-09-06T20:07:01.277793+00:00",
+        "exit_code": 0,
+        "elapsed_seconds": 37.67897116695531,
+        "finished_utc": "2026-09-06T20:07:38.957887+00:00",
+        "harnesses": 1,
+        "passed": 12,
+        "failed": 0,
+        "ignored": 0,
+        "log_sha256": "76847e2eaf56f664f5fcd562588de8b99532fc862e1ccc5184576891f94d9499"
+      },
+      {
+        "name": "07-shred-epoch-audit-tests",
+        "command": [
+          "cargo",
+          "test",
+          "-p",
+          "hivezilla",
+          "--features",
+          "shred-reconstruction",
+          "--bin",
+          "shred-epoch-audit",
+          "--locked",
+          "--offline"
+        ],
+        "log": "/tmp/blockzilla-optional-ci-20260906/07-shred-epoch-audit-tests.log",
+        "started_utc": "2026-09-06T20:07:38.958780+00:00",
+        "exit_code": 0,
+        "elapsed_seconds": 4.103424916043878,
+        "finished_utc": "2026-09-06T20:07:43.062349+00:00",
+        "harnesses": 1,
+        "passed": 22,
+        "failed": 0,
+        "ignored": 0,
+        "log_sha256": "20e95208161c389de8436f6702eef7022c44dfde3a603a14c56edb36668ac4c4"
+      },
+      {
+        "name": "08-repair-wire-goldens",
+        "command": [
+          "cargo",
+          "test",
+          "-p",
+          "hivezilla",
+          "--features",
+          "shred-reconstruction",
+          "--lib",
+          "shred_reader::repair_wire::tests",
+          "--locked",
+          "--offline"
+        ],
+        "log": "/tmp/blockzilla-optional-ci-20260906/08-repair-wire-goldens.log",
+        "started_utc": "2026-09-06T20:07:43.063357+00:00",
+        "exit_code": 0,
+        "elapsed_seconds": 0.7762462919927202,
+        "finished_utc": "2026-09-06T20:07:43.839647+00:00",
+        "harnesses": 1,
+        "passed": 6,
+        "failed": 0,
+        "ignored": 0,
+        "log_sha256": "1b07b8d56df7e06ea915c654f3bef38546a7b853b4eab75ba1136cf6ff1c4804"
+      }
+    ],
+    "checks_passed": 2,
+    "tests_passed": 298,
+    "test_harnesses": 16,
+    "tests_failed": 0,
+    "tests_ignored": 0,
+    "ci_tests_passed": 292,
+    "additional_wire_golden_tests_passed": 6,
+    "failed_attempt": {
+      "name": "05-shred-compact-tests",
+      "command": [
+        "cargo",
+        "test",
+        "-p",
+        "hivezilla",
+        "--features",
+        "shred-reconstruction",
+        "--lib",
+        "ingest::shred_compact::tests",
+        "--locked",
+        "--offline"
+      ],
+      "log": "/tmp/blockzilla-optional-ci-20260906/05-shred-compact-tests.log",
+      "started_utc": "2026-09-06T19:59:40.872161+00:00",
+      "exit_code": 101,
+      "elapsed_seconds": 152.19341095798882,
+      "finished_utc": "2026-09-06T20:02:13.070057+00:00",
+      "harnesses": 0,
+      "passed": 0,
+      "failed": 0,
+      "ignored": 0,
+      "log_sha256": "216840c885c04c1e7dbc0d98ef8b4a0458e9c44370aa9235c287df11aed765eb"
+    },
+    "failed_attempt_resolution": "Root changed the optional fixture from VersionedBlockMarker::new_block_header to VersionedBlockMarker::from_block_header for Solana entry 4.2.2. The retry and all later tests passed.",
+    "initial_lock_sha256": "3aebe00fe33070a00f89a58d35f5aae51da321526651c10eff75ff794295d734",
+    "final_lock_sha256": "3aebe00fe33070a00f89a58d35f5aae51da321526651c10eff75ff794295d734",
+    "lock_unchanged": true,
+    "final_source_sha256": {
+      "Cargo.lock": "3aebe00fe33070a00f89a58d35f5aae51da321526651c10eff75ff794295d734",
+      ".github/workflows/ci.yml": "e0d9d65727cf0f9d900d7f62bb48278f3304b7197788cc400682f4f9b66d4ee8",
+      "hivezilla/service/src/ingest/shred_compact.rs": "a5ff578d3bce40ba2aeba4d9bdfc771cbcfbeda3adeee61b849368f24c2668f9",
+      "hivezilla/service/src/shred_reader/repair_wire.rs": "625627e3cd62ed652ca6bc49cf000679cabf94fadc534498e3185aef254b253d",
+      "hivezilla/service/src/grpc.rs": "ddfd990f3bce30b3a6ad074b1a2d33653fe6f240df84127ed64a1a630507e52b",
+      "hivezilla/service/src/grpc_raw.rs": "a3fbf040e54d2c2d808b5c6c91eec90d04f3e23a28a1baccf1419b5dcc7cd47e"
+    },
+    "source_edits_during_optional_sequence": "None by this agent; root fixed the optional constructor fixture."
+  },
+  "note": "Optional-feature cases can overlap default tests and must not be added to the workspace total. Full logs are local evidence; SHA-256 values identify each completed run.",
+  "car_to_v2_fixture": {
+    "status": "PASS",
+    "environment": {
+      "unset": [
+        "RUSTFLAGS",
+        "CPATH",
+        "C_INCLUDE_PATH",
+        "CPLUS_INCLUDE_PATH",
+        "LIBRARY_PATH",
+        "SDKROOT"
+      ],
+      "CARGO_INCREMENTAL": "0",
+      "RUST_TEST_THREADS": "4"
+    },
+    "fixture": "/Users/augustin/Developement/ferno/blockzilla-v1/crates/old-faithful/of-car-reader/benches/fixtures/epoch-157-biggest.car",
+    "fixture_sha256": "04641c8c605164c34b12988d0027c0c066623aaa310c3466124aeea34b6769c3",
+    "initial_lock_sha256": "3aebe00fe33070a00f89a58d35f5aae51da321526651c10eff75ff794295d734",
+    "output": "/var/folders/m1/d9tyn2w95t5c35l0rdn0h4_w0000gn/T/blockzilla-ci-v2-fixture-20260906-27qegfin/archive",
+    "cases": [
+      {
+        "name": "01-build",
+        "command": [
+          "cargo",
+          "run",
+          "--locked",
+          "--offline",
+          "-p",
+          "blockzilla",
+          "--",
+          "build-archive-v2-hot-blocks",
+          "/Users/augustin/Developement/ferno/blockzilla-v1/crates/old-faithful/of-car-reader/benches/fixtures/epoch-157-biggest.car",
+          "/var/folders/m1/d9tyn2w95t5c35l0rdn0h4_w0000gn/T/blockzilla-ci-v2-fixture-20260906-27qegfin/archive",
+          "--max-blocks",
+          "1",
+          "--no-access"
+        ],
+        "log": "/var/folders/m1/d9tyn2w95t5c35l0rdn0h4_w0000gn/T/blockzilla-ci-v2-fixture-20260906-27qegfin/01-build.log",
+        "started_utc": "2026-09-06T20:11:36.765296+00:00",
+        "exit_code": 0,
+        "elapsed_seconds": 160.77251549996436,
+        "finished_utc": "2026-09-06T20:14:17.543616+00:00",
+        "log_sha256": "0dfd943c04b24289e1bc9d7a9ff68c90a85c23bb59668d040cbb6988219c7e57"
+      },
+      {
+        "name": "02-read",
+        "command": [
+          "cargo",
+          "run",
+          "--locked",
+          "--offline",
+          "-p",
+          "blockzilla",
+          "--",
+          "bench-archive-v2-hot-blocks",
+          "/var/folders/m1/d9tyn2w95t5c35l0rdn0h4_w0000gn/T/blockzilla-ci-v2-fixture-20260906-27qegfin/archive/archive-v2-blocks.zstd",
+          "--workers",
+          "1",
+          "--chunk-size",
+          "1"
+        ],
+        "log": "/var/folders/m1/d9tyn2w95t5c35l0rdn0h4_w0000gn/T/blockzilla-ci-v2-fixture-20260906-27qegfin/02-read.log",
+        "started_utc": "2026-09-06T20:14:17.546441+00:00",
+        "exit_code": 0,
+        "elapsed_seconds": 4.795058124989737,
+        "finished_utc": "2026-09-06T20:14:22.341666+00:00",
+        "log_sha256": "4ab9be3362fb90f38c1ef9c1538c4751d1be09f901fd17a72fcc8d0b4c1028ff"
+      }
+    ],
+    "last_lock_sha256": "3aebe00fe33070a00f89a58d35f5aae51da321526651c10eff75ff794295d734",
+    "required_files": {
+      "archive-v2-blocks.zstd": {
+        "bytes": 127578,
+        "sha256": "4021b384eff5937b8e38096707dfb671cb8bfbfa8c2bd80656e46ab351d400bc"
+      },
+      "archive-v2-blocks.index": {
+        "bytes": 88,
+        "sha256": "1dad2eafa5e173825072d5a701552376381fedc27050f800b4ed357367634d2c"
+      },
+      "archive-v2-meta.wincode": {
+        "bytes": 38,
+        "sha256": "f0b82a93f9c2c8d0c400679ec014911ea4bce23df19d1fe218c4229a4c3c99d2"
+      }
+    },
+    "build_counts": {
+      "blocks": 1,
+      "txs": 4208,
+      "uncompressed_bytes": 771452,
+      "compressed_bytes": 127578
+    },
+    "read_counts": {
+      "blocks": 1,
+      "txs": 4208,
+      "uncompressed_bytes": 771452,
+      "compressed_bytes": 127578
+    },
+    "counts_match": true,
+    "build_signatures": 4214,
+    "read_workers": 1,
+    "read_chunk_size": 1,
+    "lock_unchanged": true,
+    "validation_scope": "Exact CI conversion/read smoke check with matching counts and nonempty required files. This is not a byte-for-byte source roundtrip oracle or a release performance measurement."
+  }
+}

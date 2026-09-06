@@ -1,10 +1,14 @@
 # Hivezilla V1 implementation assessment and build plan
 
 Status: **Gate 0 in progress; core custody persisted types, unsafe-publication
-closures, the Replay hot-payload codec, and Archive finality/active-fence
+closures, and Archive finality/active-fence
 acceptance foundations are implemented, while product publication, runtime
 consumption, candidate promotion, and the Replay fixture freeze remain**,
-updated 2026-07-28.
+assessed 2026-07-28. Workspace ownership was reviewed 2026-09-06: candidate
+semantics live in `blockzilla-live-format`, Archive V2 bytes live in
+`blockzilla-archive-v2`, and the unused Replay codec was
+[retired](../design/replay-format-retirement.md). Payload format 8 remains
+reserved and unsupported. The product gates below remain a plan.
 
 This document maps the current repository to the proposed V1 contracts. It is
 not another protocol. The normative contracts are:
@@ -82,7 +86,7 @@ Until Gate 5 passes, candidate objects stay non-canonical.
 | --- | --- | --- |
 | CLI and supervision | `hivezilla/service/src/main.rs`, `ingest/config.rs`, portable supervisor | Reuse validation, redaction, process isolation, limits, and health plumbing. Replace the target `Primary`/`Replica` model with explicit roles only after equivalent commands exist. |
 | Durable journal | `hivezilla/service/src/ingest/spool.rs` | Reuse exclusive locks, no-follow checks, group commit, checkpoints, torn-tail recovery, corruption handling, audit, projection, and retirement ordering. Quota/free-reserve admission mainly comes from receiver and shred-capture code. Do not call the existing `BZIWAL01/BZIF/CMIT` bytes V1. |
-| Yellowstone raw capture | `hivezilla/service/src/grpc_raw.rs` | Reuse reconnect/watchdog, deterministic known-field protobuf encoding, generation cutover, committed cursors, retention recovery, and PoH helpers. V1's exact boundary is the pinned-schema deterministic projection; unknown provider fields are not preserved and require a new schema/stream before use. In particular, Yellowstone schema 12.4 drops Agave's V1-only transaction config and cannot distinguish V1 from V0-without-lookups after decoding. The structural adapter now requires signatures to prove the V0 interpretation in that ambiguous shape, but this only fails closed; capture must gain an explicit version/config-preserving schema before V1 traffic can be retained. |
+| Yellowstone raw capture | `hivezilla/service/src/grpc_raw.rs` | Reuse reconnect/watchdog, deterministic known-field protobuf encoding, generation cutover, committed cursors, retention recovery, and PoH helpers. V1's exact boundary is the pinned-schema deterministic projection; unknown provider fields require a new schema/stream before use. Yellowstone 12.4 could not retain V1 transaction config; 12.7 adds it. The current raw path rejects a present config before encoding and at decode/recovery boundaries, preserving payload format 2 and identity schema 1. Admitting V1 requires a separate stream schema and a version-aware adapter. The structural adapter's signature check for ambiguous older V0 data is not a replacement for that migration. |
 | Normalized gRPC path | `hivezilla/service/src/grpc.rs` | Reuse parsing and metadata conversion only after the parent-hash, complete-PoH, and missing-state blockers are fixed. Never use this path as the only raw evidence. |
 | Shred capture | `hivezilla/service/src/ingest/shred_udp.rs` | Reuse high-rate socket draining, bounded queues, group-commit structure, reserve checks, and kernel-drop telemetry. V1 format 2 stores the exact received datagram, not the current zstd storage payload; compression requires another registered format/version. |
 | Repair input | `hivezilla/service/src/shred_reader`, repair WAL tools | Extract leader schedule, trust, signature/Merkle, nonce, and repair-provenance logic from the current binary crate, then revalidate under the pinned processor/job policy. Keep repair and ordinary shreds as separate raw streams and retain legacy readers. |
@@ -90,7 +94,7 @@ Until Gate 5 passes, candidate objects stay non-canonical.
 | Network runtime | `replication_pull_runtime.rs`, `raw_replication.proto` | Reuse mTLS, static allowlists, deadlines, decoding limits, keepalive, and reconnect infrastructure. Keep the old protocol as migration compatibility; add HiveSync V1 separately. |
 | Object upload | `hivezilla/service/scripts/s3_multipart_upload.py` and supervisor tests | Reuse conditional create, checksum/readback verification, immutable-collision rejection, receipts, and failure tests as reference behavior. Move core custody and retention authority into Rust behind a provider-neutral interface. |
 | Shred reconstruction | `ingest/shred_compact.rs` | Reuse FEC grouping/recovery, conflict isolation, chained-root consistency, component decoding, and markers. Add all trust and promotion gates before continuous output. |
-| Candidate model | `crates/blockzilla-format/src/candidate_v1.rs`; legacy `live_producer.rs` | The private-field structural candidate is now ledger-only, carries distinct final-PoH/consensus and parent identities, exact fixed signatures/signed-message bytes, and component-aligned marker/data-shred geometry. It has exact-identity and explicitly non-transitive pairwise-compatibility checks but no generic merge. It is still unpromoted: evidence/trust receipts, finality-owned wrappers, and product builders remain open. `LiveBlockDraft` stays incompatible. |
+| Candidate model | `crates/blockzilla-live-format/src/candidate_v1.rs`; legacy `live_producer.rs` | The private-field structural candidate is now ledger-only, carries distinct final-PoH/consensus and parent identities, exact fixed signatures/signed-message bytes, and component-aligned marker/data-shred geometry. It has exact-identity and explicitly non-transitive pairwise-compatibility checks but no generic merge. It is still unpromoted: evidence/trust receipts, finality-owned wrappers, and product builders remain open. `LiveBlockDraft` stays incompatible. |
 | Public relay | `hivezilla/service/src/grpc_relay.rs` | Reuse bounded-ring and slow-client tests as reference behavior. Its Yellowstone protobuf, slot/filter, token, and source coupling make a small new exact-cursor exit safer than extracting it wholesale. |
 | Archive builder | `blockzilla/cli/src/archive_v2.rs` | Reuse encoding/build algorithms only after a determinism audit. Current output can include absolute paths and uses process-random hashing in the first-seen registry, whose effect on emitted ordering has not been proved absent; do not yet claim retry-identical physical bytes. |
 | Physical manifest/read path | `crates/compact-v2/blockzilla-compact-v2-reader/src/manifest.rs`, archive gateway | Reuse deterministic file ordering, size/hash validation, range reads, hash-after-write, and no-clobber immutable publication. Add catalog resolution to canonical serving APIs; low-level audit tools may still inspect explicitly supplied generations. |
@@ -118,11 +122,11 @@ Deliverables:
   bindings, semantic validators, fixed-length checks, and hard limits exist, but
   neither Blockzilla nor a compact-worker runtime consumes the compaction crate
   yet. Capture binaries must depend only on the core types they persist.
-- [x] Adapt the source-neutral candidate primitives currently in
-  `blockzilla-format` into a shared Rust semantic module so Blockzilla and the
+- [x] Adapt the source-neutral candidate primitives into
+  `blockzilla-live-format` so Blockzilla and the
   compact worker use the same `BlockCandidateV1` type without a dependency
   cycle. It has no V1 wire/hash encoding; archive-specific encoders stay in
-  `blockzilla-format`. Refactor the current private-field type to carry
+  `blockzilla-archive-v2`. Refactor the current private-field type to carry
   `final_poh_hash`, optional era-defined `consensus_block_id`,
   `parent_final_poh_hash`, and optional parent consensus ID without treating
   them as aliases, plus exact fixed-size outer signatures, exact signed-message
@@ -603,13 +607,17 @@ This is a separate product gate, not an optimization inside Compact V2. Raw
 shreds remain the permanent evidence, Replay V1 is the sequential execution
 input, and replay outputs become optional Compact V2 runtime attachments.
 
-Implementation status (2026-07-28): `blockzilla-format` now contains the
+Historical implementation status (2026-07-28): `blockzilla-format` contained the
 bounded Replay V1 hot-payload types, strict canonical encoder, event-streaming
 decoder, and focused round-trip and malformed-input tests. Payload format 8 is
 still rejected. The gate and atomic freeze remain open: registry/tail
 resolution and exact expansion, status evidence, pinned Agave fixtures and
 adapter, Replay-specific resolution/publication/catalog contracts, and
 stateful replay of the exact final bytes are not implemented.
+
+Update (2026-09-06): the unused codec was extracted and then retired. Its PoH
+helpers now live in the V2 reader. The requirements below are retained as a
+future product gate, not as a description of a current Replay codec.
 
 Deliverables:
 

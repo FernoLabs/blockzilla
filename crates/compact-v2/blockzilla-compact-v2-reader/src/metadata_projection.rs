@@ -301,16 +301,32 @@ impl CompactV2MetadataProjector {
         limits: CompactV2MetadataProjectionLimits,
         output: &mut ProjectedCompactV2TokenBalances,
     ) -> CompactV2MetadataProjectionResult<()> {
+        self.project_token_balances_and_status_reusing(bytes, limits, output, false)
+            .map(|_| ())
+    }
+
+    /// Validate the complete record once, retaining token rows and the status
+    /// facts needed to check transaction-row flags. Omitted failed balances
+    /// are still parsed and validated, without retaining their rows.
+    pub(crate) fn project_token_balances_and_status_reusing(
+        self,
+        bytes: &[u8],
+        limits: CompactV2MetadataProjectionLimits,
+        output: &mut ProjectedCompactV2TokenBalances,
+        omit_failed_balances: bool,
+    ) -> CompactV2MetadataProjectionResult<MetadataCounts> {
+        output.pre.clear();
+        output.post.clear();
         validate_limits(limits)?;
         let mut cursor = bytes;
-        match self.schema {
+        let execution_status = match self.schema {
             CompactV2MetadataSchema::CurrentTypedError => {
-                read_current_execution_status(&mut cursor, limits)?;
+                read_current_execution_status(&mut cursor, limits)?
             }
             CompactV2MetadataSchema::LegacyRawError => {
-                read_legacy_execution_status(&mut cursor, limits)?;
+                read_legacy_execution_status(&mut cursor, limits)?
             }
-        }
+        };
 
         get::<u64>(&mut cursor)?; // fee
         let pre_balance_count = skip_balances(&mut cursor, limits.total_message_accounts)?;
@@ -324,20 +340,33 @@ impl CompactV2MetadataProjector {
             .into());
         }
 
-        skip_inner_instruction_groups(&mut cursor, limits)?;
+        let inner = skip_inner_instruction_groups(&mut cursor, limits)?;
         skip_logs(&mut cursor, self.registry_entries)?;
-        read_token_balances_into(
-            &mut cursor,
-            limits.total_message_accounts,
-            self.registry_entries,
-            &mut output.pre,
-        )?;
-        read_token_balances_into(
-            &mut cursor,
-            limits.total_message_accounts,
-            self.registry_entries,
-            &mut output.post,
-        )?;
+        if omit_failed_balances && !execution_status.is_success() {
+            skip_token_balances(
+                &mut cursor,
+                limits.total_message_accounts,
+                self.registry_entries,
+            )?;
+            skip_token_balances(
+                &mut cursor,
+                limits.total_message_accounts,
+                self.registry_entries,
+            )?;
+        } else {
+            read_token_balances_into(
+                &mut cursor,
+                limits.total_message_accounts,
+                self.registry_entries,
+                &mut output.pre,
+            )?;
+            read_token_balances_into(
+                &mut cursor,
+                limits.total_message_accounts,
+                self.registry_entries,
+                &mut output.post,
+            )?;
+        }
         skip_rewards(&mut cursor, self.registry_entries)?;
         skip_loaded_addresses(
             &mut cursor,
@@ -358,7 +387,10 @@ impl CompactV2MetadataProjector {
                 cursor.len(),
             ));
         }
-        Ok(())
+        Ok(MetadataCounts {
+            execution_status,
+            inner,
+        })
     }
 
     /// Project the exact token-balance plane retained by Indexer V3.
@@ -1970,6 +2002,25 @@ mod tests {
                 assert_eq!(full_counts.inner, Some(if empty { (0, 0) } else { (2, 2) }));
                 assert_eq!(split_counts.inner, full_counts.inner);
                 let full_tokens = reader.project_token_balances(&padded, LIMITS).unwrap();
+                let mut combined_tokens = ProjectedCompactV2TokenBalances::default();
+                let combined = reader
+                    .project_token_balances_and_status_reusing(
+                        &padded,
+                        LIMITS,
+                        &mut combined_tokens,
+                        true,
+                    )
+                    .unwrap();
+                assert_eq!(combined.execution_status, full_counts.execution_status);
+                assert_eq!(combined.inner, full_counts.inner);
+                assert_eq!(
+                    canonical!(&combined_tokens.pre),
+                    canonical!(&full_tokens.pre)
+                );
+                assert_eq!(
+                    canonical!(&combined_tokens.post),
+                    canonical!(&full_tokens.post)
+                );
                 let split_tokens = reader
                     .project_split_token_balances(&tokens, LIMITS)
                     .unwrap();
@@ -2098,6 +2149,204 @@ mod tests {
             assert_eq!(projected.pre[0].amount, 10);
             assert_eq!(projected.post[0].amount, 9);
             assert_eq!(projected.post[0].decimals, 6);
+        }
+    }
+
+    #[test]
+    fn combined_token_status_preserves_cpi_presence_and_failed_retention() {
+        let failed = || {
+            full_metadata(
+                Some(CompactTransactionError::InstructionError(
+                    1,
+                    blockzilla_compact::CompactInstructionError::Custom(42),
+                )),
+                Some(cpi_groups()),
+            )
+        };
+        let cases = [
+            (
+                CompactV2MetadataSchema::CurrentTypedError,
+                current_bytes(&full_metadata(None, None)),
+                CompactV2ExecutionStatus::Succeeded,
+                None,
+            ),
+            (
+                CompactV2MetadataSchema::LegacyRawError,
+                current_bytes(&full_metadata(None, Some(vec![]))),
+                CompactV2ExecutionStatus::Succeeded,
+                Some((0, 0)),
+            ),
+            (
+                CompactV2MetadataSchema::CurrentTypedError,
+                current_bytes(&failed()),
+                CompactV2ExecutionStatus::Failed {
+                    failed_outer_instruction_index: Some(1),
+                },
+                Some((2, 2)),
+            ),
+            (
+                CompactV2MetadataSchema::LegacyRawError,
+                legacy_bytes(legacy_instruction_error(1, 25, &42u32.to_le_bytes())),
+                CompactV2ExecutionStatus::Failed {
+                    failed_outer_instruction_index: Some(1),
+                },
+                Some((2, 2)),
+            ),
+        ];
+        for (schema, bytes, status, inner) in cases {
+            let reader = projector(schema);
+            for omit in [false, true] {
+                let mut output = ProjectedCompactV2TokenBalances::default();
+                let summary = reader
+                    .project_token_balances_and_status_reusing(&bytes, LIMITS, &mut output, omit)
+                    .unwrap();
+                assert_eq!(summary.execution_status, status);
+                assert_eq!(summary.inner, inner);
+                let expected = reader.count(&bytes, LIMITS).unwrap();
+                assert_eq!(summary.execution_status, expected.execution_status);
+                assert_eq!(summary.inner, expected.inner);
+                if omit && !status.is_success() {
+                    assert!(output.pre.is_empty());
+                    assert!(output.post.is_empty());
+                } else {
+                    assert_eq!(output.pre.len(), 1);
+                    assert_eq!(output.post.len(), 1);
+                    assert_eq!(output.pre[0].amount, 10);
+                    assert_eq!(output.post[0].amount, 9);
+                }
+                // The public balance-only API keeps failed rows; its caller
+                // did not request the adapter's failure-detail omission.
+                reader
+                    .project_token_balances_reusing(&bytes, LIMITS, &mut output)
+                    .unwrap();
+                assert_eq!(output.pre.len(), 1);
+                assert_eq!(output.post.len(), 1);
+                assert_eq!(output.pre[0].amount, 10);
+                assert_eq!(output.post[0].amount, 9);
+            }
+        }
+    }
+
+    #[test]
+    fn combined_token_status_reuses_buffers_after_failure_and_partial_parse_error() {
+        let reader = projector(CompactV2MetadataSchema::CurrentTypedError);
+        let mut output = ProjectedCompactV2TokenBalances::default();
+        let mut value = full_metadata(None, Some(cpi_groups()));
+        reader
+            .project_token_balances_and_status_reusing(
+                &current_bytes(&value),
+                LIMITS,
+                &mut output,
+                true,
+            )
+            .unwrap();
+        let capacities = (output.pre.capacity(), output.post.capacity());
+        value.err = Some(CompactTransactionError::InstructionError(
+            1,
+            blockzilla_compact::CompactInstructionError::Custom(42),
+        ));
+        reader
+            .project_token_balances_and_status_reusing(
+                &current_bytes(&value),
+                LIMITS,
+                &mut output,
+                true,
+            )
+            .unwrap();
+        assert!(output.pre.is_empty());
+        assert!(output.post.is_empty());
+        assert_eq!(capacities, (output.pre.capacity(), output.post.capacity()));
+
+        value.err = None;
+        // Pre rows have already been read when the invalid post account fails.
+        value.post_token_balances[0].account_index = LIMITS.total_message_accounts as u32;
+        assert!(
+            reader
+                .project_token_balances_and_status_reusing(
+                    &current_bytes(&value),
+                    LIMITS,
+                    &mut output,
+                    true,
+                )
+                .is_err()
+        );
+        // Output after Err is not usable. The next successful record must not
+        // expose either old rows or rows from the partially parsed record.
+        value.pre_token_balances.clear();
+        value.post_token_balances.clear();
+        let summary = reader
+            .project_token_balances_and_status_reusing(
+                &current_bytes(&value),
+                LIMITS,
+                &mut output,
+                true,
+            )
+            .unwrap();
+        assert!(summary.execution_status.is_success());
+        assert!(output.pre.is_empty());
+        assert!(output.post.is_empty());
+        assert_eq!(capacities, (output.pre.capacity(), output.post.capacity()));
+    }
+
+    #[test]
+    fn omitted_failed_balances_still_validate_full_record_and_discarded_lanes() {
+        let failed = || {
+            full_metadata(
+                Some(CompactTransactionError::InstructionError(
+                    1,
+                    blockzilla_compact::CompactInstructionError::Custom(42),
+                )),
+                Some(cpi_groups()),
+            )
+        };
+        let reader = projector(CompactV2MetadataSchema::CurrentTypedError);
+        let mut cases = Vec::new();
+        let mut truncated = current_bytes(&failed());
+        truncated.pop();
+        cases.push(("truncated tail", truncated));
+        let mut trailing = current_bytes(&failed());
+        trailing.push(0);
+        cases.push(("trailing tail", trailing));
+        let mut value = failed();
+        value.pre_token_balances[0].account_index = LIMITS.total_message_accounts as u32;
+        cases.push(("token account", current_bytes(&value)));
+        let mut value = failed();
+        value.post_token_balances[0].mint = Some(CompactPubkey::Id(101));
+        cases.push(("token registry key", current_bytes(&value)));
+        let mut value = failed();
+        value.loaded_writable_addresses.clear();
+        cases.push(("loaded count", current_bytes(&value)));
+        let mut value = failed();
+        value.loaded_readonly_addresses[0] = CompactPubkey::Id(101);
+        cases.push(("loaded registry key", current_bytes(&value)));
+        let mut value = failed();
+        value.logs.as_mut().unwrap().strings.bytes = vec![0xff, 0xff];
+        cases.push(("log UTF-8", current_bytes(&value)));
+        let mut value = failed();
+        value.rewards[0].pubkey = CompactPubkey::Id(101);
+        cases.push(("reward registry key", current_bytes(&value)));
+        let mut value = failed();
+        value.return_data.as_mut().unwrap().program_id = CompactPubkey::Id(101);
+        cases.push(("return-data registry key", current_bytes(&value)));
+        let mut value = failed();
+        value.inner_instructions.as_mut().unwrap()[1].index = 0;
+        cases.push(("duplicate CPI group", current_bytes(&value)));
+        let mut value = failed();
+        value.err = Some(CompactTransactionError::InstructionError(
+            LIMITS.top_level_instruction_count as u8,
+            blockzilla_compact::CompactInstructionError::Custom(42),
+        ));
+        cases.push(("failed instruction index", current_bytes(&value)));
+
+        for (name, bytes) in cases {
+            let mut output = ProjectedCompactV2TokenBalances::default();
+            assert!(reader.project(&bytes, LIMITS).is_err(), "{name}");
+            assert!(
+                reader
+                    .project_token_balances_and_status_reusing(&bytes, LIMITS, &mut output, true)
+                    .is_err(),
+                "{name}"
+            );
         }
     }
 

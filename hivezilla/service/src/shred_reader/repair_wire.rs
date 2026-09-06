@@ -1,7 +1,7 @@
-//! Agave v4.1.2 repair-protocol wire encoding.
+//! Agave v4.2.2 repair-protocol wire encoding.
 //!
 //! The request enum order, fixed-width bincode configuration, signature
-//! placement, and ping/pong types intentionally mirror Agave v4.1.2. Keep the
+//! placement, and ping/pong types intentionally mirror Agave v4.2.2. Keep the
 //! golden tests when changing Solana dependencies: even a valid serde refactor
 //! can otherwise produce packets that validators silently reject.
 
@@ -133,7 +133,7 @@ struct RepairRequestHeader {
     nonce: RepairNonce,
 }
 
-/// Keep this enum in exact Agave v4.1.2 declaration order. Bincode encodes the
+/// Keep this enum in exact Agave v4.2.2 declaration order. Bincode encodes the
 /// zero-based variant index as a four-byte little-endian integer.
 #[derive(Debug, Deserialize, Serialize, wincode::SchemaRead, wincode::SchemaWrite)]
 enum RepairProtocol {
@@ -178,7 +178,6 @@ enum RepairProtocol {
         header: RepairRequestHeader,
         slot: u64,
         shred_index: u32,
-        fec_set_merkle_root: Hash,
         block_id: Hash,
     },
 }
@@ -188,7 +187,7 @@ enum RepairResponse {
     Ping(RepairPing),
 }
 
-/// Encode and sign one Agave v4.1.2 shred-repair request.
+/// Encode and sign one Agave v4.2.2 shred-repair request.
 ///
 /// `timestamp_ms` is the Unix timestamp in milliseconds. Validators currently
 /// reject signed requests outside their repair time window, so callers should
@@ -238,7 +237,7 @@ pub fn parse_verified_ping(packet: &[u8]) -> Option<RepairPing> {
     ping.verify().then_some(ping)
 }
 
-/// Encode the signed pong expected by an Agave v4.1.2 repair peer.
+/// Encode the signed pong expected by an Agave v4.2.2 repair peer.
 pub fn encode_pong(ping: &RepairPing, sender: &Keypair) -> Result<Vec<u8>, RepairWireError> {
     wincode::serialize(&RepairProtocol::Pong(Pong::new(ping, sender)))
         .map_err(wincode::error::Error::from)
@@ -350,6 +349,7 @@ fn encode_signed_protocol(
 mod tests {
     use super::*;
 
+    // Agave 4.1.2 packet fixtures also match the active 4.2.2 request layouts.
     const WINDOW_INDEX_GOLDEN: &str = concat!(
         "0800000073aba031224e9144a73f6723df9bf60a6941298410f4216a9ae04b13",
         "5df2088050c650db7f2d9355acff9e611c546e5a28e19018d59ad22e0ebc585b",
