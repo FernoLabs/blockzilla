@@ -14,6 +14,7 @@ name = "blockzilla-dump"
 path = "src/main.rs"
 
 [dependencies]
+blockzilla-replay-format = { path = "../blockzilla-replay-format" }
 anyhow = "1.0.104"
 blockzilla-format = { version = "0.2.0", path = "../blockzilla-format" }
 blockzilla-query-sdk = { version = "0.2.0", path = "../blockzilla-query-sdk" }

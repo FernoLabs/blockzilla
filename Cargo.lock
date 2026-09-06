@@ -692,6 +692,7 @@ dependencies = [
  "blockzilla-format",
  "blockzilla-index-archive-format",
  "blockzilla-query-sdk",
+ "blockzilla-replay-format",
  "blockzilla-source",
  "blockzilla-source-cache",
  "blockzilla-source-http",
@@ -722,6 +723,7 @@ dependencies = [
  "blockzilla-compact-v2-reader",
  "blockzilla-format",
  "blockzilla-query-sdk",
+ "blockzilla-replay-format",
  "blockzilla-user-program-index",
  "bs58",
  "clap 4.6.5",
@@ -1021,6 +1023,13 @@ dependencies = [
  "target-lexicon",
  "thiserror 2.0.19",
  "wincode 0.6.1",
+]
+
+[[package]]
+name = "blockzilla-replay-format"
+version = "0.2.0"
+dependencies = [
+ "sha2 0.11.0",
 ]
 
 [[package]]

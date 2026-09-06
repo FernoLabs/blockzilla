@@ -2,7 +2,6 @@ pub mod candidate_v1;
 pub mod framed;
 pub mod live_producer;
 pub mod registry;
-pub mod replay_v1;
 pub mod skipped_slots;
 
 pub mod blockhash_registry;
@@ -19,7 +18,6 @@ pub use primitives::*;
 pub use framed::*;
 pub use live_producer::*;
 pub use registry::*;
-pub use replay_v1::*;
 pub use skipped_slots::*;
 pub use split_compact::*;
 pub use v2::*;

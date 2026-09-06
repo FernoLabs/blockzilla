@@ -1,0 +1,13 @@
+[package]
+name = "blockzilla-replay-format"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+publish = false
+autobins = false
+description = "Replay Projection V1 payload types and codec (reserved format 8; removal candidate)"
+
+[dependencies]
+sha2 = "0.11.0"

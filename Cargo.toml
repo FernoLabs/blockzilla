@@ -13,6 +13,7 @@ members = [
     "crates/blockzilla-example-workloads",
     "crates/blockzilla-firebase-indexer",
     "crates/blockzilla-format",
+    "crates/blockzilla-replay-format",
     "crates/blockzilla-index-archive-convert",
     "crates/blockzilla-index-archive-format",
     "crates/blockzilla-index-archive-measure",

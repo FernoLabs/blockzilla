@@ -1,3 +1,9 @@
+//! **Removal candidate.** Archive V3's ledger plane models the same slot,
+//! transaction, message and instruction shapes, and adds the execution-effect
+//! plane this format lacks. Payload format 8 was never enabled, and only the
+//! PoH entry-hash slice has any consumer. See REMOVAL-CANDIDATE.md before
+//! building anything new on this.
+//!
 //! Minimal, canonical Replay Projection V1 payload types and codec.
 //!
 //! This module only implements the hot per-produced-slot payload. Finality,
