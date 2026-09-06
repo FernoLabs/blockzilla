@@ -1,0 +1,19 @@
+[package]
+name = "blockzilla-registry"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+publish = false
+autobins = false
+description = "Pubkey registry, MPHF key index and blockhash registry"
+
+[dependencies]
+blockzilla-primitives = { path = "../blockzilla-primitives" }
+anyhow = "1.0.102"
+five8 = "1.0.0"
+memmap2 = "0.9.10"
+solana-pubkey = "4.2.0"
+gxhash = "3.5.0"
+ph = { version = "=0.11.0", default-features = false }

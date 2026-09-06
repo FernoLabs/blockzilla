@@ -1,0 +1,16 @@
+[package]
+name = "blockzilla-primitives"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+publish = false
+autobins = false
+description = "Shared key, string-table and LEB128 framing primitives"
+
+[dependencies]
+anyhow = "1.0.102"
+serde = { version = "1.0.228", features = ["derive"] }
+solana-pubkey = "4.2.0"
+wincode = { version = "=0.6.1", features = ["derive"] }

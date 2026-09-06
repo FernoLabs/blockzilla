@@ -1,0 +1,34 @@
+[package]
+name = "blockzilla-program-logs"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+publish = false
+autobins = false
+description = "Known-program log decoding for Solana program output"
+
+[features]
+default = ["known-program-logs"]
+known-program-logs = [
+    "known-drift",
+    "known-okx-router",
+    "known-phoenix-perps",
+    "known-phoenix-v1",
+    "known-raydium-amm",
+    "known-static-programs",
+]
+known-drift = []
+known-okx-router = []
+known-phoenix-perps = []
+known-phoenix-v1 = []
+known-raydium-amm = []
+known-static-programs = []
+
+[dependencies]
+blockzilla-primitives = { path = "../blockzilla-primitives" }
+data-encoding = "2.11.0"
+serde = { version = "1.0.228", features = ["derive"] }
+solana-pubkey = "4.2.0"
+wincode = { version = "=0.6.1", features = ["derive"] }

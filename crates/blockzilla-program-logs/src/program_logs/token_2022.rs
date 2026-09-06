@@ -1,0 +1,654 @@
+use serde::{Deserialize, Serialize};
+use wincode::{SchemaRead, SchemaWrite};
+
+use blockzilla_primitives::{CompactPubkey, PubkeyCompactor, PubkeyResolver, StrId, StringTable};
+
+/// SPL Token-2022 program id
+pub const STR_ID: &str = "TokenzQdBNbLqP5VEhdkAS6EPFLC1PHnBqCXEpPxuEb";
+
+/// Compact id for any pubkey that exists in the Registry.
+/// This is not “program id” specific here, it is simply the registry index + 1.
+pub type PubkeyId = CompactPubkey;
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, SchemaRead, SchemaWrite)]
+pub enum Token2022Log {
+    /// entrypoint.rs:17 msg!(error.to_str::<TokenError>())
+    Error(Token2022ErrorLog),
+
+    /// Static `msg!` payloads from the Token-2022 processor and extensions.
+    Static(Token2022StaticLog),
+
+    /// processor.rs:437
+    CalculatedFee { calculated_fee: u64, fee: u64 },
+
+    /// extension/confidential_transfer/processor.rs:188
+    AccountNeedsResizePlusBytesDebug { bytes: usize },
+
+    /// extension/reallocate.rs:69
+    AccountNeedsResizePlusBytesDebug2 { bytes: usize },
+
+    /// extension/confidential_transfer_fee/processor.rs:280
+    ErrorHarvestingFrom {
+        account_key: PubkeyId,
+        /// Keep as string for now (often comes from Display impls / nested errors)
+        error: StrId,
+    },
+
+    /// extension/confidential_transfer_fee/processor.rs:366
+    ErrorHarvestingFrom2 { account_key: PubkeyId, error: StrId },
+
+    /// extension/transfer_fee/processor.rs:197
+    ErrorHarvestingFrom3 { account_key: PubkeyId, error: StrId },
+
+    /// extension/transfer_fee/processor.rs:266
+    ErrorHarvestingFrom4 { account_key: PubkeyId, error: StrId },
+}
+
+macro_rules! token_2022_static_logs {
+    ($( $variant:ident => $text:literal, )+ ) => {
+        #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, SchemaRead, SchemaWrite)]
+        pub enum Token2022StaticLog {
+            $( $variant, )+
+        }
+
+        impl Token2022StaticLog {
+            #[inline]
+            pub fn parse(text: &str) -> Option<Self> {
+                match text {
+                    $( $text => Some(Self::$variant), )+
+                    _ => None,
+                }
+            }
+
+            #[inline]
+            pub fn as_str(self) -> &'static str {
+                match self {
+                    $( Self::$variant => $text, )+
+                }
+            }
+        }
+    };
+}
+
+token_2022_static_logs! {
+    WarningPermanentDelegate => "Warning: Mint has a permanent delegate, so tokens in this account may be seized at any time",
+    PermissionedBurnAuthorityNoneUseStandardBurn => "Permissioned burn authority is None; use the standard burn",
+    InstructionBatch => "Instruction: Batch",
+    InstructionInitializeMint => "Instruction: InitializeMint",
+    InstructionInitializeMint2 => "Instruction: InitializeMint2",
+    InstructionInitializeAccount => "Instruction: InitializeAccount",
+    InstructionInitializeAccount2 => "Instruction: InitializeAccount2",
+    InstructionInitializeAccount3 => "Instruction: InitializeAccount3",
+    InstructionInitializeMultisig => "Instruction: InitializeMultisig",
+    InstructionInitializeMultisig2 => "Instruction: InitializeMultisig2",
+    InstructionTransfer => "Instruction: Transfer",
+    InstructionApprove => "Instruction: Approve",
+    InstructionRevoke => "Instruction: Revoke",
+    InstructionSetAuthority => "Instruction: SetAuthority",
+    InstructionMintTo => "Instruction: MintTo",
+    InstructionBurn => "Instruction: Burn",
+    InstructionCloseAccount => "Instruction: CloseAccount",
+    InstructionFreezeAccount => "Instruction: FreezeAccount",
+    InstructionThawAccount => "Instruction: ThawAccount",
+    InstructionTransferChecked => "Instruction: TransferChecked",
+    InstructionApproveChecked => "Instruction: ApproveChecked",
+    InstructionMintToChecked => "Instruction: MintToChecked",
+    InstructionBurnChecked => "Instruction: BurnChecked",
+    InstructionSyncNative => "Instruction: SyncNative",
+    InstructionGetAccountDataSize => "Instruction: GetAccountDataSize",
+    InstructionInitializeMintCloseAuthority => "Instruction: InitializeMintCloseAuthority",
+    InstructionInitializeImmutableOwner => "Instruction: InitializeImmutableOwner",
+    InstructionAmountToUiAmount => "Instruction: AmountToUiAmount",
+    InstructionUiAmountToAmount => "Instruction: UiAmountToAmount",
+    InstructionReallocate => "Instruction: Reallocate",
+    InstructionCreateNativeMint => "Instruction: CreateNativeMint",
+    InstructionInitializeNonTransferableMint => "Instruction: InitializeNonTransferableMint",
+    InstructionInitializePermanentDelegate => "Instruction: InitializePermanentDelegate",
+    InstructionWithdrawExcessLamports => "Instruction: WithdrawExcessLamports",
+    InstructionConfidentialMintBurnExtension => "Instruction: ConfidentialMintBurnExtension",
+    InstructionScaledUiAmountExtension => "Instruction: ScaledUiAmountExtension",
+    InstructionPausableExtension => "Instruction: PausableExtension",
+    InstructionPermissionedBurnExtension => "Instruction: PermissionedBurnExtension",
+    InstructionUnwrapLamports => "Instruction: UnwrapLamports",
+    PausableInitialize => "PausableInstruction::Initialize",
+    PausablePause => "PausableInstruction::Pause",
+    PausableResume => "PausableInstruction::Resume",
+    GroupPointerInitialize => "GroupPointerInstruction::Initialize",
+    GroupPointerUpdate => "GroupPointerInstruction::Update",
+    GroupMemberPointerInitialize => "GroupMemberPointerInstruction::Initialize",
+    GroupMemberPointerUpdate => "GroupMemberPointerInstruction::Update",
+    CpiGuardEnable => "CpiGuardInstruction::Enable",
+    CpiGuardDisable => "CpiGuardInstruction::Disable",
+    DefaultAccountStateInitialize => "DefaultAccountStateInstruction::Initialize",
+    DefaultAccountStateUpdate => "DefaultAccountStateInstruction::Update",
+    RequiredMemoTransfersEnable => "RequiredMemoTransfersInstruction::Enable",
+    RequiredMemoTransfersDisable => "RequiredMemoTransfersInstruction::Disable",
+    MetadataMintMustBeInitializedInMint => "Metadata for a mint must be initialized in the mint itself.",
+    MetadataPointerExtensionRequired => "A mint with metadata must have the metadata-pointer extension initialized",
+    TokenMetadataInitialize => "TokenMetadataInstruction: Initialize",
+    TokenMetadataUpdateField => "TokenMetadataInstruction: UpdateField",
+    TokenMetadataRemoveKey => "TokenMetadataInstruction: RemoveKey",
+    TokenMetadataUpdateAuthority => "TokenMetadataInstruction: UpdateAuthority",
+    TokenMetadataEmit => "TokenMetadataInstruction: Emit",
+    ScaledUiAmountInitialize => "ScaledUiAmountMintInstruction::Initialize",
+    ScaledUiAmountUpdateScale => "ScaledUiAmountMintInstruction::UpdateScale",
+    PermissionedBurnInitialize => "PermissionedBurnInstruction::Initialize",
+    PermissionedBurnBurn => "PermissionedBurnInstruction::Burn",
+    PermissionedBurnBurnChecked => "PermissionedBurnInstruction::BurnChecked",
+    PermissionedBurnConfidentialBurn => "PermissionedBurnInstruction::ConfidentialBurn",
+    ConfidentialTransferEncryptionPubkeyMismatch => "Encryption public-key mismatch",
+    ConfidentialTransferAvailableBalanceMismatch => "Available balance mismatch",
+    ConfidentialTransferInitializeMint => "ConfidentialTransferInstruction::InitializeMint",
+    ConfidentialTransferUpdateMint => "ConfidentialTransferInstruction::UpdateMint",
+    ConfidentialTransferConfigureAccount => "ConfidentialTransferInstruction::ConfigureAccount",
+    ConfidentialTransferApproveAccount => "ConfidentialTransferInstruction::ApproveAccount",
+    ConfidentialTransferEmptyAccount => "ConfidentialTransferInstruction::EmptyAccount",
+    ConfidentialTransferDeposit => "ConfidentialTransferInstruction::Deposit",
+    ConfidentialTransferWithdraw => "ConfidentialTransferInstruction::Withdraw",
+    ConfidentialTransferTransfer => "ConfidentialTransferInstruction::Transfer",
+    ConfidentialTransferApplyPendingBalance => "ConfidentialTransferInstruction::ApplyPendingBalance",
+    ConfidentialTransferDisableConfidentialCredits => "ConfidentialTransferInstruction::DisableConfidentialCredits",
+    ConfidentialTransferEnableConfidentialCredits => "ConfidentialTransferInstruction::EnableConfidentialCredits",
+    ConfidentialTransferDisableNonConfidentialCredits => "ConfidentialTransferInstruction::DisableNonConfidentialCredits",
+    ConfidentialTransferEnableNonConfidentialCredits => "ConfidentialTransferInstruction::EnableNonConfidentialCredits",
+    ConfidentialTransferTransferWithFee => "ConfidentialTransferInstruction::TransferWithFee",
+    ConfidentialTransferConfigureAccountWithRegistry => "ConfidentialTransferInstruction::ConfigureAccountWithRegistry",
+    TransferHookRequiresAuthorityOrProgramId => "The transfer hook extension requires at least an authority or a program id for initialization, neither was provided",
+    TransferHookInitialize => "TransferHookInstruction::Initialize",
+    TransferHookUpdate => "TransferHookInstruction::Update",
+    MetadataPointerRequiresAuthorityOrAddress => "The metadata pointer extension requires at least an authority or an address for initialization, neither was provided",
+    MetadataPointerInitialize => "MetadataPointerInstruction::Initialize",
+    MetadataPointerUpdate => "MetadataPointerInstruction::Update",
+    InterestBearingMintInitialize => "InterestBearingMintInstruction::Initialize",
+    InterestBearingMintUpdateRate => "InterestBearingMintInstruction::UpdateRate",
+    ConfidentialMintBurnInitializeMint => "ConfidentialMintBurnInstruction::InitializeMint",
+    ConfidentialMintBurnRotateSupplyElGamal => "ConfidentialMintBurnInstruction::RotateSupplyElGamal",
+    ConfidentialMintBurnUpdateDecryptableSupply => "ConfidentialMintBurnInstruction::UpdateDecryptableSupply",
+    ConfidentialMintBurnConfidentialMint => "ConfidentialMintBurnInstruction::ConfidentialMint",
+    ConfidentialMintBurnConfidentialBurn => "ConfidentialMintBurnInstruction::ConfidentialBurn",
+    ConfidentialMintBurnApplyPendingBurn => "ConfidentialMintBurnInstruction::ApplyPendingBurn",
+    ConfidentialTransferFeeInitializeConfig => "ConfidentialTransferFeeInstruction::InitializeConfidentialTransferFeeConfig",
+    ConfidentialTransferFeeWithdrawFromMint => "ConfidentialTransferFeeInstruction::WithdrawWithheldTokensFromMint",
+    ConfidentialTransferFeeWithdrawFromAccounts => "ConfidentialTransferFeeInstruction::WithdrawWithheldTokensFromAccounts",
+    ConfidentialTransferFeeHarvestToMint => "ConfidentialTransferFeeInstruction::HarvestWithheldTokensToMint",
+    ConfidentialTransferFeeEnableHarvestToMint => "ConfidentialTransferFeeInstruction::EnableHarvestToMint",
+    ConfidentialTransferFeeDisableHarvestToMint => "ConfidentialTransferFeeInstruction::DisableHarvestToMint",
+    TransferFeeTransferCheckedWithFee => "TransferFeeInstruction: TransferCheckedWithFee",
+    TransferFeeWithdrawFromMint => "TransferFeeInstruction: WithdrawWithheldTokensFromMint",
+    TransferFeeWithdrawFromAccounts => "TransferFeeInstruction: WithdrawWithheldTokensFromAccounts",
+    TransferFeeHarvestToMint => "TransferFeeInstruction: HarvestWithheldTokensToMint",
+    TransferFeeSetTransferFee => "TransferFeeInstruction: SetTransferFee",
+    TokenGroupMintMustBeInitializedInMint => "Group configurations for a mint must be initialized in the mint itself.",
+    TokenGroupMemberMustBeInitializedInMint => "Group member configurations for a mint must be initialized in the mint itself.",
+    TokenGroupInitializeGroup => "TokenGroupInstruction: InitializeGroup",
+    TokenGroupUpdateGroupMaxSize => "TokenGroupInstruction: UpdateGroupMaxSize",
+    TokenGroupUpdateGroupAuthority => "TokenGroupInstruction: UpdateGroupAuthority",
+    TokenGroupInitializeMember => "TokenGroupInstruction: InitializeMember",
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, SchemaRead, SchemaWrite)]
+pub enum Token2022ErrorLog {
+    NotRentExempt,
+    InsufficientFunds,
+    InvalidMint,
+    MintMismatch,
+    OwnerMismatch,
+    FixedSupply,
+    AlreadyInUse,
+    InvalidNumberOfProvidedSigners,
+    InvalidNumberOfRequiredSigners,
+    UninitializedState,
+    NativeNotSupported,
+    NonNativeHasBalance,
+    InvalidInstruction,
+    InvalidState,
+    Overflow,
+    AuthorityTypeNotSupported,
+    MintCannotFreeze,
+    AccountFrozen,
+    MintDecimalsMismatch,
+    NonNativeNotSupported,
+    ExtensionTypeMismatch,
+    ExtensionBaseMismatch,
+    ExtensionAlreadyInitialized,
+    ConfidentialTransferAccountHasBalance,
+    ConfidentialTransferAccountNotApproved,
+    ConfidentialTransferDepositsAndTransfersDisabled,
+    ConfidentialTransferElGamalPubkeyMismatch,
+    ConfidentialTransferBalanceMismatch,
+    MintHasSupply,
+    NoAuthorityExists,
+    TransferFeeExceedsMaximum,
+    MintRequiredForTransfer,
+    FeeMismatch,
+    FeeParametersMismatch,
+    ImmutableOwner,
+    AccountHasWithheldTransferFees,
+    NoMemo,
+    NonTransferable,
+    NonTransferableNeedsImmutableOwnership,
+    MaximumPendingBalanceCreditCounterExceeded,
+    MaximumDepositAmountExceeded,
+    CpiGuardSettingsLocked,
+    CpiGuardTransferBlocked,
+    CpiGuardBurnBlocked,
+    CpiGuardCloseAccountBlocked,
+    CpiGuardApproveBlocked,
+    CpiGuardSetAuthorityBlocked,
+    CpiGuardOwnerChangeBlocked,
+    ExtensionNotFound,
+    NonConfidentialTransfersDisabled,
+    ConfidentialTransferFeeAccountHasWithheldFee,
+    InvalidExtensionCombination,
+    InvalidLengthForAlloc,
+    AccountDecryption,
+    ProofGeneration,
+    InvalidProofInstructionOffset,
+    HarvestToMintDisabled,
+    SplitProofContextStateAccountsNotSupported,
+    NotEnoughProofContextStateAccounts,
+    MalformedCiphertext,
+    CiphertextArithmeticFailed,
+    PedersenCommitmentMismatch,
+    RangeProofLengthMismatch,
+    IllegalBitLength,
+    FeeCalculation,
+    IllegalMintBurnConversion,
+    InvalidScale,
+    MintPaused,
+    PendingBalanceNonZero,
+}
+
+impl Token2022ErrorLog {
+    #[inline]
+    pub fn parse(text: &str) -> Option<Self> {
+        match text {
+            "Error: Lamport balance below rent-exempt threshold" => Some(Self::NotRentExempt),
+            "Error: insufficient funds" => Some(Self::InsufficientFunds),
+            "Error: Invalid Mint" => Some(Self::InvalidMint),
+            "Error: Account not associated with this Mint" => Some(Self::MintMismatch),
+            "Error: owner does not match" => Some(Self::OwnerMismatch),
+            "Error: the total supply of this token is fixed" => Some(Self::FixedSupply),
+            "Error: account or token already in use" => Some(Self::AlreadyInUse),
+            "Error: Invalid number of provided signers" => {
+                Some(Self::InvalidNumberOfProvidedSigners)
+            }
+            "Error: Invalid number of required signers" => {
+                Some(Self::InvalidNumberOfRequiredSigners)
+            }
+            "Error: State is uninitialized" => Some(Self::UninitializedState),
+            "Error: Instruction does not support native tokens" => Some(Self::NativeNotSupported),
+            "Error: Non-native account can only be closed if its balance is zero" => {
+                Some(Self::NonNativeHasBalance)
+            }
+            "Error: Invalid instruction" => Some(Self::InvalidInstruction),
+            "Error: Invalid account state for operation" => Some(Self::InvalidState),
+            "Error: Operation overflowed" => Some(Self::Overflow),
+            "Error: Account does not support specified authority type" => {
+                Some(Self::AuthorityTypeNotSupported)
+            }
+            "Error: This token mint cannot freeze accounts" => Some(Self::MintCannotFreeze),
+            "Error: Account is frozen" => Some(Self::AccountFrozen),
+            "Error: decimals different from the Mint decimals" => Some(Self::MintDecimalsMismatch),
+            "Error: Instruction does not support non-native tokens" => {
+                Some(Self::NonNativeNotSupported)
+            }
+
+            "Error: New extension type does not match already existing extensions" => {
+                Some(Self::ExtensionTypeMismatch)
+            }
+            "Error: Extension does not match the base type provided" => {
+                Some(Self::ExtensionBaseMismatch)
+            }
+            "Error: Extension already initialized on this account" => {
+                Some(Self::ExtensionAlreadyInitialized)
+            }
+            "Error: An account can only be closed if its confidential balance is zero" => {
+                Some(Self::ConfidentialTransferAccountHasBalance)
+            }
+            "Error: Account not approved for confidential transfers" => {
+                Some(Self::ConfidentialTransferAccountNotApproved)
+            }
+            "Error: Account not accepting deposits or transfers" => {
+                Some(Self::ConfidentialTransferDepositsAndTransfersDisabled)
+            }
+            "Error: ElGamal public key mismatch" => {
+                Some(Self::ConfidentialTransferElGamalPubkeyMismatch)
+            }
+            "Error: Balance mismatch" => Some(Self::ConfidentialTransferBalanceMismatch),
+            "Error: Mint has non-zero supply. Burn all tokens before closing the mint" => {
+                Some(Self::MintHasSupply)
+            }
+            "Error: No authority exists to perform the desired operation" => {
+                Some(Self::NoAuthorityExists)
+            }
+            "Error: Transfer fee exceeds maximum of 10,000 basis points" => {
+                Some(Self::TransferFeeExceedsMaximum)
+            }
+            "Mint required for this account to transfer tokens, use `transfer_checked` or `transfer_checked_with_fee`" => {
+                Some(Self::MintRequiredForTransfer)
+            }
+            "Calculated fee does not match expected fee" => Some(Self::FeeMismatch),
+            "Fee parameters associated with zero-knowledge proofs do not match fee parameters in mint" => {
+                Some(Self::FeeParametersMismatch)
+            }
+            "The owner authority cannot be changed" => Some(Self::ImmutableOwner),
+            "Error: An account can only be closed if its withheld fee balance is zero, harvest fees to the mint and try again" => {
+                Some(Self::AccountHasWithheldTransferFees)
+            }
+            "Error: No memo in previous instruction required for recipient to receive a transfer" => {
+                Some(Self::NoMemo)
+            }
+            "Transfer is disabled for this mint" => Some(Self::NonTransferable),
+            "Non-transferable tokens can't be minted to an account without immutable ownership" => {
+                Some(Self::NonTransferableNeedsImmutableOwnership)
+            }
+            "The total number of `Deposit` and `Transfer` instructions to an account cannot exceed the associated `maximum_pending_balance_credit_counter`" => {
+                Some(Self::MaximumPendingBalanceCreditCounterExceeded)
+            }
+            "Deposit amount exceeds maximum limit" => Some(Self::MaximumDepositAmountExceeded),
+            "CPI Guard status cannot be changed in CPI" => Some(Self::CpiGuardSettingsLocked),
+            "CPI Guard is enabled, and a program attempted to transfer user funds without using a delegate" => {
+                Some(Self::CpiGuardTransferBlocked)
+            }
+            "CPI Guard is enabled, and a program attempted to burn user funds without using a delegate" => {
+                Some(Self::CpiGuardBurnBlocked)
+            }
+            "CPI Guard is enabled, and a program attempted to close an account without returning lamports to owner" => {
+                Some(Self::CpiGuardCloseAccountBlocked)
+            }
+            "CPI Guard is enabled, and a program attempted to approve a delegate" => {
+                Some(Self::CpiGuardApproveBlocked)
+            }
+            "CPI Guard is enabled, and a program attempted to add or change an authority" => {
+                Some(Self::CpiGuardSetAuthorityBlocked)
+            }
+            "Account ownership cannot be changed while CPI Guard is enabled" => {
+                Some(Self::CpiGuardOwnerChangeBlocked)
+            }
+            "Extension not found in account data" => Some(Self::ExtensionNotFound),
+            "Non-confidential transfers disabled" => Some(Self::NonConfidentialTransfersDisabled),
+            "Account has non-zero confidential withheld fee" => {
+                Some(Self::ConfidentialTransferFeeAccountHasWithheldFee)
+            }
+            "Mint or account is initialized to an invalid combination of extensions" => {
+                Some(Self::InvalidExtensionCombination)
+            }
+            "Extension allocation with overwrite must use the same length" => {
+                Some(Self::InvalidLengthForAlloc)
+            }
+            "Failed to decrypt a confidential transfer account" => Some(Self::AccountDecryption),
+            "Failed to generate proof" => Some(Self::ProofGeneration),
+            "An invalid proof instruction offset was provided" => {
+                Some(Self::InvalidProofInstructionOffset)
+            }
+            "Harvest of withheld tokens to mint is disabled" => Some(Self::HarvestToMintDisabled),
+            "Split proof context state accounts not supported for instruction" => {
+                Some(Self::SplitProofContextStateAccountsNotSupported)
+            }
+            "Not enough proof context state accounts provided" => {
+                Some(Self::NotEnoughProofContextStateAccounts)
+            }
+            "Ciphertext is malformed" => Some(Self::MalformedCiphertext),
+            "Ciphertext arithmetic failed" => Some(Self::CiphertextArithmeticFailed),
+            "Pedersen commitments did not match" => Some(Self::PedersenCommitmentMismatch),
+            "Range proof lengths did not match" => Some(Self::RangeProofLengthMismatch),
+            "Illegal transfer amount bit length" => Some(Self::IllegalBitLength),
+            "Transfer fee calculation failed" => Some(Self::FeeCalculation),
+            "Conversions from normal to confidential token balance and vice versa are illegal if the confidential-mint-burn extension is enabled" => {
+                Some(Self::IllegalMintBurnConversion)
+            }
+            "Invalid scale for scaled ui amount" => Some(Self::InvalidScale),
+            "Transferring, minting, and burning is paused on this mint" => Some(Self::MintPaused),
+            "Key rotation attempted while pending balance is not zero" => {
+                Some(Self::PendingBalanceNonZero)
+            }
+            _ => None,
+        }
+    }
+
+    #[inline]
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::NotRentExempt => "Error: Lamport balance below rent-exempt threshold",
+            Self::InsufficientFunds => "Error: insufficient funds",
+            Self::InvalidMint => "Error: Invalid Mint",
+            Self::MintMismatch => "Error: Account not associated with this Mint",
+            Self::OwnerMismatch => "Error: owner does not match",
+            Self::FixedSupply => "Error: the total supply of this token is fixed",
+            Self::AlreadyInUse => "Error: account or token already in use",
+            Self::InvalidNumberOfProvidedSigners => "Error: Invalid number of provided signers",
+            Self::InvalidNumberOfRequiredSigners => "Error: Invalid number of required signers",
+            Self::UninitializedState => "Error: State is uninitialized",
+            Self::NativeNotSupported => "Error: Instruction does not support native tokens",
+            Self::NonNativeHasBalance => {
+                "Error: Non-native account can only be closed if its balance is zero"
+            }
+            Self::InvalidInstruction => "Error: Invalid instruction",
+            Self::InvalidState => "Error: Invalid account state for operation",
+            Self::Overflow => "Error: Operation overflowed",
+            Self::AuthorityTypeNotSupported => {
+                "Error: Account does not support specified authority type"
+            }
+            Self::MintCannotFreeze => "Error: This token mint cannot freeze accounts",
+            Self::AccountFrozen => "Error: Account is frozen",
+            Self::MintDecimalsMismatch => "Error: decimals different from the Mint decimals",
+            Self::NonNativeNotSupported => "Error: Instruction does not support non-native tokens",
+
+            Self::ExtensionTypeMismatch => {
+                "Error: New extension type does not match already existing extensions"
+            }
+            Self::ExtensionBaseMismatch => "Error: Extension does not match the base type provided",
+            Self::ExtensionAlreadyInitialized => {
+                "Error: Extension already initialized on this account"
+            }
+            Self::ConfidentialTransferAccountHasBalance => {
+                "Error: An account can only be closed if its confidential balance is zero"
+            }
+            Self::ConfidentialTransferAccountNotApproved => {
+                "Error: Account not approved for confidential transfers"
+            }
+            Self::ConfidentialTransferDepositsAndTransfersDisabled => {
+                "Error: Account not accepting deposits or transfers"
+            }
+            Self::ConfidentialTransferElGamalPubkeyMismatch => "Error: ElGamal public key mismatch",
+            Self::ConfidentialTransferBalanceMismatch => "Error: Balance mismatch",
+            Self::MintHasSupply => {
+                "Error: Mint has non-zero supply. Burn all tokens before closing the mint"
+            }
+            Self::NoAuthorityExists => {
+                "Error: No authority exists to perform the desired operation"
+            }
+            Self::TransferFeeExceedsMaximum => {
+                "Error: Transfer fee exceeds maximum of 10,000 basis points"
+            }
+            Self::MintRequiredForTransfer => {
+                "Mint required for this account to transfer tokens, use `transfer_checked` or `transfer_checked_with_fee`"
+            }
+            Self::FeeMismatch => "Calculated fee does not match expected fee",
+            Self::FeeParametersMismatch => {
+                "Fee parameters associated with zero-knowledge proofs do not match fee parameters in mint"
+            }
+            Self::ImmutableOwner => "The owner authority cannot be changed",
+            Self::AccountHasWithheldTransferFees => {
+                "Error: An account can only be closed if its withheld fee balance is zero, harvest fees to the mint and try again"
+            }
+            Self::NoMemo => {
+                "Error: No memo in previous instruction required for recipient to receive a transfer"
+            }
+            Self::NonTransferable => "Transfer is disabled for this mint",
+            Self::NonTransferableNeedsImmutableOwnership => {
+                "Non-transferable tokens can't be minted to an account without immutable ownership"
+            }
+            Self::MaximumPendingBalanceCreditCounterExceeded => {
+                "The total number of `Deposit` and `Transfer` instructions to an account cannot exceed the associated `maximum_pending_balance_credit_counter`"
+            }
+            Self::MaximumDepositAmountExceeded => "Deposit amount exceeds maximum limit",
+            Self::CpiGuardSettingsLocked => "CPI Guard status cannot be changed in CPI",
+            Self::CpiGuardTransferBlocked => {
+                "CPI Guard is enabled, and a program attempted to transfer user funds without using a delegate"
+            }
+            Self::CpiGuardBurnBlocked => {
+                "CPI Guard is enabled, and a program attempted to burn user funds without using a delegate"
+            }
+            Self::CpiGuardCloseAccountBlocked => {
+                "CPI Guard is enabled, and a program attempted to close an account without returning lamports to owner"
+            }
+            Self::CpiGuardApproveBlocked => {
+                "CPI Guard is enabled, and a program attempted to approve a delegate"
+            }
+            Self::CpiGuardSetAuthorityBlocked => {
+                "CPI Guard is enabled, and a program attempted to add or change an authority"
+            }
+            Self::CpiGuardOwnerChangeBlocked => {
+                "Account ownership cannot be changed while CPI Guard is enabled"
+            }
+            Self::ExtensionNotFound => "Extension not found in account data",
+            Self::NonConfidentialTransfersDisabled => "Non-confidential transfers disabled",
+            Self::ConfidentialTransferFeeAccountHasWithheldFee => {
+                "Account has non-zero confidential withheld fee"
+            }
+            Self::InvalidExtensionCombination => {
+                "Mint or account is initialized to an invalid combination of extensions"
+            }
+            Self::InvalidLengthForAlloc => {
+                "Extension allocation with overwrite must use the same length"
+            }
+            Self::AccountDecryption => "Failed to decrypt a confidential transfer account",
+            Self::ProofGeneration => "Failed to generate proof",
+            Self::InvalidProofInstructionOffset => {
+                "An invalid proof instruction offset was provided"
+            }
+            Self::HarvestToMintDisabled => "Harvest of withheld tokens to mint is disabled",
+            Self::SplitProofContextStateAccountsNotSupported => {
+                "Split proof context state accounts not supported for instruction"
+            }
+            Self::NotEnoughProofContextStateAccounts => {
+                "Not enough proof context state accounts provided"
+            }
+            Self::MalformedCiphertext => "Ciphertext is malformed",
+            Self::CiphertextArithmeticFailed => "Ciphertext arithmetic failed",
+            Self::PedersenCommitmentMismatch => "Pedersen commitments did not match",
+            Self::RangeProofLengthMismatch => "Range proof lengths did not match",
+            Self::IllegalBitLength => "Illegal transfer amount bit length",
+            Self::FeeCalculation => "Transfer fee calculation failed",
+            Self::IllegalMintBurnConversion => {
+                "Conversions from normal to confidential token balance and vice versa are illegal if the confidential-mint-burn extension is enabled"
+            }
+            Self::InvalidScale => "Invalid scale for scaled ui amount",
+            Self::MintPaused => "Transferring, minting, and burning is paused on this mint",
+            Self::PendingBalanceNonZero => {
+                "Key rotation attempted while pending balance is not zero"
+            }
+        }
+    }
+}
+
+impl Token2022Log {
+    #[inline]
+    pub fn parse_without_registry(payload: &str) -> Option<Self> {
+        if let Some(e) = Token2022ErrorLog::parse(payload) {
+            return Some(Self::Error(e));
+        }
+
+        if let Some(log) = Token2022StaticLog::parse(payload) {
+            return Some(Self::Static(log));
+        }
+
+        if let Some((calculated_fee, fee)) =
+            parse_two_braced(payload, "Calculated fee ", ", received ")
+            && let (Ok(calculated_fee), Ok(fee)) = (calculated_fee.parse(), fee.parse())
+        {
+            return Some(Self::CalculatedFee {
+                calculated_fee,
+                fee,
+            });
+        }
+
+        if let Some(x) = parse_one_braced(payload, "account needs resize, +", " bytes")
+            && let Ok(bytes) = x.parse::<usize>()
+        {
+            return Some(Self::AccountNeedsResizePlusBytesDebug { bytes });
+        }
+
+        None
+    }
+
+    #[inline]
+    pub fn parse<C: PubkeyCompactor>(
+        payload: &str,
+        index: &C,
+        st: &mut StringTable,
+    ) -> Option<Self> {
+        if let Some(log) = Self::parse_without_registry(payload) {
+            return Some(log);
+        }
+
+        if let Some(x) = parse_one_braced(payload, "account needs resize, +", " bytes")
+            && let Ok(bytes) = x.parse::<usize>()
+        {
+            let _ = bytes;
+        }
+
+        // "Error harvesting from {}: {}"
+        if let Some((a, b)) = parse_two_braced(payload, "Error harvesting from ", ": ") {
+            let account_key = index.compact_str(a)?;
+            return Some(Self::ErrorHarvestingFrom {
+                account_key,
+                error: st.push(b),
+            });
+        }
+
+        None
+    }
+
+    #[inline]
+    pub fn as_str<R: PubkeyResolver + ?Sized>(&self, st: &StringTable, resolver: &R) -> String {
+        match self {
+            Self::Error(e) => e.as_str().to_string(),
+            Self::Static(log) => log.as_str().to_string(),
+
+            Self::CalculatedFee {
+                calculated_fee,
+                fee,
+            } => format!("Calculated fee {calculated_fee}, received {fee}"),
+
+            Self::AccountNeedsResizePlusBytesDebug { bytes } => {
+                format!("account needs resize, +{:?} bytes", bytes)
+            }
+            Self::AccountNeedsResizePlusBytesDebug2 { bytes } => {
+                format!("account needs resize, +{:?} bytes", bytes)
+            }
+
+            Self::ErrorHarvestingFrom { account_key, error }
+            | Self::ErrorHarvestingFrom2 { account_key, error }
+            | Self::ErrorHarvestingFrom3 { account_key, error }
+            | Self::ErrorHarvestingFrom4 { account_key, error } => format!(
+                "Error harvesting from {}: {}",
+                pubkey_id_to_string(resolver, *account_key),
+                st.resolve(*error),
+            ),
+        }
+    }
+}
+
+#[inline]
+fn pubkey_id_to_string<R: PubkeyResolver + ?Sized>(resolver: &R, id: PubkeyId) -> String {
+    id.to_pubkey(resolver)
+        .map(|pubkey| pubkey.to_string())
+        .unwrap_or_else(|| format!("<pubkey-id-oob:{id:?}>"))
+}
+
+#[inline]
+fn parse_one_braced<'a>(text: &'a str, prefix: &str, suffix: &str) -> Option<&'a str> {
+    let rest = text.strip_prefix(prefix)?;
+    let inner = rest.strip_suffix(suffix)?;
+    Some(inner.trim())
+}
+
+#[inline]
+fn parse_two_braced<'a>(text: &'a str, prefix: &str, mid: &str) -> Option<(&'a str, &'a str)> {
+    let rest = text.strip_prefix(prefix)?;
+    let (a, b) = rest.split_once(mid)?;
+    Some((a.trim(), b.trim()))
+}

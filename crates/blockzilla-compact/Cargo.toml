@@ -1,0 +1,28 @@
+[package]
+name = "blockzilla-compact"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+publish = false
+autobins = false
+description = "Compact record model: blocks, transactions, metadata and logs"
+
+[features]
+default = ["known-program-logs"]
+known-program-logs = ["blockzilla-program-logs/known-program-logs"]
+
+[dependencies]
+blockzilla-primitives = { path = "../blockzilla-primitives" }
+blockzilla-registry = { path = "../blockzilla-registry" }
+blockzilla-program-logs = { path = "../blockzilla-program-logs", default-features = false }
+anyhow = "1.0.102"
+data-encoding = "2.11.0"
+heapless = { version = "0.9.3", features = ["serde"] }
+prost = "0.14.3"
+serde = { version = "1.0.228", features = ["derive"] }
+solana-pubkey = "4.2.0"
+wincode = { version = "=0.6.1", features = ["derive"] }
+of-car-reader = { path = "../old-faithful/car-reader", version = "0.2.0", default-features = false }
+blockzilla-log-parser = { path = "../blockzilla-log-parser" }
