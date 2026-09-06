@@ -7,6 +7,8 @@ license.workspace = true
 repository.workspace = true
 description = "Convert an Archive V2 generation into Index Archive planes"
 
+autobins = false
+
 [dependencies]
 blockzilla-archive-v2 = { path = "../../crates/blockzilla-archive-v2", default-features = false }
 blockzilla-compact = { path = "../../crates/blockzilla-compact", default-features = false }
@@ -29,3 +31,19 @@ tempfile = "3.24.0"
 
 [lints]
 workspace = true
+
+[[bin]]
+name = "blockzilla-index-archive-convert"
+path = "src/main.rs"
+
+[[bin]]
+name = "archive-v2-account-scan-bench"
+path = "src/bin/archive-v2-account-scan-bench.rs"
+
+[[bin]]
+name = "ia-compare-prefix"
+path = "src/bin/ia-compare-prefix.rs"
+
+[[bin]]
+name = "ia-read"
+path = "src/bin/ia-read.rs"

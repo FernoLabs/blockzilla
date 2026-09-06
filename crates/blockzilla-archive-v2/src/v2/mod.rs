@@ -11,8 +11,6 @@ use serde::{Deserialize, Serialize};
 use wincode::{
     ReadResult, SchemaRead, SchemaWrite, WriteResult,
     config::Config,
-    error::invalid_value,
-    int_encoding::{ByteOrder, IntEncoding},
     io::{Reader, Writer},
     len::SeqLen,
 };

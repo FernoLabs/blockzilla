@@ -11487,7 +11487,7 @@ fn copy_file_with_hash(source: &Path, target: &Path) -> Result<FileBinding> {
 mod tests {
     use super::*;
     use blockzilla_archive_v2::{ArchiveV2ComputeBudgetInstructionData, ArchiveV2HotInstruction, ArchiveV2HotInstructionData, ArchiveV2HotLegacyMessage, ArchiveV2HotMessagePayload, ArchiveV2HotV0Message, ArchiveV2SystemInstructionData, ArchiveV2VoteHashRef, ArchiveV2VoteLockoutOffset, ArchiveV2VoteStateUpdate, ArchiveV2VoteTowerSync, rewrite_archive_v2_hot_message_wire};
-    use blockzilla_compact::{CompactInnerInstruction, CompactInstructionError, CompactMessageHeader, DataArray, DataTable, OwnedCompactAddressTableLookup, OwnedCompactRecentBlockhash};
+    use blockzilla_compact::{CompactInnerInstruction, CompactInstructionError, DataArray, DataTable, OwnedCompactAddressTableLookup};
     use blockzilla_primitives::StringTable;
     use blockzilla_program_logs::program_logs::system_program::NonceAction;
     use blockzilla_read_sdk::manifest::{

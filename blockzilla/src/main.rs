@@ -48,6 +48,11 @@ struct Cli {
 
 #[derive(Subcommand)]
 enum Commands {
+    /// Build and validate Archive V3 candidates and their derived indexes.
+    ArchiveV3 {
+        #[command(subcommand)]
+        command: ArchiveV3Commands,
+    },
     /// Run the storage scheduler and its read-only status API.
     Scheduler,
 
@@ -1134,6 +1139,135 @@ enum Commands {
     },
 }
 
+/// Archive V3 candidate construction, taken from the former `ia-*` binaries.
+#[derive(Subcommand)]
+enum ArchiveV3Commands {
+    /// Validate the complete physical layout of an unpublished candidate.
+    ValidateCandidate {
+        candidate_dir: PathBuf,
+        epoch: u64,
+    },
+    /// Build the fixed-width slot index for one target candidate.
+    BuildBasicIndexes {
+        candidate_dir: PathBuf,
+    },
+    /// Build the account index, or look one account up by ordinal.
+    AccountIndex {
+        generation_dir: PathBuf,
+        /// Look up this account ordinal instead of building the index.
+        #[arg(long)]
+        find: Option<u32>,
+        #[arg(long, default_value_t = 128)]
+        sort_memory_mib: usize,
+    },
+    /// Build the program index.
+    ProgramIndex {
+        generation_dir: PathBuf,
+        #[arg(long)]
+        sort_memory_mib: Option<usize>,
+    },
+    /// Build the instruction-selector index.
+    SelectorIndex {
+        generation_dir: PathBuf,
+        #[arg(long)]
+        sort_memory_mib: Option<usize>,
+    },
+}
+
+fn run_archive_v3(command: ArchiveV3Commands) -> anyhow::Result<()> {
+    use anyhow::Context as _;
+    use blockzilla_index_archive_convert::{
+        account_index::{AccountIndexBuildOptions, build_account_index, find_account},
+        basic_indexes::{BasicIndexBuildOptions, build_basic_indexes},
+        candidate::validate_complete_candidate,
+        program_index::{ProgramIndexBuildOptions, build_program_index},
+        selector_index::{SelectorIndexBuildOptions, build_selector_index},
+    };
+
+    fn sort_memory_bytes(mib: usize) -> anyhow::Result<usize> {
+        mib.checked_mul(1 << 20).context("sort-memory bytes overflow")
+    }
+
+    match command {
+        ArchiveV3Commands::ValidateCandidate { candidate_dir, epoch } => {
+            let result = validate_complete_candidate(&candidate_dir, epoch)?;
+            println!("archive_id={}", result.archive_id.to_hex());
+            println!("required_objects={}", result.required_objects);
+            println!("physical_layout=valid");
+            println!("publication_ready=false");
+        }
+        ArchiveV3Commands::BuildBasicIndexes { candidate_dir } => {
+            let report = build_basic_indexes(&candidate_dir, BasicIndexBuildOptions)?;
+            println!("archive_id={}", report.archive_id.to_hex());
+            println!("blocks={}", report.blocks);
+            println!("transactions={}", report.transactions);
+            println!("slots_object_bytes={}", report.slots_object_bytes);
+        }
+        ArchiveV3Commands::AccountIndex { generation_dir, find, sort_memory_mib } => {
+            if let Some(ordinal) = find {
+                return find_account(&generation_dir, ordinal);
+            }
+            let started = std::time::Instant::now();
+            let stats = build_account_index(
+                &generation_dir,
+                AccountIndexBuildOptions { sort_memory_bytes: sort_memory_bytes(sort_memory_mib)? },
+            )?;
+            println!("account index built");
+            println!("  distinct accounts   {}", stats.distinct_accounts);
+            println!("  postings            {}", stats.postings);
+            println!("  sort runs           {}", stats.sort_runs);
+            println!("  merge passes        {}", stats.merge_passes);
+            println!("  pages               {}", stats.pages);
+            println!("  pages bytes         {}", stats.page_bytes);
+            println!("  directory bytes     {}", stats.directory_bytes);
+            println!("  object bytes        {}", stats.object_bytes);
+            if stats.postings > 0 {
+                println!(
+                    "  bytes per posting   {:.2}",
+                    stats.page_bytes as f64 / stats.postings as f64
+                );
+            }
+            println!("  elapsed             {:?}", started.elapsed());
+        }
+        ArchiveV3Commands::ProgramIndex { generation_dir, sort_memory_mib } => {
+            let mut options = ProgramIndexBuildOptions::default();
+            if let Some(mib) = sort_memory_mib {
+                options.sort_memory_bytes = sort_memory_bytes(mib)?;
+            }
+            let started = std::time::Instant::now();
+            let report = build_program_index(&generation_dir, options)?;
+            println!("program index built");
+            println!("  postings            {}", report.postings);
+            println!("  object bytes        {}", report.object_bytes);
+            println!("  elapsed             {:?}", started.elapsed());
+        }
+        ArchiveV3Commands::SelectorIndex { generation_dir, sort_memory_mib } => {
+            let mut options = SelectorIndexBuildOptions::default();
+            if let Some(mib) = sort_memory_mib {
+                options.sort_memory_bytes = sort_memory_bytes(mib)?;
+            }
+            let started = std::time::Instant::now();
+            let report = build_selector_index(&generation_dir, options)?;
+            println!("selector index built");
+            println!("  blocks              {}", report.blocks);
+            println!("  transactions        {}", report.transactions);
+            println!(
+                "  instructions        {} top-level + {} CPI",
+                report.top_level_instructions, report.cpi_instructions
+            );
+            println!("  postings            {}", report.postings);
+            println!("  sort runs           {}", report.sort_runs);
+            println!("  merge passes        {}", report.merge_passes);
+            println!("  pages               {}", report.pages);
+            println!("  continuation pages  {}", report.continuation_pages);
+            println!("  object bytes        {}", report.object_bytes);
+            println!("  elapsed             {:?}", started.elapsed());
+        }
+    }
+    Ok(())
+}
+
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq, ValueEnum)]
 enum BlockTimeGapSourceArg {
     Auto,
@@ -1252,6 +1386,7 @@ fn main() -> Result<()> {
     let resume = cli.resume;
 
     match cli.command {
+        Commands::ArchiveV3 { command } => run_archive_v3(command),
         Commands::Scheduler => unreachable!("scheduler arguments are parsed before the main CLI"),
         Commands::PreflightCar {
             input,

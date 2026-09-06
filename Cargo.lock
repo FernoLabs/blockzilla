@@ -609,6 +609,7 @@ dependencies = [
  "blockzilla-archive-gateway",
  "blockzilla-archive-v2",
  "blockzilla-compact",
+ "blockzilla-index-archive-convert",
  "blockzilla-live-format",
  "blockzilla-log-parser",
  "blockzilla-primitives",
