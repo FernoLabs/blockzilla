@@ -864,7 +864,10 @@ dependencies = [
  "anyhow",
  "blockzilla-firebase-indexer",
  "blockzilla-query-sdk",
- "blockzilla-read-sdk",
+ "blockzilla-source",
+ "blockzilla-source-cache",
+ "blockzilla-source-http",
+ "blockzilla-source-local",
  "sha2 0.11.0",
  "tempfile",
  "thiserror 2.0.19",
@@ -948,10 +951,12 @@ dependencies = [
  "blockzilla-format",
  "blockzilla-index-archive-format",
  "blockzilla-query-sdk",
+ "blockzilla-source",
+ "blockzilla-source-cache",
+ "blockzilla-source-http",
+ "blockzilla-source-local",
  "ed25519-dalek 2.2.0",
  "rayon",
- "reqwest 0.13.4",
- "rustix",
  "serde",
  "serde_json",
  "sha2 0.11.0",
@@ -959,7 +964,6 @@ dependencies = [
  "solana-signature",
  "tempfile",
  "thiserror 2.0.19",
- "url",
  "wincode 0.6.1",
  "zstd",
 ]
@@ -1038,6 +1042,42 @@ dependencies = [
  "anyhow",
  "serde",
  "zstd",
+]
+
+[[package]]
+name = "blockzilla-source"
+version = "0.2.0"
+dependencies = [
+ "thiserror 2.0.19",
+]
+
+[[package]]
+name = "blockzilla-source-cache"
+version = "0.2.0"
+dependencies = [
+ "blockzilla-source",
+ "blockzilla-source-http",
+ "rustix",
+ "tempfile",
+]
+
+[[package]]
+name = "blockzilla-source-http"
+version = "0.2.0"
+dependencies = [
+ "blockzilla-source",
+ "reqwest 0.13.4",
+ "url",
+]
+
+[[package]]
+name = "blockzilla-source-local"
+version = "0.2.0"
+dependencies = [
+ "blockzilla-source",
+ "rustix",
+ "serde",
+ "tempfile",
 ]
 
 [[package]]

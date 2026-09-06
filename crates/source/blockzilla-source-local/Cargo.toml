@@ -1,0 +1,16 @@
+[package]
+name = "blockzilla-source-local"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+description = "Local and pinned immutable byte sources"
+
+[dependencies]
+blockzilla-source = { version = "0.2.0", path = "../blockzilla-source" }
+rustix = { version = "1.1.4", features = ["fs", "process"] }
+serde = { version = "1.0.228", features = ["derive"] }
+
+[dev-dependencies]
+tempfile = "3.24.0"

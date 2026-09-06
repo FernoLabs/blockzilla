@@ -39,11 +39,10 @@ pub use blockzilla_query_sdk::{
     ScanRequest, SourceIdentity, SourceVerification, TokenBalanceCoverage, TokenBalanceRequirement,
     TokenBalanceSide, TransactionView,
 };
-use blockzilla_read_sdk::{
-    CachedHttpRangeSource, HttpObjectIdentity, HttpObjectPathLayout, HttpRangeSource,
-    HttpRangeSourceOptions, PinnedLocalRangeSource, RangeSource, SourceError, SourceResult,
-    create_http_cache_directory,
-};
+use blockzilla_source::{RangeSource, SourceError, SourceResult};
+use blockzilla_source_local::PinnedLocalRangeSource;
+use blockzilla_source_http::{HttpObjectIdentity, HttpObjectPathLayout, HttpRangeSource, HttpRangeSourceOptions};
+use blockzilla_source_cache::{CachedHttpRangeSource, create_http_cache_directory};
 use sha2::{Digest, Sha256};
 use thiserror::Error;
 use url::Url;

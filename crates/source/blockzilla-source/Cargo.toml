@@ -1,0 +1,11 @@
+[package]
+name = "blockzilla-source"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+description = "Shared byte-range contract and object-name validation"
+
+[dependencies]
+thiserror = "2.0.18"

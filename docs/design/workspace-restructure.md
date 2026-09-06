@@ -2,6 +2,23 @@
 
 Status: agreed target layout, 2026-09-05. Branch `refactor`.
 
+Progress, 2026-09-06:
+
+- The merge is complete at `f0ef4713`. The new and legacy readers coexist.
+- Shared byte transport now lives in the four `crates/source/` crates below.
+  Existing V2 imports remain compatible through re-exports. The V3 facade
+  imports transport directly.
+- V3 still uses Compact V2 projections through the Firebase query adapter.
+  Transport extraction does not remove that separate dependency. Move shared
+  record projection with the record model before claiming independent engines.
+- The transport extraction passes `cargo check --workspace --all-targets` and
+  all 33 local, HTTP, and cache unit tests. One existing cache fixture needed
+  persistent interrupted responses to exhaust the reader's retry policy.
+- Legacy consumer migration, facade consolidation, format splits, converter
+  commands, and final folder moves remain pending. Archive compatibility and
+  performance have not been established by these compilation checks.
+
+
 The workspace grew by accretion: 23 packages split across `crates/`, `services/`,
 `workers/`, `apps/` and a top-level `blockzilla/`, with categories that reflect
 deployment target rather than subject. Merging `codex/sample-archive-benchmark`

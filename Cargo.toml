@@ -1,6 +1,11 @@
 [workspace]
 resolver = "2"
 members = [
+    "crates/source/blockzilla-source",
+    "crates/source/blockzilla-source-local",
+    "crates/source/blockzilla-source-http",
+    "crates/source/blockzilla-source-cache",
+
     "blockzilla",
     "crates/blockzilla-car-read-sdk",
     "crates/blockzilla-compact-v2-read-sdk",

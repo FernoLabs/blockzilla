@@ -10,10 +10,13 @@ description = "High-level targeted reader for Blockzilla Indexer V3 archives"
 readme = "README.md"
 
 [dependencies]
+blockzilla-source = { version = "0.2.0", path = "../source/blockzilla-source" }
+blockzilla-source-local = { version = "0.2.0", path = "../source/blockzilla-source-local" }
+blockzilla-source-http = { version = "0.2.0", path = "../source/blockzilla-source-http" }
+blockzilla-source-cache = { version = "0.2.0", path = "../source/blockzilla-source-cache" }
 anyhow = "1.0.100"
 blockzilla-firebase-indexer = { path = "../blockzilla-firebase-indexer" }
 blockzilla-query-sdk = { version = "0.2.0", path = "../blockzilla-query-sdk" }
-blockzilla-read-sdk = { version = "0.2.0", path = "../blockzilla-read-sdk", features = ["http"] }
 sha2 = "0.11.0"
 thiserror = "2.0.18"
 url = "2.5.8"

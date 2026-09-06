@@ -13,15 +13,18 @@ categories = ["database", "filesystem"]
 
 [features]
 default = []
-http = ["dep:reqwest", "dep:url"]
+http = ["dep:blockzilla-source-http", "dep:blockzilla-source-cache"]
 
 [dependencies]
+blockzilla-source = { version = "0.2.0", path = "../source/blockzilla-source" }
+blockzilla-source-local = { version = "0.2.0", path = "../source/blockzilla-source-local" }
+blockzilla-source-http = { version = "0.2.0", path = "../source/blockzilla-source-http", optional = true }
+blockzilla-source-cache = { version = "0.2.0", path = "../source/blockzilla-source-cache", optional = true }
 anyhow = "1.0.100"
 blockzilla-format = { version = "0.2.0", path = "../blockzilla-format" }
 blockzilla-index-archive-format = { version = "0.2.0", path = "../blockzilla-index-archive-format" }
 blockzilla-query-sdk = { version = "0.2.0", path = "../blockzilla-query-sdk" }
 rayon = "1.11.0"
-rustix = { version = "1.1.4", features = ["fs", "process"] }
 serde = { version = "1.0.228", features = ["derive"] }
 serde_json = "1.0.149"
 sha2 = "0.11.0"
@@ -30,16 +33,6 @@ solana-signature = { version = "3.4.1", features = ["verify"] }
 thiserror = "2.0.18"
 wincode = { version = "=0.6.1", features = ["derive", "smallvec"] }
 zstd = "0.13.3"
-
-[dependencies.reqwest]
-version = "0.13.3"
-optional = true
-default-features = false
-features = ["blocking", "rustls"]
-
-[dependencies.url]
-version = "2.5.8"
-optional = true
 
 [dev-dependencies]
 ed25519-dalek = "2.2.0"

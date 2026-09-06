@@ -279,21 +279,7 @@ fn validate_local_identity(field: &str, value: &str) -> Result<()> {
     Ok(())
 }
 
-pub(crate) fn validate_object_name(name: &str) -> std::result::Result<(), &'static str> {
-    if name.is_empty() {
-        return Err("file name is empty");
-    }
-    if name == "." || name == ".." || name.contains('/') || name.contains('\\') {
-        return Err("file name must be one safe path component");
-    }
-    if name
-        .bytes()
-        .any(|byte| byte == 0 || byte.is_ascii_control())
-    {
-        return Err("file name contains a control character");
-    }
-    Ok(())
-}
+pub(crate) use blockzilla_source::validate_object_name;
 
 pub(crate) fn decode_sha256(value: &str) -> std::result::Result<[u8; 32], String> {
     if value.len() != 64

@@ -67,38 +67,4 @@ pub enum Error {
     Overflow(&'static str),
 }
 
-#[derive(Debug, Error)]
-pub enum SourceError {
-    #[error("invalid object name: {0}")]
-    InvalidName(String),
-
-    #[error("I/O error for {object}: {source}")]
-    Io {
-        object: String,
-        #[source]
-        source: std::io::Error,
-    },
-
-    #[error("object {0} does not exist")]
-    NotFound(String),
-
-    #[error("short range read for {object}: got {actual} bytes, expected {expected}")]
-    ShortRead {
-        object: String,
-        expected: usize,
-        actual: usize,
-    },
-
-    #[error(
-        "range for {object} is outside the object: offset={offset}, length={length}, size={size}"
-    )]
-    OutOfBounds {
-        object: String,
-        offset: u64,
-        length: usize,
-        size: u64,
-    },
-
-    #[error("remote source protocol error: {0}")]
-    Protocol(String),
-}
+pub use blockzilla_source::SourceError;
