@@ -1,6 +1,8 @@
 use anyhow::{Context, Result, anyhow, bail};
 
 use blockzilla_format::{
+    ArchiveV2HotV1Message, CompactTransactionConfig, OwnedCompactV1Message,
+    WincodeArchiveV2NoRegistryV1Message,
     ARCHIVE_V2_BLOCK_ACCESS_FILE, ARCHIVE_V2_BLOCK_ACCESS_INDEX_FILE,
     ARCHIVE_V2_BLOCK_ACCESS_MAX_FRAME_BYTES, ARCHIVE_V2_BLOCK_INDEX_FILE,
     ARCHIVE_V2_BLOCKHASH_INDEX_V3_FILE, ARCHIVE_V2_BLOCKHASH_INDEX_V3_HEADER_LEN,
@@ -6056,6 +6058,7 @@ impl HotBlockBuffers {
         self.hot_instructions = match message {
             ArchiveV2HotMessagePayload::Legacy(message) => message.instructions,
             ArchiveV2HotMessagePayload::V0(message) => message.instructions,
+            ArchiveV2HotMessagePayload::V1(message) => message.instructions,
         };
         self.hot_instructions.clear();
     }
@@ -6931,6 +6934,10 @@ fn collect_access_message_refs(
                 collect_access_pubkey_id(lookup.account_key, pubkey_ids);
             }
         }
+        ArchiveV2HotMessagePayload::V1(message) => {
+            collect_access_pubkeys(message.account_keys.iter().copied(), pubkey_ids);
+            collect_access_recent_blockhash_id(&message.recent_blockhash, blockhash_ids);
+        }
     }
 }
 
@@ -6941,6 +6948,7 @@ fn collect_access_message_vote_hash_refs(
     let instructions = match message {
         ArchiveV2HotMessagePayload::Legacy(message) => message.instructions.as_slice(),
         ArchiveV2HotMessagePayload::V0(message) => message.instructions.as_slice(),
+        ArchiveV2HotMessagePayload::V1(message) => message.instructions.as_slice(),
     };
     for instruction in instructions {
         collect_access_instruction_vote_hash_refs(&instruction.data, vote_hash_block_ids);
@@ -7306,6 +7314,37 @@ fn hot_message_from_owned_with_instruction_scratch(
                     recent_blockhash: message.recent_blockhash,
                     instructions: std::mem::take(instruction_scratch),
                     address_table_lookups: message.address_table_lookups,
+                }),
+                flags,
+            ))
+        }
+        OwnedCompactMessage::V1(message) => {
+            let has_compact_vote = match hot_instructions_from_owned_into(
+                message.instructions,
+                &message.account_keys,
+                known_program_ids,
+                slot_to_block_id,
+                vote_hashes,
+                instruction_scratch,
+            ) {
+                Ok(has_compact_vote) => has_compact_vote,
+                Err(error) => {
+                    instruction_scratch.clear();
+                    return Err(error);
+                }
+            };
+            let flags = if has_compact_vote {
+                ARCHIVE_V2_TX_FLAG_HAS_COMPACT_VOTE_IX
+            } else {
+                0
+            };
+            Ok((
+                ArchiveV2HotMessagePayload::V1(ArchiveV2HotV1Message {
+                    header: message.header,
+                    config: message.config,
+                    account_keys: message.account_keys,
+                    recent_blockhash: message.recent_blockhash,
+                    instructions: std::mem::take(instruction_scratch),
                 }),
                 flags,
             ))
@@ -9252,6 +9291,11 @@ fn count_no_registry_tx_pubkeys(
                 counter.add32(&lookup.account_key);
             }
         }
+        WincodeArchiveV2NoRegistryMessage::V1(message) => {
+            for key in &message.account_keys {
+                counter.add32(key);
+            }
+        }
     }
 }
 
@@ -9494,6 +9538,29 @@ fn optimize_no_registry_message(
                     .into_iter()
                     .map(|lookup| optimize_no_registry_lookup(lookup, key_index))
                     .collect::<Result<Vec<_>>>()?,
+            })
+        }
+        WincodeArchiveV2NoRegistryMessage::V1(message) => {
+            OwnedCompactMessage::V1(OwnedCompactV1Message {
+                header: message.header,
+                config: message.config,
+                account_keys: compact_required_keys(
+                    key_index,
+                    &message.account_keys,
+                    "transaction account key",
+                )?,
+                recent_blockhash: resolve_recent_blockhash(
+                    rolling_blockhashes,
+                    &message.recent_blockhash,
+                    slot,
+                    tx_index,
+                    nonce_recent_blockhashes,
+                )?,
+                instructions: message
+                    .instructions
+                    .into_iter()
+                    .map(owned_no_registry_instruction)
+                    .collect(),
             })
         }
     })
@@ -15303,6 +15370,7 @@ fn owned_message_account_keys_for_analysis(message: &OwnedCompactMessage) -> &[C
     match message {
         OwnedCompactMessage::Legacy(message) => &message.account_keys,
         OwnedCompactMessage::V0(message) => &message.account_keys,
+        OwnedCompactMessage::V1(message) => &message.account_keys,
     }
 }
 
@@ -15310,6 +15378,7 @@ fn hot_message_account_keys_for_analysis(message: &ArchiveV2HotMessagePayload) -
     match message {
         ArchiveV2HotMessagePayload::Legacy(message) => &message.account_keys,
         ArchiveV2HotMessagePayload::V0(message) => &message.account_keys,
+        ArchiveV2HotMessagePayload::V1(message) => &message.account_keys,
     }
 }
 
@@ -15319,6 +15388,7 @@ fn owned_message_instructions_for_analysis(
     match message {
         OwnedCompactMessage::Legacy(message) => &message.instructions,
         OwnedCompactMessage::V0(message) => &message.instructions,
+        OwnedCompactMessage::V1(message) => &message.instructions,
     }
 }
 
@@ -15328,6 +15398,7 @@ fn hot_message_instructions_for_analysis(
     match message {
         ArchiveV2HotMessagePayload::Legacy(message) => &message.instructions,
         ArchiveV2HotMessagePayload::V0(message) => &message.instructions,
+        ArchiveV2HotMessagePayload::V1(message) => &message.instructions,
     }
 }
 
@@ -16644,6 +16715,18 @@ fn analyze_owned_message_space(
             count_recent_blockhash(&message.recent_blockhash, stats);
             analyze_owned_instructions(&message.instructions, stats)?;
         }
+        OwnedCompactMessage::V1(message) => {
+            add_wincode_size!(stats, "tx/message_v1_header", &message.header);
+            add_wincode_size!(stats, "tx/transaction_config", &message.config);
+            add_wincode_size!(stats, "tx/account_keys", &message.account_keys);
+            add_wincode_size!(stats, "tx/recent_blockhash", &message.recent_blockhash);
+            add_wincode_size!(stats, "tx/instructions", &message.instructions);
+            for key in &message.account_keys {
+                count_compact_pubkey(*key, stats);
+            }
+            count_recent_blockhash(&message.recent_blockhash, stats);
+            analyze_owned_instructions(&message.instructions, stats)?;
+        }
     }
     Ok(())
 }
@@ -17933,6 +18016,42 @@ fn to_owned_compact_message(
                 })
                 .collect(),
         }),
+        VersionedMessage::V1(message) => {
+            OwnedCompactMessage::V1(OwnedCompactV1Message {
+                header: CompactMessageHeader {
+                    num_required_signatures: message.header.num_required_signatures,
+                    num_readonly_signed_accounts: message.header.num_readonly_signed_accounts,
+                    num_readonly_unsigned_accounts: message.header.num_readonly_unsigned_accounts,
+                },
+                config: CompactTransactionConfig {
+                    priority_fee: message.config.priority_fee,
+                    compute_unit_limit: message.config.compute_unit_limit,
+                    loaded_accounts_data_size_limit: message.config.loaded_accounts_data_size_limit,
+                    heap_size: message.config.heap_size,
+                },
+                account_keys: compact_required_keys(
+                    key_index,
+                    &message
+                        .account_keys
+                        .iter()
+                        .map(|key| **key)
+                        .collect::<Vec<_>>(),
+                    "transaction account key",
+                )?,
+                recent_blockhash: resolve_recent_blockhash(
+                    rolling_blockhashes,
+                    message.recent_blockhash,
+                    slot,
+                    tx_index,
+                    nonce_recent_blockhashes,
+                )?,
+                instructions: message
+                    .instructions
+                    .into_iter()
+                    .map(owned_instruction)
+                    .collect(),
+            })
+        }
     })
 }
 
@@ -17991,6 +18110,28 @@ fn to_no_registry_transaction(vtx: VersionedTransaction<'_>) -> WincodeArchiveV2
                         writable_indexes: lookup.writable_indexes,
                         readonly_indexes: lookup.readonly_indexes,
                     })
+                    .collect(),
+            })
+        }
+        VersionedMessage::V1(message) => {
+            WincodeArchiveV2NoRegistryMessage::V1(WincodeArchiveV2NoRegistryV1Message {
+                header: CompactMessageHeader {
+                    num_required_signatures: message.header.num_required_signatures,
+                    num_readonly_signed_accounts: message.header.num_readonly_signed_accounts,
+                    num_readonly_unsigned_accounts: message.header.num_readonly_unsigned_accounts,
+                },
+                config: CompactTransactionConfig {
+                    priority_fee: message.config.priority_fee,
+                    compute_unit_limit: message.config.compute_unit_limit,
+                    loaded_accounts_data_size_limit: message.config.loaded_accounts_data_size_limit,
+                    heap_size: message.config.heap_size,
+                },
+                account_keys: message.account_keys.into_iter().copied().collect(),
+                recent_blockhash: *message.recent_blockhash,
+                instructions: message
+                    .instructions
+                    .into_iter()
+                    .map(no_registry_instruction)
                     .collect(),
             })
         }
@@ -19978,6 +20119,10 @@ mod tests {
                 car_entries: 11,
                 payload_bytes: 12,
                 wire_bytes: 13,
+                direct_buffer_entries: 0,
+                direct_buffer_payload_bytes: 0,
+                scratch_entries: 0,
+                scratch_payload_bytes: 0,
                 transactions: 1,
                 entries: 2,
                 blocks: 3,
@@ -22132,6 +22277,7 @@ mod tests {
             match message {
                 ArchiveV2HotMessagePayload::Legacy(message) => &message.instructions,
                 ArchiveV2HotMessagePayload::V0(message) => &message.instructions,
+                ArchiveV2HotMessagePayload::V1(message) => &message.instructions,
             }
         }
 

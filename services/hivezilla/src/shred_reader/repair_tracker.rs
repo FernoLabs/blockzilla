@@ -628,7 +628,7 @@ fn validated_observation(shred: &Shred) -> Option<ValidatedObservation> {
     {
         return None;
     }
-    let merkle_root = shred.merkle_root().ok()?.to_bytes();
+    let merkle_root = shred.merkle_root().ok()?;
 
     if shred.is_data() {
         let index = shred.index();
@@ -706,7 +706,7 @@ mod tests {
     use solana_hash::Hash;
     use solana_keypair::{Keypair, Signer};
 
-    use super::{
+    use super::super::{
         repair_runtime::RepairPeer,
         repair_trust_store::{RepairTrustStore, RepairTrustStoreConfig},
     };

@@ -233,7 +233,7 @@ mod tests {
     use std::{num::NonZeroU64, time::Duration};
     use tempfile::tempdir;
 
-    use super::{repair_wal::RepairWalFsyncPolicy, repair_wire::ShredRepairRequest};
+    use super::super::{repair_wal::RepairWalFsyncPolicy, repair_wire::ShredRepairRequest};
     use solana_hash::Hash;
     use solana_keypair::Signature;
     use solana_pubkey::Pubkey;

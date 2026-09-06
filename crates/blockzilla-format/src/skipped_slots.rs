@@ -217,3 +217,34 @@ fn ensure_trailing_bits_are_zero(bitmap: &[u8], slots_per_epoch: u32) -> Result<
     }
     Ok(())
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn round_trip_includes_leading_inner_and_trailing_skipped_slots() {
+        let mut map = SkippedSlotMap::new(16).unwrap();
+        map.record_present(18).unwrap();
+        map.record_present(20).unwrap();
+        let decoded = SkippedSlotMap::decode(&map.encode().unwrap()).unwrap();
+
+        assert_eq!(decoded.epoch(), Some(1));
+        assert_eq!(decoded.present_slots(), 2);
+        assert_eq!(decoded.skipped_slots(), 14);
+        assert_eq!(decoded.is_skipped(16), Some(true));
+        assert_eq!(decoded.is_skipped(18), Some(false));
+        assert_eq!(decoded.is_skipped(19), Some(true));
+        assert_eq!(decoded.is_skipped(20), Some(false));
+        assert_eq!(decoded.is_skipped(31), Some(true));
+        assert_eq!(decoded.is_skipped(32), None);
+    }
+
+    #[test]
+    fn rejects_duplicate_and_cross_epoch_slots() {
+        let mut map = SkippedSlotMap::new(8).unwrap();
+        map.record_present(9).unwrap();
+        assert!(map.record_present(9).is_err());
+        assert!(map.record_present(17).is_err());
+    }
+}

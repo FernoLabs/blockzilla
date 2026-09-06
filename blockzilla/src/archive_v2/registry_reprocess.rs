@@ -11677,6 +11677,11 @@ mod tests {
                     visit(key, ReferenceClass::Eligible)?;
                 }
             }
+            ArchiveV2HotMessagePayload::V1(message) => {
+                for key in &mut message.account_keys {
+                    visit(key, ReferenceClass::Eligible)?;
+                }
+            }
             ArchiveV2HotMessagePayload::V0(message) => {
                 for key in &mut message.account_keys {
                     visit(key, ReferenceClass::Eligible)?;
@@ -11835,6 +11840,7 @@ mod tests {
             let recent_blockhash = match &owned {
                 ArchiveV2HotMessagePayload::Legacy(message) => &message.recent_blockhash,
                 ArchiveV2HotMessagePayload::V0(message) => &message.recent_blockhash,
+                ArchiveV2HotMessagePayload::V1(message) => &message.recent_blockhash,
             };
             super::super::collect_access_recent_blockhash_id(
                 recent_blockhash,

@@ -588,6 +588,7 @@ impl<'a> HotKeyLookup<'a> {
         let static_keys = match message {
             ArchiveV2HotMessagePayload::Legacy(message) => message.account_keys.as_slice(),
             ArchiveV2HotMessagePayload::V0(message) => message.account_keys.as_slice(),
+            ArchiveV2HotMessagePayload::V1(message) => message.account_keys.as_slice(),
         };
         Self {
             static_keys,
@@ -2236,6 +2237,13 @@ fn scan_car_token_instruction_tx_outer(
             mint_filter,
             stats,
         ),
+        VersionedMessage::V1(message) => scan_car_token_instruction_refs_outer(
+            &message.account_keys,
+            &message.instructions,
+            known,
+            mint_filter,
+            stats,
+        ),
     }
 }
 
@@ -2374,6 +2382,12 @@ fn scan_car_program_transaction_tx_outer(
             programs,
             stats,
         ),
+        VersionedMessage::V1(message) => scan_car_program_transaction_refs_outer(
+            &message.account_keys,
+            &message.instructions,
+            programs,
+            stats,
+        ),
     }
 }
 
@@ -2426,6 +2440,9 @@ fn full_car_message_keys(
     let mut out = Vec::new();
     match &tx.message {
         VersionedMessage::Legacy(message) => {
+            out.extend(message.account_keys.iter().map(|key| Some(**key)));
+        }
+        VersionedMessage::V1(message) => {
             out.extend(message.account_keys.iter().map(|key| Some(**key)));
         }
         VersionedMessage::V0(message) => {
@@ -2516,6 +2533,7 @@ fn car_instruction_refs<'a>(
     let outer = match &tx.message {
         VersionedMessage::Legacy(message) => &message.instructions,
         VersionedMessage::V0(message) => &message.instructions,
+        VersionedMessage::V1(message) => &message.instructions,
     };
     let mut out = Vec::new();
     for (outer_ix, instruction) in outer.iter().enumerate() {
@@ -3491,6 +3509,7 @@ fn scan_hot_program_refs(
     let outer = match message {
         ArchiveV2HotMessagePayload::Legacy(message) => message.instructions.as_slice(),
         ArchiveV2HotMessagePayload::V0(message) => message.instructions.as_slice(),
+        ArchiveV2HotMessagePayload::V1(message) => message.instructions.as_slice(),
     };
     let inner_groups = if outer_only { None } else { inner_groups };
     let account_match_index = hot_program_account_match(keys, programs);
@@ -3798,6 +3817,7 @@ fn scan_hot_token_instruction_refs(
     let outer = match message {
         ArchiveV2HotMessagePayload::Legacy(message) => message.instructions.as_slice(),
         ArchiveV2HotMessagePayload::V0(message) => message.instructions.as_slice(),
+        ArchiveV2HotMessagePayload::V1(message) => message.instructions.as_slice(),
     };
     let inner_groups = if outer_only { None } else { inner_groups };
     for (outer_ix, instruction) in outer.iter().enumerate() {
@@ -4602,6 +4622,7 @@ fn full_message_keys(
     let static_keys = match message {
         ArchiveV2HotMessagePayload::Legacy(message) => &message.account_keys,
         ArchiveV2HotMessagePayload::V0(message) => &message.account_keys,
+        ArchiveV2HotMessagePayload::V1(message) => &message.account_keys,
     };
     out.extend(
         static_keys
@@ -4631,6 +4652,7 @@ fn full_message_key_refs(
     let static_keys = match message {
         ArchiveV2HotMessagePayload::Legacy(message) => &message.account_keys,
         ArchiveV2HotMessagePayload::V0(message) => &message.account_keys,
+        ArchiveV2HotMessagePayload::V1(message) => &message.account_keys,
     };
     out.extend(
         static_keys
@@ -4786,6 +4808,7 @@ fn hot_instruction_refs<'a>(
     let outer = match message {
         ArchiveV2HotMessagePayload::Legacy(message) => &message.instructions,
         ArchiveV2HotMessagePayload::V0(message) => &message.instructions,
+        ArchiveV2HotMessagePayload::V1(message) => &message.instructions,
     };
     let mut out = Vec::new();
     for (outer_ix, instruction) in outer.iter().enumerate() {

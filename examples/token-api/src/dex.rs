@@ -62,6 +62,7 @@ impl<'a> DexTxContext<'a> {
         match self.message {
             ArchiveV2HotMessagePayload::Legacy(message) => &message.instructions,
             ArchiveV2HotMessagePayload::V0(message) => &message.instructions,
+            ArchiveV2HotMessagePayload::V1(message) => &message.instructions,
         }
     }
 

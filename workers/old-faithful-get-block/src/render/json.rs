@@ -101,8 +101,7 @@ fn car_bytes_to_json_bytes_inner(
     let mut block = read_car_block(bytes, include_rewards, transaction_read_mode)?;
     let tx_count = block.get_len().0;
     let rewards = if include_rewards {
-        let rewards = decode_block_rewards_proto(block.rewards.as_ref())?;
-        rewards
+        decode_block_rewards_proto(block.rewards.as_ref())?
     } else {
         None
     };
@@ -735,6 +734,10 @@ fn write_transaction_version(
             w.raw(b"0");
             Ok(())
         }
+        VersionedMessage::V1(_) => {
+            w.raw(b"1");
+            Ok(())
+        }
     }
 }
 
@@ -755,6 +758,16 @@ fn write_message(w: &mut JsonWriter, message: &VersionedMessage<'_>) -> Result<(
             message.recent_blockhash,
             &message.instructions,
             Some(&message.address_table_lookups),
+        ),
+        // v1 has no lookup tables. Its header config is not rendered here
+        // because SIMD-0385's RPC shape for it is not settled.
+        VersionedMessage::V1(message) => write_message_fields(
+            w,
+            message.header,
+            &message.account_keys,
+            message.recent_blockhash,
+            &message.instructions,
+            None,
         ),
     }
 }
@@ -815,6 +828,7 @@ fn write_account_key_objects(
     let (header, account_keys) = match &tx.message {
         VersionedMessage::Legacy(message) => (message.header, message.account_keys.as_slice()),
         VersionedMessage::V0(message) => (message.header, message.account_keys.as_slice()),
+        VersionedMessage::V1(message) => (message.header, message.account_keys.as_slice()),
     };
 
     let required_signatures = header.num_required_signatures as usize;
@@ -877,6 +891,7 @@ fn write_account_key_objects_borrowed(
     let (header, account_keys) = match &tx.message {
         VersionedMessage::Legacy(message) => (message.header, message.account_keys.as_slice()),
         VersionedMessage::V0(message) => (message.header, message.account_keys.as_slice()),
+        VersionedMessage::V1(message) => (message.header, message.account_keys.as_slice()),
     };
 
     let required_signatures = header.num_required_signatures as usize;
@@ -1768,6 +1783,85 @@ fn write_u64_array(w: &mut JsonWriter, values: &[u64]) -> Result<(), String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use of_car_reader::versioned_transaction::{V1Message, V1TransactionConfig};
+
+    fn sample_v1_transaction<'a>(
+        signature: &'a [u8; 64],
+        account_keys: [&'a [u8; 32]; 2],
+        recent_blockhash: &'a [u8; 32],
+    ) -> VersionedTransaction<'a> {
+        VersionedTransaction {
+            signatures: vec![signature],
+            message: VersionedMessage::V1(V1Message {
+                header: MessageHeader {
+                    num_required_signatures: 1,
+                    num_readonly_signed_accounts: 0,
+                    num_readonly_unsigned_accounts: 1,
+                },
+                config: V1TransactionConfig {
+                    priority_fee: Some(42),
+                    compute_unit_limit: Some(1_400_000),
+                    loaded_accounts_data_size_limit: Some(65_536),
+                    heap_size: Some(262_144),
+                },
+                account_keys: account_keys.into_iter().collect(),
+                recent_blockhash,
+                instructions: vec![CompiledInstruction {
+                    program_id_index: 1,
+                    accounts: vec![0],
+                    data: vec![0xaa, 0xbb, 0xcc],
+                }],
+            }),
+        }
+    }
+
+    #[test]
+    fn writes_v1_transaction_in_full_and_accounts_modes() {
+        let signature = [7; 64];
+        let signer = [1; 32];
+        let program = [2; 32];
+        let recent_blockhash = [9; 32];
+        let transaction = sample_v1_transaction(&signature, [&signer, &program], &recent_blockhash);
+
+        let mut full = JsonWriter::with_capacity(512);
+        write_block_transaction(&mut full, &transaction, None).expect("write full v1 tx");
+        let full: serde_json::Value =
+            serde_json::from_slice(&full.into_inner()).expect("valid full JSON");
+
+        assert_eq!(full["version"], serde_json::json!(1));
+        assert_eq!(
+            full["transaction"]["message"]["accountKeys"]
+                .as_array()
+                .unwrap()
+                .len(),
+            2
+        );
+        assert_eq!(
+            full["transaction"]["message"]["instructions"][0]["programIdIndex"],
+            serde_json::json!(1)
+        );
+        assert!(
+            full["transaction"]["message"]
+                .get("addressTableLookups")
+                .is_none()
+        );
+
+        let mut accounts = JsonWriter::with_capacity(512);
+        write_accounts_transaction(&mut accounts, &transaction, None)
+            .expect("write accounts v1 tx");
+        let accounts: serde_json::Value =
+            serde_json::from_slice(&accounts.into_inner()).expect("valid accounts JSON");
+
+        assert_eq!(accounts["version"], serde_json::json!(1));
+        assert_eq!(
+            accounts["transaction"]["accountKeys"][0]["signer"],
+            serde_json::json!(true)
+        );
+        assert_eq!(
+            accounts["transaction"]["accountKeys"][1]["writable"],
+            serde_json::json!(false)
+        );
+    }
 
     #[test]
     fn decodes_unit_borsh_io_error_instruction_error() {

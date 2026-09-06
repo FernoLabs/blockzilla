@@ -1,30 +1,21 @@
 # Firewatch signer-to-program index redesign
 
-Goal: given a wallet pubkey, return each program reached by transactions it
-signed and the per-program usage aggregate for one epoch, with a tractable
-build and a low-latency query path.
+Goal: given a wallet pubkey, return the program ids reached by transactions it
+signed, per epoch, with a tractable build and a low-latency query path.
 
-Status (2026-08-13): the Stage 3 signer-dense builder and the version-4 usage
-record are implemented. The legacy chunked builder is retained as a byte-level
-oracle for new version-4 builds. Existing indexes are immutable and must be
-rebuilt directly from the compacted archive.
+Status (2026-08-08): the production/correctness batch, safe Stage 1 work, and
+the Stage 3 signer-dense builder are implemented. Stage 2 remains partial.
+The legacy chunked builder is retained as a byte-level oracle while
+`build-dense` is promoted through fixture and full-epoch gates.
 
 ## 1. Current semantic and publication contract
 
-The shard format is version 4, the manifest schema is version 4, and semantic
-version 2 means exactly:
+The shard format is version 3, the manifest schema is version 3, and semantic
+version 1 means exactly:
 
 - include successful transactions only;
 - map every required transaction signer (fee payer and co-signers) to every
   distinct top-level and recorded inner/CPI program in that transaction;
-- for each wallet/program pair, store the top-level instruction count, inner
-  instruction count, distinct successful-transaction count, first and last
-  slot, minimum and maximum available block time, and timed-transaction count;
-- count a program once in `transaction_count` when the same transaction calls
-  it more than once or calls it both directly and through CPI;
-- derive the average available-time gap as
-  `(max_block_time - min_block_time) / (timed_transaction_count - 1)` when at
-  least two contributing transactions have block time;
 - include vote transactions (the compact-vote flag is not an exact
   whole-transaction classifier);
 - fail the build on raw transactions, successful raw/absent metadata, decode
@@ -77,15 +68,12 @@ about 64 MB/s across two processes, 281 MB/s with six warm readers, and 259
 MB/s with six cold readers. Large scans mostly bypass the bcache, so this is
 real parallelism across the backing disks rather than a warm-cache artifact.
 Those signer counts predate the strict successful-only discovery alignment;
-the production rerun must record the smaller exact V2 counts before sizing the
+the production rerun must record the smaller exact V1 counts before sizing the
 final rollout.
 
 The box has 12 cores and 7.5 GB RAM, with roughly 4.4 GB free while sharing
 production work. The epoch-920 baseline projected about 47.8M distinct
-relations. The old id-only file used about 191 MB in `programs.rel`. A
-version-4 52-byte usage record would use about 2.49 GB in `programs.rel`, plus
-about 170 MB in `wallets.idx`. These values are projections and require a full
-production rerun.
+relations, roughly 191 MB in `programs.rel` plus 170 MB in `wallets.idx`.
 
 ## 3. Root causes and current disposition
 
@@ -96,10 +84,10 @@ write. About 1.67 billion pushes per pass could produce only about 47.8 million
 distinct relations. Hot vote authorities and bots therefore consumed gigabytes
 for answers that were only a few integers.
 
-`record()` now keeps every wallet slot sorted and unique by program id at
-insertion time. A repeated pair uses a checked aggregate merge. Parallel
-builder merge is a sorted union that also adds counts and keeps slot and time
-extrema. The writer no longer sorts or deduplicates.
+`record()` now keeps every wallet slot sorted and unique at insertion time,
+with a consecutive-duplicate fast path and binary-search insertion. Parallel
+builder merge is a true sorted-set union, so duplicates cannot return during
+merge. The writer no longer sorts/deduplicates.
 
 ### R2. Account-id chunking rereads the archive — landed in `build-dense`
 
@@ -183,7 +171,7 @@ Remaining:
 6. Successful-only outcome policy, all-signer cross-product semantics, and
    explicit vote inclusion encoded in the manifest.
 7. Strict all-or-nothing publication with exact omission counts (always zero
-   for a valid version-4 index).
+   for a valid version-3 index).
 
 ### Stage 2 — query and binding: partial
 
@@ -236,34 +224,32 @@ trusted-local builds run both passes in one process against retained handles.
 ### Pass 2: one signer-dense accumulator
 
 Decode threads scan disjoint block ranges and send bounded batches of
-`(dense_signer_rank, ProgramUsage)` pairs to one accumulator owner. Empty batch
+`(dense_signer_rank, program_id)` pairs to one accumulator owner. Empty batch
 buffers are recycled to their originating worker. The accumulator uses one
-four-byte linked-list head per discovered signer, one eight-byte node and one
-48-byte program-id-free usage payload in one 56-byte arena entry per distinct
-relation, and one registry-sized program bitset. Lists stay sorted and unique
-during insertion. Repeated traffic merges the existing aggregate and does not
-allocate duplicate nodes. Output walks those lists directly without a second
-CSR copy.
+four-byte linked-list head per discovered signer, one eight-byte node per
+distinct relation, and one registry-sized program bitset. Lists stay sorted
+and unique during insertion, so repeated vote/bot traffic never allocates
+duplicate nodes. Output walks those lists directly without a second CSR copy.
 
 For the epoch-920 projection, signer heads are about **40.55 MiB**, the program
-bitset about **6.07 MiB**, and 47.8M distinct relations use about **2.49 GiB**
-for the compact 56-byte arena entries. The resident signer-rank payload adds
-about 7.59 MiB. The default full-batch queue can hold about 32 MiB of pair
-payload. Six default 64 MiB reader-prefetch buffers can add about 384 MiB.
-Vector capacity can be higher than its logical length. Use an initial
-operational budget of at least **3.8–4.3 GiB**, and measure full-epoch RSS
-before rollout.
+bitset about **6.07 MiB**, and 47.8M distinct relation nodes about **364.7 MiB**:
+roughly **411 MiB** of logical accumulator storage before `Vec` capacity slack.
+The resident signer-rank payload adds about 7.59 MiB. The default full-batch
+queue holds at most 4 MiB of full pair payload; retained queue, worker, and
+recycled `Vec` capacities are roughly 5 MiB at six workers. Six default
+64 MiB reader-prefetch buffers can still add about 384 MiB, so the initial
+operational budget remains **about 0.9–1.1 GiB** until full-epoch RSS is
+measured; the reason is now reader/allocator overhead, not empty signer slots.
 Non-default batch/thread/queue combinations are rejected if their combined
 retained pair-buffer estimate exceeds 256 MiB.
 
 ### Output layout
 
-Stage 3 writes the version-4 shard layout. Each `programs.rel` item is a fixed
-52-byte usage record. Shard width affects only output geometry and no longer
-causes another archive pass. The chunked and dense builders can be exact
-version-4 oracles for each other. This does **not** enable the inverse
-`program -> wallets` query; that still requires a separate postings index or a
-full wallet scan.
+Stage 3 deliberately preserves the version-3 shard layout byte-for-byte. Shard
+width affects only output geometry and no longer causes another archive pass.
+This keeps the existing query/binding contract and enables exact old/new
+oracles. It does **not** enable the inverse `program -> wallets` query; that
+still requires a separate postings index (or a full wallet scan).
 
 ### Full-epoch projection (fixture measurements are recorded below)
 
@@ -271,9 +257,9 @@ full wallet scan.
 |---|---|---|---|
 | archive decode passes | 11 | 11, plus one required hash pass | 2, plus one required hash pass; 1 with a reused signer artifact |
 | build wall clock | ~10 h (1 thread) | not remeasured | unmeasured at full epoch; do not extrapolate from discovery alone |
-| peak memory | 3.8 GB | not remeasured; duplicate growth removed | version-4 relation arena ~2.49 GiB; budget ≥3.8–4.3 GiB initially |
-| query | 2.32 GB, ~72 s | file-backed MPHF, bound shard/program map; verification scan remains | returns per-program usage metrics; service caching remains Stage 2 work |
-| output | 11 shards | 11 shards, format v3 | 11 shards, format v4; projected relation file ~2.49 GB |
+| peak memory | 3.8 GB | not remeasured; duplicate growth removed | logical accumulator ~411 MiB; budget ≥0.9–1.1 GiB initially |
+| query | 2.32 GB, ~72 s | file-backed MPHF, bound shard/program map; verification scan remains | unchanged format; service caching remains Stage 2 work |
+| output | 11 shards | 11 shards, format v3 | identical format-v3 shard geometry |
 
 Stage 3 status:
 
@@ -284,7 +270,7 @@ Stage 3 status:
    zero-allocation signer-id iteration.
 3. Landed: compact dense builder with insertion-time dedup.
 4. Landed: bounded decoder-to-accumulator pipeline and recycled buffers.
-5. Landed: deterministic streaming writer for version-4 usage records.
+5. Landed: deterministic streaming writer for unchanged version-3 shards.
 6. Optional/future: program-to-wallet postings if inverse queries become a
    real product requirement.
 
@@ -312,8 +298,7 @@ Repeatable synthetic oracles now cover:
 - staging-parent selection, including a relative `index` output path;
 - atomic no-replace behavior when a destination path races publication.
 
-The 3,000-block epoch-1000 production fixture provided the version-3
-end-to-end gate. Its old hash does not validate version 4:
+The 3,000-block epoch-1000 production fixture now provides an end-to-end gate:
 
 - 3,688,626 transactions, 3,000 blocks, and 1,975,310 registry entries;
 - strict version-3 legacy builder, `build-dense --threads 1`, and
@@ -332,27 +317,23 @@ end-to-end gate. Its old hash does not validate version 4:
   1.099 s at four); end-to-end overhead was the required discovery pass. The
   fixture therefore does not justify another recent-pair cache yet.
 
-The older version-2-format semantic oracle intentionally differs: 159,977
-wallets and 484,364 relations. A streaming set diff found 1,681 old-only wallets, 196
+The older version-2 semantic oracle intentionally differs: 159,977 wallets and
+484,364 relations. A streaming set diff found 1,681 old-only wallets, 196
 strict-V1-only wallets, 7,661 old-only relations, and 201,705 strict-V1-only
 relations, matching the successful-only exclusion and all-signer cross-product
 changes rather than an output-order artifact.
 
-Still required before version-4 production rollout:
+Still required before production rollout:
 
-1. Rerun the 3,000-block fixture and require byte parity between the chunked
-   and dense version-4 builders.
-2. Rebuild epoch-900, compare counts and all usage fields, and spot-check known
-   wallets/programs.
-3. Measure full-epoch release RSS/wall time and cold/warm query latency after
+1. Rebuild epoch-900, compare counts, and spot-check known wallets/programs.
+2. Measure full-epoch release RSS/wall time and cold/warm query latency after
    the landed changes before selecting production chunk/thread settings.
 
 ## 7. Rollout and remaining risks
 
-- Version-3 indexes must be rebuilt from the compacted archive; older
-  semantic/format manifests are deliberately rejected and remain immutable.
-- The version-3 fixture gate passed. The version-4 fixture and epoch-900 gates
-  are still required before rebuilding epoch-920.
+- Version-3 indexes must be rebuilt; older semantic/format manifests are
+  deliberately rejected.
+- The fixture gate passed; validate epoch-900 before rebuilding epoch-920.
 - `build-dense` keeps the legacy builder available until epoch-900 parity and
   full-epoch RSS/performance gates complete.
 - Linked-list insertion is linear in one wallet's distinct program count;

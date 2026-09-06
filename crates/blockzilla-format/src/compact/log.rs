@@ -10,7 +10,7 @@ use solana_pubkey::Pubkey;
 use wincode::{SchemaRead, SchemaWrite};
 
 use crate::program_logs::{self, ProgramLog, system_program};
-use crate::{CompactPubkey, KeyIndex, KeyStore, PubkeyCompactor};
+use crate::{CompactPubkey, KeyIndex, PubkeyCompactor, PubkeyResolver};
 
 pub type StrId = u32;
 pub type ProgramId = CompactPubkey;
@@ -23,6 +23,147 @@ pub struct CompactLogStream {
     pub events: Vec<LogEvent>,
     pub strings: StringTable,
     pub data: DataTable,
+}
+
+/// Reusable allocation storage for compact log parsing.
+///
+/// A caller can keep one value per worker, parse one log stream, consume that
+/// stream, and then return it with [`Self::recycle`]. The next parse reuses the
+/// event, table, and base64-decoding allocations without a lock.
+#[derive(Debug)]
+pub struct CompactLogReuse {
+    events: Vec<LogEvent>,
+    string_lengths: Vec<u32>,
+    string_bytes: Vec<u8>,
+    data_arrays: Vec<DataArray>,
+    data_chunk_lengths: Vec<u32>,
+    data_bytes: Vec<u8>,
+    decode_buf: Vec<u8>,
+    max_retained_buffer_bytes: usize,
+}
+
+/// Default limit for one retained compact-log buffer.
+///
+/// The limit applies to each vector, not to the sum of all vectors. This keeps
+/// normal transaction allocations hot while a single unusually large log does
+/// not stay pinned in every worker slot.
+pub const DEFAULT_COMPACT_LOG_MAX_RETAINED_BUFFER_BYTES: usize = 1024 * 1024;
+
+impl Default for CompactLogReuse {
+    fn default() -> Self {
+        Self::with_max_retained_buffer_bytes(DEFAULT_COMPACT_LOG_MAX_RETAINED_BUFFER_BYTES)
+    }
+}
+
+impl CompactLogReuse {
+    pub fn new() -> Self {
+        Self::default()
+    }
+
+    pub fn with_max_retained_buffer_bytes(max_retained_buffer_bytes: usize) -> Self {
+        Self {
+            events: Vec::new(),
+            string_lengths: Vec::new(),
+            string_bytes: Vec::new(),
+            data_arrays: Vec::new(),
+            data_chunk_lengths: Vec::new(),
+            data_bytes: Vec::new(),
+            decode_buf: Vec::new(),
+            max_retained_buffer_bytes,
+        }
+    }
+
+    /// Returns an already-consumed output stream to this reuse slot.
+    pub fn recycle(&mut self, logs: CompactLogStream) {
+        retain_reusable_vec(
+            &mut self.events,
+            logs.events,
+            self.max_retained_buffer_bytes,
+        );
+        retain_reusable_vec(
+            &mut self.string_lengths,
+            logs.strings.lengths,
+            self.max_retained_buffer_bytes,
+        );
+        retain_reusable_vec(
+            &mut self.string_bytes,
+            logs.strings.bytes,
+            self.max_retained_buffer_bytes,
+        );
+        retain_reusable_vec(
+            &mut self.data_arrays,
+            logs.data.arrays,
+            self.max_retained_buffer_bytes,
+        );
+        retain_reusable_vec(
+            &mut self.data_chunk_lengths,
+            logs.data.chunk_lengths,
+            self.max_retained_buffer_bytes,
+        );
+        retain_reusable_vec(
+            &mut self.data_bytes,
+            logs.data.bytes,
+            self.max_retained_buffer_bytes,
+        );
+    }
+
+    /// Total capacity, in bytes, currently retained by this reuse slot.
+    pub fn retained_capacity_bytes(&self) -> usize {
+        reusable_vec_bytes(&self.events)
+            .saturating_add(reusable_vec_bytes(&self.string_lengths))
+            .saturating_add(reusable_vec_bytes(&self.string_bytes))
+            .saturating_add(reusable_vec_bytes(&self.data_arrays))
+            .saturating_add(reusable_vec_bytes(&self.data_chunk_lengths))
+            .saturating_add(reusable_vec_bytes(&self.data_bytes))
+            .saturating_add(reusable_vec_bytes(&self.decode_buf))
+    }
+
+    #[inline]
+    fn take_stream(&mut self, estimated_len: usize) -> CompactLogStream {
+        let mut events = std::mem::take(&mut self.events);
+        events.clear();
+        if events.capacity() < estimated_len {
+            events.reserve(estimated_len);
+        }
+
+        CompactLogStream {
+            events,
+            strings: StringTable {
+                lengths: std::mem::take(&mut self.string_lengths),
+                bytes: std::mem::take(&mut self.string_bytes),
+            },
+            data: DataTable {
+                arrays: std::mem::take(&mut self.data_arrays),
+                chunk_lengths: std::mem::take(&mut self.data_chunk_lengths),
+                bytes: std::mem::take(&mut self.data_bytes),
+            },
+        }
+    }
+
+    #[inline]
+    fn recycle_decode_buf(&mut self, decode_buf: Vec<u8>) {
+        retain_reusable_vec(
+            &mut self.decode_buf,
+            decode_buf,
+            self.max_retained_buffer_bytes,
+        );
+    }
+}
+
+#[inline]
+fn reusable_vec_bytes<T>(values: &Vec<T>) -> usize {
+    values.capacity().saturating_mul(std::mem::size_of::<T>())
+}
+
+#[inline]
+fn retain_reusable_vec<T>(slot: &mut Vec<T>, mut values: Vec<T>, max_bytes: usize) {
+    values.clear();
+    if reusable_vec_bytes(&values) > max_bytes {
+        return;
+    }
+    if values.capacity() > slot.capacity() {
+        *slot = values;
+    }
 }
 
 #[derive(Debug, Default, Serialize, Deserialize, SchemaRead, SchemaWrite)]
@@ -403,6 +544,249 @@ pub enum LogEvent {
     },
 }
 
+impl CompactLogStream {
+    /// Visits every compact public-key reference stored in this log stream.
+    ///
+    /// Events are visited in stream order. Fields use the deterministic order
+    /// of the legacy JSON inspection path so validation keeps the same first
+    /// error. The visitor is fallible so callers can validate registry
+    /// identifiers without building an intermediate representation.
+    #[inline]
+    pub fn try_for_each_pubkey<E>(
+        &self,
+        mut visitor: impl FnMut(CompactPubkey) -> Result<(), E>,
+    ) -> Result<(), E> {
+        for event in &self.events {
+            try_visit_log_event_pubkeys(event, &mut visitor)?;
+        }
+        Ok(())
+    }
+}
+
+#[inline]
+fn try_visit_log_event_pubkeys<E>(
+    event: &LogEvent,
+    visitor: &mut impl FnMut(CompactPubkey) -> Result<(), E>,
+) -> Result<(), E> {
+    match event {
+        LogEvent::System(log) => try_visit_system_program_log_pubkeys(log, visitor),
+        LogEvent::LoaderUpgradedProgram { program }
+        | LogEvent::Invoke { program, depth: _ }
+        | LogEvent::BpfInvoke { program }
+        | LogEvent::Consumed {
+            program,
+            used: _,
+            limit: _,
+        }
+        | LogEvent::Success { program }
+        | LogEvent::BpfSuccess { program }
+        | LogEvent::Failure { program, reason: _ }
+        | LogEvent::BpfFailure { program, reason: _ }
+        | LogEvent::FailureCustomProgramError { program, code: _ }
+        | LogEvent::BpfFailureCustomProgramError { program, code: _ }
+        | LogEvent::FailureInvalidAccountData { program }
+        | LogEvent::BpfFailureInvalidAccountData { program }
+        | LogEvent::FailureInvalidProgramArgument { program }
+        | LogEvent::BpfFailureInvalidProgramArgument { program }
+        | LogEvent::Return { program, data: _ } => visitor(*program),
+        LogEvent::LoaderFinalizedAccount { account }
+        | LogEvent::RuntimeWritablePrivilegeEscalated { account }
+        | LogEvent::RuntimeSignerPrivilegeEscalated { account }
+        | LogEvent::RuntimeAccountOwnerBalanceVerificationFailed { account } => visitor(*account),
+        LogEvent::ProgramLog(log) | LogEvent::ProgramPlainLog(log) => {
+            try_visit_program_log_pubkeys(log, visitor)
+        }
+        LogEvent::ProgramIdLog { program, log } => {
+            try_visit_program_log_pubkeys(log, visitor)?;
+            visitor(*program)
+        }
+        LogEvent::ProgramNotDeployed { program } | LogEvent::ProgramNotCached { program } => {
+            if let Some(program) = program {
+                visitor(*program)?;
+            }
+            Ok(())
+        }
+        LogEvent::LogTruncated
+        | LogEvent::StakeMergingAccounts
+        | LogEvent::ProgramLogError { msg: _ }
+        | LogEvent::ProgramAccountNotWritable
+        | LogEvent::ProgramIdMismatch
+        | LogEvent::ProgramNotUpgradeable
+        | LogEvent::ProgramAndProgramDataAccountMismatch
+        | LogEvent::ProgramWasExtendedInThisBlockAlready
+        | LogEvent::BpfConsumed { used: _, limit: _ }
+        | LogEvent::FailedToComplete { reason: _ }
+        | LogEvent::CustomProgramError { code: _ }
+        | LogEvent::Data { data: _ }
+        | LogEvent::Consumption { units: _ }
+        | LogEvent::CbRequestUnits { units: _ }
+        | LogEvent::UnknownProgram { program: _ }
+        | LogEvent::UnknownAccount { account: _ }
+        | LogEvent::VerifyEd25519
+        | LogEvent::VerifySecp256k1
+        | LogEvent::CloseContextState
+        | LogEvent::Plain { text: _ }
+        | LogEvent::Unparsed { text: _ } => Ok(()),
+    }
+}
+
+#[inline]
+fn try_visit_program_log_pubkeys<E>(
+    log: &ProgramLog,
+    visitor: &mut impl FnMut(CompactPubkey) -> Result<(), E>,
+) -> Result<(), E> {
+    match log {
+        ProgramLog::Token2022(log) => try_visit_token_2022_log_pubkeys(log, visitor),
+        ProgramLog::Empty
+        | ProgramLog::Token(_)
+        | ProgramLog::Ata(_)
+        | ProgramLog::AddressLookupTable(_)
+        | ProgramLog::LoaderV3(_)
+        | ProgramLog::LoaderV4(_)
+        | ProgramLog::Memo(_)
+        | ProgramLog::Record(_)
+        | ProgramLog::TransferHook(_)
+        | ProgramLog::AccountCompression(_)
+        | ProgramLog::Stake(_)
+        | ProgramLog::ZkElgamalProof(_)
+        | ProgramLog::AnchorInstruction { name: _ }
+        | ProgramLog::AnchorErrorOccurred {
+            code: _,
+            number: _,
+            msg: _,
+        }
+        | ProgramLog::AnchorErrorThrown {
+            file: _,
+            line: _,
+            code: _,
+            number: _,
+            msg: _,
+        }
+        | ProgramLog::Unknown(_) => Ok(()),
+        #[cfg(feature = "known-program-logs")]
+        ProgramLog::Known(_) => Ok(()),
+    }
+}
+
+#[inline]
+fn try_visit_token_2022_log_pubkeys<E>(
+    log: &program_logs::token_2022::Token2022Log,
+    visitor: &mut impl FnMut(CompactPubkey) -> Result<(), E>,
+) -> Result<(), E> {
+    use program_logs::token_2022::Token2022Log;
+
+    match log {
+        Token2022Log::ErrorHarvestingFrom {
+            account_key,
+            error: _,
+        }
+        | Token2022Log::ErrorHarvestingFrom2 {
+            account_key,
+            error: _,
+        }
+        | Token2022Log::ErrorHarvestingFrom3 {
+            account_key,
+            error: _,
+        }
+        | Token2022Log::ErrorHarvestingFrom4 {
+            account_key,
+            error: _,
+        } => visitor(*account_key),
+        Token2022Log::Error(_)
+        | Token2022Log::Static(_)
+        | Token2022Log::CalculatedFee {
+            calculated_fee: _,
+            fee: _,
+        }
+        | Token2022Log::AccountNeedsResizePlusBytesDebug { bytes: _ }
+        | Token2022Log::AccountNeedsResizePlusBytesDebug2 { bytes: _ } => Ok(()),
+    }
+}
+
+#[inline]
+fn try_visit_system_program_log_pubkeys<E>(
+    log: &system_program::SystemProgramLog,
+    visitor: &mut impl FnMut(CompactPubkey) -> Result<(), E>,
+) -> Result<(), E> {
+    use system_program::SystemProgramLog;
+
+    match log {
+        SystemProgramLog::CreateAddressMismatch {
+            provided_addr,
+            derived_addr,
+        }
+        | SystemProgramLog::TransferFromAddressMismatch {
+            provided_addr,
+            derived_addr,
+        } => {
+            try_visit_pubkey_or_string(*derived_addr, visitor)?;
+            visitor(*provided_addr)
+        }
+        SystemProgramLog::CreateAccountAlreadyInUse { addr }
+        | SystemProgramLog::AllocateAlreadyInUse { addr }
+        | SystemProgramLog::AllocateToMustSign { addr }
+        | SystemProgramLog::AllocateAccountAlreadyInUse { addr }
+        | SystemProgramLog::AssignAccountMustSign { addr }
+        | SystemProgramLog::CreateAccountAccountAlreadyInUse { addr } => {
+            try_visit_system_address(*addr, visitor)
+        }
+        SystemProgramLog::TransferFromMustSign { from } => visitor(*from),
+        SystemProgramLog::NonceAccountMustBeWriteable { action: _, account }
+        | SystemProgramLog::NonceAccountMustBeSigner { action: _, account }
+        | SystemProgramLog::NonceAccountMustSign { action: _, account }
+        | SystemProgramLog::NonceAccountStateInvalid { action: _, account } => {
+            try_visit_pubkey_or_string(*account, visitor)
+        }
+        SystemProgramLog::Instruction(_)
+        | SystemProgramLog::AllocateRequestedTooLarge {
+            requested: _,
+            max_allowed: _,
+        }
+        | SystemProgramLog::CreateAccountDataSizeLimitedInInnerInstructions { limit: _ }
+        | SystemProgramLog::TransferFromMustNotCarryData
+        | SystemProgramLog::TransferInsufficient { have: _, need: _ }
+        | SystemProgramLog::AdvanceNonceRecentBlockhashesEmpty
+        | SystemProgramLog::InitializeNonceRecentBlockhashesEmpty
+        | SystemProgramLog::AuthorizeNonceAccount { msg: _ }
+        | SystemProgramLog::NonceInsufficientLamports {
+            action: _,
+            have: _,
+            need: _,
+        }
+        | SystemProgramLog::NonceCanOnlyAdvanceOncePerSlot { action: _ } => Ok(()),
+    }
+}
+
+#[inline]
+fn try_visit_system_address<E>(
+    address: system_program::SystemAddress,
+    visitor: &mut impl FnMut(CompactPubkey) -> Result<(), E>,
+) -> Result<(), E> {
+    match address {
+        system_program::SystemAddress::Pubkey(pubkey) => {
+            try_visit_pubkey_or_string(pubkey, visitor)
+        }
+        system_program::SystemAddress::Debug { address, base } => {
+            try_visit_pubkey_or_string(address, visitor)?;
+            if let Some(base) = base {
+                try_visit_pubkey_or_string(base, visitor)?;
+            }
+            Ok(())
+        }
+    }
+}
+
+#[inline]
+fn try_visit_pubkey_or_string<E>(
+    pubkey: system_program::PubkeyOrString,
+    visitor: &mut impl FnMut(CompactPubkey) -> Result<(), E>,
+) -> Result<(), E> {
+    match pubkey {
+        system_program::PubkeyOrString::Pubkey(pubkey) => visitor(pubkey),
+        system_program::PubkeyOrString::Text(_) => Ok(()),
+    }
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct CompactLogParseCount {
     pub label: String,
@@ -548,7 +932,7 @@ const LOG_PUBKEY_CACHE_MAX: usize = 64;
 
 #[derive(Debug, Default)]
 struct LogPubkeyCache<'a> {
-    entries: Vec<(&'a str, Option<CompactPubkey>)>,
+    entries: heapless::Vec<(&'a str, Option<CompactPubkey>), LOG_PUBKEY_CACHE_MAX>,
     hits: u64,
     misses: u64,
     max_entries: usize,
@@ -565,10 +949,71 @@ impl<'a> LogPubkeyCache<'a> {
         let value = index.compact_str(key);
         self.misses = self.misses.saturating_add(1);
         if self.entries.len() < LOG_PUBKEY_CACHE_MAX {
-            self.entries.push((key, value));
+            self.entries
+                .push((key, value))
+                .expect("cache length checked against fixed capacity");
             self.max_entries = self.max_entries.max(self.entries.len());
         }
         value
+    }
+}
+
+const PROGRAM_STACK_INLINE: usize = 16;
+
+/// Keeps the normal Solana invocation stack on the thread stack. The spill
+/// vector preserves the old unlimited behavior for malformed or synthetic
+/// logs with more nesting.
+#[derive(Debug, Default)]
+struct ProgramStack<'a> {
+    inline: heapless::Vec<&'a str, PROGRAM_STACK_INLINE>,
+    overflow: Vec<&'a str>,
+}
+
+impl<'a> ProgramStack<'a> {
+    #[inline]
+    fn last(&self) -> Option<&&'a str> {
+        self.overflow.last().or_else(|| self.inline.last())
+    }
+
+    #[inline]
+    fn push(&mut self, program: &'a str) {
+        if self.overflow.is_empty() && self.inline.len() < PROGRAM_STACK_INLINE {
+            self.inline
+                .push(program)
+                .expect("inline program stack length checked");
+        } else {
+            self.overflow.push(program);
+        }
+    }
+
+    #[inline]
+    fn pop(&mut self) -> Option<&'a str> {
+        self.overflow.pop().or_else(|| self.inline.pop())
+    }
+
+    #[inline]
+    fn clear(&mut self) {
+        self.inline.clear();
+        self.overflow.clear();
+    }
+
+    #[inline]
+    fn rposition(&self, program: &str) -> Option<usize> {
+        self.overflow
+            .iter()
+            .rposition(|active| *active == program)
+            .map(|position| self.inline.len() + position)
+            .or_else(|| self.inline.iter().rposition(|active| *active == program))
+    }
+
+    #[inline]
+    fn truncate(&mut self, len: usize) {
+        if len <= self.inline.len() {
+            self.inline.truncate(len);
+            self.overflow.clear();
+        } else {
+            self.overflow.truncate(len - self.inline.len());
+        }
     }
 }
 
@@ -602,14 +1047,9 @@ fn could_be_system_program_log(line: &str) -> bool {
 }
 
 #[inline]
-fn pid_to_pubkey(store: &KeyStore, pid: ProgramId) -> Pubkey {
-    pid.to_pubkey(store).unwrap_or_else(|| {
-        panic!(
-            "log.rs: ProgramId out of bounds: pid={:?} len={}",
-            pid,
-            store.len()
-        )
-    })
+fn pid_to_pubkey<R: PubkeyResolver + ?Sized>(resolver: &R, pid: ProgramId) -> Pubkey {
+    pid.to_pubkey(resolver)
+        .unwrap_or_else(|| panic!("log.rs: ProgramId cannot be resolved: pid={pid:?}"))
 }
 
 pub fn parse_logs(lines: &[String], index: &KeyIndex) -> CompactLogStream {
@@ -620,7 +1060,8 @@ pub fn parse_logs_with_compactor<C: PubkeyCompactor>(
     lines: &[String],
     index: &C,
 ) -> CompactLogStream {
-    parse_log_iter_with_compactor(lines.iter().map(String::as_str), lines.len(), index, None)
+    let mut reuse = CompactLogReuse::new();
+    parse_logs_with_compactor_reusing(lines, index, &mut reuse)
 }
 
 pub fn parse_logs_with_compactor_and_stats<C: PubkeyCompactor>(
@@ -628,11 +1069,36 @@ pub fn parse_logs_with_compactor_and_stats<C: PubkeyCompactor>(
     index: &C,
     stats: &mut CompactLogParseStats,
 ) -> CompactLogStream {
-    parse_log_iter_with_compactor(
+    let mut reuse = CompactLogReuse::new();
+    parse_logs_with_compactor_and_stats_reusing(lines, index, stats, &mut reuse)
+}
+
+pub fn parse_logs_with_compactor_reusing<C: PubkeyCompactor>(
+    lines: &[String],
+    index: &C,
+    reuse: &mut CompactLogReuse,
+) -> CompactLogStream {
+    parse_log_iter_with_compactor_reusing(
+        lines.iter().map(String::as_str),
+        lines.len(),
+        index,
+        None,
+        reuse,
+    )
+}
+
+pub fn parse_logs_with_compactor_and_stats_reusing<C: PubkeyCompactor>(
+    lines: &[String],
+    index: &C,
+    stats: &mut CompactLogParseStats,
+    reuse: &mut CompactLogReuse,
+) -> CompactLogStream {
+    parse_log_iter_with_compactor_reusing(
         lines.iter().map(String::as_str),
         lines.len(),
         index,
         Some(stats),
+        reuse,
     )
 }
 
@@ -640,7 +1106,8 @@ pub fn parse_log_strs_with_compactor<C: PubkeyCompactor>(
     lines: &[&str],
     index: &C,
 ) -> CompactLogStream {
-    parse_log_iter_with_compactor(lines.iter().copied(), lines.len(), index, None)
+    let mut reuse = CompactLogReuse::new();
+    parse_log_strs_with_compactor_reusing(lines, index, &mut reuse)
 }
 
 pub fn parse_log_strs_with_compactor_and_stats<C: PubkeyCompactor>(
@@ -648,24 +1115,51 @@ pub fn parse_log_strs_with_compactor_and_stats<C: PubkeyCompactor>(
     index: &C,
     stats: &mut CompactLogParseStats,
 ) -> CompactLogStream {
-    parse_log_iter_with_compactor(lines.iter().copied(), lines.len(), index, Some(stats))
+    let mut reuse = CompactLogReuse::new();
+    parse_log_strs_with_compactor_and_stats_reusing(lines, index, stats, &mut reuse)
 }
 
-fn parse_log_iter_with_compactor<'a, I, C>(
+pub fn parse_log_strs_with_compactor_reusing<C: PubkeyCompactor>(
+    lines: &[&str],
+    index: &C,
+    reuse: &mut CompactLogReuse,
+) -> CompactLogStream {
+    parse_log_iter_with_compactor_reusing(lines.iter().copied(), lines.len(), index, None, reuse)
+}
+
+pub fn parse_log_strs_with_compactor_and_stats_reusing<C: PubkeyCompactor>(
+    lines: &[&str],
+    index: &C,
+    stats: &mut CompactLogParseStats,
+    reuse: &mut CompactLogReuse,
+) -> CompactLogStream {
+    parse_log_iter_with_compactor_reusing(
+        lines.iter().copied(),
+        lines.len(),
+        index,
+        Some(stats),
+        reuse,
+    )
+}
+
+pub(crate) fn parse_log_iter_with_compactor_reusing<'a, I, C>(
     lines: I,
     estimated_len: usize,
     index: &C,
     mut stats: Option<&mut CompactLogParseStats>,
+    reuse: &mut CompactLogReuse,
 ) -> CompactLogStream
 where
     I: IntoIterator<Item = &'a str>,
     C: PubkeyCompactor,
 {
-    let mut st = StringTable::default();
-    let mut dt = DataTable::default();
-    let mut events = Vec::with_capacity(estimated_len);
-    let mut decode_buf = Vec::new();
-    let mut program_stack = Vec::<&'a str>::new();
+    let CompactLogStream {
+        mut events,
+        strings: mut st,
+        data: mut dt,
+    } = reuse.take_stream(estimated_len);
+    let mut decode_buf = std::mem::take(&mut reuse.decode_buf);
+    let mut program_stack = ProgramStack::default();
     let mut pubkey_cache = LogPubkeyCache::default();
 
     let cb_pid = index.compact_str(CB_PK);
@@ -1091,6 +1585,8 @@ where
         stats.record_pubkey_cache(&pubkey_cache);
     }
 
+    reuse.recycle_decode_buf(decode_buf);
+
     CompactLogStream {
         events,
         strings: st,
@@ -1208,7 +1704,7 @@ fn program_log_variant_label(log: &ProgramLog) -> &'static str {
     }
 }
 
-fn update_program_stack<'a>(parsed: ParsedLogLine<'a>, stack: &mut Vec<&'a str>) {
+fn update_program_stack<'a>(parsed: ParsedLogLine<'a>, stack: &mut ProgramStack<'a>) {
     match parsed {
         ParsedLogLine::Invoke { program, depth } => {
             let depth = depth as usize;
@@ -1229,7 +1725,7 @@ fn update_program_stack<'a>(parsed: ParsedLogLine<'a>, stack: &mut Vec<&'a str>)
         | ParsedLogLine::BpfFailure { program, .. } => {
             if stack.last().is_some_and(|active| *active == program) {
                 stack.pop();
-            } else if let Some(position) = stack.iter().rposition(|active| *active == program) {
+            } else if let Some(position) = stack.rposition(program) {
                 stack.truncate(position);
             } else {
                 stack.clear();
@@ -1239,7 +1735,10 @@ fn update_program_stack<'a>(parsed: ParsedLogLine<'a>, stack: &mut Vec<&'a str>)
     }
 }
 
-pub fn render_logs(cls: &CompactLogStream, store: &KeyStore) -> Vec<String> {
+pub fn render_logs<R: PubkeyResolver + ?Sized>(
+    cls: &CompactLogStream,
+    resolver: &R,
+) -> Vec<String> {
     let mut out = Vec::with_capacity(cls.events.len());
     let st = &cls.strings;
     let dt = &cls.data;
@@ -1248,12 +1747,12 @@ pub fn render_logs(cls: &CompactLogStream, store: &KeyStore) -> Vec<String> {
         match ev {
             LogEvent::Invoke { program, depth, .. } => out.push(format!(
                 "Program {} invoke [{}]",
-                pid_to_pubkey(store, *program),
+                pid_to_pubkey(resolver, *program),
                 depth
             )),
             LogEvent::BpfInvoke { program } => out.push(format!(
                 "Call BPF program {}",
-                pid_to_pubkey(store, *program)
+                pid_to_pubkey(resolver, *program)
             )),
             LogEvent::Consumed {
                 program,
@@ -1261,7 +1760,7 @@ pub fn render_logs(cls: &CompactLogStream, store: &KeyStore) -> Vec<String> {
                 limit,
             } => out.push(format!(
                 "Program {} consumed {} of {} compute units",
-                pid_to_pubkey(store, *program),
+                pid_to_pubkey(resolver, *program),
                 used,
                 limit
             )),
@@ -1270,65 +1769,65 @@ pub fn render_logs(cls: &CompactLogStream, store: &KeyStore) -> Vec<String> {
             }
             LogEvent::Success { program } => out.push(format!(
                 "Program {} success",
-                pid_to_pubkey(store, *program)
+                pid_to_pubkey(resolver, *program)
             )),
             LogEvent::BpfSuccess { program } => out.push(format!(
                 "BPF program {} success",
-                pid_to_pubkey(store, *program)
+                pid_to_pubkey(resolver, *program)
             )),
             LogEvent::Failure { program, reason } => out.push(format!(
                 "Program {} failed: {}",
-                pid_to_pubkey(store, *program),
+                pid_to_pubkey(resolver, *program),
                 st.resolve(*reason)
             )),
             LogEvent::BpfFailure { program, reason } => out.push(format!(
                 "BPF program {} failed {}",
-                pid_to_pubkey(store, *program),
+                pid_to_pubkey(resolver, *program),
                 st.resolve(*reason)
             )),
             LogEvent::FailureCustomProgramError { program, code } => out.push(format!(
                 "Program {} failed: custom program error: 0x{:x}",
-                pid_to_pubkey(store, *program),
+                pid_to_pubkey(resolver, *program),
                 code
             )),
             LogEvent::BpfFailureCustomProgramError { program, code } => out.push(format!(
                 "BPF program {} failed custom program error: 0x{:x}",
-                pid_to_pubkey(store, *program),
+                pid_to_pubkey(resolver, *program),
                 code
             )),
             LogEvent::FailureInvalidAccountData { program } => out.push(format!(
                 "Program {} failed: invalid account data for instruction",
-                pid_to_pubkey(store, *program)
+                pid_to_pubkey(resolver, *program)
             )),
             LogEvent::BpfFailureInvalidAccountData { program } => out.push(format!(
                 "BPF program {} failed invalid account data for instruction",
-                pid_to_pubkey(store, *program)
+                pid_to_pubkey(resolver, *program)
             )),
             LogEvent::FailureInvalidProgramArgument { program } => out.push(format!(
                 "Program {} failed: invalid program argument",
-                pid_to_pubkey(store, *program)
+                pid_to_pubkey(resolver, *program)
             )),
             LogEvent::BpfFailureInvalidProgramArgument { program } => out.push(format!(
                 "BPF program {} failed invalid program argument",
-                pid_to_pubkey(store, *program)
+                pid_to_pubkey(resolver, *program)
             )),
             LogEvent::FailedToComplete { reason } => out.push(format!(
                 "Program failed to complete: {}",
                 st.resolve(*reason)
             )),
-            LogEvent::System(sys) => out.push(sys.render(st, store)),
+            LogEvent::System(sys) => out.push(sys.render(st, resolver)),
             LogEvent::LogTruncated => out.push("Log truncated".to_string()),
             LogEvent::StakeMergingAccounts => out.push("Merging stake accounts".to_string()),
             LogEvent::LoaderUpgradedProgram { program } => out.push(format!(
                 "Upgraded program {}",
-                pid_to_pubkey(store, *program)
+                pid_to_pubkey(resolver, *program)
             )),
             LogEvent::LoaderFinalizedAccount { account } => out.push(format!(
                 "Finalized account {}",
-                pid_to_pubkey(store, *account)
+                pid_to_pubkey(resolver, *account)
             )),
             LogEvent::ProgramLog(log) => {
-                let payload = program_logs::render_program_log(log, store, st);
+                let payload = program_logs::render_program_log(log, resolver, st);
                 if payload.is_empty() {
                     out.push("Program log:".to_string());
                 } else {
@@ -1339,8 +1838,8 @@ pub fn render_logs(cls: &CompactLogStream, store: &KeyStore) -> Vec<String> {
                 out.push(format!("Program log: Error: {}", st.resolve(*msg)));
             }
             LogEvent::ProgramIdLog { program, log } => {
-                let payload = program_logs::render_program_log(log, store, st);
-                let program = pid_to_pubkey(store, *program);
+                let payload = program_logs::render_program_log(log, resolver, st);
+                let program = pid_to_pubkey(resolver, *program);
                 if payload.is_empty() {
                     out.push(format!("Program {program} log:"));
                 } else {
@@ -1348,7 +1847,7 @@ pub fn render_logs(cls: &CompactLogStream, store: &KeyStore) -> Vec<String> {
                 }
             }
             LogEvent::ProgramPlainLog(log) => {
-                out.push(program_logs::render_program_log(log, store, st));
+                out.push(program_logs::render_program_log(log, resolver, st));
             }
             LogEvent::ProgramAccountNotWritable => {
                 out.push("Program account not writeable".to_string())
@@ -1365,7 +1864,7 @@ pub fn render_logs(cls: &CompactLogStream, store: &KeyStore) -> Vec<String> {
             }
             LogEvent::Return { program, data } => out.push(format!(
                 "Program return: {} {}",
-                pid_to_pubkey(store, *program),
+                pid_to_pubkey(resolver, *program),
                 dt.render(*data),
             )),
             LogEvent::Data { data } => out.push(format!("Program data: {}", dt.render(*data))),
@@ -1379,7 +1878,7 @@ pub fn render_logs(cls: &CompactLogStream, store: &KeyStore) -> Vec<String> {
                 if let Some(pid) = program {
                     out.push(format!(
                         "Program {} is not deployed",
-                        pid_to_pubkey(store, *pid)
+                        pid_to_pubkey(resolver, *pid)
                     ));
                 } else {
                     out.push("Program is not deployed".to_string());
@@ -1389,7 +1888,7 @@ pub fn render_logs(cls: &CompactLogStream, store: &KeyStore) -> Vec<String> {
                 if let Some(pid) = program {
                     out.push(format!(
                         "Program {} is not cached",
-                        pid_to_pubkey(store, *pid)
+                        pid_to_pubkey(resolver, *pid)
                     ));
                 } else {
                     out.push("Program is not cached".to_string());
@@ -1406,15 +1905,15 @@ pub fn render_logs(cls: &CompactLogStream, store: &KeyStore) -> Vec<String> {
             LogEvent::VerifySecp256k1 => out.push("VerifySecp256k1".to_string()),
             LogEvent::RuntimeWritablePrivilegeEscalated { account } => out.push(format!(
                 "{}'s writable privilege escalated",
-                pid_to_pubkey(store, *account)
+                pid_to_pubkey(resolver, *account)
             )),
             LogEvent::RuntimeSignerPrivilegeEscalated { account } => out.push(format!(
                 "{}'s signer privilege escalated",
-                pid_to_pubkey(store, *account)
+                pid_to_pubkey(resolver, *account)
             )),
             LogEvent::RuntimeAccountOwnerBalanceVerificationFailed { account } => out.push(format!(
                 "failed to verify account {} instruction spent from the balance of an account it does not own",
-                pid_to_pubkey(store, *account)
+                pid_to_pubkey(resolver, *account)
             )),
             LogEvent::CloseContextState => out.push("CloseContextState".to_string()),
             LogEvent::Plain { text } | LogEvent::Unparsed { text } => {
@@ -1430,6 +1929,7 @@ pub fn render_logs(cls: &CompactLogStream, store: &KeyStore) -> Vec<String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::KeyStore;
 
     fn key_index(keys: &[&str]) -> KeyIndex {
         KeyIndex::build(
@@ -1470,6 +1970,74 @@ mod tests {
             vec![&[1, 2, 3][..], &[4, 5][..]]
         );
         assert_eq!(table.render(id), "AQID BAU=");
+    }
+
+    #[test]
+    fn reusable_log_parser_preserves_output_and_reuses_allocations() {
+        let index = key_index(&[CB_PK]);
+        let lines = vec![
+            format!("Program {CB_PK} invoke [1]"),
+            "Program data: AQID BAU=".to_owned(),
+            "plain runtime text".to_owned(),
+            format!("Program {CB_PK} success"),
+        ];
+        let expected = parse_logs(&lines, &index);
+        let expected_bytes = wincode::serialize(&expected).expect("serialize expected logs");
+        let mut reuse = CompactLogReuse::new();
+
+        let first = parse_logs_with_compactor_reusing(&lines, &index, &mut reuse);
+        assert_eq!(
+            wincode::serialize(&first).expect("serialize first reusable logs"),
+            expected_bytes
+        );
+        let events_ptr = first.events.as_ptr();
+        let string_lengths_ptr = first.strings.lengths.as_ptr();
+        let string_bytes_ptr = first.strings.bytes.as_ptr();
+        let data_arrays_ptr = first.data.arrays.as_ptr();
+        let data_chunk_lengths_ptr = first.data.chunk_lengths.as_ptr();
+        let data_bytes_ptr = first.data.bytes.as_ptr();
+        let decode_buf_ptr = reuse.decode_buf.as_ptr();
+        reuse.recycle(first);
+        assert!(reuse.retained_capacity_bytes() > 0);
+
+        let second = parse_logs_with_compactor_reusing(&lines, &index, &mut reuse);
+        assert_eq!(
+            wincode::serialize(&second).expect("serialize second reusable logs"),
+            expected_bytes
+        );
+        assert_eq!(second.events.as_ptr(), events_ptr);
+        assert_eq!(second.strings.lengths.as_ptr(), string_lengths_ptr);
+        assert_eq!(second.strings.bytes.as_ptr(), string_bytes_ptr);
+        assert_eq!(second.data.arrays.as_ptr(), data_arrays_ptr);
+        assert_eq!(second.data.chunk_lengths.as_ptr(), data_chunk_lengths_ptr);
+        assert_eq!(second.data.bytes.as_ptr(), data_bytes_ptr);
+        assert_eq!(reuse.decode_buf.as_ptr(), decode_buf_ptr);
+    }
+
+    #[test]
+    fn reusable_log_parser_discards_oversized_buffers() {
+        let mut reuse = CompactLogReuse::with_max_retained_buffer_bytes(8);
+        let logs = CompactLogStream {
+            events: Vec::with_capacity(32),
+            strings: StringTable {
+                lengths: Vec::with_capacity(32),
+                bytes: Vec::with_capacity(64),
+            },
+            data: DataTable {
+                arrays: Vec::with_capacity(32),
+                chunk_lengths: Vec::with_capacity(32),
+                bytes: Vec::with_capacity(64),
+            },
+        };
+
+        reuse.recycle(logs);
+
+        assert_eq!(reuse.events.capacity(), 0);
+        assert_eq!(reuse.string_lengths.capacity(), 0);
+        assert_eq!(reuse.string_bytes.capacity(), 0);
+        assert_eq!(reuse.data_arrays.capacity(), 0);
+        assert_eq!(reuse.data_chunk_lengths.capacity(), 0);
+        assert_eq!(reuse.data_bytes.capacity(), 0);
     }
 
     #[test]

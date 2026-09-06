@@ -8,6 +8,7 @@
 pub mod cluster_info;
 pub mod contact_info;
 pub mod gossip_service;
+pub mod net;
 pub mod ping_pong;
 
 pub use cluster_info::ClusterInfo;

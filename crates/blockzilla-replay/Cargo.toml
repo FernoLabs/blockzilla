@@ -42,7 +42,7 @@ solana-sbpf = "=0.21.0"
 target-lexicon = "=0.13.5"
 tar = "0.4.43"
 thiserror = "2.0.18"
-wincode = { version = "=0.5.5", features = ["derive", "smallvec"] }
+wincode = { version = "=0.6.1", features = ["derive", "smallvec"] }
 
 [target.'cfg(target_arch = "aarch64")'.dependencies]
 cranelift-codegen = "=0.134.2"

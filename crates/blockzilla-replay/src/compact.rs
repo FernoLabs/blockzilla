@@ -171,6 +171,7 @@ pub struct CompactSlotProbe {
 pub enum CompactMessageVersion {
     Legacy,
     V0,
+    V1,
 }
 
 const COMPACT_INLINE_ACCOUNT_KEYS: usize = 8;
@@ -705,7 +706,7 @@ impl OpenCompactGeneration {
                 path: registry_path.clone(),
                 message: error.to_string(),
             })?;
-        let keys = KeyStore::load_file(registry_file, &registry_path).map_err(|error| {
+        let keys = KeyStore::load_file(registry_file).map_err(|error| {
             CompactProbeError::Sidecar {
                 path: registry_path,
                 message: error.to_string(),
@@ -1087,6 +1088,13 @@ fn own_transaction(
             keys,
             blockhashes,
         ),
+        // V1 adds a transaction config this projector does not model. Refuse it
+        // rather than replay a message whose semantics are only partly read.
+        ArchiveV2HotMessagePayload::V1(_) => Err(tx_error(
+            slot,
+            row.tx_index,
+            "V1 message config is not modelled by the replay projector".to_string(),
+        )),
     }
 }
 

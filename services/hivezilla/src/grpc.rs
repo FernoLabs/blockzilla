@@ -2606,7 +2606,7 @@ fn compact_no_registry_logs(
                 decoded.len()
             );
             let lines: Vec<String> =
-                wincode::config::deserialize(&decoded, wincode_leb128_config())
+                blockzilla_wincode::config::deserialize(&decoded, wincode_leb128_config())
                     .context("decode live log string vector")?;
             report.zstd_log_streams_compacted += 1;
             report.log_lines_compacted = report
@@ -3057,7 +3057,7 @@ fn read_no_registry_block_frame<R: Read>(
         return Err(err).context("read no-registry block frame");
     }
     *remaining_bytes -= len as u64;
-    let block = wincode::config::deserialize(scratch, wincode_leb128_config())
+    let block = blockzilla_wincode::config::deserialize(scratch, wincode_leb128_config())
         .context("decode no-registry block frame")?;
     Ok(Some((u64::from(len_bytes) + len as u64, block)))
 }
@@ -3557,6 +3557,11 @@ pub(crate) fn visit_pubkeys_from_block(
         if let WincodeArchiveV2Payload::Decoded { value, .. } = &tx.tx {
             match &value.message {
                 WincodeArchiveV2NoRegistryMessage::Legacy(message) => {
+                    for pubkey in &message.account_keys {
+                        visit(*pubkey)?;
+                    }
+                }
+                WincodeArchiveV2NoRegistryMessage::V1(message) => {
                     for pubkey in &message.account_keys {
                         visit(*pubkey)?;
                     }

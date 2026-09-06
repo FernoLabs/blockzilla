@@ -366,5 +366,6 @@ fn static_key_count(tx: &VersionedTransaction<'_>) -> usize {
     match &tx.message {
         VersionedMessage::Legacy(message) => message.account_keys.len(),
         VersionedMessage::V0(message) => message.account_keys.len(),
+        VersionedMessage::V1(message) => message.account_keys.len(),
     }
 }

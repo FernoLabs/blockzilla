@@ -1,13 +1,11 @@
 //! Stream-decode one epoch's Archive V2 Compact generation and build its
 //! wallet -> program-id reverse index.
 //!
-//! V2 maps every required transaction signer (fee payer and co-signers) to
-//! every direct or recorded inner/CPI program reached by that transaction.
-//! Each wallet/program relation keeps direct and inner invocation counts,
-//! distinct successful-transaction count, first/last slot, and the range of
-//! available block times. Only successful transactions are included; votes
-//! are included. The relation does not depend on whether a signer is repeated
-//! in an individual instruction's account list.
+//! V1 maps every required transaction signer (fee payer and co-signers) to
+//! every distinct direct or recorded inner/CPI program reached by that
+//! transaction. Only successful transactions are included; votes are included.
+//! The relation does not depend on whether a signer is repeated in an
+//! individual instruction's account list.
 //!
 //! Only the message header/instructions and the metadata inner-instruction
 //! list are decoded; logs, token balances, rewards, and return data are
@@ -18,7 +16,6 @@
 //! pass to bind the index manifest to its real SHA-256.
 
 use std::{
-    ffi::OsString,
     fs::{self, File},
     io::{BufReader, Read, Seek, SeekFrom},
     num::NonZeroUsize,
@@ -37,23 +34,20 @@ use blockzilla_format::{
     ARCHIVE_V2_TX_FLAG_TX_RAW_FALLBACK, ArchiveV2HotTxRow, CompactPubkey, FileBackedKeyIndex,
 };
 use blockzilla_read_sdk::{
-    ArchiveReader, ArchiveV2MessageProjector, ArchiveV2MetadataProfileAdmission,
-    ArchiveV2MetadataProjectionLimits, ArchiveV2MetadataWireProfile, ArchiveV2WireProfile,
-    HashVerification, MAX_MESSAGE_ACCOUNTS, OpenOptions, PinnedLocalRangeSource,
-    manifest::TrustedGenerationIdentity, project_archive_v2_metadata_error,
-    project_archive_v2_metadata_prefix,
+    ArchiveReader, HashVerification, OpenOptions, PinnedLocalRangeSource,
+    manifest::TrustedGenerationIdentity,
 };
 use rustix::fs::{CWD, RenameFlags, renameat_with};
 use sha2::{Digest, Sha256};
 use smallvec::SmallVec;
 
 use crate::{
+    decode,
     dense_accumulator::DenseAccumulator,
     format::{
         FORMAT_VERSION, GenerationBindingKind, IndexBuilder, IndexFileBinding, IndexManifest,
-        IndexSemantics, MANIFEST_SCHEMA_VERSION, OmissionCounts, ProgramTracker, ProgramUsage,
-        RecordOutcome, RegistryFileIdentity, ShardBinding, ShardWriter, bind_shard, open_file,
-        write_program_map,
+        IndexSemantics, MANIFEST_SCHEMA_VERSION, OmissionCounts, ProgramTracker, RecordOutcome,
+        RegistryFileIdentity, ShardBinding, ShardWriter, bind_shard, open_file, write_program_map,
     },
     signer_rank::{SignerRank, SignerSetBinding, SignerSetBuilder},
 };
@@ -62,7 +56,7 @@ use crate::{
 /// single build's peak memory regardless of the epoch's registry size — see
 /// `format.rs`'s module docs for the chunking/sharding scheme this drives.
 /// Chosen to keep one chunk's fixed empty-array cost comfortably bounded on
-/// modest hardware (~24 bytes/slot empty, so 8M accounts is ~192MB before
+/// modest hardware (~48 bytes/slot empty, so 8M accounts is ~384MB before
 /// any real instruction data accumulates on top).
 pub const DEFAULT_MAX_ACCOUNTS_PER_CHUNK: u32 = 8_000_000;
 pub const MAX_SCAN_THREADS: usize = 256;
@@ -71,7 +65,6 @@ pub const DEFAULT_QUEUED_RELATION_BATCHES: usize = 32;
 pub const MAX_RELATION_BATCH_PAIRS: usize = 1_048_576;
 pub const MAX_QUEUED_RELATION_BATCHES: usize = 4_096;
 pub const MAX_RELATION_PIPELINE_BUFFER_BYTES: usize = 256 * 1024 * 1024;
-const FIREWATCH_ATTEMPT_ID_ENV: &str = "BLOCKZILLA_FIREWATCH_ATTEMPT_ID";
 
 /// Identity to assert when opening a generation with no published
 /// `archive-v2-generation.json` (see `blockzilla-read-sdk`'s `open_trusted`).
@@ -80,7 +73,6 @@ pub struct TrustLocal {
     pub cluster_id: String,
     pub generation_id: String,
     pub slots_per_epoch: u64,
-    pub wire_profile: ArchiveV2WireProfile,
 }
 
 fn archive_hash_verification(trusted_local: bool) -> HashVerification {
@@ -112,15 +104,8 @@ pub fn open_archive(
             epoch,
             generation_id: trust_local.generation_id,
             slots_per_epoch: trust_local.slots_per_epoch,
-            wire_profile: trust_local.wire_profile,
         };
-        ArchiveReader::open_trusted_with_metadata_profile(
-            source,
-            identity,
-            ArchiveV2MetadataWireProfile::UnmarkedHistoricalCompatibility,
-            options,
-        )
-        .with_context(|| {
+        ArchiveReader::open_trusted(source, identity, options).with_context(|| {
             format!(
                 "open Archive V2 generation at {} (trusted local, no manifest)",
                 archive_root.display()
@@ -135,12 +120,8 @@ pub fn open_archive(
             hash_verification: archive_hash_verification(false),
             ..OpenOptions::default()
         };
-        ArchiveReader::open_with_options_and_metadata_admission(
-            source,
-            options,
-            ArchiveV2MetadataProfileAdmission::AllowUnmarkedHistorical,
-        )
-        .with_context(|| format!("open Archive V2 generation at {}", archive_root.display()))?
+        ArchiveReader::open_with_options(source, options)
+            .with_context(|| format!("open Archive V2 generation at {}", archive_root.display()))?
     };
 
     let manifest_epoch = archive.manifest().epoch;
@@ -172,7 +153,6 @@ fn scan_range_into_builder(
     builder: &mut IndexBuilder,
     log_progress: bool,
 ) -> Result<ScanStats> {
-    let message_projector = archive.message_projector();
     let mut stats = ScanStats::default();
     let total_blocks = range.len();
     let mut blocks = archive
@@ -204,11 +184,9 @@ fn scan_range_into_builder(
                 builder,
                 archive.registry_entries(),
                 slot,
-                block.header().block_time,
                 &row,
                 block.message_bytes(),
                 block.metadata_bytes(),
-                message_projector,
             )?;
         }
     }
@@ -219,15 +197,10 @@ fn transaction_is_in_semantic_scope(row: &ArchiveV2HotTxRow) -> Result<bool> {
     if row.flags & ARCHIVE_V2_TX_FLAG_TX_RAW_FALLBACK != 0 {
         anyhow::bail!("raw transaction fallback")
     }
-    // Failed transactions are outside successful-only V2. Their metadata is
+    // Failed transactions are outside successful-only V1. Their metadata is
     // not required, so a raw failed metadata payload is not an omission.
     if row.flags & ARCHIVE_V2_TX_FLAG_HAS_ERROR != 0 {
         return Ok(false);
-    }
-    if row.flags & ARCHIVE_V2_TX_FLAG_HAS_METADATA == 0 || row.metadata_len == 0 {
-        anyhow::bail!(
-            "decoded transaction metadata is absent, so the successful-only outcome is unknown"
-        )
     }
     if row.flags & ARCHIVE_V2_TX_FLAG_METADATA_RAW_FALLBACK != 0 {
         anyhow::bail!("raw metadata fallback for successful transaction")
@@ -329,9 +302,7 @@ pub fn scan_into_builder_parallel(
     for result in per_thread_results {
         let (builder, thread_stats) = result?;
         match &mut merged_builder {
-            Some(accumulator) => accumulator
-                .merge(builder)
-                .context("merge parallel wallet/program usage")?,
+            Some(accumulator) => accumulator.merge(builder),
             None => merged_builder = Some(builder),
         }
         stats.blocks_scanned += thread_stats.blocks_scanned;
@@ -350,9 +321,8 @@ fn scan_range_relations(
     archive: &ArchiveReader<PinnedLocalRangeSource>,
     range: std::ops::Range<usize>,
     log_progress: bool,
-    mut on_relation: impl FnMut(u32, ProgramUsage) -> Result<()>,
+    mut on_relation: impl FnMut(u32, u32) -> Result<()>,
 ) -> Result<ScanStats> {
-    let message_projector = archive.message_projector();
     let mut stats = ScanStats::default();
     let total_blocks = range.len();
     let mut blocks = archive
@@ -382,11 +352,9 @@ fn scan_range_relations(
             visit_transaction_relations(
                 archive.registry_entries(),
                 slot,
-                block.header().block_time,
                 &row,
                 block.message_bytes(),
                 block.metadata_bytes(),
-                message_projector,
                 &mut on_relation,
             )?;
         }
@@ -396,7 +364,7 @@ fn scan_range_relations(
 
 struct RelationBatch {
     worker: usize,
-    pairs: Vec<(u32, ProgramUsage)>,
+    pairs: Vec<(u32, u32)>,
 }
 
 /// Run Stage 3 pass 2. Decoder workers own disjoint block ranges and send
@@ -456,7 +424,7 @@ pub fn scan_into_dense_accumulator(
     let thread_count = thread_count.min(total_rows.max(1));
     if thread_count == 1 || total_rows <= 1 {
         let mut last_signer_rank = None::<(u32, u32)>;
-        return scan_range_relations(archive, 0..total_rows, log_progress, |signer, usage| {
+        return scan_range_relations(archive, 0..total_rows, log_progress, |signer, program| {
             let dense_rank = match last_signer_rank {
                 Some((last_signer, rank)) if last_signer == signer => rank,
                 _ => {
@@ -467,7 +435,7 @@ pub fn scan_into_dense_accumulator(
                     rank
                 }
             };
-            accumulator.record(dense_rank, usage)?;
+            accumulator.record(dense_rank, program)?;
             Ok(())
         });
     }
@@ -487,7 +455,7 @@ pub fn scan_into_dense_accumulator(
     let mut recycle_senders = Vec::with_capacity(ranges.len());
     let mut recycle_receivers = Vec::with_capacity(ranges.len());
     for _ in 0..ranges.len() {
-        let (sender, receiver) = mpsc::channel::<Vec<(u32, ProgramUsage)>>();
+        let (sender, receiver) = mpsc::channel::<Vec<(u32, u32)>>();
         recycle_senders.push(sender);
         recycle_receivers.push(Some(receiver));
     }
@@ -506,7 +474,7 @@ pub fn scan_into_dense_accumulator(
                     archive,
                     range,
                     log_progress && worker == 0,
-                    |signer, usage| {
+                    |signer, program| {
                         let dense_rank = match last_signer_rank {
                             Some((last_signer, rank)) if last_signer == signer => rank,
                             _ => {
@@ -519,7 +487,7 @@ pub fn scan_into_dense_accumulator(
                                 rank
                             }
                         };
-                        batch.push((dense_rank, usage));
+                        batch.push((dense_rank, program));
                         if batch.len() == batch_pairs {
                             sender
                                 .send(RelationBatch {
@@ -637,7 +605,7 @@ pub fn build_index(
     result
 }
 
-/// Build the same version-4 index with the Stage 3 two-pass algorithm:
+/// Build the same version-3 index with the Stage 3 two-pass algorithm:
 /// discover/rank only real signers, then decode the archive once into one
 /// compact dense accumulator. `signer_set` may reuse a pass-1 artifact for a
 /// published generation; when omitted, both passes run against the same set
@@ -728,7 +696,7 @@ fn validate_relation_pipeline_buffer(
         .context("relation pipeline buffer-count overflow")?;
     let bytes = retained_batches
         .checked_mul(batch_pairs)
-        .and_then(|pairs| pairs.checked_mul(std::mem::size_of::<(u32, ProgramUsage)>()))
+        .and_then(|pairs| pairs.checked_mul(std::mem::size_of::<(u32, u32)>()))
         .context("relation pipeline byte-size overflow")?;
     anyhow::ensure!(
         bytes <= MAX_RELATION_PIPELINE_BUFFER_BYTES,
@@ -839,7 +807,7 @@ fn build_dense_index_to_staging(
     let mut shard_bindings = Vec::with_capacity(shard_count as usize);
     let mut program_tracker = ProgramTracker::new(registry_entries);
     let mut wallets = accumulator.wallets(signer_rank.iter_ids()).peekable();
-    let mut program_scratch = Vec::<ProgramUsage>::new();
+    let mut program_scratch = Vec::<u32>::new();
     let mut wallet_count = 0u64;
     let mut relation_count = 0usize;
 
@@ -876,8 +844,8 @@ fn build_dense_index_to_staging(
             relation_count = relation_count
                 .checked_add(program_scratch.len())
                 .context("dense relation output count overflow")?;
-            for usage in &program_scratch {
-                program_tracker.observe_id(usage.program_id);
+            for &program_id in &program_scratch {
+                program_tracker.observe_id(program_id);
             }
             writer
                 .push_sorted(wallet.wallet_id(), &program_scratch)
@@ -1248,7 +1216,6 @@ fn finalize_index(
         archive_root: canonical_archive_root.display().to_string(),
         generation_id: archive.manifest().generation_id.clone(),
         generation_digest: archive.manifest().generation_digest.clone(),
-        archive_wire_profile: archive.wire_profile(),
         registry: registry.registry_binding.clone(),
         registry_file_identity: registry.registry_identity.clone(),
         registry_index: registry.registry_index_binding.clone(),
@@ -1288,7 +1255,6 @@ fn finalize_index(
 }
 
 fn create_staging_dir(final_path: &Path) -> Result<PathBuf> {
-    let firewatch_attempt_id = firewatch_attempt_id()?;
     let parent = output_parent(final_path);
     fs::create_dir_all(parent)
         .with_context(|| format!("create index output parent {}", parent.display()))?;
@@ -1301,14 +1267,10 @@ fn create_staging_dir(final_path: &Path) -> Result<PathBuf> {
         .unwrap_or_default()
         .as_nanos();
     for attempt in 0..100u32 {
-        let staging_name = staging_dir_name(
-            name,
-            std::process::id(),
-            now,
-            attempt,
-            firewatch_attempt_id.as_deref(),
-        );
-        let candidate = parent.join(staging_name);
+        let candidate = parent.join(format!(
+            ".{name}.staging-{}-{now}-{attempt}",
+            std::process::id()
+        ));
         match fs::create_dir(&candidate) {
             Ok(()) => return Ok(candidate),
             Err(error) if error.kind() == std::io::ErrorKind::AlreadyExists => continue,
@@ -1319,42 +1281,6 @@ fn create_staging_dir(final_path: &Path) -> Result<PathBuf> {
         }
     }
     anyhow::bail!("could not allocate a unique index staging directory")
-}
-
-fn staging_dir_name(
-    final_name: &str,
-    pid: u32,
-    timestamp: u128,
-    sequence: u32,
-    firewatch_attempt_id: Option<&str>,
-) -> String {
-    let mut name = format!(".{final_name}.staging-{pid}-{timestamp}-{sequence}");
-    if let Some(firewatch_attempt_id) = firewatch_attempt_id {
-        name.push('-');
-        name.push_str(firewatch_attempt_id);
-    }
-    name
-}
-
-fn firewatch_attempt_id() -> Result<Option<String>> {
-    validate_firewatch_attempt_id(std::env::var_os(FIREWATCH_ATTEMPT_ID_ENV))
-}
-
-fn validate_firewatch_attempt_id(value: Option<OsString>) -> Result<Option<String>> {
-    let Some(value) = value else {
-        return Ok(None);
-    };
-    let value = value
-        .into_string()
-        .map_err(|_| anyhow::anyhow!("{FIREWATCH_ATTEMPT_ID_ENV} must be valid UTF-8"))?;
-    anyhow::ensure!(
-        value.len() == 32
-            && value
-                .bytes()
-                .all(|byte| byte.is_ascii_digit() || (b'a'..=b'f').contains(&byte)),
-        "{FIREWATCH_ATTEMPT_ID_ENV} must be exactly 32 lowercase hexadecimal characters"
-    );
-    Ok(Some(value))
 }
 
 fn output_parent(path: &Path) -> &Path {
@@ -1518,9 +1444,12 @@ fn validate_registry_index_mapping(
     Ok(())
 }
 
-/// Fixed cost of one empty `IndexBuilder` slot. Real chunks cost more after
-/// relations allocate their usage buffers, so this is only a floor.
-pub const APPROX_BYTES_PER_EMPTY_SLOT: u64 = std::mem::size_of::<Vec<ProgramUsage>>() as u64;
+/// Rough empirical cost of one *empty* `IndexBuilder` slot (an inline-
+/// capacity `SmallVec<[u32; 8]>`, no heap spill yet), measured by
+/// `index-bench`'s allocator counters: a 60,000,000-slot builder allocated
+/// 2,898,315,052 bytes, ≈48.3 bytes/slot. Real chunks cost more once actual
+/// relations accumulate; this is a floor, not an estimate of total memory.
+pub const APPROX_BYTES_PER_EMPTY_SLOT: u64 = 48;
 
 #[derive(Debug, Clone, Copy)]
 pub struct DiscoverSignersStats {
@@ -1532,7 +1461,7 @@ pub struct DiscoverSignersStats {
 }
 
 /// Scans one contiguous block-row range, decoding *only* enough of each
-/// transaction to learn its signers (see the SDK message projector — no
+/// transaction to learn its signers (see `decode::decode_signers` — no
 /// instructions, no metadata, not even the rest of `account_keys`), and
 /// marks each distinct signer registry id seen in `seen`. Shared by the
 /// sequential (`discover_signers`, one range = the whole archive) and
@@ -1546,7 +1475,6 @@ fn scan_signers_range(
     range: std::ops::Range<usize>,
     seen: &mut SignerSetBuilder,
 ) -> Result<ScanStats> {
-    let message_projector = archive.message_projector();
     let mut stats = ScanStats::default();
 
     let mut blocks = archive
@@ -1565,7 +1493,7 @@ fn scan_signers_range(
                 stats.failed_transactions_excluded += 1;
                 continue;
             }
-            let message = slice_range(
+            let mut cursor = slice_range(
                 block.message_bytes(),
                 row.message_offset,
                 row.message_len,
@@ -1573,8 +1501,7 @@ fn scan_signers_range(
                 slot,
                 row.tx_index,
             )?;
-            let signers = message_projector
-                .project_signers(message)
+            let signers = decode::decode_signers(&mut cursor)
                 .with_context(|| format!("decode signers (slot {slot} tx {})", row.tx_index))?;
             anyhow::ensure!(
                 signers.len() == usize::from(row.signature_count),
@@ -1606,7 +1533,7 @@ fn scan_signers_range(
 }
 
 /// Scans the whole archive once, single-threaded, and returns the count of
-/// **distinct** signer registry ids from V2-successful transactions. A cheap
+/// **distinct** signer registry ids from V1-successful transactions. A cheap
 /// way to learn the index's wallet population — typically far smaller than
 /// its full registry, since most registered ids are token accounts, PDAs, and
 /// programs that never sign — before committing to a build chunk width.
@@ -1635,7 +1562,7 @@ pub fn discover_signers_parallel(
     Ok(discover_stats(&seen, stats))
 }
 
-/// Discover and rank the exact signer population used by the V2 relation.
+/// Discover and rank the exact signer population used by the V1 relation.
 /// The caller supplies the already-verified archive/registry provenance that
 /// will be embedded in a reusable pass-1 artifact.
 pub fn discover_signer_rank(
@@ -1762,63 +1689,38 @@ fn stats_add(total: &mut ScanStats, part: ScanStats) {
     total.failed_transactions_excluded += part.failed_transactions_excluded;
 }
 
-/// V2's transaction-local program invocation counts. A program account index
-/// appears in `values` once, while direct and inner instruction occurrences
-/// remain separate. Failed transactions are excluded before this is used.
+/// V1's exact semantic relation: for a successful transaction, associate every
+/// required signer with every distinct program actually reached by its
+/// top-level or recorded inner/CPI instructions. Failed transactions are
+/// excluded before this function is called. Votes are included because the
+/// compact vote-instruction flag is not an exact whole-transaction classifier.
 struct ProgramIndexSet {
-    direct_counts: [u32; MAX_MESSAGE_ACCOUNTS],
-    inner_counts: [u32; MAX_MESSAGE_ACCOUNTS],
-    values: [u8; MAX_MESSAGE_ACCOUNTS],
+    seen: [bool; decode::MAX_MESSAGE_ACCOUNTS],
+    values: [u8; decode::MAX_MESSAGE_ACCOUNTS],
     len: usize,
-    overflowed: bool,
 }
 
 impl ProgramIndexSet {
     fn new() -> Self {
         Self {
-            direct_counts: [0; MAX_MESSAGE_ACCOUNTS],
-            inner_counts: [0; MAX_MESSAGE_ACCOUNTS],
-            values: [0; MAX_MESSAGE_ACCOUNTS],
+            seen: [false; decode::MAX_MESSAGE_ACCOUNTS],
+            values: [0; decode::MAX_MESSAGE_ACCOUNTS],
             len: 0,
-            overflowed: false,
         }
     }
 
     #[inline]
-    fn record_direct(&mut self, index: u8) {
-        self.record(index, true);
-    }
-
-    #[inline]
-    fn record_inner(&mut self, index: u8) {
-        self.record(index, false);
-    }
-
-    #[inline]
-    fn record(&mut self, index: u8, direct: bool) {
+    fn insert(&mut self, index: u8) {
         let index_usize = usize::from(index);
-        if self.direct_counts[index_usize] == 0 && self.inner_counts[index_usize] == 0 {
+        if !self.seen[index_usize] {
+            self.seen[index_usize] = true;
             self.values[self.len] = index;
             self.len += 1;
-        }
-        let count = if direct {
-            &mut self.direct_counts[index_usize]
-        } else {
-            &mut self.inner_counts[index_usize]
-        };
-        match count.checked_add(1) {
-            Some(next) => *count = next,
-            None => self.overflowed = true,
         }
     }
 
     fn as_slice(&self) -> &[u8] {
         &self.values[..self.len]
-    }
-
-    fn counts(&self, index: u8) -> (u32, u32) {
-        let index = usize::from(index);
-        (self.direct_counts[index], self.inner_counts[index])
     }
 }
 
@@ -1826,51 +1728,39 @@ fn index_transaction(
     builder: &mut IndexBuilder,
     registry_entries: u32,
     slot: u64,
-    block_time: Option<i64>,
     row: &ArchiveV2HotTxRow,
     message_bytes: &[u8],
     metadata_bytes: &[u8],
-    message_projector: ArchiveV2MessageProjector,
 ) -> Result<()> {
     visit_transaction_relations(
         registry_entries,
         slot,
-        block_time,
         row,
         message_bytes,
         metadata_bytes,
-        message_projector,
-        |signer, usage| match builder.record(signer, usage) {
+        |signer, program| match builder.record(signer, program) {
             RecordOutcome::Recorded | RecordOutcome::OutOfChunk => Ok(()),
             RecordOutcome::InvalidProgram => anyhow::bail!(
-                "program registry id {} is invalid (slot {slot} tx {})",
-                usage.program_id,
+                "program registry id {program} is invalid (slot {slot} tx {})",
                 row.tx_index
             ),
-            RecordOutcome::InvalidUsage(error) => Err(error).with_context(|| {
-                format!(
-                    "record program usage {} (slot {slot} tx {})",
-                    usage.program_id, row.tx_index
-                )
-            }),
         },
     )
 }
 
-/// Decode one successful transaction into its exact V2 signer/program usage
-/// cross-product. The transaction count is one for each distinct program,
-/// while instruction counts retain every direct and inner invocation.
+/// Decode one successful transaction into its exact V1 signer/program
+/// cross-product. Keeping the semantic decoder independent of its sink lets
+/// the legacy chunked builder record directly while Stage 3 workers stream
+/// bounded relation batches to one dense accumulator.
 fn visit_transaction_relations(
     registry_entries: u32,
     slot: u64,
-    block_time: Option<i64>,
     row: &ArchiveV2HotTxRow,
     message_bytes: &[u8],
     metadata_bytes: &[u8],
-    message_projector: ArchiveV2MessageProjector,
-    mut on_relation: impl FnMut(u32, ProgramUsage) -> Result<()>,
+    mut on_relation: impl FnMut(u32, u32) -> Result<()>,
 ) -> Result<()> {
-    let message = slice_range(
+    let mut message_cursor = slice_range(
         message_bytes,
         row.message_offset,
         row.message_len,
@@ -1880,12 +1770,17 @@ fn visit_transaction_relations(
     )?;
 
     let mut program_indexes = ProgramIndexSet::new();
-    let decoded_message = message_projector
-        .project(message, |instruction| {
-            program_indexes.record_direct(instruction.program_id_index);
-        })
-        .with_context(|| format!("decode message (slot {slot} tx {})", row.tx_index))?;
+    let decoded_message = decode::decode_message(&mut message_cursor, |instruction| {
+        program_indexes.insert(instruction.program_id_index);
+    })
+    .with_context(|| format!("decode message (slot {slot} tx {})", row.tx_index))?;
     let signer_count = usize::from(decoded_message.num_required_signatures);
+    anyhow::ensure!(
+        message_cursor.is_empty(),
+        "message decode left {} trailing bytes (slot {slot} tx {})",
+        message_cursor.len(),
+        row.tx_index,
+    );
     anyhow::ensure!(
         decoded_message.is_v0 == (row.flags & ARCHIVE_V2_TX_FLAG_MESSAGE_V0 != 0),
         "message version disagrees with row flags (slot {slot} tx {})",
@@ -1906,7 +1801,7 @@ fn visit_transaction_relations(
     let has_metadata = row.flags & ARCHIVE_V2_TX_FLAG_HAS_METADATA != 0 && row.metadata_len != 0;
     anyhow::ensure!(
         has_metadata,
-        "decoded transaction metadata is absent, so the successful-only outcome is unknown (slot {slot} tx {})",
+        "successful transaction has no decoded metadata (slot {slot} tx {})",
         row.tx_index
     );
     let need_inner = row.flags & ARCHIVE_V2_TX_FLAG_HAS_INNER_IX != 0;
@@ -1952,17 +1847,17 @@ fn visit_transaction_relations(
     // fast path. V0 must always reach the loaded vectors—even when empty—so
     // their writable/readonly lengths can be matched exactly to the message.
     let metadata_error = if decoded_message.is_v0 || need_inner {
-        let decoded_metadata = project_archive_v2_metadata_prefix(
+        let decoded_metadata = decode::decode_metadata_prefix(
             &mut metadata_cursor,
             decoded_message.is_v0,
-            ArchiveV2MetadataProjectionLimits {
+            decode::MetadataDecodeLimits {
                 total_message_accounts,
                 top_level_instruction_count: decoded_message.instruction_count,
             },
             |instruction| {
                 // `decode_metadata_prefix` validates this against the exact
                 // message-account count before invoking the callback.
-                program_indexes.record_inner(instruction.program_id_index as u8);
+                program_indexes.insert(instruction.program_id_index as u8);
             },
         )
         .with_context(|| format!("decode metadata (slot {slot} tx {})", row.tx_index))?;
@@ -1998,17 +1893,12 @@ fn visit_transaction_relations(
         }
         decoded_metadata.has_error
     } else {
-        project_archive_v2_metadata_error(&mut metadata_cursor)
+        decode::decode_metadata_error(&mut metadata_cursor)
             .with_context(|| format!("decode metadata outcome (slot {slot} tx {})", row.tx_index))?
     };
     anyhow::ensure!(
         !metadata_error,
         "metadata outcome disagrees with successful row flags (slot {slot} tx {})",
-        row.tx_index
-    );
-    anyhow::ensure!(
-        !program_indexes.overflowed,
-        "program instruction count exceeds u32 (slot {slot} tx {})",
         row.tx_index
     );
 
@@ -2025,58 +1915,29 @@ fn visit_transaction_relations(
     signers.sort_unstable();
     signers.dedup();
 
-    let mut programs: SmallVec<[(u32, u32, u32); 8]> = SmallVec::new();
+    let mut programs: SmallVec<[u32; 8]> = SmallVec::new();
     for &program_index in program_indexes.as_slice() {
-        let account_index = usize::from(program_index);
-        let key = accounts.get(account_index).with_context(|| {
+        let program_index = usize::from(program_index);
+        let key = accounts.get(program_index).with_context(|| {
             format!(
-                "program account index {account_index} is out of range (slot {slot} tx {})",
+                "program account index {program_index} is out of range (slot {slot} tx {})",
                 row.tx_index
             )
         })?;
-        let program_id =
-            required_registry_id(key, registry_entries, "program", slot, row.tx_index)?;
-        let (direct_count, inner_count) = program_indexes.counts(program_index);
-        programs.push((program_id, direct_count, inner_count));
+        programs.push(required_registry_id(
+            key,
+            registry_entries,
+            "program",
+            slot,
+            row.tx_index,
+        )?);
     }
-    programs.sort_unstable_by_key(|entry| entry.0);
-
-    let mut usages: SmallVec<[ProgramUsage; 8]> = SmallVec::new();
-    for (program_id, direct_count, inner_count) in programs {
-        if let Some(previous) = usages
-            .last_mut()
-            .filter(|usage| usage.program_id == program_id)
-        {
-            previous.direct_instruction_count = previous
-                .direct_instruction_count
-                .checked_add(direct_count)
-                .context("direct instruction count overflow while resolving program aliases")?;
-            previous.inner_instruction_count = previous
-                .inner_instruction_count
-                .checked_add(inner_count)
-                .context("inner instruction count overflow while resolving program aliases")?;
-        } else {
-            usages.push(
-                ProgramUsage::new_transaction(
-                    program_id,
-                    direct_count,
-                    inner_count,
-                    slot,
-                    block_time,
-                )
-                .with_context(|| {
-                    format!(
-                        "create program usage {program_id} (slot {slot} tx {})",
-                        row.tx_index
-                    )
-                })?,
-            );
-        }
-    }
+    programs.sort_unstable();
+    programs.dedup();
 
     for signer in signers {
-        for &usage in &usages {
-            on_relation(signer, usage)?;
+        for &program in &programs {
+            on_relation(signer, program)?;
         }
     }
     Ok(())
@@ -2125,8 +1986,7 @@ mod tests {
         ArchiveV2HotInstruction, ArchiveV2HotInstructionData, ArchiveV2HotLegacyMessage,
         ArchiveV2HotMessagePayload, ArchiveV2HotV0Message, CompactInnerInstruction,
         CompactInnerInstructions, CompactMessageHeader, CompactMetaV1,
-        OwnedCompactAddressTableLookup, OwnedCompactRecentBlockhash, WincodeLeb128Config,
-        wincode_leb128_config,
+        OwnedCompactAddressTableLookup, OwnedCompactRecentBlockhash, wincode_leb128_config,
     };
 
     #[test]
@@ -2195,12 +2055,8 @@ mod tests {
         );
     }
 
-    fn serialize<T: wincode::SchemaWrite<WincodeLeb128Config, Src = T>>(value: &T) -> Vec<u8> {
+    fn serialize<T: wincode::SchemaWrite<decode::Cfg, Src = T>>(value: &T) -> Vec<u8> {
         wincode::config::serialize(value, wincode_leb128_config()).unwrap()
-    }
-
-    fn test_message_projector() -> ArchiveV2MessageProjector {
-        ArchiveV2MessageProjector::new(ArchiveV2WireProfile::PostUnknownInstructionFallbacksV1)
     }
 
     fn success_metadata(
@@ -2239,18 +2095,11 @@ mod tests {
         }
     }
 
-    fn written_usages(builder: &mut IndexBuilder, wallet: u32) -> Vec<ProgramUsage> {
+    fn written_programs(builder: &mut IndexBuilder, wallet: u32) -> Vec<u32> {
         let directory = tempfile::tempdir().unwrap();
         let shard = directory.path().join("shard-0");
         builder.write(&shard).unwrap();
         IndexReader::open(&shard).unwrap().query(wallet).unwrap()
-    }
-
-    fn written_programs(builder: &mut IndexBuilder, wallet: u32) -> Vec<u32> {
-        written_usages(builder, wallet)
-            .into_iter()
-            .map(|usage| usage.program_id)
-            .collect()
     }
 
     #[test]
@@ -2298,39 +2147,13 @@ mod tests {
         );
         row.signature_count = 2;
         let mut builder = IndexBuilder::new(1, 10, 10);
-        index_transaction(
-            &mut builder,
-            10,
-            100,
-            Some(1_700_000_000),
-            &row,
-            &message_bytes,
-            &metadata_bytes,
-            test_message_projector(),
-        )
-        .unwrap();
+        index_transaction(&mut builder, 10, 100, &row, &message_bytes, &metadata_bytes).unwrap();
 
-        assert_eq!(
-            written_usages(&mut builder, 1),
-            vec![
-                ProgramUsage::new_transaction(3, 1, 0, 100, Some(1_700_000_000)).unwrap(),
-                ProgramUsage::new_transaction(4, 0, 1, 100, Some(1_700_000_000)).unwrap(),
-            ]
-        );
+        assert_eq!(written_programs(&mut builder, 1), vec![3, 4]);
         // Rebuild because write borrows the first builder's output directory
         // only for the duration of written_programs and wallet 2 is in it too.
         let mut builder = IndexBuilder::new(1, 10, 10);
-        index_transaction(
-            &mut builder,
-            10,
-            100,
-            Some(1_700_000_000),
-            &row,
-            &message_bytes,
-            &metadata_bytes,
-            test_message_projector(),
-        )
-        .unwrap();
+        index_transaction(&mut builder, 10, 100, &row, &message_bytes, &metadata_bytes).unwrap();
         assert_eq!(written_programs(&mut builder, 2), vec![3, 4]);
     }
 
@@ -2338,11 +2161,10 @@ mod tests {
     fn repeated_top_level_program_indexes_stay_fixed_size_and_deduplicated() {
         let mut indexes = ProgramIndexSet::new();
         for _ in 0..1_000_000 {
-            indexes.record_direct(1);
+            indexes.insert(1);
         }
         assert_eq!(indexes.as_slice(), &[1]);
-        assert_eq!(indexes.counts(1), (1_000_000, 0));
-        assert!(std::mem::size_of::<ProgramIndexSet>() <= 3072);
+        assert!(std::mem::size_of::<ProgramIndexSet>() <= 1024);
 
         let message = ArchiveV2HotMessagePayload::Legacy(ArchiveV2HotLegacyMessage {
             header: CompactMessageHeader {
@@ -2369,21 +2191,8 @@ mod tests {
             ARCHIVE_V2_TX_FLAG_HAS_METADATA,
         );
         let mut builder = IndexBuilder::new(1, 2, 2);
-        index_transaction(
-            &mut builder,
-            2,
-            100,
-            Some(1_700_000_000),
-            &row,
-            &message_bytes,
-            &metadata_bytes,
-            test_message_projector(),
-        )
-        .unwrap();
-        assert_eq!(
-            written_usages(&mut builder, 1),
-            vec![ProgramUsage::new_transaction(2, 50_000, 0, 100, Some(1_700_000_000)).unwrap()]
-        );
+        index_transaction(&mut builder, 2, 100, &row, &message_bytes, &metadata_bytes).unwrap();
+        assert_eq!(written_programs(&mut builder, 1), vec![2]);
     }
 
     #[test]
@@ -2426,91 +2235,8 @@ mod tests {
             ARCHIVE_V2_TX_FLAG_HAS_METADATA | ARCHIVE_V2_TX_FLAG_HAS_INNER_IX,
         );
         let mut builder = IndexBuilder::new(1, 2, 2);
-        index_transaction(
-            &mut builder,
-            2,
-            100,
-            Some(1_700_000_000),
-            &row,
-            &message_bytes,
-            &metadata_bytes,
-            test_message_projector(),
-        )
-        .unwrap();
-        assert_eq!(
-            written_usages(&mut builder, 1),
-            vec![ProgramUsage::new_transaction(2, 1, 50_000, 100, Some(1_700_000_000)).unwrap()]
-        );
-    }
-
-    #[test]
-    fn wallet_program_usage_counts_instructions_once_per_row_for_transaction_activity() {
-        let message = ArchiveV2HotMessagePayload::Legacy(ArchiveV2HotLegacyMessage {
-            header: CompactMessageHeader {
-                num_required_signatures: 1,
-                num_readonly_signed_accounts: 0,
-                num_readonly_unsigned_accounts: 1,
-            },
-            account_keys: vec![CompactPubkey::Id(1), CompactPubkey::Id(2)],
-            recent_blockhash: OwnedCompactRecentBlockhash::Id(0),
-            instructions: (0..2)
-                .map(|_| ArchiveV2HotInstruction {
-                    program_id_index: 1,
-                    accounts: vec![],
-                    data: ArchiveV2HotInstructionData::Raw(vec![]),
-                })
-                .collect(),
-        });
-        let metadata = success_metadata(
-            Some(vec![CompactInnerInstructions {
-                index: 0,
-                instructions: vec![
-                    CompactInnerInstruction {
-                        program_id_index: 1,
-                        accounts: vec![],
-                        data: vec![],
-                        stack_height: Some(2),
-                    };
-                    3
-                ],
-            }]),
-            vec![],
-            vec![],
-        );
-        let message_bytes = serialize(&message);
-        let metadata_bytes = serialize(&metadata);
-        let row = row(
-            &message_bytes,
-            &metadata_bytes,
-            ARCHIVE_V2_TX_FLAG_HAS_METADATA | ARCHIVE_V2_TX_FLAG_HAS_INNER_IX,
-        );
-        let mut builder = IndexBuilder::new(1, 2, 2);
-
-        for (slot, block_time) in [(100, Some(1_000)), (130, Some(1_012)), (140, None)] {
-            index_transaction(
-                &mut builder,
-                2,
-                slot,
-                block_time,
-                &row,
-                &message_bytes,
-                &metadata_bytes,
-                test_message_projector(),
-            )
-            .unwrap();
-        }
-
-        let usages = written_usages(&mut builder, 1);
-        assert_eq!(usages.len(), 1);
-        let usage = usages[0];
-        assert_eq!(usage.program_id, 2);
-        assert_eq!(usage.direct_instruction_count, 6);
-        assert_eq!(usage.inner_instruction_count, 9);
-        assert_eq!(usage.transaction_count, 3);
-        assert_eq!((usage.first_seen_slot, usage.last_seen_slot), (100, 140));
-        assert_eq!((usage.min_block_time, usage.max_block_time), (1_000, 1_012));
-        assert_eq!(usage.timed_transaction_count, 2);
-        assert_eq!(usage.average_timed_transaction_gap_seconds(), Some(12.0));
+        index_transaction(&mut builder, 2, 100, &row, &message_bytes, &metadata_bytes).unwrap();
+        assert_eq!(written_programs(&mut builder, 1), vec![2]);
     }
 
     #[test]
@@ -2558,24 +2284,8 @@ mod tests {
                 | ARCHIVE_V2_TX_FLAG_HAS_LOADED_ADDRESSES,
         );
         let mut builder = IndexBuilder::new(1, 10, 10);
-        index_transaction(
-            &mut builder,
-            10,
-            100,
-            Some(1_700_000_000),
-            &row,
-            &message_bytes,
-            &metadata_bytes,
-            test_message_projector(),
-        )
-        .unwrap();
-        assert_eq!(
-            written_usages(&mut builder, 1),
-            vec![
-                ProgramUsage::new_transaction(2, 1, 0, 100, Some(1_700_000_000)).unwrap(),
-                ProgramUsage::new_transaction(5, 0, 1, 100, Some(1_700_000_000)).unwrap(),
-            ]
-        );
+        index_transaction(&mut builder, 10, 100, &row, &message_bytes, &metadata_bytes).unwrap();
+        assert_eq!(written_programs(&mut builder, 1), vec![2, 5]);
     }
 
     #[test]
@@ -2609,17 +2319,8 @@ mod tests {
         );
         let mut builder = IndexBuilder::new(1, 10, 10);
 
-        let error = index_transaction(
-            &mut builder,
-            10,
-            100,
-            Some(1_700_000_000),
-            &row,
-            &message_bytes,
-            &metadata_bytes,
-            test_message_projector(),
-        )
-        .unwrap_err();
+        let error = index_transaction(&mut builder, 10, 100, &row, &message_bytes, &metadata_bytes)
+            .unwrap_err();
         assert!(error.to_string().contains("loaded writable addresses"));
     }
 
@@ -2657,17 +2358,8 @@ mod tests {
         let mut builder = IndexBuilder::new(1, 10, 10);
 
         assert!(
-            index_transaction(
-                &mut builder,
-                10,
-                100,
-                Some(1_700_000_000),
-                &row,
-                &message_bytes,
-                &metadata_bytes,
-                test_message_projector()
-            )
-            .is_err()
+            index_transaction(&mut builder, 10, 100, &row, &message_bytes, &metadata_bytes,)
+                .is_err()
         );
     }
 
@@ -2703,17 +2395,8 @@ mod tests {
         row.signature_count = 2;
         let mut builder = IndexBuilder::new(1, 10, 10);
 
-        let error = index_transaction(
-            &mut builder,
-            10,
-            100,
-            Some(1_700_000_000),
-            &row,
-            &message_bytes,
-            &metadata_bytes,
-            test_message_projector(),
-        )
-        .unwrap_err();
+        let error = index_transaction(&mut builder, 10, 100, &row, &message_bytes, &metadata_bytes)
+            .unwrap_err();
         assert!(error.to_string().contains("static account keys"));
     }
 
@@ -2736,23 +2419,6 @@ mod tests {
             ..row(&[0], &[0], 0)
         };
         assert!(transaction_is_in_semantic_scope(&raw_transaction).is_err());
-    }
-
-    #[test]
-    fn row_policy_rejects_unknown_outcome_when_metadata_is_absent() {
-        let absent_metadata = row(&[0], &[], 0);
-        let error = transaction_is_in_semantic_scope(&absent_metadata).unwrap_err();
-        assert!(
-            error
-                .to_string()
-                .contains("successful-only outcome is unknown")
-        );
-
-        let missing_metadata_flag = row(&[0], &[1], 0);
-        assert!(transaction_is_in_semantic_scope(&missing_metadata_flag).is_err());
-
-        let empty_metadata = row(&[0], &[], ARCHIVE_V2_TX_FLAG_HAS_METADATA);
-        assert!(transaction_is_in_semantic_scope(&empty_metadata).is_err());
     }
 
     #[test]
@@ -2781,17 +2447,8 @@ mod tests {
         );
         let mut builder = IndexBuilder::new(1, 10, 10);
         assert!(
-            index_transaction(
-                &mut builder,
-                10,
-                100,
-                Some(1_700_000_000),
-                &row,
-                &message_bytes,
-                &metadata_bytes,
-                test_message_projector()
-            )
-            .is_err()
+            index_transaction(&mut builder, 10, 100, &row, &message_bytes, &metadata_bytes,)
+                .is_err()
         );
     }
 
@@ -2804,41 +2461,6 @@ mod tests {
         assert_eq!(staging.parent().unwrap(), parent.path());
         assert!(!final_path.exists());
         fs::remove_dir(staging).unwrap();
-    }
-
-    #[test]
-    fn firewatch_attempt_id_validation_is_strict() {
-        assert_eq!(validate_firewatch_attempt_id(None).unwrap(), None);
-        assert_eq!(
-            validate_firewatch_attempt_id(Some(OsString::from("0123456789abcdef0123456789abcdef")))
-                .unwrap(),
-            Some("0123456789abcdef0123456789abcdef".to_string())
-        );
-
-        for invalid in [
-            "",
-            "0123456789abcdef0123456789abcde",
-            "0123456789abcdef0123456789abcdef0",
-            "0123456789ABCDEF0123456789ABCDEF",
-            "0123456789abcdef0123456789abcdeg",
-        ] {
-            assert!(
-                validate_firewatch_attempt_id(Some(OsString::from(invalid))).is_err(),
-                "accepted invalid attempt id {invalid:?}"
-            );
-        }
-    }
-
-    #[test]
-    fn staging_name_preserves_legacy_form_and_ends_with_attempt_id() {
-        assert_eq!(
-            staging_dir_name("index", 12, 34, 5, None),
-            ".index.staging-12-34-5"
-        );
-        assert_eq!(
-            staging_dir_name("index", 12, 34, 5, Some("0123456789abcdef0123456789abcdef")),
-            ".index.staging-12-34-5-0123456789abcdef0123456789abcdef"
-        );
     }
 
     #[test]

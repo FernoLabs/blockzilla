@@ -14,7 +14,7 @@ pre-1.0, so pin the Git revision used to produce an archive.
 | [`services/`](services/README.md) | Runtime daemons for live ingestion, archive delivery, and monitoring. |
 | [`workers/`](workers/README.md) | Cloudflare Workers/edge API consumers that are deployable outside the NAS host. |
 | [`crates/`](crates/) | Shared formats, parsers, protocol types, and Old Faithful interoperability readers. |
-| [`examples/token-api/`](examples/token-api/README.md) | Legacy example | Builds a small derived index and local API. It is not the read-SDK starter example. |
+| [`examples/token-api/`](examples/token-api/README.md) | Legacy example | Directly reads Compact V2 wire files; it is not the read-SDK starter. |
 | [`docs/`](docs/README.md) | Implemented formats, architecture, and research/benchmark notes. |
 | [`scripts/`](scripts/README.md) | Replay sync, marathon, benchmarks, and correctness scripts. |
 

@@ -632,6 +632,22 @@ for epoch in 0 1; do
   fi
 done
 
+readonly message_schema_marker='archive-v2-message-schema-may24-pre-unknown-fallbacks-v1.marker'
+
+# Mainnet epochs 0 and 1 were built before the current message grammar. State
+# that in the generation rather than inferring it from content hashes: readers
+# verify this 87-byte file directly. It is also listed in the manifest, so a
+# reader that still resolves the marker through the manifest honours it too.
+write_message_schema_marker() {
+  local directory="$1"
+  local source_marker="$repo_root/crates/blockzilla-replay/assets/$message_schema_marker"
+  verify_regular_nonempty_file "$source_marker"
+  if [[ ! -e "$directory/$message_schema_marker" ]]; then
+    cp -- "$source_marker" "$directory/$message_schema_marker"
+  fi
+  verify_regular_nonempty_file "$directory/$message_schema_marker"
+}
+
 generate_manifest() {
   local epoch="$1"
   local directory
@@ -643,6 +659,7 @@ generate_manifest() {
   manifest="$directory/$manifest_name"
   ! path_exists "$manifest" || die "refusing to overwrite existing manifest: $manifest"
 
+  write_message_schema_marker "$directory"
   printf 'validate and manifest epoch=%s directory=%s\n' "$epoch" "$directory"
   if [[ "$epoch" == 0 ]]; then
     (
@@ -654,8 +671,8 @@ generate_manifest() {
         --epoch 0 \
         --generation-id "$generation_id" \
         --slots-per-epoch "$slots_per_epoch" \
-        --wire-profile pre-unknown-instruction-fallbacks-v1 \
-        --file blockhash_registry.bin
+        --file blockhash_registry.bin \
+        --file "$message_schema_marker"
     )
   else
     (
@@ -667,9 +684,9 @@ generate_manifest() {
         --epoch 1 \
         --generation-id "$generation_id" \
         --slots-per-epoch "$slots_per_epoch" \
-        --wire-profile pre-unknown-instruction-fallbacks-v1 \
         --file blockhash_registry.bin \
-        --file prev_blockhash_tail.bin
+        --file prev_blockhash_tail.bin \
+        --file "$message_schema_marker"
     )
   fi
   verify_regular_nonempty_file "$manifest"

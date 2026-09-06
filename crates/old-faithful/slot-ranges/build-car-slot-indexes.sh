@@ -13,10 +13,20 @@ Environment:
                     Default: ./out
   BLOCKHASH_DIR     Root for epoch-N/blockhash_registry.bin.
                     Default: $SLOT_INDEX_DIR/blockhash-registry
+                    For START_EPOCH > 0, it must also contain epoch-(N-1).
   JOBS              Number of CAR epochs to scan concurrently. Default: 4
   PREFER_ZST=1      Prefer epoch-N.car.zst when both raw and zstd exist.
   OVERWRITE=1       Replace existing raw/registry/v2 files.
   SCAN_ONLY=1       Only build raw ranges + blockhash registries; skip v2 stitch.
+  SEED_PREVIOUS_BLOCKHASH
+                    Base58 seed for epoch 0. The wrapper uses the known
+                    mainnet genesis hash by default when START_EPOCH=0.
+  SYNC_R2_AFTER=1   Validate and upload v2 indexes after the build. Requires
+                    SLOT_INDEX_V2_REMOTE.
+  SLOT_INDEX_V2_REMOTE
+                    Explicit v2 upload target. Use
+                    r2:blockzilla/slot-index-v2-verified for the verified-only
+                    Old Faithful Worker.
 
 The CAR scan is parallel per epoch. It writes raw slot ranges plus
 blockhash_registry.bin. Unless SCAN_ONLY=1, a second fast pass stitches
@@ -35,6 +45,16 @@ CARS_DIR="${CARS_DIR:-epochs}"
 SLOT_INDEX_DIR="${SLOT_INDEX_DIR:-out}"
 BLOCKHASH_DIR="${BLOCKHASH_DIR:-$SLOT_INDEX_DIR/blockhash-registry}"
 JOBS="${JOBS:-4}"
+SEED_PREVIOUS_BLOCKHASH="${SEED_PREVIOUS_BLOCKHASH:-}"
+if [[ "$START_EPOCH" == "0" && -z "$SEED_PREVIOUS_BLOCKHASH" ]]; then
+  SEED_PREVIOUS_BLOCKHASH="5eykt4UsFv8P8NJdTREpY1vzqKqZKvdpKuc147dw2N9d"
+fi
+if [[ "${SYNC_R2_AFTER:-0}" == "1" \
+  && "${SCAN_ONLY:-0}" != "1" \
+  && -z "${SLOT_INDEX_V2_REMOTE:-}" ]]; then
+  echo "SYNC_R2_AFTER=1 requires SLOT_INDEX_V2_REMOTE" >&2
+  exit 2
+fi
 
 scan_args=(
   "--start-epoch" "$START_EPOCH"
@@ -66,5 +86,26 @@ if [[ "${SCAN_ONLY:-0}" != "1" ]]; then
     "--archive-v2-dir" "$BLOCKHASH_DIR"
     "--overwrite-v2"
   )
+  if [[ -n "$SEED_PREVIOUS_BLOCKHASH" ]]; then
+    v2_args+=("--seed-previous-blockhash" "$SEED_PREVIOUS_BLOCKHASH")
+  fi
   cargo run --release -p of-slot-ranges --bin of-slot-ranges -- "${v2_args[@]}"
+  validator_seed_args=()
+  if [[ -n "$SEED_PREVIOUS_BLOCKHASH" ]]; then
+    validator_seed_args+=("--seed-previous-blockhash" "$SEED_PREVIOUS_BLOCKHASH")
+  fi
+  cargo run --release -p of-slot-ranges --bin of-validate-slot-index-v2 -- \
+    "$SLOT_INDEX_DIR" "$BLOCKHASH_DIR" \
+    --start-epoch "$START_EPOCH" \
+    --end-epoch "$END_EPOCH" \
+    --registry-only \
+    "${validator_seed_args[@]}"
+  if [[ "${SYNC_R2_AFTER:-0}" == "1" ]]; then
+    SEED_PREVIOUS_BLOCKHASH="$SEED_PREVIOUS_BLOCKHASH" \
+      SLOT_INDEX_V2_VALIDATE_BIN="${SLOT_INDEX_V2_VALIDATE_BIN:-$REPO_ROOT/target/release/of-validate-slot-index-v2}" \
+      SLOT_INDEX_START_EPOCH="$START_EPOCH" \
+      SLOT_INDEX_END_EPOCH="$END_EPOCH" \
+      "$SCRIPT_DIR/sync-slot-index-r2.sh" push-v2-authoritative \
+      "$SLOT_INDEX_DIR" "$BLOCKHASH_DIR" "$SLOT_INDEX_V2_REMOTE"
+  fi
 fi

@@ -2013,6 +2013,12 @@ fn visit_no_registry_pubkeys(
                     visit(lookup.account_key)?;
                 }
             }
+            // V1 carries the whole address list inline; there are no lookups.
+            blockzilla_format::WincodeArchiveV2NoRegistryMessage::V1(message) => {
+                for pubkey in &message.account_keys {
+                    visit(*pubkey)?;
+                }
+            }
         }
         if let Some(metadata) = tx.metadata.as_ref() {
             let WincodeArchiveV2Payload::Decoded { value, .. } = metadata else {

@@ -8,7 +8,7 @@ use solana_keypair::{Keypair, Signer, signable::Signable};
 use solana_sha256_hasher::hashv;
 use solana_signature::Signature;
 
-#[derive(Debug, Deserialize, Serialize)]
+#[derive(Debug, Deserialize, Serialize, wincode::SchemaRead, wincode::SchemaWrite)]
 pub struct Ping<const N: usize> {
     from: Pubkey,
     #[serde(with = "BigArray")]
@@ -16,7 +16,7 @@ pub struct Ping<const N: usize> {
     signature: Signature,
 }
 
-#[derive(Debug, Deserialize, Serialize)]
+#[derive(Debug, Deserialize, Serialize, wincode::SchemaRead, wincode::SchemaWrite)]
 pub struct Pong {
     from: Pubkey,
     hash: Hash,

@@ -4,15 +4,14 @@
 //! describe a different shard layout after a format-preserving optimization.
 //! Comparing directory bytes therefore cannot establish semantic parity. This
 //! utility validates both indexes' table geometry and compares the canonical
-//! `wallet_id -> sorted unique program usage` stream without loading either
+//! `wallet_id -> sorted unique program_ids` stream without loading either
 //! index into memory. With paired registry flags it resolves IDs to pubkeys
-//! and external-sorts the complete usage records, allowing parity checks
-//! across registry reorderings with a bounded relation-sort buffer.
+//! and external-sorts those relations, allowing parity checks across registry
+//! reorderings with a bounded relation-sort buffer.
 
 use std::{
     cmp::Ordering,
     collections::BinaryHeap,
-    ffi::OsString,
     fs::{self, File, OpenOptions},
     io::{BufReader, BufWriter, Read, Write},
     os::unix::fs::{FileExt, MetadataExt},
@@ -22,42 +21,26 @@ use std::{
 };
 
 use anyhow::{Context, Result, bail, ensure};
-use blockzilla_firebase_indexer::format::{
-    FORMAT_VERSION, IndexFileBinding, IndexManifest, PROGRAM_USAGE_RECORD_LEN, ProgramMapReader,
-    ProgramUsage, RegistryFileIdentity as ManifestFileIdentity,
-};
-use blockzilla_format::{ARCHIVE_V2_PUBKEY_REGISTRY_FILE, ARCHIVE_V2_PUBKEY_REGISTRY_INDEX_FILE};
 use clap::Parser;
 use rustix::fs::{Mode, OFlags};
 use sha2::{Digest, Sha256};
 
 const WALLETS_MAGIC: [u8; 4] = *b"FBIW";
 const RELATIONS_MAGIC: [u8; 4] = *b"FBIR";
+// Version 3 adds manifest/binding hardening, but retains version 2's physical
+// wallet and relation record layouts.  Accept both so retained v2 builds can
+// serve as a semantic oracle for the v3 writer.
+const LEGACY_FORMAT_VERSION: u32 = 2;
+const CURRENT_FORMAT_VERSION: u32 = 3;
 const HEADER_LEN: u64 = 16;
 const WALLET_RECORD_LEN: u64 = 16;
-const PROGRAM_USAGE_PAYLOAD_LEN: usize = PROGRAM_USAGE_RECORD_LEN - 4;
-const RELATION_RECORD_LEN: u64 = PROGRAM_USAGE_RECORD_LEN as u64;
-const HASH_DOMAIN: &[u8] = b"firewatch-index-canonical-program-usage-v1\0";
-const PUBKEY_RELATION_RECORD_LEN: usize = 32 + 32 + PROGRAM_USAGE_PAYLOAD_LEN;
-const PUBKEY_HASH_DOMAIN: &[u8] = b"firewatch-index-canonical-pubkey-program-usage-v1\0";
+const RELATION_RECORD_LEN: u64 = 4;
+const HASH_DOMAIN: &[u8] = b"firewatch-index-canonical-relations-v1\0";
+const PUBKEY_RELATION_RECORD_LEN: usize = 64;
+const PUBKEY_HASH_DOMAIN: &[u8] = b"firewatch-index-canonical-pubkey-relations-v1\0";
 const DEFAULT_SORT_MEMORY_MIB: u64 = 256;
 const MAX_FINAL_RUNS: usize = 32;
 const MERGE_FAN_IN: usize = 8;
-
-#[derive(Debug, Clone)]
-struct BoundProgramMap {
-    binding: IndexFileBinding,
-    count: u64,
-}
-
-impl BoundProgramMap {
-    fn from_manifest(manifest: &IndexManifest) -> Self {
-        Self {
-            binding: manifest.program_map.clone(),
-            count: manifest.program_count,
-        }
-    }
-}
 const REGISTRY_FILE_NAME: &str = "registry.bin";
 const REGISTRY_CACHE_LIMIT_BYTES: usize = 64 * 1024 * 1024;
 const WALLET_WINDOW_BYTES: usize = 1024 * 1024;
@@ -76,50 +59,11 @@ const _: () = assert!(WALLET_WINDOW_BYTES % 32 == 0);
 const _: () = assert!(PROGRAM_CACHE_PAGE_BYTES % 32 == 0);
 const _: () = assert!(PROGRAM_CACHE_WAYS > 0 && PROGRAM_CACHE_WAYS <= u8::MAX as usize);
 const _: () = assert!(REGISTRY_CACHE_ACCOUNTED_BYTES <= REGISTRY_CACHE_LIMIT_BYTES);
-const FIREWATCH_ATTEMPT_ID_ENV: &str = "BLOCKZILLA_FIREWATCH_ATTEMPT_ID";
-
-fn program_usage_to_le_bytes(usage: ProgramUsage) -> [u8; PROGRAM_USAGE_RECORD_LEN] {
-    let mut bytes = [0u8; PROGRAM_USAGE_RECORD_LEN];
-    bytes[0..4].copy_from_slice(&usage.program_id.to_le_bytes());
-    bytes[4..8].copy_from_slice(&usage.direct_instruction_count.to_le_bytes());
-    bytes[8..12].copy_from_slice(&usage.inner_instruction_count.to_le_bytes());
-    bytes[12..16].copy_from_slice(&usage.transaction_count.to_le_bytes());
-    bytes[16..24].copy_from_slice(&usage.first_seen_slot.to_le_bytes());
-    bytes[24..32].copy_from_slice(&usage.last_seen_slot.to_le_bytes());
-    bytes[32..40].copy_from_slice(&usage.min_block_time.to_le_bytes());
-    bytes[40..48].copy_from_slice(&usage.max_block_time.to_le_bytes());
-    bytes[48..52].copy_from_slice(&usage.timed_transaction_count.to_le_bytes());
-    bytes
-}
-
-fn program_usage_from_le_bytes(bytes: [u8; PROGRAM_USAGE_RECORD_LEN]) -> Result<ProgramUsage> {
-    let usage = ProgramUsage {
-        program_id: u32::from_le_bytes(bytes[0..4].try_into().unwrap()),
-        direct_instruction_count: u32::from_le_bytes(bytes[4..8].try_into().unwrap()),
-        inner_instruction_count: u32::from_le_bytes(bytes[8..12].try_into().unwrap()),
-        transaction_count: u32::from_le_bytes(bytes[12..16].try_into().unwrap()),
-        first_seen_slot: u64::from_le_bytes(bytes[16..24].try_into().unwrap()),
-        last_seen_slot: u64::from_le_bytes(bytes[24..32].try_into().unwrap()),
-        min_block_time: i64::from_le_bytes(bytes[32..40].try_into().unwrap()),
-        max_block_time: i64::from_le_bytes(bytes[40..48].try_into().unwrap()),
-        timed_transaction_count: u32::from_le_bytes(bytes[48..52].try_into().unwrap()),
-    };
-    usage
-        .validate()
-        .with_context(|| format!("invalid program usage record {usage:?}"))?;
-    Ok(usage)
-}
-
-fn usage_payload(usage: ProgramUsage) -> [u8; PROGRAM_USAGE_PAYLOAD_LEN] {
-    program_usage_to_le_bytes(usage)[4..]
-        .try_into()
-        .expect("program usage payload has a fixed size")
-}
 
 #[derive(Debug, Parser)]
 #[command(
     name = "index-parity",
-    about = "Compare two Firewatch indexes by canonical wallet-to-program usage"
+    about = "Compare two Firewatch indexes by canonical wallet-to-program relations"
 )]
 struct Args {
     /// Report the exact set-difference cardinalities instead of failing at
@@ -144,7 +88,7 @@ struct Args {
 
     /// Parent directory for the private registry-aware sort workspace.
     /// Defaults to the first index's parent directory. Budget temporary disk
-    /// for up to 112 bytes per relation on each side, plus bounded merge runs.
+    /// for up to 64 bytes per relation on each side, plus bounded merge runs.
     #[arg(long)]
     temp_dir: Option<PathBuf>,
 
@@ -174,41 +118,16 @@ fn main() -> Result<()> {
             parent
         }
     });
-    // Create the managed attempt workspace before long content verification so an
-    // external controller can bind, pause, or cancel this exact process safely.
-    let workspace = registries
-        .is_some()
-        .then(|| PrivateTempDir::create(temp_parent))
-        .transpose()?;
-    let left_manifest = IndexManifest::verify_generation(&args.left)
-        .context("verify left Firewatch index generation")?;
-    let right_manifest = IndexManifest::verify_generation(&args.right)
-        .context("verify right Firewatch index generation")?;
-    let left_program_map = BoundProgramMap::from_manifest(&left_manifest);
-    let right_program_map = BoundProgramMap::from_manifest(&right_manifest);
-    let archive_guards = registries
-        .map(|(left_registry, right_registry)| {
-            Ok::<_, anyhow::Error>((
-                ArchiveBindingGuard::open(left_registry, &left_manifest)?,
-                ArchiveBindingGuard::open(right_registry, &right_manifest)?,
-            ))
-        })
-        .transpose()?;
 
     if args.summarize_differences {
         let summary = if let Some((left_registry, right_registry)) = registries {
-            summarize_registry_differences_in_workspace(
+            summarize_registry_differences(
                 &args.left,
                 left_registry,
                 &args.right,
                 right_registry,
                 sort_memory_bytes,
-                workspace
-                    .as_ref()
-                    .expect("registry workspace exists")
-                    .path(),
-                left_program_map,
-                right_program_map,
+                temp_parent,
             )?
         } else {
             summarize_differences(&args.left, &args.right)?
@@ -226,25 +145,16 @@ fn main() -> Result<()> {
         println!("right_only_relations={}", summary.right_only_relations);
         println!("left_canonical_sha256={}", summary.left.sha256);
         println!("right_canonical_sha256={}", summary.right.sha256);
-        if let Some((left_guard, right_guard)) = archive_guards.as_ref() {
-            left_guard.verify_unchanged()?;
-            right_guard.verify_unchanged()?;
-        }
         return Ok(());
     }
     let summary = if let Some((left_registry, right_registry)) = registries {
-        compare_registry_indexes_in_workspace(
+        compare_registry_indexes(
             &args.left,
             left_registry,
             &args.right,
             right_registry,
             sort_memory_bytes,
-            workspace
-                .as_ref()
-                .expect("registry workspace exists")
-                .path(),
-            left_program_map,
-            right_program_map,
+            temp_parent,
         )?
     } else {
         compare_indexes(&args.left, &args.right)?
@@ -253,10 +163,6 @@ fn main() -> Result<()> {
     println!("wallets={}", summary.wallets);
     println!("relations={}", summary.relations);
     println!("canonical_sha256={}", summary.sha256);
-    if let Some((left_guard, right_guard)) = archive_guards.as_ref() {
-        left_guard.verify_unchanged()?;
-        right_guard.verify_unchanged()?;
-    }
     Ok(())
 }
 
@@ -304,11 +210,11 @@ fn compare_indexes(left: &Path, right: &Path) -> Result<ParitySummary> {
                     "canonical mismatch at wallet record {record_index}: left={left_header:?}, right={right_header:?}"
                 );
                 for program_index in 0..left_header.program_count {
-                    let left_program = left.next_usage()?;
-                    let right_program = right.next_usage()?;
+                    let left_program = left.next_program()?;
+                    let right_program = right.next_program()?;
                     ensure!(
                         left_program == right_program,
-                        "canonical usage mismatch for wallet {} at program position {program_index}: left={left_program:?}, right={right_program:?}",
+                        "canonical mismatch for wallet {} at program position {program_index}: left={left_program}, right={right_program}",
                         left_header.wallet_id
                     );
                 }
@@ -442,10 +348,7 @@ fn summarize_program_differences(
                 checked_increment(&mut summary.right_only_relations, 1, "right-only relations")?;
                 right_program = take_next_program(right, &mut right_remaining)?;
             }
-            (Some(left_usage), Some(right_usage)) => match left_usage
-                .program_id
-                .cmp(&right_usage.program_id)
-            {
+            (Some(left_id), Some(right_id)) => match left_id.cmp(&right_id) {
                 std::cmp::Ordering::Less => {
                     checked_increment(&mut summary.left_only_relations, 1, "left-only relations")?;
                     left_program = take_next_program(left, &mut left_remaining)?;
@@ -459,20 +362,7 @@ fn summarize_program_differences(
                     right_program = take_next_program(right, &mut right_remaining)?;
                 }
                 std::cmp::Ordering::Equal => {
-                    if left_usage == right_usage {
-                        checked_increment(&mut summary.shared_relations, 1, "shared relations")?;
-                    } else {
-                        checked_increment(
-                            &mut summary.left_only_relations,
-                            1,
-                            "left-only relations",
-                        )?;
-                        checked_increment(
-                            &mut summary.right_only_relations,
-                            1,
-                            "right-only relations",
-                        )?;
-                    }
+                    checked_increment(&mut summary.shared_relations, 1, "shared relations")?;
                     left_program = take_next_program(left, &mut left_remaining)?;
                     right_program = take_next_program(right, &mut right_remaining)?;
                 }
@@ -481,15 +371,12 @@ fn summarize_program_differences(
     }
 }
 
-fn take_next_program(
-    index: &mut CanonicalIndex,
-    remaining: &mut u32,
-) -> Result<Option<ProgramUsage>> {
+fn take_next_program(index: &mut CanonicalIndex, remaining: &mut u32) -> Result<Option<u32>> {
     if *remaining == 0 {
         return Ok(None);
     }
     *remaining -= 1;
-    index.next_usage().map(Some)
+    index.next_program().map(Some)
 }
 
 fn drain_programs(
@@ -499,7 +386,7 @@ fn drain_programs(
     label: &'static str,
 ) -> Result<()> {
     for _ in 0..count {
-        index.next_usage()?;
+        index.next_program()?;
     }
     checked_increment(destination, u64::from(count), label)
 }
@@ -537,7 +424,6 @@ fn sort_memory_bytes(memory_mib: u64) -> Result<usize> {
     Ok(bytes)
 }
 
-#[cfg(test)]
 fn compare_registry_indexes(
     left: &Path,
     left_registry: &Path,
@@ -547,50 +433,23 @@ fn compare_registry_indexes(
     temp_parent: &Path,
 ) -> Result<ParitySummary> {
     let workspace = PrivateTempDir::create(temp_parent)?;
-    let left_program_map = fixture_program_map(left, left_registry)?;
-    let right_program_map = fixture_program_map(right, right_registry)?;
-    compare_registry_indexes_in_workspace(
-        left,
-        left_registry,
-        right,
-        right_registry,
-        sort_memory_bytes,
-        workspace.path(),
-        left_program_map,
-        right_program_map,
-    )
-}
-
-fn compare_registry_indexes_in_workspace(
-    left: &Path,
-    left_registry: &Path,
-    right: &Path,
-    right_registry: &Path,
-    sort_memory_bytes: usize,
-    workspace: &Path,
-    left_program_map: BoundProgramMap,
-    right_program_map: BoundProgramMap,
-) -> Result<ParitySummary> {
     let left_runs = build_pubkey_relation_runs(
         left,
         left_registry,
-        workspace,
+        workspace.path(),
         "left",
         sort_memory_bytes,
-        &left_program_map,
     )?;
     let right_runs = build_pubkey_relation_runs(
         right,
         right_registry,
-        workspace,
+        workspace.path(),
         "right",
         sort_memory_bytes,
-        &right_program_map,
     )?;
     compare_pubkey_relation_runs(&left_runs, &right_runs)
 }
 
-#[cfg(test)]
 fn summarize_registry_differences(
     left: &Path,
     left_registry: &Path,
@@ -600,45 +459,19 @@ fn summarize_registry_differences(
     temp_parent: &Path,
 ) -> Result<DifferenceSummary> {
     let workspace = PrivateTempDir::create(temp_parent)?;
-    let left_program_map = fixture_program_map(left, left_registry)?;
-    let right_program_map = fixture_program_map(right, right_registry)?;
-    summarize_registry_differences_in_workspace(
-        left,
-        left_registry,
-        right,
-        right_registry,
-        sort_memory_bytes,
-        workspace.path(),
-        left_program_map,
-        right_program_map,
-    )
-}
-
-fn summarize_registry_differences_in_workspace(
-    left: &Path,
-    left_registry: &Path,
-    right: &Path,
-    right_registry: &Path,
-    sort_memory_bytes: usize,
-    workspace: &Path,
-    left_program_map: BoundProgramMap,
-    right_program_map: BoundProgramMap,
-) -> Result<DifferenceSummary> {
     let left_runs = build_pubkey_relation_runs(
         left,
         left_registry,
-        workspace,
+        workspace.path(),
         "left",
         sort_memory_bytes,
-        &left_program_map,
     )?;
     let right_runs = build_pubkey_relation_runs(
         right,
         right_registry,
-        workspace,
+        workspace.path(),
         "right",
         sort_memory_bytes,
-        &right_program_map,
     )?;
     summarize_pubkey_relation_runs(&left_runs, &right_runs)
 }
@@ -649,14 +482,7 @@ fn build_pubkey_relation_runs(
     temp_root: &Path,
     side: &'static str,
     sort_memory_bytes: usize,
-    program_binding: &BoundProgramMap,
 ) -> Result<Vec<PathBuf>> {
-    let program_map = ProgramMapReader::open_verified(
-        index_root,
-        &program_binding.binding,
-        program_binding.count,
-    )
-    .with_context(|| format!("open bound program map at {}", index_root.display()))?;
     let mut registry = PubkeyRegistry::load(registry_path)?;
     let mut index = CanonicalIndex::open(index_root)?;
     let mut sorter = PubkeyRelationSorter::new(temp_root, side, sort_memory_bytes)?;
@@ -664,26 +490,15 @@ fn build_pubkey_relation_runs(
     while let Some(header) = index.next_wallet()? {
         let wallet = registry.resolve_wallet(header.wallet_id, index_root)?;
         for _ in 0..header.program_count {
-            let usage = index.next_usage()?;
-            let program_id = usage.program_id;
-            let program = program_map
-                .resolve(program_id)
-                .with_context(|| format!("resolve bound program id {program_id}"))?;
-            let registry_program = registry.resolve_program(program_id, index_root)?;
-            ensure!(
-                program == registry_program,
-                "{} programs.map id {program_id} does not match its bound registry",
-                index_root.display()
-            );
+            let program_id = index.next_program()?;
+            let program = registry.resolve_program(program_id, index_root)?;
             let mut relation = [0u8; PUBKEY_RELATION_RECORD_LEN];
             relation[..32].copy_from_slice(&wallet);
-            relation[32..64].copy_from_slice(&program);
-            relation[64..].copy_from_slice(&usage_payload(usage));
+            relation[32..].copy_from_slice(&program);
             sorter.push(relation)?;
         }
     }
     index.finish()?;
-    program_map.verify_unchanged()?;
     let runs = sorter.finish()?;
     registry.verify_unchanged()?;
     Ok(runs)
@@ -712,107 +527,6 @@ impl RegistryFileIdentity {
             changed_nanoseconds: metadata.ctime_nsec(),
         }
     }
-}
-
-struct ArchiveBindingGuard {
-    registry_path: PathBuf,
-    registry_file: File,
-    registry_identity: RegistryFileIdentity,
-    index_path: PathBuf,
-    index_file: File,
-    index_identity: RegistryFileIdentity,
-}
-
-impl ArchiveBindingGuard {
-    fn open(registry_argument: &Path, manifest: &IndexManifest) -> Result<Self> {
-        let registry_path = if registry_argument.is_dir() {
-            registry_argument.join(ARCHIVE_V2_PUBKEY_REGISTRY_FILE)
-        } else {
-            registry_argument.to_path_buf()
-        };
-        ensure!(
-            registry_path.file_name().and_then(|name| name.to_str())
-                == Some(ARCHIVE_V2_PUBKEY_REGISTRY_FILE),
-            "registry argument must name the archive registry.bin"
-        );
-        let archive = fs::canonicalize(
-            registry_path
-                .parent()
-                .context("registry path has no archive parent")?,
-        )?;
-        ensure!(
-            archive == Path::new(&manifest.archive_root),
-            "registry argument archive {} does not match index archive {}",
-            archive.display(),
-            manifest.archive_root
-        );
-        let registry_file = open_registry_file(&registry_path)?;
-        let registry_identity = RegistryFileIdentity::from_metadata(&registry_file.metadata()?);
-        ensure!(
-            registry_identity_matches(&registry_identity, &manifest.registry_file_identity)
-                && registry_identity.size == manifest.registry.size,
-            "archive registry.bin identity does not match the Firewatch index manifest"
-        );
-        let index_path = archive.join(ARCHIVE_V2_PUBKEY_REGISTRY_INDEX_FILE);
-        let index_file = open_registry_file(&index_path)?;
-        let index_identity = RegistryFileIdentity::from_metadata(&index_file.metadata()?);
-        ensure!(
-            registry_identity_matches(&index_identity, &manifest.registry_index_file_identity)
-                && index_identity.size == manifest.registry_index.size,
-            "archive registry.mphf identity does not match the Firewatch index manifest"
-        );
-        let guard = Self {
-            registry_path,
-            registry_file,
-            registry_identity,
-            index_path,
-            index_file,
-            index_identity,
-        };
-        guard.verify_unchanged()?;
-        Ok(guard)
-    }
-
-    fn verify_unchanged(&self) -> Result<()> {
-        verify_retained_identity(
-            &self.registry_file,
-            &self.registry_path,
-            self.registry_identity,
-        )?;
-        verify_retained_identity(&self.index_file, &self.index_path, self.index_identity)
-    }
-}
-
-fn registry_identity_matches(
-    actual: &RegistryFileIdentity,
-    expected: &ManifestFileIdentity,
-) -> bool {
-    actual.size == expected.size
-        && actual.device == expected.device
-        && actual.inode == expected.inode
-        && actual.modified_seconds == expected.modified_seconds
-        && actual.modified_nanoseconds == expected.modified_nanoseconds
-        && actual.changed_seconds == expected.changed_seconds
-        && actual.changed_nanoseconds == expected.changed_nanoseconds
-}
-
-fn verify_retained_identity(
-    file: &File,
-    path: &Path,
-    expected: RegistryFileIdentity,
-) -> Result<()> {
-    ensure!(
-        RegistryFileIdentity::from_metadata(&file.metadata()?) == expected,
-        "retained archive file changed: {}",
-        path.display()
-    );
-    let current = open_registry_file(path)?;
-    ensure!(
-        RegistryFileIdentity::from_metadata(&current.metadata()?) == expected,
-        "archive path no longer names the retained file: {}",
-        path.display()
-    );
-    Ok(())
 }
 
 struct PubkeyRegistry {
@@ -1204,7 +918,6 @@ struct PrivateTempDir {
 
 impl PrivateTempDir {
     fn create(parent: &Path) -> Result<Self> {
-        let firewatch_attempt_id = firewatch_attempt_id()?;
         ensure!(
             parent.is_dir(),
             "temporary parent {} is not a directory",
@@ -1217,13 +930,10 @@ impl PrivateTempDir {
             .as_nanos();
         for _ in 0..128 {
             let sequence = NEXT_TEMP.fetch_add(1, AtomicOrdering::Relaxed);
-            let temp_name = parity_temp_dir_name(
-                std::process::id(),
-                timestamp,
-                sequence,
-                firewatch_attempt_id.as_deref(),
-            );
-            let path = parent.join(temp_name);
+            let path = parent.join(format!(
+                ".index-parity-{}-{timestamp:x}-{sequence:x}.tmp",
+                std::process::id()
+            ));
             let mut builder = fs::DirBuilder::new();
             #[cfg(unix)]
             {
@@ -1249,41 +959,6 @@ impl PrivateTempDir {
     fn path(&self) -> &Path {
         &self.path
     }
-}
-
-fn parity_temp_dir_name(
-    pid: u32,
-    timestamp: u128,
-    sequence: u64,
-    firewatch_attempt_id: Option<&str>,
-) -> String {
-    let mut name = format!(".index-parity-{pid}-{timestamp:x}-{sequence:x}.tmp");
-    if let Some(firewatch_attempt_id) = firewatch_attempt_id {
-        name.push('-');
-        name.push_str(firewatch_attempt_id);
-    }
-    name
-}
-
-fn firewatch_attempt_id() -> Result<Option<String>> {
-    validate_firewatch_attempt_id(std::env::var_os(FIREWATCH_ATTEMPT_ID_ENV))
-}
-
-fn validate_firewatch_attempt_id(value: Option<OsString>) -> Result<Option<String>> {
-    let Some(value) = value else {
-        return Ok(None);
-    };
-    let value = value
-        .into_string()
-        .map_err(|_| anyhow::anyhow!("{FIREWATCH_ATTEMPT_ID_ENV} must be valid UTF-8"))?;
-    ensure!(
-        value.len() == 32
-            && value
-                .bytes()
-                .all(|byte| byte.is_ascii_digit() || (b'a'..=b'f').contains(&byte)),
-        "{FIREWATCH_ATTEMPT_ID_ENV} must be exactly 32 lowercase hexadecimal characters"
-    );
-    Ok(Some(value))
 }
 
 impl Drop for PrivateTempDir {
@@ -1619,19 +1294,9 @@ fn summarize_pubkey_programs(
                     checked_increment(right_only_relations, 1, "right-only relations")?;
                 }
                 Ordering::Equal => {
-                    if left.current() == right.current() {
-                        left.consume()?;
-                        right.consume()?;
-                        checked_increment(shared_relations, 1, "shared relations")?;
-                    } else {
-                        // A wallet/program pair is shared only when its complete
-                        // count and timing aggregate is equal. Represent one
-                        // changed aggregate as one removal plus one addition.
-                        left.consume()?;
-                        right.consume()?;
-                        checked_increment(left_only_relations, 1, "left-only relations")?;
-                        checked_increment(right_only_relations, 1, "right-only relations")?;
-                    }
+                    left.consume()?;
+                    right.consume()?;
+                    checked_increment(shared_relations, 1, "shared relations")?;
                 }
             },
         }
@@ -1643,33 +1308,14 @@ fn relation_wallet(record: &PubkeyRelation) -> [u8; 32] {
 }
 
 fn relation_program(record: &PubkeyRelation) -> [u8; 32] {
-    record[32..64].try_into().unwrap()
-}
-
-fn relation_usage_payload(record: &PubkeyRelation) -> [u8; PROGRAM_USAGE_PAYLOAD_LEN] {
-    record[64..].try_into().unwrap()
-}
-
-fn display_usage_payload(payload: [u8; PROGRAM_USAGE_PAYLOAD_LEN]) -> String {
-    let direct_instruction_count = u32::from_le_bytes(payload[0..4].try_into().unwrap());
-    let inner_instruction_count = u32::from_le_bytes(payload[4..8].try_into().unwrap());
-    let transaction_count = u32::from_le_bytes(payload[8..12].try_into().unwrap());
-    let first_seen_slot = u64::from_le_bytes(payload[12..20].try_into().unwrap());
-    let last_seen_slot = u64::from_le_bytes(payload[20..28].try_into().unwrap());
-    let min_block_time = i64::from_le_bytes(payload[28..36].try_into().unwrap());
-    let max_block_time = i64::from_le_bytes(payload[36..44].try_into().unwrap());
-    let timed_transaction_count = u32::from_le_bytes(payload[44..48].try_into().unwrap());
-    format!(
-        "direct_instructions={direct_instruction_count}, inner_instructions={inner_instruction_count}, transactions={transaction_count}, slots={first_seen_slot}..={last_seen_slot}, block_times={min_block_time}..={max_block_time}, timed_transactions={timed_transaction_count}"
-    )
+    record[32..].try_into().unwrap()
 }
 
 fn display_pubkey_relation(record: &PubkeyRelation) -> String {
     format!(
-        "wallet={}, program={}, {}",
+        "wallet={}, program={}",
         bs58::encode(&record[..32]).into_string(),
-        bs58::encode(&record[32..64]).into_string(),
-        display_usage_payload(relation_usage_payload(record))
+        bs58::encode(&record[32..]).into_string()
     )
 }
 
@@ -1765,17 +1411,21 @@ impl CanonicalIndex {
         }
     }
 
-    fn next_usage(&mut self) -> Result<ProgramUsage> {
+    fn next_program(&mut self) -> Result<u32> {
         ensure!(
             self.pending_programs > 0,
-            "internal parity reader error: usage requested outside a wallet record"
+            "internal parity reader error: program requested outside a wallet record"
         );
-        let usage = self
+        let program = self
             .shard
             .as_mut()
             .context("internal parity reader error: missing shard")?
-            .next_usage()?;
-        let program = usage.program_id;
+            .next_program()?;
+        ensure!(
+            program != 0,
+            "{} contains program id 0",
+            self.root.display()
+        );
         ensure!(
             self.previous_program
                 .is_none_or(|previous| program > previous),
@@ -1791,8 +1441,8 @@ impl CanonicalIndex {
             .relations
             .checked_add(1)
             .context("relation count overflow")?;
-        self.hasher.update(program_usage_to_le_bytes(usage));
-        Ok(usage)
+        self.hasher.update(program.to_le_bytes());
+        Ok(program)
     }
 
     fn finish(mut self) -> Result<ParitySummary> {
@@ -1907,24 +1557,18 @@ impl ShardReader {
         }))
     }
 
-    fn next_usage(&mut self) -> Result<ProgramUsage> {
+    fn next_program(&mut self) -> Result<u32> {
         ensure!(
             self.pending_programs > 0,
-            "program usage requested outside a wallet row"
+            "program requested outside a wallet row"
         );
-        let mut bytes = [0u8; PROGRAM_USAGE_RECORD_LEN];
+        let mut bytes = [0u8; RELATION_RECORD_LEN as usize];
         self.relations
             .read_exact(&mut bytes)
             .with_context(|| format!("read relation from {}", self.path.display()))?;
         self.pending_programs -= 1;
         self.relation_cursor += 1;
-        program_usage_from_le_bytes(bytes).with_context(|| {
-            format!(
-                "decode relation {} from {}",
-                self.relation_cursor - 1,
-                self.path.display()
-            )
-        })
+        Ok(u32::from_le_bytes(bytes))
     }
 
     fn finish(&mut self) -> Result<()> {
@@ -1970,7 +1614,7 @@ fn open_table(
     );
     let version = u32::from_le_bytes(header[4..8].try_into().unwrap());
     ensure!(
-        version == FORMAT_VERSION,
+        matches!(version, LEGACY_FORMAT_VERSION | CURRENT_FORMAT_VERSION),
         "{} has unsupported {kind} format version {version}",
         path.display()
     );
@@ -2033,46 +1677,11 @@ fn hex_lower(bytes: &[u8]) -> String {
 
 #[cfg(test)]
 mod tests {
-    use std::io::{Seek, SeekFrom, Write};
+    use std::io::Write;
 
     use tempfile::TempDir;
 
     use super::*;
-
-    #[test]
-    fn firewatch_attempt_id_validation_is_strict() {
-        assert_eq!(validate_firewatch_attempt_id(None).unwrap(), None);
-        assert_eq!(
-            validate_firewatch_attempt_id(Some(OsString::from("0123456789abcdef0123456789abcdef")))
-                .unwrap(),
-            Some("0123456789abcdef0123456789abcdef".to_string())
-        );
-
-        for invalid in [
-            "",
-            "0123456789abcdef0123456789abcde",
-            "0123456789abcdef0123456789abcdef0",
-            "0123456789ABCDEF0123456789ABCDEF",
-            "0123456789abcdef0123456789abcdeg",
-        ] {
-            assert!(
-                validate_firewatch_attempt_id(Some(OsString::from(invalid))).is_err(),
-                "accepted invalid attempt id {invalid:?}"
-            );
-        }
-    }
-
-    #[test]
-    fn parity_temp_name_preserves_legacy_form_and_ends_with_attempt_id() {
-        assert_eq!(
-            parity_temp_dir_name(12, 0x34, 0x5, None),
-            ".index-parity-12-34-5.tmp"
-        );
-        assert_eq!(
-            parity_temp_dir_name(12, 0x34, 0x5, Some("0123456789abcdef0123456789abcdef")),
-            ".index-parity-12-34-5.tmp-0123456789abcdef0123456789abcdef"
-        );
-    }
 
     #[test]
     fn canonical_comparison_ignores_shard_layout() {
@@ -2102,114 +1711,6 @@ mod tests {
     }
 
     #[test]
-    fn canonical_comparison_binds_every_usage_metric() {
-        let baseline = detailed_usage(3);
-        let mut variants = Vec::new();
-        variants.push(ProgramUsage {
-            direct_instruction_count: baseline.direct_instruction_count + 1,
-            ..baseline
-        });
-        variants.push(ProgramUsage {
-            inner_instruction_count: baseline.inner_instruction_count + 1,
-            ..baseline
-        });
-        variants.push(ProgramUsage {
-            transaction_count: baseline.transaction_count + 1,
-            ..baseline
-        });
-        variants.push(ProgramUsage {
-            first_seen_slot: baseline.first_seen_slot + 1,
-            ..baseline
-        });
-        variants.push(ProgramUsage {
-            last_seen_slot: baseline.last_seen_slot + 1,
-            ..baseline
-        });
-        variants.push(ProgramUsage {
-            min_block_time: baseline.min_block_time + 1,
-            ..baseline
-        });
-        variants.push(ProgramUsage {
-            max_block_time: baseline.max_block_time + 1,
-            ..baseline
-        });
-        variants.push(ProgramUsage {
-            timed_transaction_count: baseline.timed_transaction_count + 1,
-            ..baseline
-        });
-
-        for variant in variants {
-            variant.validate().unwrap();
-            let left = TempDir::new().unwrap();
-            let right = TempDir::new().unwrap();
-            write_usage_shard(left.path(), 0, &[(2, vec![baseline])]);
-            write_usage_shard(right.path(), 0, &[(2, vec![variant])]);
-
-            let error = compare_indexes(left.path(), right.path()).unwrap_err();
-            let message = format!("{error:#}");
-            assert!(message.contains("canonical usage mismatch"), "{message}");
-        }
-    }
-
-    #[test]
-    fn difference_summary_counts_changed_usage_as_remove_and_add() {
-        let left = TempDir::new().unwrap();
-        let right = TempDir::new().unwrap();
-        let baseline = detailed_usage(3);
-        let changed = ProgramUsage {
-            inner_instruction_count: baseline.inner_instruction_count + 1,
-            ..baseline
-        };
-        write_usage_shard(left.path(), 0, &[(2, vec![baseline])]);
-        write_usage_shard(right.path(), 0, &[(2, vec![changed])]);
-
-        let summary = summarize_differences(left.path(), right.path()).unwrap();
-        assert_eq!(summary.shared_wallets, 1);
-        assert_eq!(summary.shared_relations, 0);
-        assert_eq!(summary.left_only_relations, 1);
-        assert_eq!(summary.right_only_relations, 1);
-    }
-
-    #[test]
-    fn clean_v4_reader_rejects_v3_tables() {
-        let left = TempDir::new().unwrap();
-        let right = TempDir::new().unwrap();
-        write_shard(left.path(), 0, &[(2, &[3])]);
-        write_shard(right.path(), 0, &[(2, &[3])]);
-        for name in ["wallets.idx", "programs.rel"] {
-            let path = right.path().join("shard-0").join(name);
-            let mut file = OpenOptions::new().write(true).open(path).unwrap();
-            file.seek(SeekFrom::Start(4)).unwrap();
-            file.write_all(&3u32.to_le_bytes()).unwrap();
-        }
-
-        let error = compare_indexes(left.path(), right.path()).unwrap_err();
-        assert!(format!("{error:#}").contains("unsupported wallets.idx format version 3"));
-    }
-
-    #[test]
-    fn reader_rejects_invalid_usage_timing_sentinel() {
-        let left = TempDir::new().unwrap();
-        let right = TempDir::new().unwrap();
-        let invalid = ProgramUsage {
-            program_id: 3,
-            direct_instruction_count: 1,
-            inner_instruction_count: 0,
-            transaction_count: 1,
-            first_seen_slot: 100,
-            last_seen_slot: 100,
-            min_block_time: 1_000,
-            max_block_time: 1_000,
-            timed_transaction_count: 0,
-        };
-        write_usage_shard(left.path(), 0, &[(2, vec![usage(3)])]);
-        write_usage_shard(right.path(), 0, &[(2, vec![invalid])]);
-
-        let error = compare_indexes(left.path(), right.path()).unwrap_err();
-        assert!(format!("{error:#}").contains("missing block-time sentinel is inconsistent"));
-    }
-
-    #[test]
     fn canonical_comparison_rejects_trailing_unreferenced_relations() {
         let left = TempDir::new().unwrap();
         let right = TempDir::new().unwrap();
@@ -2220,8 +1721,7 @@ mod tests {
             .append(true)
             .open(&relations)
             .unwrap();
-        file.write_all(&program_usage_to_le_bytes(usage(9)))
-            .unwrap();
+        file.write_all(&9u32.to_le_bytes()).unwrap();
 
         let error = compare_indexes(left.path(), right.path()).unwrap_err();
         assert!(format!("{error:#}").contains("length"));
@@ -2343,51 +1843,6 @@ mod tests {
     }
 
     #[test]
-    fn registry_aware_comparison_binds_usage_payload() {
-        let temp = TempDir::new().unwrap();
-        let left = temp.path().join("left-index");
-        let right = temp.path().join("right-index");
-        fs::create_dir(&left).unwrap();
-        fs::create_dir(&right).unwrap();
-        let registry = temp.path().join("registry.bin");
-        write_registry(&registry, &[[7u8; 32], [3u8; 32]]);
-        let baseline = detailed_usage(2);
-        let changed = ProgramUsage {
-            direct_instruction_count: baseline.direct_instruction_count + 1,
-            ..baseline
-        };
-        write_usage_shard(&left, 0, &[(1, vec![baseline])]);
-        write_usage_shard(&right, 0, &[(1, vec![changed])]);
-
-        let error = compare_registry_indexes(
-            &left,
-            &registry,
-            &right,
-            &registry,
-            PUBKEY_RELATION_RECORD_LEN,
-            temp.path(),
-        )
-        .unwrap_err();
-        let message = format!("{error:#}");
-        assert!(message.contains("canonical pubkey mismatch"), "{message}");
-        assert!(message.contains("direct_instructions="), "{message}");
-
-        let difference = summarize_registry_differences(
-            &left,
-            &registry,
-            &right,
-            &registry,
-            PUBKEY_RELATION_RECORD_LEN,
-            temp.path(),
-        )
-        .unwrap();
-        assert_eq!(difference.shared_wallets, 1);
-        assert_eq!(difference.shared_relations, 0);
-        assert_eq!(difference.left_only_relations, 1);
-        assert_eq!(difference.right_only_relations, 1);
-    }
-
-    #[test]
     fn registry_aware_comparison_rejects_out_of_range_ids() {
         let temp = TempDir::new().unwrap();
         let left = temp.path().join("left-index");
@@ -2408,7 +1863,7 @@ mod tests {
             temp.path(),
         )
         .unwrap_err();
-        assert!(format!("{error:#}").contains("absent from the bound programs.map"));
+        assert!(format!("{error:#}").contains("only 1 entries"));
     }
 
     #[test]
@@ -2542,29 +1997,16 @@ mod tests {
     }
 
     fn write_shard(root: &Path, shard: u32, rows: &[(u32, &[u32])]) {
-        let usage_rows = rows
-            .iter()
-            .map(|(wallet, programs)| {
-                (
-                    *wallet,
-                    programs.iter().copied().map(usage).collect::<Vec<_>>(),
-                )
-            })
-            .collect::<Vec<_>>();
-        write_usage_shard(root, shard, &usage_rows);
-    }
-
-    fn write_usage_shard(root: &Path, shard: u32, rows: &[(u32, Vec<ProgramUsage>)]) {
         let directory = root.join(format!("shard-{shard}"));
         fs::create_dir_all(&directory).unwrap();
 
         let mut wallets = Vec::new();
         wallets.extend_from_slice(&WALLETS_MAGIC);
-        wallets.extend_from_slice(&FORMAT_VERSION.to_le_bytes());
+        wallets.extend_from_slice(&CURRENT_FORMAT_VERSION.to_le_bytes());
         wallets.extend_from_slice(&(rows.len() as u64).to_le_bytes());
         let mut relations = Vec::new();
         relations.extend_from_slice(&RELATIONS_MAGIC);
-        relations.extend_from_slice(&FORMAT_VERSION.to_le_bytes());
+        relations.extend_from_slice(&CURRENT_FORMAT_VERSION.to_le_bytes());
         let relation_count: usize = rows.iter().map(|(_, programs)| programs.len()).sum();
         relations.extend_from_slice(&(relation_count as u64).to_le_bytes());
 
@@ -2573,8 +2015,8 @@ mod tests {
             wallets.extend_from_slice(&wallet.to_le_bytes());
             wallets.extend_from_slice(&offset.to_le_bytes());
             wallets.extend_from_slice(&(programs.len() as u32).to_le_bytes());
-            for program in programs {
-                relations.extend_from_slice(&program_usage_to_le_bytes(*program));
+            for program in *programs {
+                relations.extend_from_slice(&program.to_le_bytes());
             }
             offset += programs.len() as u64;
         }
@@ -2582,46 +2024,4 @@ mod tests {
         fs::write(directory.join("wallets.idx"), wallets).unwrap();
         fs::write(directory.join("programs.rel"), relations).unwrap();
     }
-
-    fn usage(program_id: u32) -> ProgramUsage {
-        ProgramUsage::new_transaction(program_id, 1, 0, 100, Some(1_000)).unwrap()
-    }
-
-    fn detailed_usage(program_id: u32) -> ProgramUsage {
-        let usage = ProgramUsage {
-            program_id,
-            direct_instruction_count: 5,
-            inner_instruction_count: 7,
-            transaction_count: 4,
-            first_seen_slot: 100,
-            last_seen_slot: 200,
-            min_block_time: 1_000,
-            max_block_time: 1_100,
-            timed_transaction_count: 3,
-        };
-        usage.validate().unwrap();
-        usage
-    }
-}
-
-#[cfg(test)]
-fn fixture_program_map(index_root: &Path, registry_path: &Path) -> Result<BoundProgramMap> {
-    let bytes = fs::read(registry_path)?;
-    ensure!(
-        bytes.len() % 32 == 0,
-        "fixture registry length is not a multiple of 32"
-    );
-    let entries = bytes
-        .chunks_exact(32)
-        .enumerate()
-        .map(|(index, key)| {
-            let id = u32::try_from(index + 1).context("fixture registry is too large")?;
-            Ok((id, key.try_into().expect("chunk length is exact")))
-        })
-        .collect::<Result<Vec<_>>>()?;
-    let binding = blockzilla_firebase_indexer::format::write_program_map(index_root, &entries)?;
-    Ok(BoundProgramMap {
-        binding,
-        count: entries.len() as u64,
-    })
 }

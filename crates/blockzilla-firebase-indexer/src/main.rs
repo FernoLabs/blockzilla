@@ -1,14 +1,13 @@
 use std::path::PathBuf;
 
 use anyhow::{Context, Result};
-use blockzilla_firebase_indexer::{build, dense_accumulator, format::IndexManifest, query};
-use blockzilla_read_sdk::ArchiveV2WireProfile;
+use blockzilla_firebase_indexer::{build, dense_accumulator, query};
 use clap::{Parser, Subcommand};
 
 #[derive(Debug, Parser)]
 #[command(
     name = "blockzilla-firebase-indexer",
-    about = "Per-epoch reverse index: signer wallet -> per-program direct and CPI usage"
+    about = "Per-epoch reverse index: signer wallet -> programs reached by successful transactions (direct and CPI)"
 )]
 struct Cli {
     #[command(subcommand)]
@@ -31,8 +30,8 @@ enum Command {
         /// Open the archive without a published archive-v2-generation.json
         /// and without hashing file content, asserting its identity instead.
         /// Only for a filesystem you already trust (e.g. a local NAS).
-        /// Requires --cluster-id, --generation-id, and --wire-profile.
-        #[arg(long, requires_all = ["cluster_id", "generation_id", "wire_profile"])]
+        /// Requires --cluster-id and --generation-id.
+        #[arg(long, requires_all = ["cluster_id", "generation_id"])]
         trust_local: bool,
         /// Asserted cluster identity for an unpublished trusted-local archive.
         #[arg(long, requires = "trust_local")]
@@ -40,9 +39,6 @@ enum Command {
         /// Asserted immutable generation identity for trusted-local mode.
         #[arg(long, requires = "trust_local")]
         generation_id: Option<String>,
-        /// Exact hot-message grammar asserted for this trusted-local archive.
-        #[arg(long, requires = "trust_local")]
-        wire_profile: Option<ArchiveV2WireProfile>,
         /// Epoch width used to validate a trusted-local archive layout.
         #[arg(long, requires = "trust_local", default_value_t = 432_000)]
         slots_per_epoch: u64,
@@ -65,7 +61,7 @@ enum Command {
         threads: usize,
     },
     /// Build with the two-pass signer-dense pipeline. This emits the exact
-    /// same version-4 shard/query format as `build`, but scans the archive at
+    /// same version-3 shard/query format as `build`, but scans the archive at
     /// most twice instead of once per account-id shard.
     BuildDense {
         #[arg(long)]
@@ -75,8 +71,8 @@ enum Command {
         #[arg(long)]
         out: PathBuf,
         /// Assert this unpublished archive is immutable and locally trusted.
-        /// Requires --cluster-id, --generation-id, and --wire-profile.
-        #[arg(long, requires_all = ["cluster_id", "generation_id", "wire_profile"])]
+        /// Requires --cluster-id and --generation-id.
+        #[arg(long, requires_all = ["cluster_id", "generation_id"])]
         trust_local: bool,
         /// Asserted cluster identity for an unpublished trusted-local archive.
         #[arg(long, requires = "trust_local")]
@@ -84,9 +80,6 @@ enum Command {
         /// Asserted immutable generation identity for trusted-local mode.
         #[arg(long, requires = "trust_local")]
         generation_id: Option<String>,
-        /// Exact hot-message grammar asserted for this trusted-local archive.
-        #[arg(long, requires = "trust_local")]
-        wire_profile: Option<ArchiveV2WireProfile>,
         /// Epoch width used to validate a trusted-local archive layout.
         #[arg(long, requires = "trust_local", default_value_t = 432_000)]
         slots_per_epoch: u64,
@@ -121,8 +114,8 @@ enum Command {
         #[arg(long)]
         archive: PathBuf,
         /// Assert this unpublished archive is immutable and locally trusted.
-        /// Requires --cluster-id, --generation-id, and --wire-profile.
-        #[arg(long, requires_all = ["cluster_id", "generation_id", "wire_profile"])]
+        /// Requires --cluster-id and --generation-id.
+        #[arg(long, requires_all = ["cluster_id", "generation_id"])]
         trust_local: bool,
         /// Asserted cluster identity for an unpublished trusted-local archive.
         #[arg(long, requires = "trust_local")]
@@ -130,9 +123,6 @@ enum Command {
         /// Asserted immutable generation identity for trusted-local mode.
         #[arg(long, requires = "trust_local")]
         generation_id: Option<String>,
-        /// Exact hot-message grammar asserted for this trusted-local archive.
-        #[arg(long, requires = "trust_local")]
-        wire_profile: Option<ArchiveV2WireProfile>,
         /// Epoch width used to validate a trusted-local archive layout.
         #[arg(long, requires = "trust_local", default_value_t = 432_000)]
         slots_per_epoch: u64,
@@ -149,12 +139,6 @@ enum Command {
         /// must not already exist.
         #[arg(long, conflicts_with = "trust_local")]
         out: Option<PathBuf>,
-    },
-    /// Verify every immutable index data file against manifest.json.
-    VerifyIndex {
-        /// Path to an index directory produced by `build` or `build-dense`.
-        #[arg(long)]
-        index: PathBuf,
     },
     /// Look up a wallet's program-id interactions in a built index.
     Query {
@@ -195,7 +179,6 @@ fn main() -> Result<()> {
             trust_local,
             cluster_id,
             generation_id,
-            wire_profile,
             slots_per_epoch,
             max_accounts_per_chunk,
             threads,
@@ -213,8 +196,6 @@ fn main() -> Result<()> {
                     generation_id: generation_id
                         .context("--generation-id is required with --trust-local")?,
                     slots_per_epoch,
-                    wire_profile: wire_profile
-                        .context("--wire-profile is required with --trust-local")?,
                 })
             } else {
                 None
@@ -235,7 +216,6 @@ fn main() -> Result<()> {
             trust_local,
             cluster_id,
             generation_id,
-            wire_profile,
             slots_per_epoch,
             signers,
             shard_width,
@@ -254,8 +234,6 @@ fn main() -> Result<()> {
                     generation_id: generation_id
                         .context("--generation-id is required with --trust-local")?,
                     slots_per_epoch,
-                    wire_profile: wire_profile
-                        .context("--wire-profile is required with --trust-local")?,
                 })
             } else {
                 None
@@ -278,7 +256,6 @@ fn main() -> Result<()> {
             trust_local,
             cluster_id,
             generation_id,
-            wire_profile,
             slots_per_epoch,
             threads,
             out,
@@ -300,8 +277,6 @@ fn main() -> Result<()> {
                     generation_id: generation_id
                         .context("--generation-id is required with --trust-local")?,
                     slots_per_epoch,
-                    wire_profile: wire_profile
-                        .context("--wire-profile is required with --trust-local")?,
                 })
             } else {
                 None
@@ -350,13 +325,6 @@ fn main() -> Result<()> {
             );
             Ok(())
         }
-        Command::VerifyIndex { index } => {
-            let manifest = IndexManifest::verify_generation(&index)?;
-            println!("index_verified=true");
-            println!("wallets={}", manifest.wallet_count);
-            println!("programs={}", manifest.program_count);
-            Ok(())
-        }
         Command::Query {
             wallet,
             index,
@@ -374,29 +342,8 @@ fn main() -> Result<()> {
                 );
             } else {
                 println!("{} (epoch {}):", result.wallet, result.epoch);
-                for usage in &result.programs {
-                    println!(
-                        "  {} direct_ix={} inner_ix={} tx={} slots={}..={} block_times={}..={} timed_tx={} avg_timed_gap_s={}",
-                        usage.program,
-                        usage.direct_instruction_count,
-                        usage.inner_instruction_count,
-                        usage.transaction_count,
-                        usage.first_seen_slot,
-                        usage.last_seen_slot,
-                        usage
-                            .min_block_time
-                            .map(|time| time.to_string())
-                            .unwrap_or_else(|| "n/a".into()),
-                        usage
-                            .max_block_time
-                            .map(|time| time.to_string())
-                            .unwrap_or_else(|| "n/a".into()),
-                        usage.timed_transaction_count,
-                        usage
-                            .average_time_between_timed_transactions_seconds
-                            .map(|seconds| format!("{seconds:.3}"))
-                            .unwrap_or_else(|| "n/a".into()),
-                    );
+                for program in &result.programs {
+                    println!("  {program}");
                 }
             }
             Ok(())

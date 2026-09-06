@@ -20,9 +20,9 @@ review every artifact before publishing it.
 
 | Script | Mode | Purpose |
 | --- | --- | --- |
-| `build-epoch-900-network-format-r2-inventory.sh` | Local fixed-name and size validation | Create the manifest-free, no-clobber Compact V2 and Indexer V3 epoch-900 publication inventory. |
-| `publish-network-format-benchmark-r2.sh` | Private R2 stage + server-side promotion | Publish one strict, size-checked, immutable benchmark inventory without payload hashes or body readback. |
-| `run-epoch-900-corrected-v3.sh` | Fixed NAS build + local read samples | Build the new full-epoch V3 candidate from the sealed corrected epoch-900 Compact generation. It does not publish data. |
+| `run-archive-sample-read-matrix.sh` | NAS/Mac, local + network | Run 12 dedicated examples on all 11 sample epochs; use `--check-only` before launch. |
+| `build-archive-sample-bundle.sh` | Mac cross-build | Package the 12 Linux readers and runner without starting them. |
+| `prepare-nas-sample-mirror.sh` | NAS, path setup | Hard-link the existing repaired samples and retained CARs into the public folder layout. |
 | `run-rpc-correctness-matrix.sh` | Maintainer-only | Run the standard multi-provider correctness matrix. |
 | `sync-replay-compact.sh` | SSH transfer + local validation | Resume the replay-minimal Compact epoch-0/1 files from the NAS and publish local Archive V2 manifests. |
 | `run-replay-marathon.sh` | Local/NAS, bounded | Resume a sealed Compact chain for several hours with boundary checkpoints, replay metrics, and `pidstat` telemetry. |
@@ -35,32 +35,8 @@ Historical and one-off helpers are now intentionally stored locally outside git 
 
 Use `--help` where available for prerequisites, inputs, and output paths.
 
-## Corrected epoch-900 V3 build
-
-`run-epoch-900-corrected-v3.sh` is a fixed one-shot NAS runner. It refuses an
-existing output or converter staging path. It checks the upstream local Compact
-source authority and both source schema markers. It checks the declared sizes
-of the large source objects, but it does not hash those payloads again. This
-upstream source check is not an R2 publication control. The public R2 procedure
-uses only the fixed-name and size inventory.
-
-The runner waits until SPYX PID `252572` is gone. It then requires 12 available
-logical CPUs, at least 3 GiB `MemAvailable`, at least 500 GB free, and no other
-V3 converter. It starts the reviewed converter with 12 workers and the
-`current` / `current-typed-error` schemas. After the build, it validates the
-exact converter inventory and report and runs four bounded reader samples. It
-does not use a load-average gate. It does not create a V3 benchmark manifest.
-It does not upload, replace, or remove data.
-
-Run the local checks before you copy the runner to the NAS:
-
-```bash
-scripts/test-run-epoch-900-corrected-v3.sh
-```
-
-On the NAS, inspect the fixed paths in the runner. Then start it with no
-arguments. A failed run keeps the output and evidence for review. Do not remove
-or reuse them without a separate review.
+See [the sample reader run guide](../docs/benchmarks/sample-reader-matrix.md)
+for metrics, output parity, cache rules, resume, and article comparison limits.
 
 ## Production predecessor-tail seeding
 
@@ -79,15 +55,6 @@ blockzilla seed-previous-blockhash-tails \
 The checked-in `systemd` timer invokes the `blockzilla-current` release. The
 superseded Python implementation was retired after fixture and live dry-run
 parity; Rust is the only maintained implementation.
-
-For an explicit target, the command first uses the predecessor V3 blockhash
-index. If V3 is absent, it verifies the complete canonical hot-block index,
-the compact block blob, and the blockhash registry before it derives the last
-300 hash-and-slot rows. A complete scheduler-owned target is accepted only
-when its ownership marker is schema-current, bound to the target epoch, in the
-`complete` state, and has no process ID. Publication never replaces an
-existing tail. Use `--dry-run` to perform all checks without writing a tail or
-receipt.
 
 ## Checkpointed replay marathon
 

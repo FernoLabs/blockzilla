@@ -6,39 +6,29 @@ rust-version.workspace = true
 license.workspace = true
 repository.workspace = true
 publish = false
-description = "Per-epoch reverse index: signer wallet -> per-program direct and CPI usage"
+description = "Per-epoch reverse index: wallet pubkey -> program ids it interacted with (direct and CPI)"
 default-run = "blockzilla-firebase-indexer"
+
 autobins = false
 
 [[bin]]
 name = "blockzilla-firebase-indexer"
 path = "src/main.rs"
 
-[[bin]]
-name = "firewatch-index-controller"
-path = "src/bin/firewatch-index-controller.rs"
-
-[[bin]]
-name = "firewatch-wire-profile-audit"
-path = "src/bin/firewatch-wire-profile-audit.rs"
-
-[[bin]]
-name = "firewatch-wire-profile-audit-batch"
-path = "src/bin/firewatch-wire-profile-audit-batch.rs"
-
-[[bin]]
-name = "firewatch-wire-profile-marker-transition"
-path = "src/bin/firewatch-wire-profile-marker-transition.rs"
-
 [dependencies]
+reqwest = { version = "0.13.3", default-features = false, features = ["blocking", "json", "rustls"] }
+libc = "0.2.183"
+blockzilla-read-sdk-legacy = { path = "../blockzilla-read-sdk-legacy" }
 anyhow = "1.0.102"
 blockzilla-format = { path = "../blockzilla-format" }
-blockzilla-read-sdk = { package = "blockzilla-read-sdk-legacy", path = "../blockzilla-read-sdk-legacy" }
+blockzilla-index-archive-format = { path = "../blockzilla-index-archive-format" }
+blockzilla-query-sdk = { path = "../blockzilla-query-sdk" }
+blockzilla-read-sdk = { path = "../blockzilla-read-sdk", features = ["http"] }
+blockzilla-user-program-index = { version = "0.2.0", path = "../blockzilla-user-program-index" }
+of-car-reader = { path = "../old-faithful/car-reader", default-features = false, features = ["zstd-native"] }
 bs58 = "0.5.1"
-clap = { version = "4.6.1", features = ["derive", "env"] }
-libc = "0.2.183"
+clap = { version = "4.6.1", features = ["derive"] }
 pprof = { version = "0.15.0", features = ["flamegraph"] }
-reqwest = { version = "0.13.3", default-features = false, features = ["blocking", "json", "rustls"] }
 rustix = { version = "1.1.4", features = ["fs"] }
 serde = { version = "1.0.228", features = ["derive"] }
 serde_json = "1.0.149"
@@ -47,11 +37,36 @@ smallvec = "1.15.2"
 thiserror = "2.0.18"
 tracing = "0.1.44"
 tracing-subscriber = { version = "0.3.23", features = ["env-filter"] }
-wincode = { version = "=0.5.5", features = ["derive"] }
+wincode = { version = "=0.6.1", features = ["derive"] }
+zstd = "0.13.3"
 
 [dev-dependencies]
+ed25519-dalek = "2.2.0"
 tempfile = "3.24.0"
-zstd = "0.13.3"
+
+[[bin]]
+name = "archive-v2-account-projection-verify"
+path = "src/bin/archive-v2-account-projection-verify.rs"
+
+[[bin]]
+name = "archive-v2-account-projection"
+path = "src/bin/archive-v2-account-projection.rs"
+
+[[bin]]
+name = "archive-v2-lean-read-bench"
+path = "src/bin/archive-v2-lean-read-bench.rs"
+
+[[bin]]
+name = "firewatch-wire-profile-audit-batch"
+path = "src/bin/firewatch-wire-profile-audit-batch.rs"
+
+[[bin]]
+name = "firewatch-wire-profile-audit"
+path = "src/bin/firewatch-wire-profile-audit.rs"
+
+[[bin]]
+name = "firewatch-wire-profile-marker-transition"
+path = "src/bin/firewatch-wire-profile-marker-transition.rs"
 
 [[bin]]
 name = "index-bench"

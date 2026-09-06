@@ -2,15 +2,27 @@
 resolver = "2"
 members = [
     "blockzilla",
+    "crates/blockzilla-car-read-sdk",
+    "crates/blockzilla-compact-v2-read-sdk",
     "crates/blockzilla-dex-parser",
+    "crates/blockzilla-dump",
+    "crates/blockzilla-example-workloads",
     "crates/blockzilla-firebase-indexer",
     "crates/blockzilla-format",
+    "crates/blockzilla-index-archive-convert",
+    "crates/blockzilla-index-archive-format",
+    "crates/blockzilla-index-archive-measure",
+    "crates/blockzilla-indexer-v3-read-sdk",
     "crates/blockzilla-log-parser",
+    "crates/blockzilla-query-sdk",
+    "crates/blockzilla-read-sdk",
     "crates/blockzilla-read-sdk-legacy",
+    "crates/blockzilla-reader-profile",
     "crates/blockzilla-replay",
     "crates/blockzilla-spyx-query",
     "crates/blockzilla-token-balance-audit",
     "crates/blockzilla-token-transaction-dump",
+    "crates/blockzilla-user-program-index",
     "crates/hivezilla-object-store",
     "crates/hivezilla-protocol",
     "crates/old-faithful/car-reader",
@@ -18,6 +30,9 @@ members = [
     "crates/shred-codec",
     "crates/solana-gossip-compat",
     "crates/solana-ledger-compat",
+    "examples/read-car",
+    "examples/read-compact-v2",
+    "examples/read-indexer-v3",
     "examples/token-api",
     "services/blockzilla-archive-gateway",
     "services/blockzilla-monitor",
@@ -27,25 +42,11 @@ members = [
 ]
 
 [workspace.package]
-version = "0.1.0"
+version = "0.2.0"
 edition = "2024"
 rust-version = "1.96"
 license = "MIT"
 repository = "https://github.com/FernoLabs/blockzilla"
-
-# macOS otherwise keeps unpacked object files and full debug data for every
-# changed crate hash. This workspace is large enough for those stale dev/test
-# artifacts to consume tens of GiB in a few days. Debug assertions remain on;
-# use the release-debug profile when full symbols are required.
-[profile.dev]
-debug = 0
-split-debuginfo = "off"
-incremental = false
-
-[profile.test]
-debug = 0
-split-debuginfo = "off"
-incremental = false
 
 [profile.release]
 opt-level = 3

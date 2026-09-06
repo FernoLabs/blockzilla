@@ -18,7 +18,7 @@ use crate::{
     },
     node::{
         BlockNode, CborCidRef, DataFrame, EntryNode, EpochNode, Node, RewardsNode, Shredding,
-        SlotMeta, SubsetNode, TransactionNode, decode_node,
+        SlotMeta, SubsetNode, TransactionNode, decode_node_with_kind, peek_node_type,
     },
     versioned_transaction::VersionedTransaction,
 };
@@ -406,6 +406,19 @@ impl RawDataFrame {
         self.append_reassembled(out, dataframes, visited)
     }
 
+    /// Reassemble one dataframe without allowing the output to exceed `limit`.
+    pub fn reassemble_bytes_into_bounded(
+        &self,
+        dataframes: &HashMap<Cid36, StandaloneDataFrame>,
+        out: &mut Vec<u8>,
+        visited: &mut HashSet<Cid36>,
+        limit: usize,
+    ) -> Result<(), ReconstructError> {
+        out.clear();
+        visited.clear();
+        self.append_reassembled_bounded(out, dataframes, visited, limit)
+    }
+
     fn append_reassembled(
         &self,
         out: &mut Vec<u8>,
@@ -433,6 +446,60 @@ impl RawDataFrame {
 
         Ok(())
     }
+
+    fn append_reassembled_bounded(
+        &self,
+        out: &mut Vec<u8>,
+        dataframes: &HashMap<Cid36, StandaloneDataFrame>,
+        visited: &mut HashSet<Cid36>,
+        limit: usize,
+    ) -> Result<(), ReconstructError> {
+        extend_bounded(out, &self.data, limit)?;
+
+        for next in &self.next {
+            if let Some(inline) = next.inline_raw_bytes() {
+                extend_bounded(out, inline, limit)?;
+                continue;
+            }
+
+            let cid = next.require_car_cid()?;
+            if !visited.insert(cid) {
+                return Err(ReconstructError::DataFrameCycle(cid));
+            }
+            let frame = dataframes
+                .get(&cid)
+                .ok_or(ReconstructError::MissingDataFrame(cid))?;
+            frame
+                .frame
+                .append_reassembled_bounded(out, dataframes, visited, limit)?;
+            visited.remove(&cid);
+        }
+
+        Ok(())
+    }
+}
+
+fn extend_bounded(
+    output: &mut Vec<u8>,
+    bytes: &[u8],
+    limit: usize,
+) -> Result<(), ReconstructError> {
+    let end =
+        output
+            .len()
+            .checked_add(bytes.len())
+            .ok_or(ReconstructError::DataFrameBytesLimit {
+                required: usize::MAX,
+                limit,
+            })?;
+    if end > limit {
+        return Err(ReconstructError::DataFrameBytesLimit {
+            required: end,
+            limit,
+        });
+    }
+    output.extend_from_slice(bytes);
+    Ok(())
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -531,6 +598,17 @@ impl RawTransactionNode {
         self.data.reassemble_bytes_into(dataframes, out, visited)
     }
 
+    pub fn transaction_bytes_into_bounded(
+        &self,
+        dataframes: &HashMap<Cid36, StandaloneDataFrame>,
+        out: &mut Vec<u8>,
+        visited: &mut HashSet<Cid36>,
+        limit: usize,
+    ) -> Result<(), ReconstructError> {
+        self.data
+            .reassemble_bytes_into_bounded(dataframes, out, visited, limit)
+    }
+
     pub fn metadata_bytes_into(
         &self,
         dataframes: &HashMap<Cid36, StandaloneDataFrame>,
@@ -539,6 +617,17 @@ impl RawTransactionNode {
     ) -> Result<(), ReconstructError> {
         self.metadata
             .reassemble_bytes_into(dataframes, out, visited)
+    }
+
+    pub fn metadata_bytes_into_bounded(
+        &self,
+        dataframes: &HashMap<Cid36, StandaloneDataFrame>,
+        out: &mut Vec<u8>,
+        visited: &mut HashSet<Cid36>,
+        limit: usize,
+    ) -> Result<(), ReconstructError> {
+        self.metadata
+            .reassemble_bytes_into_bounded(dataframes, out, visited, limit)
     }
 }
 
@@ -914,19 +1003,56 @@ pub struct LosslessCarBlock {
     pub(crate) data_buffer_pool: LosslessDataBufferPool,
 }
 
+const LOSSLESS_BLOCK_SCRATCH_MAX_RETAINED_BYTES: usize = 32 << 20;
+const LOSSLESS_BLOCK_CONTAINER_MAX_RETAINED_ITEMS: usize = 1 << 16;
+
+fn clear_vec_with_capacity_limit<T>(values: &mut Vec<T>, max_capacity: usize) {
+    values.clear();
+    if values.capacity() > max_capacity {
+        *values = Vec::new();
+    }
+}
+
+fn clear_hash_map_with_capacity_limit<K, V>(values: &mut HashMap<K, V>, max_capacity: usize) {
+    values.clear();
+    if values.capacity() > max_capacity {
+        *values = HashMap::new();
+    }
+}
+
 impl LosslessCarBlock {
     /// Clear the current block and retain bounded data-frame buffers for reuse.
     pub fn clear(&mut self) {
         self.recycle_all_data_buffers();
         self.block = None;
-        self.entries.clear();
+        clear_vec_with_capacity_limit(
+            &mut self.entries,
+            LOSSLESS_BLOCK_CONTAINER_MAX_RETAINED_ITEMS,
+        );
         debug_assert!(self.transactions.is_empty());
         debug_assert!(self.rewards.is_none());
         debug_assert!(self.dataframes.is_empty());
-        self.tx_by_cid.clear();
-        self.entry_by_cid.clear();
-        self.rewards_by_cid.clear();
-        self.scratch.clear();
+        clear_vec_with_capacity_limit(
+            &mut self.transactions,
+            LOSSLESS_BLOCK_CONTAINER_MAX_RETAINED_ITEMS,
+        );
+        clear_hash_map_with_capacity_limit(
+            &mut self.dataframes,
+            LOSSLESS_BLOCK_CONTAINER_MAX_RETAINED_ITEMS,
+        );
+        clear_hash_map_with_capacity_limit(
+            &mut self.tx_by_cid,
+            LOSSLESS_BLOCK_CONTAINER_MAX_RETAINED_ITEMS,
+        );
+        clear_hash_map_with_capacity_limit(
+            &mut self.entry_by_cid,
+            LOSSLESS_BLOCK_CONTAINER_MAX_RETAINED_ITEMS,
+        );
+        clear_hash_map_with_capacity_limit(
+            &mut self.rewards_by_cid,
+            LOSSLESS_BLOCK_CONTAINER_MAX_RETAINED_ITEMS,
+        );
+        clear_vec_with_capacity_limit(&mut self.scratch, LOSSLESS_BLOCK_SCRATCH_MAX_RETAINED_BYTES);
     }
 
     /// Cumulative statistics for the reusable data-frame buffers.
@@ -956,12 +1082,50 @@ impl LosslessCarBlock {
         !self.pending_node_counts().is_empty()
     }
 
+    pub(crate) fn unterminated_block_group_error(&self) -> Option<ReconstructError> {
+        let pending = self.pending_node_counts();
+        (!pending.is_empty()).then_some(ReconstructError::UnterminatedBlockGroup {
+            transactions: pending.transactions,
+            entries: pending.entries,
+            rewards: pending.rewards,
+            dataframes: pending.dataframes,
+        })
+    }
+
     pub fn read_entry_payload_into<R: Read>(
         &mut self,
         reader: &mut R,
         payload_len: usize,
         location: NodeLocation,
         cid_bytes: [u8; 36],
+    ) -> CarReadResult<bool> {
+        self.read_entry_payload_into_inner(reader, payload_len, location, cid_bytes, None)
+    }
+
+    pub(crate) fn read_entry_payload_into_bounded<R: Read>(
+        &mut self,
+        reader: &mut R,
+        payload_len: usize,
+        location: NodeLocation,
+        cid_bytes: [u8; 36],
+        max_transactions_per_block: usize,
+    ) -> CarReadResult<bool> {
+        self.read_entry_payload_into_inner(
+            reader,
+            payload_len,
+            location,
+            cid_bytes,
+            Some(max_transactions_per_block),
+        )
+    }
+
+    fn read_entry_payload_into_inner<R: Read>(
+        &mut self,
+        reader: &mut R,
+        payload_len: usize,
+        location: NodeLocation,
+        cid_bytes: [u8; 36],
+        max_transactions_per_block: Option<usize>,
     ) -> CarReadResult<bool> {
         if payload_len == 0 {
             return Err(CarReadError::UnexpectedEof(format!(
@@ -988,10 +1152,19 @@ impl LosslessCarBlock {
                     )));
                 }
             };
-        self.push_raw_node(node)
+
+        self.push_raw_node_inner(node, max_transactions_per_block)
     }
 
     pub(crate) fn push_raw_node(&mut self, node: RawNode) -> CarReadResult<bool> {
+        self.push_raw_node_inner(node, None)
+    }
+
+    fn push_raw_node_inner(
+        &mut self,
+        node: RawNode,
+        max_transactions_per_block: Option<usize>,
+    ) -> CarReadResult<bool> {
         match node {
             RawNode::Transaction(tx) => {
                 let cid = tx.cid;
@@ -1034,12 +1207,106 @@ impl LosslessCarBlock {
                 Ok(false)
             }
             RawNode::Block(block) => {
-                self.finalize(block)
-                    .map_err(|err| CarReadError::InvalidData(err.to_string()))?;
+                if let Some(limit) = max_transactions_per_block {
+                    self.finalize_bounded(block, limit)
+                        .map_err(|err| CarReadError::InvalidData(err.to_string()))?;
+                } else {
+                    self.finalize(block)
+                        .map_err(|err| CarReadError::InvalidData(err.to_string()))?;
+                }
                 Ok(true)
             }
             RawNode::Subset(_) | RawNode::Epoch(_) => Ok(false),
         }
+    }
+
+    fn finalize_bounded(
+        &mut self,
+        block: RawBlockNode,
+        max_transactions_per_block: usize,
+    ) -> Result<(), ReconstructError> {
+        self.validate_bounded_references(&block, max_transactions_per_block)?;
+        self.finalize(block)
+    }
+
+    fn validate_bounded_references(
+        &self,
+        block: &RawBlockNode,
+        max_transactions_per_block: usize,
+    ) -> Result<(), ReconstructError> {
+        if block.entries.len() > self.entry_by_cid.len() {
+            return Err(ReconstructError::ReferenceCountExceedsAvailableNodes {
+                kind: "entry",
+                references: block.entries.len(),
+                available_nodes: self.entry_by_cid.len(),
+            });
+        }
+
+        let mut transaction_references = 0usize;
+        for entry_ref in &block.entries {
+            let entry_cid = entry_ref.require_car_cid()?;
+            let entry = self
+                .entry_by_cid
+                .get(&entry_cid)
+                .ok_or(ReconstructError::MissingEntry(entry_cid))?;
+            transaction_references = transaction_references
+                .checked_add(entry.node.transactions.len())
+                .ok_or(ReconstructError::TransactionReferenceCountOverflow)?;
+            if transaction_references > max_transactions_per_block {
+                return Err(ReconstructError::TransactionReferenceCountLimit {
+                    count: transaction_references,
+                    limit: max_transactions_per_block,
+                });
+            }
+        }
+        if transaction_references > self.tx_by_cid.len() {
+            return Err(ReconstructError::ReferenceCountExceedsAvailableNodes {
+                kind: "transaction",
+                references: transaction_references,
+                available_nodes: self.tx_by_cid.len(),
+            });
+        }
+
+        // Each block entry is one PoH entry and each transaction CID can occur
+        // only once in a valid Solana block. Reject repeated references before
+        // cloning their retained nodes into canonical order.
+        let mut entry_cids = HashSet::new();
+        entry_cids.try_reserve(block.entries.len()).map_err(|_| {
+            ReconstructError::ReferenceSetAllocation {
+                kind: "entry",
+                count: block.entries.len(),
+            }
+        })?;
+        let mut transaction_cids = HashSet::new();
+        transaction_cids
+            .try_reserve(transaction_references)
+            .map_err(|_| ReconstructError::ReferenceSetAllocation {
+                kind: "transaction",
+                count: transaction_references,
+            })?;
+
+        for entry_ref in &block.entries {
+            let entry_cid = entry_ref.require_car_cid()?;
+            if !entry_cids.insert(entry_cid) {
+                return Err(ReconstructError::DuplicateEntryReference(entry_cid));
+            }
+            let entry = self
+                .entry_by_cid
+                .get(&entry_cid)
+                .ok_or(ReconstructError::MissingEntry(entry_cid))?;
+            for transaction_ref in &entry.node.transactions {
+                let transaction_cid = transaction_ref.require_car_cid()?;
+                if !transaction_cids.insert(transaction_cid) {
+                    return Err(ReconstructError::DuplicateTransactionReference(
+                        transaction_cid,
+                    ));
+                }
+                if !self.tx_by_cid.contains_key(&transaction_cid) {
+                    return Err(ReconstructError::MissingTransaction(transaction_cid));
+                }
+            }
+        }
+        Ok(())
     }
 
     fn finalize(&mut self, block: RawBlockNode) -> Result<(), ReconstructError> {
@@ -1201,6 +1468,79 @@ impl LosslessCarBlock {
     }
 }
 
+fn insert_pending_unique<T>(
+    map: &mut HashMap<Cid36, PendingRawNode<T>>,
+    cid: Cid36,
+    value: T,
+) -> Result<(), T> {
+    match map.entry(cid) {
+        std::collections::hash_map::Entry::Vacant(entry) => {
+            entry.insert(PendingRawNode::new(value));
+            Ok(())
+        }
+        std::collections::hash_map::Entry::Occupied(_) => Err(value),
+    }
+}
+
+fn recycle_transaction_data(pool: &mut LosslessDataBufferPool, transaction: RawTransactionNode) {
+    pool.recycle(transaction.data.data);
+    pool.recycle(transaction.metadata.data);
+}
+
+fn recycle_rewards_data(pool: &mut LosslessDataBufferPool, rewards: RawRewardsNode) {
+    pool.recycle(rewards.data.data);
+}
+
+fn insert_map_unique<T>(map: &mut HashMap<Cid36, T>, cid: Cid36, value: T) -> Result<(), T> {
+    match map.entry(cid) {
+        std::collections::hash_map::Entry::Vacant(entry) => {
+            entry.insert(value);
+            Ok(())
+        }
+        std::collections::hash_map::Entry::Occupied(_) => Err(value),
+    }
+}
+
+/// Take the original node for its first reference. Keep one clone as the
+/// template only when later references need the same owned value.
+fn take_referenced_node<T, F>(
+    map: &mut HashMap<Cid36, PendingRawNode<T>>,
+    cid: Cid36,
+    mut record_clone: F,
+) -> Result<T, ReconstructError>
+where
+    T: Clone,
+    F: FnMut(&T),
+{
+    let pending = map.get_mut(&cid).ok_or_else(|| {
+        ReconstructError::NodeDecode(format!("validated reference disappeared for {cid}"))
+    })?;
+    if pending.remaining_references == 0 {
+        return Err(ReconstructError::NodeDecode(format!(
+            "reference count exhausted for {cid}"
+        )));
+    }
+    pending.remaining_references -= 1;
+
+    if pending.remaining_references == 0 {
+        return Ok(map
+            .remove(&cid)
+            .expect("referenced node exists until its last reference")
+            .node);
+    }
+
+    if !pending.first_value_moved {
+        pending.first_value_moved = true;
+        let retained = pending.node.clone();
+        record_clone(&retained);
+        return Ok(std::mem::replace(&mut pending.node, retained));
+    }
+
+    let cloned = pending.node.clone();
+    record_clone(&cloned);
+    Ok(cloned)
+}
+
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct ValidationStats {
     pub car_entries: u64,
@@ -1272,7 +1612,23 @@ pub fn decode_raw_node_with_data_buffers<F>(
 where
     F: FnMut(usize) -> Vec<u8>,
 {
-    let node = decode_node(payload).map_err(|err| ReconstructError::NodeDecode(err.to_string()))?;
+    let kind =
+        peek_node_type(payload).map_err(|error| ReconstructError::NodeDecode(error.to_string()))?;
+    decode_raw_node_with_known_kind_and_data_buffers(location, cid, payload, kind, take_data_buffer)
+}
+
+pub(crate) fn decode_raw_node_with_known_kind_and_data_buffers<F>(
+    location: NodeLocation,
+    cid: Cid36,
+    payload: &[u8],
+    kind: u64,
+    take_data_buffer: &mut F,
+) -> Result<RawNode, ReconstructError>
+where
+    F: FnMut(usize) -> Vec<u8>,
+{
+    let node = decode_node_with_kind(payload, kind)
+        .map_err(|error| ReconstructError::NodeDecode(error.to_string()))?;
 
     Ok(match node {
         Node::Transaction(tx) => {
@@ -1396,18 +1752,8 @@ pub fn validate_reader_after_header<R: Read>(
         }
     }
 
-    if !pending.tx_by_cid.is_empty()
-        || !pending.entry_by_cid.is_empty()
-        || !pending.rewards_by_cid.is_empty()
-        || !pending.dataframes.is_empty()
-    {
-        return Err(ReconstructError::UnterminatedBlockGroup {
-            transactions: pending.tx_by_cid.len(),
-            entries: pending.entry_by_cid.len(),
-            rewards: pending.rewards_by_cid.len(),
-            dataframes: pending.dataframes.len(),
-        }
-        .into());
+    if let Some(error) = pending.unterminated_block_group_error() {
+        return Err(error.into());
     }
 
     for subset in subsets_by_cid.values() {
@@ -1455,7 +1801,27 @@ pub enum ReconstructError {
         rewards: usize,
         dataframes: usize,
     },
+    TransactionReferenceCountOverflow,
+    TransactionReferenceCountLimit {
+        count: usize,
+        limit: usize,
+    },
+    ReferenceCountExceedsAvailableNodes {
+        kind: &'static str,
+        references: usize,
+        available_nodes: usize,
+    },
+    ReferenceSetAllocation {
+        kind: &'static str,
+        count: usize,
+    },
+    DuplicateEntryReference(Cid36),
+    DuplicateTransactionReference(Cid36),
     DataFrameCycle(Cid36),
+    DataFrameBytesLimit {
+        required: usize,
+        limit: usize,
+    },
     CidMismatch {
         kind: &'static str,
         expected: Cid36,
@@ -1501,7 +1867,36 @@ impl fmt::Display for ReconstructError {
                 f,
                 "unterminated block group: txs={transactions} entries={entries} rewards={rewards} dataframes={dataframes}"
             ),
+            ReconstructError::TransactionReferenceCountOverflow => {
+                write!(f, "transaction reference count overflow")
+            }
+            ReconstructError::TransactionReferenceCountLimit { count, limit } => write!(
+                f,
+                "transaction reference count {count} exceeds configured limit {limit}"
+            ),
+            ReconstructError::ReferenceCountExceedsAvailableNodes {
+                kind,
+                references,
+                available_nodes,
+            } => write!(
+                f,
+                "{kind} reference count {references} exceeds {available_nodes} available nodes"
+            ),
+            ReconstructError::ReferenceSetAllocation { kind, count } => write!(
+                f,
+                "could not reserve {count} {kind} references for bounded reconstruction"
+            ),
+            ReconstructError::DuplicateEntryReference(cid) => {
+                write!(f, "duplicate block entry reference {cid}")
+            }
+            ReconstructError::DuplicateTransactionReference(cid) => {
+                write!(f, "duplicate block transaction reference {cid}")
+            }
             ReconstructError::DataFrameCycle(cid) => write!(f, "dataframe cycle at {cid}"),
+            ReconstructError::DataFrameBytesLimit { required, limit } => write!(
+                f,
+                "reassembled dataframe needs {required} bytes, configured limit is {limit}"
+            ),
             ReconstructError::CidMismatch {
                 kind,
                 expected,
@@ -1537,79 +1932,6 @@ fn insert_unique<T>(
         return Err(ReconstructError::DuplicateCid(cid));
     }
     Ok(())
-}
-
-fn insert_pending_unique<T>(
-    map: &mut HashMap<Cid36, PendingRawNode<T>>,
-    cid: Cid36,
-    value: T,
-) -> Result<(), T> {
-    match map.entry(cid) {
-        std::collections::hash_map::Entry::Vacant(entry) => {
-            entry.insert(PendingRawNode::new(value));
-            Ok(())
-        }
-        std::collections::hash_map::Entry::Occupied(_) => Err(value),
-    }
-}
-
-fn recycle_transaction_data(pool: &mut LosslessDataBufferPool, transaction: RawTransactionNode) {
-    pool.recycle(transaction.data.data);
-    pool.recycle(transaction.metadata.data);
-}
-
-fn recycle_rewards_data(pool: &mut LosslessDataBufferPool, rewards: RawRewardsNode) {
-    pool.recycle(rewards.data.data);
-}
-
-fn insert_map_unique<T>(map: &mut HashMap<Cid36, T>, cid: Cid36, value: T) -> Result<(), T> {
-    match map.entry(cid) {
-        std::collections::hash_map::Entry::Vacant(entry) => {
-            entry.insert(value);
-            Ok(())
-        }
-        std::collections::hash_map::Entry::Occupied(_) => Err(value),
-    }
-}
-
-/// Take the original node for its first reference. Keep one clone as the
-/// template only when later references need the same owned value.
-fn take_referenced_node<T, F>(
-    map: &mut HashMap<Cid36, PendingRawNode<T>>,
-    cid: Cid36,
-    mut record_clone: F,
-) -> Result<T, ReconstructError>
-where
-    T: Clone,
-    F: FnMut(&T),
-{
-    let pending = map.get_mut(&cid).ok_or_else(|| {
-        ReconstructError::NodeDecode(format!("validated reference disappeared for {cid}"))
-    })?;
-    if pending.remaining_references == 0 {
-        return Err(ReconstructError::NodeDecode(format!(
-            "reference count exhausted for {cid}"
-        )));
-    }
-    pending.remaining_references -= 1;
-
-    if pending.remaining_references == 0 {
-        return Ok(map
-            .remove(&cid)
-            .expect("referenced node exists until its last reference")
-            .node);
-    }
-
-    if !pending.first_value_moved {
-        pending.first_value_moved = true;
-        let retained = pending.node.clone();
-        record_clone(&retained);
-        return Ok(std::mem::replace(&mut pending.node, retained));
-    }
-
-    let cloned = pending.node.clone();
-    record_clone(&cloned);
-    Ok(cloned)
 }
 
 fn validate_payload_cid(
@@ -1746,7 +2068,8 @@ fn hex_bytes(bytes: &[u8]) -> String {
 mod tests {
     use super::{
         CAR_CID_PREFIX, Cid36, LosslessCarBlock, NodeLocation, RawCidRef, RawCidRefBytes,
-        RawDataFrame, RawNode, ReconstructError, StandaloneDataFrame, decode_raw_node,
+        RawDataFrame, RawNode, ReconstructError, StandaloneDataFrame,
+        clear_hash_map_with_capacity_limit, clear_vec_with_capacity_limit, decode_raw_node,
         decode_raw_node_with_data_buffers, validate_car_stream,
     };
     use crate::{CarBlockReader, confirmed_block, node::CborCidRef};
@@ -1760,6 +2083,25 @@ mod tests {
     #[test]
     fn cid_prefix_matches_old_faithful() {
         assert_eq!(CAR_CID_PREFIX, [0x01, 0x71, 0x12, 0x20]);
+    }
+
+    #[test]
+    fn reusable_container_limits_keep_small_and_release_large_allocations() {
+        let mut bytes = Vec::with_capacity(8);
+        bytes.extend_from_slice(&[1, 2, 3]);
+        let retained_pointer = bytes.as_ptr();
+        clear_vec_with_capacity_limit(&mut bytes, 8);
+        assert_eq!(bytes.as_ptr(), retained_pointer);
+        assert_eq!(bytes.capacity(), 8);
+
+        bytes.reserve(32);
+        clear_vec_with_capacity_limit(&mut bytes, 8);
+        assert_eq!(bytes.capacity(), 0);
+
+        let mut values = HashMap::with_capacity(32);
+        values.insert(1u8, 2u8);
+        clear_hash_map_with_capacity_limit(&mut values, 8);
+        assert_eq!(values.capacity(), 0);
     }
 
     #[test]
@@ -2021,7 +2363,6 @@ mod tests {
         )
         .expect("decode block");
         assert!(block.push_raw_node(terminal).expect("finalize block"));
-
         assert_eq!(block.entries.len(), 2);
         assert_eq!(block.entries[0].cid, entry_cid);
         assert_eq!(block.entries[1].cid, entry_cid);

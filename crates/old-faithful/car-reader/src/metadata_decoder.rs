@@ -176,6 +176,9 @@ pub trait TransactionStatusMetaVisitor<'a> {
     #[inline]
     fn inner_instructions_raw(&mut self, _bytes: &'a [u8]) {}
 
+    /// Called once per group, including empty groups, before its instructions.
+    fn inner_instruction_group(&mut self, _outer_index: u32) {}
+
     #[inline]
     fn inner_instruction(&mut self, _instruction: InnerInstructionVisit<'a>) {}
 
@@ -815,23 +818,38 @@ where
 {
     let mut reader = BorrowedMetadataReader::new(bytes);
     let mut outer_instruction_index = 0u32;
-    let mut instructions = Vec::new();
+    // Protobuf fields need not be ordered. Find the final group index first,
+    // then visit instruction slices without allocating an intermediate list.
     while !reader.is_eof() {
         match reader.next_tag() {
             Ok(8) => outer_instruction_index = reader.read_uint32()?,
-            Ok(18) => instructions.push(reader.read_bytes()?),
+            Ok(18) => {
+                reader.read_bytes()?;
+            }
             Ok(tag) => reader.skip_unknown(tag)?,
             Err(err) => return Err(err),
         }
     }
 
-    for (inner_instruction_index, bytes) in instructions.into_iter().enumerate() {
-        let instruction = read_inner_instruction_visit(
-            outer_instruction_index,
-            inner_instruction_index as u32,
-            bytes,
-        )?;
-        visitor.inner_instruction(instruction);
+    visitor.inner_instruction_group(outer_instruction_index);
+    let mut reader = BorrowedMetadataReader::new(bytes);
+    let mut inner_instruction_index = 0u32;
+    while !reader.is_eof() {
+        match reader.next_tag() {
+            Ok(18) => {
+                let instruction = read_inner_instruction_visit(
+                    outer_instruction_index,
+                    inner_instruction_index,
+                    reader.read_bytes()?,
+                )?;
+                visitor.inner_instruction(instruction);
+                inner_instruction_index = inner_instruction_index
+                    .checked_add(1)
+                    .ok_or(QuickProtobufError::Varint)?;
+            }
+            Ok(tag) => reader.skip_unknown(tag)?,
+            Err(err) => return Err(err),
+        }
     }
 
     Ok(())

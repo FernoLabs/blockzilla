@@ -186,6 +186,11 @@ fn collect_vote_hash_ids_for_block(block: &ArchiveV2HotBlockBlob) -> Result<Vec<
                     collect_vote_hashes_from_instruction(&instruction.data, &mut ids);
                 }
             }
+            ArchiveV2HotMessagePayload::V1(message) => {
+                for instruction in message.instructions {
+                    collect_vote_hashes_from_instruction(&instruction.data, &mut ids);
+                }
+            }
         }
     }
     let mut ids = ids.into_iter().collect::<Vec<_>>();

@@ -103,7 +103,7 @@ fn car_bytes_to_quick_protobuf_no_meta(
     let mut out = Vec::with_capacity(input_len);
     let mut writer = Writer::new(&mut out);
 
-    if previous_blockhash != "" {
+    if !previous_blockhash.is_empty() {
         writer
             .write_with_tag(10, |writer| writer.write_string(&previous_blockhash))
             .map_err(|err| format!("Failed to encode protobuf previous_blockhash: {err}"))?;
@@ -223,25 +223,57 @@ fn quick_transaction<'a>(tx: &'a VersionedTransaction<'a>) -> quick_proto::Trans
 }
 
 fn quick_message<'a>(message: &'a VersionedMessage<'a>) -> quick_proto::Message<'a> {
-    let (account_keys, header, instructions, recent_blockhash, versioned, address_table_lookups) =
-        match message {
-            VersionedMessage::Legacy(m) => (
-                m.account_keys.as_slice(),
-                m.header,
-                m.instructions.as_slice(),
-                m.recent_blockhash.as_slice(),
-                false,
-                [].as_slice(),
-            ),
-            VersionedMessage::V0(m) => (
-                m.account_keys.as_slice(),
-                m.header,
-                m.instructions.as_slice(),
-                m.recent_blockhash.as_slice(),
-                true,
-                m.address_table_lookups.as_slice(),
-            ),
-        };
+    let (
+        account_keys,
+        header,
+        instructions,
+        recent_blockhash,
+        versioned,
+        address_table_lookups,
+        config,
+    ) = match message {
+        VersionedMessage::Legacy(m) => (
+            m.account_keys.as_slice(),
+            m.header,
+            m.instructions.as_slice(),
+            m.recent_blockhash.as_slice(),
+            false,
+            [].as_slice(),
+            None,
+        ),
+        VersionedMessage::V0(m) => (
+            m.account_keys.as_slice(),
+            m.header,
+            m.instructions.as_slice(),
+            m.recent_blockhash.as_slice(),
+            true,
+            m.address_table_lookups.as_slice(),
+            None,
+        ),
+        // `versioned` stays a bool; a present `config` is what marks v1,
+        // matching solana-rpc/superbank#75. v1 has no lookup tables.
+        VersionedMessage::V1(m) => (
+            m.account_keys.as_slice(),
+            m.header,
+            m.instructions.as_slice(),
+            m.recent_blockhash.as_slice(),
+            true,
+            [].as_slice(),
+            // quick-protobuf has no proto3 presence tracking, so these
+            // flatten to scalars and an unset field is indistinguishable
+            // from zero on this renderer. The prost path and the archive
+            // both keep the Option, which is where presence matters.
+            Some(quick_proto::TransactionConfig {
+                priority_fee: m.config.priority_fee.unwrap_or_default(),
+                compute_unit_limit: m.config.compute_unit_limit.unwrap_or_default(),
+                loaded_accounts_data_size_limit: m
+                    .config
+                    .loaded_accounts_data_size_limit
+                    .unwrap_or_default(),
+                heap_size: m.config.heap_size.unwrap_or_default(),
+            }),
+        ),
+    };
 
     quick_proto::Message {
         header: Some(quick_proto::MessageHeader {
@@ -253,6 +285,7 @@ fn quick_message<'a>(message: &'a VersionedMessage<'a>) -> quick_proto::Message<
             .iter()
             .map(|account_key| Cow::Borrowed(account_key.as_slice()))
             .collect(),
+        config,
         recent_blockhash: Cow::Borrowed(recent_blockhash),
         instructions: instructions
             .iter()
@@ -285,25 +318,50 @@ fn quick_reward(reward: proto::Reward) -> quick_proto::Reward<'static> {
 }
 
 fn proto_transaction(tx: &VersionedTransaction<'_>) -> proto::Transaction {
-    let (account_keys, header, instructions, recent_blockhash, versioned, address_table_lookups) =
-        match &tx.message {
-            VersionedMessage::Legacy(m) => (
-                m.account_keys.clone(),
-                m.header,
-                m.instructions.clone(),
-                m.recent_blockhash,
-                false,
-                Vec::new(),
-            ),
-            VersionedMessage::V0(m) => (
-                m.account_keys.clone(),
-                m.header,
-                m.instructions.clone(),
-                m.recent_blockhash,
-                true,
-                m.address_table_lookups.clone(),
-            ),
-        };
+    let (
+        account_keys,
+        header,
+        instructions,
+        recent_blockhash,
+        versioned,
+        address_table_lookups,
+        config,
+    ) = match &tx.message {
+        VersionedMessage::Legacy(m) => (
+            m.account_keys.clone(),
+            m.header,
+            m.instructions.clone(),
+            m.recent_blockhash,
+            false,
+            Vec::new(),
+            None,
+        ),
+        VersionedMessage::V0(m) => (
+            m.account_keys.clone(),
+            m.header,
+            m.instructions.clone(),
+            m.recent_blockhash,
+            true,
+            m.address_table_lookups.clone(),
+            None,
+        ),
+        // `versioned` stays a bool; a present `config` is what marks v1,
+        // matching solana-rpc/superbank#75. v1 has no lookup tables.
+        VersionedMessage::V1(m) => (
+            m.account_keys.clone(),
+            m.header,
+            m.instructions.clone(),
+            m.recent_blockhash,
+            true,
+            Vec::new(),
+            Some(proto::TransactionConfig {
+                priority_fee: m.config.priority_fee,
+                compute_unit_limit: m.config.compute_unit_limit,
+                loaded_accounts_data_size_limit: m.config.loaded_accounts_data_size_limit,
+                heap_size: m.config.heap_size,
+            }),
+        ),
+    };
 
     proto::Transaction {
         signatures: tx.signatures.iter().map(|s| s.to_vec()).collect(),
@@ -314,6 +372,7 @@ fn proto_transaction(tx: &VersionedTransaction<'_>) -> proto::Transaction {
                 num_readonly_unsigned_accounts: header.num_readonly_unsigned_accounts as u32,
             }),
             account_keys: account_keys.into_iter().map(|a| a.to_vec()).collect(),
+            config,
             recent_blockhash: recent_blockhash.to_vec(),
             instructions: instructions
                 .into_iter()
@@ -333,5 +392,64 @@ fn proto_transaction(tx: &VersionedTransaction<'_>) -> proto::Transaction {
                 })
                 .collect(),
         }),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use of_car_reader::versioned_transaction::{
+        CompiledInstruction, MessageHeader, V1Message, V1TransactionConfig,
+    };
+
+    #[test]
+    fn maps_v1_transaction_config_in_both_protobuf_paths() {
+        let signature = [7; 64];
+        let signer = [1; 32];
+        let program = [2; 32];
+        let recent_blockhash = [9; 32];
+        let transaction = VersionedTransaction {
+            signatures: vec![&signature],
+            message: VersionedMessage::V1(V1Message {
+                header: MessageHeader {
+                    num_required_signatures: 1,
+                    num_readonly_signed_accounts: 0,
+                    num_readonly_unsigned_accounts: 1,
+                },
+                config: V1TransactionConfig {
+                    priority_fee: Some(42),
+                    compute_unit_limit: Some(1_400_000),
+                    loaded_accounts_data_size_limit: Some(65_536),
+                    heap_size: Some(262_144),
+                },
+                account_keys: vec![&signer, &program],
+                recent_blockhash: &recent_blockhash,
+                instructions: vec![CompiledInstruction {
+                    program_id_index: 1,
+                    accounts: vec![0],
+                    data: vec![0xaa, 0xbb, 0xcc],
+                }],
+            }),
+        };
+
+        let prost = proto_transaction(&transaction)
+            .message
+            .expect("prost v1 message");
+        assert!(prost.versioned);
+        assert!(prost.address_table_lookups.is_empty());
+        let prost_config = prost.config.expect("prost v1 config");
+        assert_eq!(prost_config.priority_fee, Some(42));
+        assert_eq!(prost_config.compute_unit_limit, Some(1_400_000));
+        assert_eq!(prost_config.loaded_accounts_data_size_limit, Some(65_536));
+        assert_eq!(prost_config.heap_size, Some(262_144));
+
+        let quick = quick_message(&transaction.message);
+        assert!(quick.versioned);
+        assert!(quick.address_table_lookups.is_empty());
+        let quick_config = quick.config.expect("quick-protobuf v1 config");
+        assert_eq!(quick_config.priority_fee, 42);
+        assert_eq!(quick_config.compute_unit_limit, 1_400_000);
+        assert_eq!(quick_config.loaded_accounts_data_size_limit, 65_536);
+        assert_eq!(quick_config.heap_size, 262_144);
     }
 }

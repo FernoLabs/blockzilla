@@ -1,22 +1,28 @@
 # Blockzilla documentation
 
-Start with the repository [fixture quick start](../README.md#quick-start-build-and-read-the-fixture).
-It is the shortest working path through the project.
+Start with [Archive formats and the read SDK](reference/archive-formats-and-read-sdk.md).
+It is the main product guide for format choice, the common ordered scan API,
+network setup, cache behavior, trust levels, and reader file layouts.
+
+The repository [fixture quick start](../README.md#quick-start-build-and-read-the-fixture)
+is the shortest working path through the project.
 
 Current guides: [Blockzilla CLI](../blockzilla/README.md),
-[supporting services](../services/README.md), the
-[archive format and read SDK guide](reference/archive-formats-and-read-sdk.md),
-and [developer scripts](../scripts/README.md).
+[supporting services](../services/README.md), and
+[developer scripts](../scripts/README.md).
 
-The [token API example](../examples/token-api/README.md) is an older
-format-specific example. It is not the recommended read-SDK starting point.
+The [token API example](../examples/token-api/README.md) is an older,
+format-specific example. It reads Compact V2 wire files directly and is not the
+recommended read-SDK starting point.
 
 ## Implemented reference
 
 - [Archive formats and the read SDK](reference/archive-formats-and-read-sdk.md)
-  defines the stable names, common application model, trust states, and
-  current support boundary for CAR, Compact Archive V2, and Indexer-first
-  Standalone V3.
+  is the common entry point for CAR, Compact V2, Indexer V3, and the
+  `NetworkEpoch` facade.
+- [Blockzilla query SDK guide](guides/blockzilla-query-sdk.md) documents the
+  implemented source-neutral models, request policy, adapters, sinks, and
+  receipts.
 - [Archive V2 hot-block format](reference/archive-v2-hot-block-format.md)
   documents the files and records implemented by `blockzilla-format` and the
   Blockzilla builders.
@@ -44,14 +50,15 @@ format-specific example. It is not the recommended read-SDK starting point.
   parallel executor.
 - [gRPC ledger-projection shadow](operations/grpc-ledger-shadow.md) documents
   the authority-free offline migration canary and its fail-closed alerts.
-- [Archive V2 metadata normalization](operations/archive-v2-metadata-normalization.md)
-  defines the current typed-error format, source authority, offline staging,
-  publication boundary, and recovery rules.
 
 Archive V2 is pre-1.0. Pin the Git revision used to produce and read an archive.
 
 ## Proposed architecture
 
+- [Blockzilla Index Archive](design/blockzilla-index-archive.md): indexer-first
+  replacement for Archive V2 — column planes for replay and filtering, resolved
+  transaction accounts, rebuildable posting indexes, and the migration path
+  from today's V2 generations via an offline column transform.
 - [Rust runtime boundary](architecture/rust-runtime-boundary.md): ownership
   rule for production logic, the narrow external-tool exceptions, and the
   migration order for remaining Python and shell implementations.

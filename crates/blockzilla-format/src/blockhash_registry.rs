@@ -3,92 +3,70 @@ use gxhash::{HashMap as RegistryHashMap, HashMapExt};
 #[cfg(target_arch = "wasm32")]
 use std::collections::HashMap as RegistryHashMap;
 
-/// Hard requirement: we always keep exactly the last 150 blockhashes from previous epoch (if any).
-pub const PREV_TAIL_LEN: usize = 200;
-
-/// Blockhash registry for one epoch + last 150 blockhashes of previous epoch.
+/// Blockhash registry for one epoch.
 ///
-/// Index convention (signed):
-///   >= 0  → current epoch (index in `hashes`)
-/// > <  0  → previous epoch tail
-/// > -1 = last (newest)
-/// > -2 = second last
-/// > ...
-/// > -150 = 150th last
+/// Record 0 is the boundary hash. It is the genesis hash for epoch 0 and the
+/// final registry record from the prior epoch for every later epoch. Produced
+/// blocks start at ID 1 and follow block order.
 #[derive(Debug, Clone)]
 pub struct BlockhashRegistry {
-    /// All blockhashes for the current epoch (in seen order).
+    /// Boundary hash followed by one hash for each produced block.
     pub hashes: Vec<[u8; 32]>,
-    /// Last PREV_TAIL_LEN of previous epoch, oldest → newest, len <= PREV_TAIL_LEN.
-    pub prev_tail: Vec<[u8; 32]>,
-    /// Map blockhash bytes → signed id (>=0 current, <0 previous tail).
+    /// Map blockhash bytes to their non-negative registry ID.
     pub index: RegistryHashMap<[u8; 32], i32>,
 }
 
 impl BlockhashRegistry {
-    pub fn new(hashes: Vec<[u8; 32]>, mut prev_tail: Vec<[u8; 32]>) -> Self {
-        // Enforce invariant: at most PREV_TAIL_LEN.
-        if prev_tail.len() > PREV_TAIL_LEN {
-            prev_tail.drain(0..prev_tail.len() - PREV_TAIL_LEN);
+    pub fn new(hashes: Vec<[u8; 32]>) -> Self {
+        let mut index = RegistryHashMap::with_capacity(hashes.len());
+        for (id, hash) in hashes.iter().enumerate() {
+            let id = i32::try_from(id).expect("blockhash registry ID exceeds i32::MAX");
+            index.insert(*hash, id);
         }
-
-        let mut index = RegistryHashMap::with_capacity(hashes.len() + prev_tail.len());
-
-        // 1) Insert previous-epoch tail with NEGATIVE ids.
-        //
-        // prev_tail is oldest → newest, so:
-        //   newest => -1
-        //   second newest => -2
-        //   ...
-        let m = prev_tail.len();
-        for (i, h) in prev_tail.iter().enumerate() {
-            let id = -((m - i) as i32);
-            index.insert(*h, id);
-        }
-
-        // 2) Insert current epoch with NON-NEGATIVE ids.
-        // If a hash exists in both prev_tail and current epoch, current overwrites (preferred).
-        for (i, h) in hashes.iter().enumerate() {
-            index.insert(*h, i as i32);
-        }
-
-        Self {
-            hashes,
-            prev_tail,
-            index,
-        }
+        Self { hashes, index }
     }
 
     #[inline(always)]
-    pub fn lookup(&self, h: &[u8; 32]) -> Option<i32> {
-        // This checks both current epoch and prev_tail.
-        self.index.get(h).copied()
+    pub fn lookup(&self, hash: &[u8; 32]) -> Option<i32> {
+        self.index.get(hash).copied()
     }
 
     #[inline(always)]
-    pub fn contains(&self, h: &[u8; 32]) -> bool {
-        self.index.contains_key(h)
+    pub fn contains(&self, hash: &[u8; 32]) -> bool {
+        self.index.contains_key(hash)
     }
 
-    /// Resolve a signed id back to a hash.
     #[inline(always)]
     pub fn get(&self, id: i32) -> Option<&[u8; 32]> {
-        if id >= 0 {
-            self.hashes.get(id as usize)
-        } else {
-            let k = (-id) as usize;
-            if k == 0 || k > self.prev_tail.len() {
-                None
-            } else {
-                // -1 => last element (newest)
-                self.prev_tail.get(self.prev_tail.len() - k)
-            }
-        }
+        usize::try_from(id).ok().and_then(|id| self.hashes.get(id))
     }
 
-    /// Returns the previous blockhash id for a current-epoch position.
+    /// Return the blockhash ID for a zero-based produced-block ordinal.
+    #[inline(always)]
+    pub fn block_id_for_pos(pos: u32) -> Option<u32> {
+        pos.checked_add(1)
+    }
+
+    /// Return the previous-blockhash ID for a zero-based block ordinal.
     #[inline(always)]
     pub fn previous_id_for_pos(pos: u32) -> u32 {
-        if pos == 0 { 0 } else { pos - 1 }
+        pos
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn boundary_is_id_zero_and_produced_blocks_start_at_one() {
+        let boundary = [1; 32];
+        let first_block = [2; 32];
+        let registry = BlockhashRegistry::new(vec![boundary, first_block]);
+
+        assert_eq!(registry.lookup(&boundary), Some(0));
+        assert_eq!(registry.lookup(&first_block), Some(1));
+        assert_eq!(BlockhashRegistry::block_id_for_pos(0), Some(1));
+        assert_eq!(BlockhashRegistry::previous_id_for_pos(0), 0);
     }
 }

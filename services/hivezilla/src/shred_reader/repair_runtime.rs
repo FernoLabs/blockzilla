@@ -851,8 +851,8 @@ impl<T: RepairTrust> RepairRuntime<T> {
             self.reject(source, RepairRejectReason::MissingTrustedFecIdentity, poll);
             return Ok(());
         };
-        let actual_root = match shred.merkle_root() {
-            Ok(root) => root,
+        let actual_root: Hash = match shred.merkle_root() {
+            Ok(root) => root.into(),
             Err(error) => {
                 self.reject(
                     source,
@@ -867,7 +867,7 @@ impl<T: RepairTrust> RepairRuntime<T> {
             return Ok(());
         }
         let actual_chained_root = match shred.chained_merkle_root() {
-            Ok(root) => Some(root),
+            Ok(root) => Some(root.into()),
             Err(_) => {
                 self.reject(source, RepairRejectReason::MissingChainedMerkleRoot, poll);
                 return Ok(());
@@ -901,7 +901,7 @@ impl<T: RepairTrust> RepairRuntime<T> {
             trust_anchor_fec_set_index: expected_fec.trust_anchor_fec_set_index,
             learned_chained_merkle_root,
             chained_merkle_root: actual_chained_root,
-            leader_signature: *shred.signature(),
+            leader_signature: (*shred.signature()).into(),
         };
         // Persist before removing the nonce or exposing the shred. A disk error is fatal to this
         // supervised attempt; fresh trust state is required after restart, and no accepted shred
@@ -1005,7 +1005,7 @@ mod tests {
     use solana_keypair::Signer;
     use tempfile::tempdir;
 
-    use super::repair_wal::{RepairWalConfig, RepairWalFsyncPolicy};
+    use super::super::repair_wal::{RepairWalConfig, RepairWalFsyncPolicy};
 
     struct TestTrust {
         peer: RepairPeer,
@@ -1333,7 +1333,7 @@ mod tests {
 
     #[tokio::test]
     async fn answers_only_a_ping_signed_by_the_address_bound_peer() {
-        #[derive(Serialize)]
+        #[derive(Serialize, wincode::SchemaWrite)]
         enum TestRepairResponse {
             Ping(Ping<32>),
         }
@@ -1419,9 +1419,9 @@ mod tests {
             version,
             leader: leader.pubkey(),
             fec: Some(TrustedFecIdentity {
-                merkle_root: shred.merkle_root().unwrap(),
+                merkle_root: shred.merkle_root().unwrap().into(),
                 chained_merkle_root: ChainedMerkleRootExpectation::Exact(
-                    shred.chained_merkle_root().ok(),
+                    shred.chained_merkle_root().ok().map(Into::into),
                 ),
                 trust_anchor_fec_set_index: shred.fec_set_index(),
             }),
@@ -1487,9 +1487,9 @@ mod tests {
         let slot = 123;
         let shred = signed_test_data_shred(slot, 0, version, &leader);
         let fec = TrustedFecIdentity {
-            merkle_root: shred.merkle_root().unwrap(),
+            merkle_root: shred.merkle_root().unwrap().into(),
             chained_merkle_root: ChainedMerkleRootExpectation::Exact(
-                shred.chained_merkle_root().ok(),
+                shred.chained_merkle_root().ok().map(Into::into),
             ),
             trust_anchor_fec_set_index: shred.fec_set_index(),
         };

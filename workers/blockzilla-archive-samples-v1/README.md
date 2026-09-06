@@ -29,13 +29,10 @@ The source has one explicit allowlist:
 ```
 
 An object is not public only because it exists in R2. Its epoch and file name
-must also be in the Worker allowlists. Do not deploy this Worker until every
-object in the allowlist passes the offline format and size checks.
-
-Retained epochs 0 through 800 are not yet uniform. This Worker must not deploy
-until the selected files for all eleven epochs pass the one-current-schema
-policy. The Worker does not detect or select an old metadata schema. Rebuild an
-old archive before you admit it to this bucket.
+must also be in the Worker allowlists. A missing object returns `404`, so the
+bucket can be filled in stages. Upload an object only after it passes the
+offline format and size checks. The Worker does not detect or select an old
+metadata schema. Rebuild an old archive before you upload it.
 
 ## Exact file sets
 

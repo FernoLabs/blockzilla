@@ -16,7 +16,7 @@ base64 = "0.22.1"
 base58-turbo = "0.1.0"
 five8 = "1.0.0"
 js-sys = "0.3.98"
-of-car-reader = { path = "../../crates/old-faithful/car-reader", default-features = false, features = ["compact-index", "zstd-wasm"] }
+of-car-reader = { version = "=0.2.0", default-features = false, features = ["compact-index", "zstd-wasm"] }
 of-slot-ranges = { path = "../../crates/old-faithful/slot-ranges", default-features = false }
 prost = "0.14.3"
 quick-protobuf = "0.8.1"
@@ -24,5 +24,5 @@ ryu = "1.0.23"
 serde = { version = "1.0.228", features = ["derive"] }
 serde_json = "1.0.149"
 wasm-bindgen = "0.2.121"
-wincode = "=0.5.5"
+wincode = "=0.6.1"
 worker = { version = "0.8.3", features = ["http"] }

@@ -598,12 +598,10 @@ fn fec_identity(shred: &Shred, payload: &[u8]) -> Result<FecIdentity> {
         leader_signature,
         merkle_root: shred
             .merkle_root()
-            .map_err(|error| anyhow::anyhow!("derive shred Merkle root: {error:?}"))?
-            .to_bytes(),
+            .map_err(|error| anyhow::anyhow!("derive shred Merkle root: {error:?}"))?,
         chained_merkle_root: shred
             .chained_merkle_root()
-            .map_err(|error| anyhow::anyhow!("derive chained shred Merkle root: {error:?}"))?
-            .to_bytes(),
+            .map_err(|error| anyhow::anyhow!("derive chained shred Merkle root: {error:?}"))?,
         proof_size: variant & 0x0f,
         resigned: matches!(variant & 0xf0, 0x70 | 0xb0),
     })

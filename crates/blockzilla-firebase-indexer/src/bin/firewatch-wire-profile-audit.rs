@@ -34,8 +34,8 @@ use blockzilla_format::{
     ARCHIVE_V2_SIGNATURES_FILE,
 };
 #[cfg(test)]
-use blockzilla_read_sdk::WireProfileAuditOutcome;
-use blockzilla_read_sdk::{
+use blockzilla_read_sdk_legacy::WireProfileAuditOutcome;
+use blockzilla_read_sdk_legacy::{
     ArchiveReader, ArchiveV2MetadataWireProfile, ArchiveV2WireProfile, Error as ArchiveReaderError,
     HashVerification, OpenOptions, PinnedLocalRangeSource, audit_full_generation_wire_profile,
     manifest::TrustedGenerationIdentity, validate_pinned_local_registry_index_mapping,
@@ -410,7 +410,7 @@ fn validate_canonical_registry_evidence(
     source: &PinnedLocalRangeSource,
     reader: &ArchiveReader<PinnedLocalRangeSource>,
     capture: &GenerationCapture,
-) -> Result<blockzilla_read_sdk::LocalRegistryIndexValidation> {
+) -> Result<blockzilla_read_sdk_legacy::LocalRegistryIndexValidation> {
     let registry = capture
         .selected_archive_files
         .get(ARCHIVE_V2_PUBKEY_REGISTRY_FILE)
@@ -1360,7 +1360,7 @@ mod tests {
                 profile: ArchiveV2WireProfile::PreUnknownInstructionFallbacksV1,
                 slot: 1,
                 tx_index: 2,
-                source: blockzilla_read_sdk::MessageProjectionError::TrailingBytes(1),
+                source: blockzilla_read_sdk_legacy::MessageProjectionError::TrailingBytes(1),
             },
         )
         .context("outer context");

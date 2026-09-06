@@ -23,7 +23,7 @@ use blockzilla_format::{
     ARCHIVE_V2_PUBKEY_REGISTRY_FILE, ARCHIVE_V2_PUBKEY_REGISTRY_INDEX_FILE,
     ARCHIVE_V2_SIGNATURES_FILE,
 };
-use blockzilla_read_sdk::{
+use blockzilla_read_sdk_legacy::{
     ArchiveReader, ArchiveV2MetadataWireProfile, ArchiveV2PublicationLock, ArchiveV2WireProfile,
     FullGenerationWireProfileAudit, HashVerification, OpenOptions as ReaderOpenOptions,
     PinnedLocalRangeSource, UnprovenWireProfileDecision, acquire_archive_v2_publication_lock,

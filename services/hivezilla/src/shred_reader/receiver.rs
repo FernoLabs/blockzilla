@@ -19,10 +19,12 @@ use solana_gossip::{
 };
 use solana_keypair::Signer;
 use solana_ledger_compat::Shred;
+// The address-space types come from our gossip fork so both sides agree on one
+// type; the reachability helpers still come from solana-net-utils.
+use solana_gossip::net::{BindIpAddrs, SocketAddrSpace};
 use solana_net_utils::{
-    SocketAddrSpace, get_cluster_shred_version_with_binding, get_public_ip_addr_with_binding,
-    ip_echo_server, multihomed_sockets::BindIpAddrs, verify_all_reachable_tcp,
-    verify_all_reachable_udp,
+    get_cluster_shred_version_with_binding, get_public_ip_addr_with_binding, ip_echo_server,
+    verify_all_reachable_tcp, verify_all_reachable_udp,
 };
 use tokio::{
     sync::{mpsc, watch},

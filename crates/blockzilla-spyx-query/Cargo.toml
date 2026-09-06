@@ -34,7 +34,7 @@ tokio = { version = "1.52.3", features = ["macros", "net", "rt-multi-thread", "s
 tower-http = { version = "0.6.8", features = ["cors", "fs", "trace"] }
 tracing = "0.1.44"
 tracing-subscriber = { version = "0.3.23", features = ["env-filter"] }
-wincode = { version = "=0.5.5", features = ["derive"] }
+wincode = { version = "=0.6.1", features = ["derive"] }
 
 [dependencies.reqwest]
 version = "0.13.3"

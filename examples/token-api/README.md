@@ -4,35 +4,10 @@
 serves Birdeye-shaped HTTP routes. It is an experimental example, not a
 supported market-data service or part of Blockzilla's archive contract.
 
-This example reads Compact V2 wire objects directly. It predates the
-source-neutral read interface and is not the recommended SDK example. New
-examples must keep archive decoding, registry resolution, decompression, and
-transport policy inside a reader adapter. See the
-[archive format and read SDK guide](../../docs/reference/archive-formats-and-read-sdk.md).
-
-This code is made as a learning entrypoint. It is built for clarity.
-Use it as a first parser step, then replace pieces for production work.
-
-## Add a parser (simple path)
-
-The parser flow is small:
-
-1. Read a decoded block.
-2. Read one transaction metadata and balance changes.
-3. Pass a transaction context to registered decoders.
-4. Write found `SwapRecord` rows.
-
-To add a new parser today:
-
-- Add a new `DexProgramSpec` entry in
-  `src/dex.rs::DEFAULT_DEX_PROGRAMS` if you want a known DEX ID.
-- Add a decoder that implements `DexDecoder`.
-- Register that decoder from `DexRegistry::new` or `indexer::index_archive_v2`
-  before `process_tx` runs.
-
-For a very simple first parser, start with `BalanceDeltaDexDecoder` style:
-use token owner net deltas and emit a swap when one account has two
-non-zero mint deltas that move in opposite directions.
+This older example reads Compact V2 wire files directly. It does not use the
+common archive read SDK and is not the recommended SDK example. Start with
+[Archive formats and the read SDK](../../docs/reference/archive-formats-and-read-sdk.md)
+and the [archive token-event example](../archive-token-events/README.md).
 
 ## Run
 

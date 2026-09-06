@@ -8,7 +8,14 @@ use wincode::{
     io::{Reader, Writer},
 };
 
-use crate::KeyStore;
+/// Resolves one-based public-key registry identifiers.
+///
+/// Implementations can keep keys in memory or read one 32-byte record from an
+/// immutable registry file. Identifier zero is reserved for inline keys and
+/// must return `None`.
+pub trait PubkeyResolver {
+    fn resolve_pubkey(&self, id: u32) -> Option<[u8; 32]>;
+}
 
 /// Compact pubkey reference.
 ///
@@ -36,16 +43,16 @@ impl CompactPubkey {
     }
 
     #[inline]
-    pub fn resolve(self, store: &KeyStore) -> Option<[u8; 32]> {
+    pub fn resolve<R: PubkeyResolver + ?Sized>(self, resolver: &R) -> Option<[u8; 32]> {
         match self {
-            Self::Id(id) => store.get(id).copied(),
+            Self::Id(id) => resolver.resolve_pubkey(id),
             Self::Raw(pubkey) => Some(pubkey),
         }
     }
 
     #[inline]
-    pub fn to_pubkey(self, store: &KeyStore) -> Option<Pubkey> {
-        self.resolve(store).map(Pubkey::new_from_array)
+    pub fn to_pubkey<R: PubkeyResolver + ?Sized>(self, resolver: &R) -> Option<Pubkey> {
+        self.resolve(resolver).map(Pubkey::new_from_array)
     }
 }
 

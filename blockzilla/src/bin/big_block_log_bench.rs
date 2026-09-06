@@ -329,6 +329,11 @@ fn collect_tx_keys(tx: &VersionedTransaction<'_>, out: &mut FixtureLogs) {
                 out.record_key(*lookup.account_key);
             }
         }
+        VersionedMessage::V1(message) => {
+            for key in &message.account_keys {
+                out.record_key(**key);
+            }
+        }
     }
 }
 

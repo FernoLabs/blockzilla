@@ -13,5 +13,5 @@ separate package or directory. In the target architecture, Blockzilla remains
 the only canonical catalog authority; a fenced Hivezilla worker performs the
 physical archive build and upload.
 
-Operational apps (including the watcher web UI) are placed in [`../apps/`](../apps/)
-for deployment outside this services-only boundary.
+Cloudflare Workers are placed in [`../workers/`](../workers/) for deployment
+outside this services-only boundary.

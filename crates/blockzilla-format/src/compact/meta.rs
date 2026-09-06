@@ -12,7 +12,7 @@ use solana_pubkey::Pubkey;
 use std::str::FromStr;
 use wincode::{SchemaRead, SchemaWrite};
 
-use crate::{CompactLogStream, CompactPubkey, KeyIndex};
+use crate::{CompactLogReuse, CompactLogStream, CompactPubkey, KeyIndex};
 
 #[derive(Debug, Serialize, Deserialize, SchemaRead, SchemaWrite)]
 pub struct CompactMetaV1 {
@@ -377,6 +377,224 @@ pub struct CompactReward {
     pub commission: Option<u8>,
 }
 
+/// Reusable allocation storage for protobuf metadata compaction.
+///
+/// Keep one value per worker. After the compact metadata has been encoded or
+/// otherwise consumed, pass it to [`Self::recycle`]. A later decode can then
+/// reuse its top-level vectors, inner-instruction vectors, return-data buffer,
+/// and compact-log storage without synchronization.
+#[derive(Debug)]
+pub struct CompactMetaReuse {
+    pre_balances: Vec<u64>,
+    post_balances: Vec<u64>,
+    inner_instructions: Vec<CompactInnerInstructions>,
+    inner_instruction_lists: Vec<Vec<CompactInnerInstruction>>,
+    inner_instruction_accounts: Vec<Vec<u8>>,
+    inner_instruction_data: Vec<Vec<u8>>,
+    log_message_ranges: Vec<(usize, usize)>,
+    pre_token_balances: Vec<CompactTokenBalance>,
+    post_token_balances: Vec<CompactTokenBalance>,
+    rewards: Vec<CompactReward>,
+    loaded_writable_addresses: Vec<CompactPubkey>,
+    loaded_readonly_addresses: Vec<CompactPubkey>,
+    return_data: Vec<u8>,
+    logs: CompactLogReuse,
+    max_retained_buffer_bytes: usize,
+}
+
+/// Default limit for one retained metadata buffer.
+///
+/// The limit applies to each top-level vector. A nested vector pool is also
+/// discarded if its total retained capacity exceeds this limit.
+pub const DEFAULT_COMPACT_META_MAX_RETAINED_BUFFER_BYTES: usize = 1024 * 1024;
+
+impl Default for CompactMetaReuse {
+    fn default() -> Self {
+        Self::with_max_retained_buffer_bytes(DEFAULT_COMPACT_META_MAX_RETAINED_BUFFER_BYTES)
+    }
+}
+
+impl CompactMetaReuse {
+    pub fn new() -> Self {
+        Self::default()
+    }
+
+    pub fn with_max_retained_buffer_bytes(max_retained_buffer_bytes: usize) -> Self {
+        Self {
+            pre_balances: Vec::new(),
+            post_balances: Vec::new(),
+            inner_instructions: Vec::new(),
+            inner_instruction_lists: Vec::new(),
+            inner_instruction_accounts: Vec::new(),
+            inner_instruction_data: Vec::new(),
+            log_message_ranges: Vec::new(),
+            pre_token_balances: Vec::new(),
+            post_token_balances: Vec::new(),
+            rewards: Vec::new(),
+            loaded_writable_addresses: Vec::new(),
+            loaded_readonly_addresses: Vec::new(),
+            return_data: Vec::new(),
+            logs: CompactLogReuse::with_max_retained_buffer_bytes(max_retained_buffer_bytes),
+            max_retained_buffer_bytes,
+        }
+    }
+
+    /// Returns already-consumed compact metadata to this reuse slot.
+    pub fn recycle(&mut self, mut meta: CompactMetaV1) {
+        retain_meta_vec(
+            &mut self.pre_balances,
+            meta.pre_balances,
+            self.max_retained_buffer_bytes,
+        );
+        retain_meta_vec(
+            &mut self.post_balances,
+            meta.post_balances,
+            self.max_retained_buffer_bytes,
+        );
+        if let Some(inner_instructions) = meta.inner_instructions.take() {
+            self.recycle_inner_instructions(inner_instructions);
+        }
+        if let Some(logs) = meta.logs.take() {
+            self.logs.recycle(logs);
+        }
+        retain_meta_vec(
+            &mut self.pre_token_balances,
+            meta.pre_token_balances,
+            self.max_retained_buffer_bytes,
+        );
+        retain_meta_vec(
+            &mut self.post_token_balances,
+            meta.post_token_balances,
+            self.max_retained_buffer_bytes,
+        );
+        retain_meta_vec(
+            &mut self.rewards,
+            meta.rewards,
+            self.max_retained_buffer_bytes,
+        );
+        retain_meta_vec(
+            &mut self.loaded_writable_addresses,
+            meta.loaded_writable_addresses,
+            self.max_retained_buffer_bytes,
+        );
+        retain_meta_vec(
+            &mut self.loaded_readonly_addresses,
+            meta.loaded_readonly_addresses,
+            self.max_retained_buffer_bytes,
+        );
+        if let Some(return_data) = meta.return_data.take() {
+            retain_meta_vec(
+                &mut self.return_data,
+                return_data.data,
+                self.max_retained_buffer_bytes,
+            );
+        }
+    }
+
+    /// Total capacity, in bytes, currently retained by this reuse slot.
+    pub fn retained_capacity_bytes(&self) -> usize {
+        let inner_list_bytes = meta_vec_pool_bytes(&self.inner_instruction_lists);
+        let inner_account_bytes = meta_vec_pool_bytes(&self.inner_instruction_accounts);
+        let inner_data_bytes = meta_vec_pool_bytes(&self.inner_instruction_data);
+
+        meta_vec_bytes(&self.pre_balances)
+            .saturating_add(meta_vec_bytes(&self.post_balances))
+            .saturating_add(meta_vec_bytes(&self.inner_instructions))
+            .saturating_add(inner_list_bytes)
+            .saturating_add(inner_account_bytes)
+            .saturating_add(inner_data_bytes)
+            .saturating_add(meta_vec_bytes(&self.log_message_ranges))
+            .saturating_add(meta_vec_bytes(&self.pre_token_balances))
+            .saturating_add(meta_vec_bytes(&self.post_token_balances))
+            .saturating_add(meta_vec_bytes(&self.rewards))
+            .saturating_add(meta_vec_bytes(&self.loaded_writable_addresses))
+            .saturating_add(meta_vec_bytes(&self.loaded_readonly_addresses))
+            .saturating_add(meta_vec_bytes(&self.return_data))
+            .saturating_add(self.logs.retained_capacity_bytes())
+    }
+
+    fn recycle_inner_instructions(
+        &mut self,
+        mut inner_instructions: Vec<CompactInnerInstructions>,
+    ) {
+        for group in inner_instructions.drain(..) {
+            let mut instructions = group.instructions;
+            for instruction in instructions.drain(..) {
+                retain_meta_vec_in_pool(
+                    &mut self.inner_instruction_accounts,
+                    instruction.accounts,
+                    self.max_retained_buffer_bytes,
+                );
+                retain_meta_vec_in_pool(
+                    &mut self.inner_instruction_data,
+                    instruction.data,
+                    self.max_retained_buffer_bytes,
+                );
+            }
+            retain_meta_vec_in_pool(
+                &mut self.inner_instruction_lists,
+                instructions,
+                self.max_retained_buffer_bytes,
+            );
+        }
+        retain_meta_vec(
+            &mut self.inner_instructions,
+            inner_instructions,
+            self.max_retained_buffer_bytes,
+        );
+        trim_meta_vec_pool(
+            &mut self.inner_instruction_lists,
+            self.max_retained_buffer_bytes,
+        );
+        trim_meta_vec_pool(
+            &mut self.inner_instruction_accounts,
+            self.max_retained_buffer_bytes,
+        );
+        trim_meta_vec_pool(
+            &mut self.inner_instruction_data,
+            self.max_retained_buffer_bytes,
+        );
+    }
+}
+
+#[inline]
+fn meta_vec_bytes<T>(values: &Vec<T>) -> usize {
+    values.capacity().saturating_mul(std::mem::size_of::<T>())
+}
+
+#[inline]
+fn retain_meta_vec<T>(slot: &mut Vec<T>, mut values: Vec<T>, max_bytes: usize) {
+    values.clear();
+    if meta_vec_bytes(&values) > max_bytes {
+        return;
+    }
+    if values.capacity() > slot.capacity() {
+        *slot = values;
+    }
+}
+
+#[inline]
+fn retain_meta_vec_in_pool<T>(pool: &mut Vec<Vec<T>>, mut values: Vec<T>, max_bytes: usize) {
+    values.clear();
+    if meta_vec_bytes(&values) <= max_bytes {
+        pool.push(values);
+    }
+}
+
+#[inline]
+fn trim_meta_vec_pool<T>(pool: &mut Vec<Vec<T>>, max_bytes: usize) {
+    if meta_vec_pool_bytes(pool) > max_bytes {
+        *pool = Vec::new();
+    }
+}
+
+#[inline]
+fn meta_vec_pool_bytes<T>(pool: &Vec<Vec<T>>) -> usize {
+    pool.iter().fold(meta_vec_bytes(pool), |total, values| {
+        total.saturating_add(meta_vec_bytes(values))
+    })
+}
+
 pub fn compact_meta_from_proto(
     meta: &of_car_reader::confirmed_block::TransactionStatusMeta,
     index: &KeyIndex,
@@ -485,7 +703,20 @@ pub fn compact_meta_from_proto(
 }
 
 pub fn compact_meta_from_protobuf_visit(bytes: &[u8], index: &KeyIndex) -> Result<CompactMetaV1> {
-    let mut visitor = CompactMetaVisitor::new(index);
+    let mut reuse = CompactMetaReuse::new();
+    compact_meta_from_protobuf_visit_reusing(bytes, index, &mut reuse)
+}
+
+/// Compacts protobuf metadata with caller-owned reusable allocation storage.
+///
+/// The returned metadata owns its vectors. Call [`CompactMetaReuse::recycle`]
+/// after the metadata has been encoded or otherwise consumed.
+pub fn compact_meta_from_protobuf_visit_reusing(
+    bytes: &[u8],
+    index: &KeyIndex,
+    reuse: &mut CompactMetaReuse,
+) -> Result<CompactMetaV1> {
+    let mut visitor = CompactMetaVisitor::new(bytes, index, reuse);
     visit_protobuf_transaction_status_meta(bytes, &mut visitor)
         .map_err(|err| anyhow::anyhow!("protobuf visit: {err}"))?;
     visitor.finish()
@@ -506,46 +737,67 @@ fn reserve_on_first<T>(values: &mut Vec<T>, additional: usize) {
     }
 }
 
-struct CompactMetaVisitor<'index, 'metadata> {
+struct CompactMetaVisitor<'index, 'metadata, 'reuse> {
+    metadata: &'metadata [u8],
     index: &'index KeyIndex,
+    reuse: &'reuse mut CompactMetaReuse,
     err: Option<CompactTransactionError>,
     fee: u64,
     pre_balances: Vec<u64>,
     post_balances: Vec<u64>,
     inner_instructions: Vec<CompactInnerInstructions>,
     inner_instructions_none: bool,
-    log_messages: Vec<&'metadata str>,
+    log_message_ranges: Vec<(usize, usize)>,
     log_messages_none: bool,
     pre_token_balances: Vec<CompactTokenBalance>,
     post_token_balances: Vec<CompactTokenBalance>,
     rewards: Vec<CompactReward>,
     loaded_writable_addresses: Vec<CompactPubkey>,
     loaded_readonly_addresses: Vec<CompactPubkey>,
-    return_data: Option<CompactReturnData>,
+    return_data_program_id: Option<CompactPubkey>,
+    return_data: Vec<u8>,
     return_data_none: bool,
     compute_units_consumed: Option<u64>,
     cost_units: Option<u64>,
     error: Option<anyhow::Error>,
 }
 
-impl<'index, 'metadata> CompactMetaVisitor<'index, 'metadata> {
-    fn new(index: &'index KeyIndex) -> Self {
+impl<'index, 'metadata, 'reuse> CompactMetaVisitor<'index, 'metadata, 'reuse> {
+    fn new(
+        metadata: &'metadata [u8],
+        index: &'index KeyIndex,
+        reuse: &'reuse mut CompactMetaReuse,
+    ) -> Self {
+        let pre_balances = std::mem::take(&mut reuse.pre_balances);
+        let post_balances = std::mem::take(&mut reuse.post_balances);
+        let inner_instructions = std::mem::take(&mut reuse.inner_instructions);
+        let log_message_ranges = std::mem::take(&mut reuse.log_message_ranges);
+        let pre_token_balances = std::mem::take(&mut reuse.pre_token_balances);
+        let post_token_balances = std::mem::take(&mut reuse.post_token_balances);
+        let rewards = std::mem::take(&mut reuse.rewards);
+        let loaded_writable_addresses = std::mem::take(&mut reuse.loaded_writable_addresses);
+        let loaded_readonly_addresses = std::mem::take(&mut reuse.loaded_readonly_addresses);
+        let return_data = std::mem::take(&mut reuse.return_data);
+
         Self {
+            metadata,
             index,
+            reuse,
             err: None,
             fee: 0,
-            pre_balances: Vec::new(),
-            post_balances: Vec::new(),
-            inner_instructions: Vec::new(),
+            pre_balances,
+            post_balances,
+            inner_instructions,
             inner_instructions_none: false,
-            log_messages: Vec::new(),
+            log_message_ranges,
             log_messages_none: false,
-            pre_token_balances: Vec::new(),
-            post_token_balances: Vec::new(),
-            rewards: Vec::new(),
-            loaded_writable_addresses: Vec::new(),
-            loaded_readonly_addresses: Vec::new(),
-            return_data: None,
+            pre_token_balances,
+            post_token_balances,
+            rewards,
+            loaded_writable_addresses,
+            loaded_readonly_addresses,
+            return_data_program_id: None,
+            return_data,
             return_data_none: false,
             compute_units_consumed: None,
             cost_units: None,
@@ -559,42 +811,55 @@ impl<'index, 'metadata> CompactMetaVisitor<'index, 'metadata> {
         }
     }
 
-    fn finish(self) -> Result<CompactMetaV1> {
-        if let Some(err) = self.error {
+    fn finish(&mut self) -> Result<CompactMetaV1> {
+        if let Some(err) = self.error.take() {
             return Err(err);
         }
 
         let inner_instructions = if self.inner_instructions_none {
             None
         } else {
-            Some(self.inner_instructions)
+            Some(std::mem::take(&mut self.inner_instructions))
         };
         let logs = if self.log_messages_none {
             None
         } else {
-            Some(crate::log::parse_log_strs_with_compactor(
-                &self.log_messages,
+            let metadata = self.metadata;
+            let lines = self.log_message_ranges.iter().map(|&(start, end)| {
+                std::str::from_utf8(&metadata[start..end])
+                    .expect("protobuf visitor supplied valid utf-8 log text")
+            });
+            Some(crate::log::parse_log_iter_with_compactor_reusing(
+                lines,
+                self.log_message_ranges.len(),
                 self.index,
+                None,
+                &mut self.reuse.logs,
             ))
         };
         let return_data = if self.return_data_none {
             None
         } else {
-            self.return_data
+            self.return_data_program_id
+                .take()
+                .map(|program_id| CompactReturnData {
+                    program_id,
+                    data: std::mem::take(&mut self.return_data),
+                })
         };
 
         Ok(CompactMetaV1 {
-            err: self.err,
+            err: self.err.take(),
             fee: self.fee,
-            pre_balances: self.pre_balances,
-            post_balances: self.post_balances,
+            pre_balances: std::mem::take(&mut self.pre_balances),
+            post_balances: std::mem::take(&mut self.post_balances),
             inner_instructions,
             logs,
-            pre_token_balances: self.pre_token_balances,
-            post_token_balances: self.post_token_balances,
-            rewards: self.rewards,
-            loaded_writable_addresses: self.loaded_writable_addresses,
-            loaded_readonly_addresses: self.loaded_readonly_addresses,
+            pre_token_balances: std::mem::take(&mut self.pre_token_balances),
+            post_token_balances: std::mem::take(&mut self.post_token_balances),
+            rewards: std::mem::take(&mut self.rewards),
+            loaded_writable_addresses: std::mem::take(&mut self.loaded_writable_addresses),
+            loaded_readonly_addresses: std::mem::take(&mut self.loaded_readonly_addresses),
             return_data,
             compute_units_consumed: self.compute_units_consumed,
             cost_units: self.cost_units,
@@ -602,8 +867,60 @@ impl<'index, 'metadata> CompactMetaVisitor<'index, 'metadata> {
     }
 }
 
-impl<'index, 'metadata> TransactionStatusMetaVisitor<'metadata>
-    for CompactMetaVisitor<'index, 'metadata>
+impl Drop for CompactMetaVisitor<'_, '_, '_> {
+    fn drop(&mut self) {
+        self.reuse
+            .recycle_inner_instructions(std::mem::take(&mut self.inner_instructions));
+        retain_meta_vec(
+            &mut self.reuse.pre_balances,
+            std::mem::take(&mut self.pre_balances),
+            self.reuse.max_retained_buffer_bytes,
+        );
+        retain_meta_vec(
+            &mut self.reuse.post_balances,
+            std::mem::take(&mut self.post_balances),
+            self.reuse.max_retained_buffer_bytes,
+        );
+        retain_meta_vec(
+            &mut self.reuse.log_message_ranges,
+            std::mem::take(&mut self.log_message_ranges),
+            self.reuse.max_retained_buffer_bytes,
+        );
+        retain_meta_vec(
+            &mut self.reuse.pre_token_balances,
+            std::mem::take(&mut self.pre_token_balances),
+            self.reuse.max_retained_buffer_bytes,
+        );
+        retain_meta_vec(
+            &mut self.reuse.post_token_balances,
+            std::mem::take(&mut self.post_token_balances),
+            self.reuse.max_retained_buffer_bytes,
+        );
+        retain_meta_vec(
+            &mut self.reuse.rewards,
+            std::mem::take(&mut self.rewards),
+            self.reuse.max_retained_buffer_bytes,
+        );
+        retain_meta_vec(
+            &mut self.reuse.loaded_writable_addresses,
+            std::mem::take(&mut self.loaded_writable_addresses),
+            self.reuse.max_retained_buffer_bytes,
+        );
+        retain_meta_vec(
+            &mut self.reuse.loaded_readonly_addresses,
+            std::mem::take(&mut self.loaded_readonly_addresses),
+            self.reuse.max_retained_buffer_bytes,
+        );
+        retain_meta_vec(
+            &mut self.reuse.return_data,
+            std::mem::take(&mut self.return_data),
+            self.reuse.max_retained_buffer_bytes,
+        );
+    }
+}
+
+impl<'index, 'metadata, 'reuse> TransactionStatusMetaVisitor<'metadata>
+    for CompactMetaVisitor<'index, 'metadata, 'reuse>
 {
     #[inline]
     fn wants_status_error(&self) -> bool {
@@ -691,19 +1008,35 @@ impl<'index, 'metadata> TransactionStatusMetaVisitor<'metadata>
                 &mut self.inner_instructions,
                 INNER_INSTRUCTION_GROUPS_RESERVE,
             );
+            let mut instructions = self
+                .reuse
+                .inner_instruction_lists
+                .pop()
+                .unwrap_or_else(|| Vec::with_capacity(INNER_INSTRUCTIONS_PER_GROUP_RESERVE));
+            instructions.clear();
             self.inner_instructions.push(CompactInnerInstructions {
                 index: instruction.outer_instruction_index,
-                instructions: Vec::with_capacity(INNER_INSTRUCTIONS_PER_GROUP_RESERVE),
+                instructions,
             });
         }
 
         let Some(group) = self.inner_instructions.last_mut() else {
             return;
         };
+        let mut accounts = self
+            .reuse
+            .inner_instruction_accounts
+            .pop()
+            .unwrap_or_default();
+        accounts.clear();
+        accounts.extend_from_slice(instruction.accounts);
+        let mut data = self.reuse.inner_instruction_data.pop().unwrap_or_default();
+        data.clear();
+        data.extend_from_slice(instruction.data);
         group.instructions.push(CompactInnerInstruction {
             program_id_index: instruction.program_id_index,
-            accounts: instruction.accounts.to_vec(),
-            data: instruction.data.to_vec(),
+            accounts,
+            data,
             stack_height: instruction.stack_height,
         });
     }
@@ -715,8 +1048,31 @@ impl<'index, 'metadata> TransactionStatusMetaVisitor<'metadata>
 
     #[inline]
     fn log_message(&mut self, message: &'metadata str) {
-        reserve_on_first(&mut self.log_messages, LOG_MESSAGES_RESERVE);
-        self.log_messages.push(message);
+        reserve_on_first(&mut self.log_message_ranges, LOG_MESSAGES_RESERVE);
+        if message.is_empty() {
+            self.log_message_ranges.push((0, 0));
+            return;
+        }
+
+        let metadata_start = self.metadata.as_ptr() as usize;
+        let message_start = message.as_ptr() as usize;
+        let Some(start) = message_start.checked_sub(metadata_start) else {
+            self.record_error(anyhow::anyhow!(
+                "protobuf log text is outside the metadata input"
+            ));
+            return;
+        };
+        let Some(end) = start.checked_add(message.len()) else {
+            self.record_error(anyhow::anyhow!("protobuf log text range overflow"));
+            return;
+        };
+        if end > self.metadata.len() {
+            self.record_error(anyhow::anyhow!(
+                "protobuf log text is outside the metadata input"
+            ));
+            return;
+        }
+        self.log_message_ranges.push((start, end));
     }
 
     #[inline]
@@ -792,10 +1148,9 @@ impl<'index, 'metadata> TransactionStatusMetaVisitor<'metadata>
     fn return_data(&mut self, return_data: ReturnDataVisit<'metadata>) {
         match return_data.program_id.try_into() {
             Ok(program_id) => {
-                self.return_data = Some(CompactReturnData {
-                    program_id: self.index.compact(program_id),
-                    data: return_data.data.to_vec(),
-                });
+                self.return_data_program_id = Some(self.index.compact(program_id));
+                self.return_data.clear();
+                self.return_data.extend_from_slice(return_data.data);
             }
             Err(_) => self.record_error(anyhow::anyhow!(
                 "invalid return data program id len {}",
@@ -1081,5 +1436,133 @@ mod tests {
         meta.log_messages.clear();
         meta.log_messages_none = false;
         assert_protobuf_visitor_matches_owned(&meta, &index);
+    }
+
+    #[test]
+    fn metadata_reuse_preserves_output_and_reuses_nested_allocations() {
+        let (meta, index) = representative_log_metadata();
+        let protobuf = meta.encode_to_vec();
+        let expected =
+            compact_meta_from_protobuf_visit(&protobuf, &index).expect("compact expected metadata");
+        let expected_bytes = wincode::serialize(&expected).expect("serialize expected metadata");
+        let mut reuse = CompactMetaReuse::new();
+
+        let first = compact_meta_from_protobuf_visit_reusing(&protobuf, &index, &mut reuse)
+            .expect("first reusable metadata decode");
+        assert_eq!(
+            wincode::serialize(&first).expect("serialize first reusable metadata"),
+            expected_bytes
+        );
+        let pre_balances_ptr = first.pre_balances.as_ptr();
+        let inner_instructions = first
+            .inner_instructions
+            .as_ref()
+            .expect("representative inner instructions");
+        let inner_groups_ptr = inner_instructions.as_ptr();
+        let inner_list_ptr = inner_instructions[0].instructions.as_ptr();
+        let mut account_ptrs = inner_instructions[0]
+            .instructions
+            .iter()
+            .map(|instruction| instruction.accounts.as_ptr() as usize)
+            .collect::<Vec<_>>();
+        account_ptrs.sort_unstable();
+        let mut data_ptrs = inner_instructions[0]
+            .instructions
+            .iter()
+            .map(|instruction| instruction.data.as_ptr() as usize)
+            .collect::<Vec<_>>();
+        data_ptrs.sort_unstable();
+        let log_events_ptr = first
+            .logs
+            .as_ref()
+            .expect("representative logs")
+            .events
+            .as_ptr();
+        let return_data_ptr = first
+            .return_data
+            .as_ref()
+            .expect("representative return data")
+            .data
+            .as_ptr();
+        let log_range_ptr = reuse.log_message_ranges.as_ptr();
+        reuse.recycle(first);
+        assert!(reuse.retained_capacity_bytes() > 0);
+
+        let second = compact_meta_from_protobuf_visit_reusing(&protobuf, &index, &mut reuse)
+            .expect("second reusable metadata decode");
+        assert_eq!(
+            wincode::serialize(&second).expect("serialize second reusable metadata"),
+            expected_bytes
+        );
+        assert_eq!(second.pre_balances.as_ptr(), pre_balances_ptr);
+        let second_inner = second
+            .inner_instructions
+            .as_ref()
+            .expect("second representative inner instructions");
+        assert_eq!(second_inner.as_ptr(), inner_groups_ptr);
+        assert_eq!(second_inner[0].instructions.as_ptr(), inner_list_ptr);
+        let mut second_account_ptrs = second_inner[0]
+            .instructions
+            .iter()
+            .map(|instruction| instruction.accounts.as_ptr() as usize)
+            .collect::<Vec<_>>();
+        second_account_ptrs.sort_unstable();
+        assert_eq!(second_account_ptrs, account_ptrs);
+        let mut second_data_ptrs = second_inner[0]
+            .instructions
+            .iter()
+            .map(|instruction| instruction.data.as_ptr() as usize)
+            .collect::<Vec<_>>();
+        second_data_ptrs.sort_unstable();
+        assert_eq!(second_data_ptrs, data_ptrs);
+        assert_eq!(
+            second.logs.as_ref().expect("second logs").events.as_ptr(),
+            log_events_ptr
+        );
+        assert_eq!(
+            second
+                .return_data
+                .as_ref()
+                .expect("second return data")
+                .data
+                .as_ptr(),
+            return_data_ptr
+        );
+        assert_eq!(reuse.log_message_ranges.as_ptr(), log_range_ptr);
+    }
+
+    #[test]
+    fn metadata_reuse_discards_oversized_buffers() {
+        let (meta, index) = representative_log_metadata();
+        let protobuf = meta.encode_to_vec();
+        let mut reuse = CompactMetaReuse::with_max_retained_buffer_bytes(32);
+        let compact = compact_meta_from_protobuf_visit_reusing(&protobuf, &index, &mut reuse)
+            .expect("compact metadata");
+
+        reuse.recycle(compact);
+
+        assert_eq!(reuse.pre_balances.capacity(), 0);
+        assert_eq!(reuse.post_balances.capacity(), 0);
+        assert!(
+            reuse
+                .inner_instruction_lists
+                .iter()
+                .all(|values| meta_vec_bytes(values) <= 32)
+        );
+        assert!(meta_vec_pool_bytes(&reuse.inner_instruction_lists) <= 32);
+        assert!(
+            reuse
+                .inner_instruction_accounts
+                .iter()
+                .all(|values| meta_vec_bytes(values) <= 32)
+        );
+        assert!(meta_vec_pool_bytes(&reuse.inner_instruction_accounts) <= 32);
+        assert!(
+            reuse
+                .inner_instruction_data
+                .iter()
+                .all(|values| meta_vec_bytes(values) <= 32)
+        );
+        assert!(meta_vec_pool_bytes(&reuse.inner_instruction_data) <= 32);
     }
 }

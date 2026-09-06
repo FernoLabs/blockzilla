@@ -546,6 +546,11 @@ fn collect_vote_hashes_for_tx(
                 collect_vote_hashes_from_instruction(&instruction.data, ids);
             }
         }
+        ArchiveV2HotMessagePayload::V1(message) => {
+            for instruction in message.instructions {
+                collect_vote_hashes_from_instruction(&instruction.data, ids);
+            }
+        }
     }
     Ok(())
 }
@@ -604,6 +609,10 @@ fn collect_access_message_refs(
                 collect_access_pubkey_id(lookup.account_key, pubkey_ids);
             }
         }
+        ArchiveV2HotMessagePayload::V1(message) => {
+            collect_access_pubkeys(message.account_keys.iter().copied(), pubkey_ids);
+            collect_access_recent_blockhash_id(&message.recent_blockhash, blockhash_ids);
+        }
     }
 }
 
@@ -614,6 +623,7 @@ fn collect_access_message_vote_hash_refs(
     let instructions = match message {
         ArchiveV2HotMessagePayload::Legacy(message) => message.instructions.as_slice(),
         ArchiveV2HotMessagePayload::V0(message) => message.instructions.as_slice(),
+        ArchiveV2HotMessagePayload::V1(message) => message.instructions.as_slice(),
     };
     for instruction in instructions {
         collect_vote_hashes_from_instruction(&instruction.data, ids);

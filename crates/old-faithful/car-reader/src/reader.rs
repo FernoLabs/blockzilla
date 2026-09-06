@@ -74,6 +74,20 @@ pub struct DecodedNodeRecord {
     pub total_len: usize,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum DecodedPayloadSource {
+    DirectBuffer,
+    Scratch,
+}
+
+struct InternalDecodedRecord<T> {
+    value: T,
+    payload_len: usize,
+    entry_len: usize,
+    total_len: usize,
+    payload_source: DecodedPayloadSource,
+}
+
 /// Physical CAR nodes and bytes consumed by one lossless block read.
 ///
 /// These counters describe nodes in the CAR stream. They do not count logical
@@ -83,6 +97,14 @@ pub struct LosslessBlockReadStats {
     pub car_entries: u64,
     pub payload_bytes: u64,
     pub wire_bytes: u64,
+    /// Entries decoded directly from the reader's buffered bytes.
+    pub direct_buffer_entries: u64,
+    /// Payload bytes decoded directly from the reader's buffered bytes.
+    pub direct_buffer_payload_bytes: u64,
+    /// Entries that crossed an input-buffer boundary and used caller scratch.
+    pub scratch_entries: u64,
+    /// Payload bytes copied into caller scratch before decoding.
+    pub scratch_payload_bytes: u64,
     pub transactions: u64,
     pub entries: u64,
     pub blocks: u64,
@@ -93,26 +115,74 @@ pub struct LosslessBlockReadStats {
 }
 
 impl LosslessBlockReadStats {
-    fn record(&mut self, record: &DecodedNodeRecord) -> CarReadResult<()> {
+    fn record(
+        &mut self,
+        record: &DecodedNodeRecord,
+        payload_source: DecodedPayloadSource,
+    ) -> CarReadResult<()> {
+        let kind = match &record.node {
+            crate::reconstruct::RawNode::Transaction(_) => 0,
+            crate::reconstruct::RawNode::Entry(_) => 1,
+            crate::reconstruct::RawNode::Block(_) => 2,
+            crate::reconstruct::RawNode::Subset(_) => 3,
+            crate::reconstruct::RawNode::Epoch(_) => 4,
+            crate::reconstruct::RawNode::Rewards(_) => 5,
+            crate::reconstruct::RawNode::DataFrame(_) => 6,
+        };
+        self.record_parts(record.payload_len, record.total_len, payload_source, kind)
+    }
+
+    fn record_parts(
+        &mut self,
+        payload_len: usize,
+        total_len: usize,
+        payload_source: DecodedPayloadSource,
+        kind: u64,
+    ) -> CarReadResult<()> {
         self.car_entries = checked_stat_add(self.car_entries, 1, "CAR entry count")?;
         self.payload_bytes = checked_stat_add(
             self.payload_bytes,
-            record.payload_len as u64,
+            payload_len as u64,
             "CAR payload byte count",
         )?;
-        self.wire_bytes = checked_stat_add(
-            self.wire_bytes,
-            record.total_len as u64,
-            "CAR wire byte count",
-        )?;
-        let counter = match &record.node {
-            crate::reconstruct::RawNode::Transaction(_) => &mut self.transactions,
-            crate::reconstruct::RawNode::Entry(_) => &mut self.entries,
-            crate::reconstruct::RawNode::Block(_) => &mut self.blocks,
-            crate::reconstruct::RawNode::Rewards(_) => &mut self.rewards,
-            crate::reconstruct::RawNode::DataFrame(_) => &mut self.dataframes,
-            crate::reconstruct::RawNode::Subset(_) => &mut self.subsets,
-            crate::reconstruct::RawNode::Epoch(_) => &mut self.epochs,
+        self.wire_bytes =
+            checked_stat_add(self.wire_bytes, total_len as u64, "CAR wire byte count")?;
+        match payload_source {
+            DecodedPayloadSource::DirectBuffer => {
+                self.direct_buffer_entries = checked_stat_add(
+                    self.direct_buffer_entries,
+                    1,
+                    "direct-buffer CAR entry count",
+                )?;
+                self.direct_buffer_payload_bytes = checked_stat_add(
+                    self.direct_buffer_payload_bytes,
+                    payload_len as u64,
+                    "direct-buffer CAR payload byte count",
+                )?;
+            }
+            DecodedPayloadSource::Scratch => {
+                self.scratch_entries =
+                    checked_stat_add(self.scratch_entries, 1, "scratch CAR entry count")?;
+                self.scratch_payload_bytes = checked_stat_add(
+                    self.scratch_payload_bytes,
+                    payload_len as u64,
+                    "scratch CAR payload byte count",
+                )?;
+            }
+        }
+        let counter = match kind {
+            0 => &mut self.transactions,
+            1 => &mut self.entries,
+            2 => &mut self.blocks,
+            3 => &mut self.subsets,
+            4 => &mut self.epochs,
+            5 => &mut self.rewards,
+            6 => &mut self.dataframes,
+            _ => {
+                return Err(CarReadError::InvalidData(format!(
+                    "unknown CAR node kind {kind}"
+                )));
+            }
         };
         *counter = checked_stat_add(*counter, 1, "CAR node count")?;
         Ok(())
@@ -139,6 +209,19 @@ pub enum CarPayloadRead {
     Full,
 }
 
+/// Caller-selected limits for one lossless block scan.
+///
+/// These limits stop declared CAR payload sizes before the lossless reader
+/// allocates their bodies. They do not make legacy CAR decoding suitable for
+/// untrusted input; callers must still require an operator-trusted source.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct LosslessBlockReadLimits {
+    pub max_entry_payload_bytes: usize,
+    pub max_block_payload_bytes: usize,
+    pub max_entries_per_block: usize,
+    pub max_transactions_per_block: usize,
+}
+
 impl<R: Read> CarBlockReader<R> {
     /// Create a CAR reader with a specific internal I/O buffer size.
     pub fn with_capacity(inner: R, io_buf_bytes: usize) -> Self {
@@ -163,11 +246,50 @@ impl<R: Read> CarBlockReader<R> {
         Ok(out)
     }
 
+    /// Read a CAR header only when its declared payload fits `max_header_bytes`.
+    pub fn read_header_bytes_bounded(&mut self, max_header_bytes: usize) -> CarReadResult<Vec<u8>> {
+        if max_header_bytes == 0 {
+            return Err(CarReadError::InvalidData(
+                "CAR header byte limit must be nonzero".to_string(),
+            ));
+        }
+        let (header_len, header_varint) = read_uvarint64_with_bytes(&mut self.reader)?;
+        let header_len = usize::try_from(header_len)
+            .map_err(|_| CarReadError::InvalidData("CAR header exceeds usize".to_string()))?;
+        if header_len > max_header_bytes {
+            return Err(CarReadError::InvalidData(format!(
+                "CAR header {header_len} bytes exceeds configured limit {max_header_bytes}"
+            )));
+        }
+        let mut output = header_varint;
+        let start = output.len();
+        let total = start
+            .checked_add(header_len)
+            .ok_or_else(|| CarReadError::InvalidData("CAR header size overflow".to_string()))?;
+        output.resize(total, 0u8);
+        self.reader
+            .read_exact(&mut output[start..])
+            .map_err(|error| CarReadError::Io(error.to_string()))?;
+        self.offset = self
+            .offset
+            .checked_add(u64::try_from(output.len()).map_err(|_| {
+                CarReadError::InvalidData("CAR header size exceeds u64".to_string())
+            })?)
+            .ok_or_else(|| CarReadError::InvalidData("CAR offset overflow".to_string()))?;
+        Ok(output)
+    }
+
     /// Read and discard the CAR header.
     ///
     /// Call this once before reading entries or blocks from a normal CAR file.
     pub fn skip_header(&mut self) -> CarReadResult<()> {
         let _ = self.read_header_bytes()?;
+        Ok(())
+    }
+
+    /// Read and discard a CAR header under an explicit payload limit.
+    pub fn skip_header_bounded(&mut self, max_header_bytes: usize) -> CarReadResult<()> {
+        let _ = self.read_header_bytes_bounded(max_header_bytes)?;
         Ok(())
     }
 
@@ -276,9 +398,10 @@ impl<R: Read> CarBlockReader<R> {
             let checkpoint = out.data_buffer_pool.checkpoint();
             let record = {
                 let pool = &mut out.data_buffer_pool;
-                self.read_decoded_node_record_with_scratch(&mut out.scratch, &mut |required| {
-                    pool.take(required)
-                })
+                self.read_decoded_node_record_with_scratch_tracked(
+                    &mut out.scratch,
+                    &mut |required| pool.take(required),
+                )
             };
             let record = match record {
                 Ok(record) => record,
@@ -287,13 +410,9 @@ impl<R: Read> CarBlockReader<R> {
                     return Err(err);
                 }
             };
-            let Some(record) = record else {
-                let pending = out.pending_node_counts();
-                if !pending.is_empty() {
-                    return Err(CarReadError::InvalidData(format!(
-                        "unterminated block group: txs={} entries={} rewards={} dataframes={}",
-                        pending.transactions, pending.entries, pending.rewards, pending.dataframes,
-                    )));
+            let Some((record, payload_source)) = record else {
+                if let Some(error) = out.unterminated_block_group_error() {
+                    return Err(CarReadError::InvalidData(error.to_string()));
                 }
                 return Ok(LosslessBlockRead {
                     has_block: false,
@@ -301,13 +420,263 @@ impl<R: Read> CarBlockReader<R> {
                 });
             };
 
-            stats.record(&record)?;
+            stats.record(&record, payload_source)?;
             let done = out.push_raw_node(record.node)?;
             if done {
                 return Ok(LosslessBlockRead {
                     has_block: true,
                     stats,
                 });
+            }
+        }
+    }
+
+    /// Read one lossless block in canonical Old Faithful physical order.
+    ///
+    /// This path appends transaction and entry nodes directly. It does not
+    /// build CID lookup tables for transactions, entries, or rewards. Use the
+    /// generic lossless method when input can use a different physical order.
+    pub fn read_until_block_ordered_lossless(
+        &mut self,
+        out: &mut crate::ordered_lossless::OrderedLosslessCarBlock,
+    ) -> CarReadResult<bool> {
+        Ok(self
+            .read_until_block_ordered_lossless_with_stats(out)?
+            .has_block)
+    }
+
+    /// Read one canonical ordered lossless block with physical read counters.
+    ///
+    /// This method keeps the direct-buffer decode path and the same bounded
+    /// dataframe buffer pool as the generic lossless reader.
+    pub fn read_until_block_ordered_lossless_with_stats(
+        &mut self,
+        out: &mut crate::ordered_lossless::OrderedLosslessCarBlock,
+    ) -> CarReadResult<LosslessBlockRead> {
+        self.read_until_block_ordered_lossless_inner(out, None)
+    }
+
+    /// Read one canonical ordered block with explicit payload limits.
+    pub fn read_until_block_ordered_lossless_bounded(
+        &mut self,
+        out: &mut crate::ordered_lossless::OrderedLosslessCarBlock,
+        limits: LosslessBlockReadLimits,
+    ) -> CarReadResult<bool> {
+        if limits.max_entry_payload_bytes == 0
+            || limits.max_block_payload_bytes == 0
+            || limits.max_entries_per_block == 0
+            || limits.max_transactions_per_block == 0
+        {
+            return Err(CarReadError::InvalidData(
+                "ordered lossless block read limits must be nonzero".to_string(),
+            ));
+        }
+        Ok(self
+            .read_until_block_ordered_lossless_inner(out, Some(limits))?
+            .has_block)
+    }
+
+    fn read_until_block_ordered_lossless_inner(
+        &mut self,
+        out: &mut crate::ordered_lossless::OrderedLosslessCarBlock,
+        limits: Option<LosslessBlockReadLimits>,
+    ) -> CarReadResult<LosslessBlockRead> {
+        out.clear();
+        let mut stats = LosslessBlockReadStats::default();
+
+        loop {
+            let checkpoint = out.data_buffer_pool.checkpoint();
+            let record = {
+                let pool = &mut out.data_buffer_pool;
+                let recycled_shredding = &mut out.recycled_shredding;
+                self.read_node_record_with_scratch_tracked(
+                    &mut out.scratch,
+                    &mut |location, cid, payload| {
+                        crate::ordered_lossless::decode_ordered_raw_node_with_data_buffers(
+                            location,
+                            cid,
+                            payload,
+                            &mut |required| pool.take(required),
+                            recycled_shredding,
+                        )
+                    },
+                )
+            };
+            let record = match record {
+                Ok(record) => record,
+                Err(error) => {
+                    out.data_buffer_pool.rollback_to_checkpoint(checkpoint);
+                    return Err(error);
+                }
+            };
+            let Some(record) = record else {
+                if let Some(error) = out.unterminated_block_group_error() {
+                    return Err(CarReadError::InvalidData(error.to_string()));
+                }
+                return Ok(LosslessBlockRead {
+                    has_block: false,
+                    stats,
+                });
+            };
+
+            stats.record_parts(
+                record.payload_len,
+                record.total_len,
+                record.payload_source,
+                record.value.kind(),
+            )?;
+            if let Some(limits) = limits {
+                if record.payload_len > limits.max_entry_payload_bytes {
+                    return Err(CarReadError::InvalidData(format!(
+                        "CAR entry payload {} exceeds configured limit {}",
+                        record.payload_len, limits.max_entry_payload_bytes
+                    )));
+                }
+                if stats.payload_bytes > limits.max_block_payload_bytes as u64 {
+                    return Err(CarReadError::InvalidData(format!(
+                        "CAR block payload bytes {} exceed configured limit {}",
+                        stats.payload_bytes, limits.max_block_payload_bytes
+                    )));
+                }
+                if stats.car_entries > limits.max_entries_per_block as u64 {
+                    return Err(CarReadError::InvalidData(format!(
+                        "CAR block entry count {} exceeds configured limit {}",
+                        stats.car_entries, limits.max_entries_per_block
+                    )));
+                }
+                if stats.transactions > limits.max_transactions_per_block as u64 {
+                    return Err(CarReadError::InvalidData(format!(
+                        "CAR block transaction count {} exceeds configured limit {}",
+                        stats.transactions, limits.max_transactions_per_block
+                    )));
+                }
+            }
+            let done = out.push_ordered_node(record.value)?;
+            if done {
+                return Ok(LosslessBlockRead {
+                    has_block: true,
+                    stats,
+                });
+            }
+        }
+    }
+
+    /// Read one CID-resolved block with explicit raw-payload limits.
+    ///
+    /// The existing unbounded method is kept for compatibility. Query adapters
+    /// should use this method and must still label the source operator-trusted.
+    pub fn read_until_block_lossless_bounded(
+        &mut self,
+        out: &mut crate::reconstruct::LosslessCarBlock,
+        limits: LosslessBlockReadLimits,
+    ) -> CarReadResult<bool> {
+        if limits.max_entry_payload_bytes == 0
+            || limits.max_block_payload_bytes == 0
+            || limits.max_entries_per_block == 0
+            || limits.max_transactions_per_block == 0
+        {
+            return Err(CarReadError::InvalidData(
+                "lossless block read limits must be nonzero".to_string(),
+            ));
+        }
+
+        out.clear();
+        let mut block_payload_bytes = 0usize;
+        let mut block_entries = 0usize;
+
+        loop {
+            let entry_offset = self.offset;
+            let current_entry_index = self.entry_index;
+            let entry_len = match read_uvarint64_with_len(&mut self.reader) {
+                Ok((value, varint_len)) => {
+                    self.offset = self
+                        .offset
+                        .checked_add(u64::try_from(varint_len).map_err(|_| {
+                            CarReadError::InvalidData("CAR varint length exceeds u64".to_string())
+                        })?)
+                        .ok_or_else(|| {
+                            CarReadError::InvalidData("CAR offset overflow".to_string())
+                        })?;
+                    usize::try_from(value).map_err(|_| {
+                        CarReadError::InvalidData("entry length exceeds usize".to_string())
+                    })?
+                }
+                // A valid Old Faithful CAR can end with subset and epoch index
+                // nodes after its last block. Those nodes are not retained in
+                // this pending block group. A retained transaction, entry,
+                // reward, or dataframe without a block is truncated input.
+                Err(CarReadError::Eof) => {
+                    if let Some(error) = out.unterminated_block_group_error() {
+                        return Err(CarReadError::InvalidData(error.to_string()));
+                    }
+                    return Ok(false);
+                }
+                Err(error) => return Err(error),
+            };
+            let payload_len = entry_len
+                .checked_sub(CAR_CID_LEN)
+                .ok_or_else(|| CarReadError::InvalidData("entry_len < cid_len".to_string()))?;
+            if payload_len > limits.max_entry_payload_bytes {
+                return Err(CarReadError::InvalidData(format!(
+                    "CAR entry payload {payload_len} exceeds configured limit {}",
+                    limits.max_entry_payload_bytes
+                )));
+            }
+            block_payload_bytes =
+                block_payload_bytes
+                    .checked_add(payload_len)
+                    .ok_or_else(|| {
+                        CarReadError::InvalidData(
+                            "CAR block payload byte count overflow".to_string(),
+                        )
+                    })?;
+            if block_payload_bytes > limits.max_block_payload_bytes {
+                return Err(CarReadError::InvalidData(format!(
+                    "CAR block payload bytes {block_payload_bytes} exceed configured limit {}",
+                    limits.max_block_payload_bytes
+                )));
+            }
+            block_entries = block_entries.checked_add(1).ok_or_else(|| {
+                CarReadError::InvalidData("CAR block entry count overflow".to_string())
+            })?;
+            if block_entries > limits.max_entries_per_block {
+                return Err(CarReadError::InvalidData(format!(
+                    "CAR block entry count {block_entries} exceeds configured limit {}",
+                    limits.max_entries_per_block
+                )));
+            }
+
+            let mut cid_buf = [0u8; CAR_CID_LEN];
+            self.reader.read_exact(&mut cid_buf)?;
+            self.offset = self
+                .offset
+                .checked_add(u64::try_from(cid_buf.len()).map_err(|_| {
+                    CarReadError::InvalidData("CAR CID length exceeds u64".to_string())
+                })?)
+                .ok_or_else(|| CarReadError::InvalidData("CAR offset overflow".to_string()))?;
+
+            let done = out.read_entry_payload_into_bounded(
+                &mut self.reader,
+                payload_len,
+                crate::reconstruct::NodeLocation {
+                    entry_index: current_entry_index,
+                    car_offset: entry_offset,
+                },
+                cid_buf,
+                limits.max_transactions_per_block,
+            )?;
+            self.offset = self
+                .offset
+                .checked_add(u64::try_from(payload_len).map_err(|_| {
+                    CarReadError::InvalidData("CAR payload length exceeds u64".to_string())
+                })?)
+                .ok_or_else(|| CarReadError::InvalidData("CAR offset overflow".to_string()))?;
+            self.entry_index = self
+                .entry_index
+                .checked_add(1)
+                .ok_or_else(|| CarReadError::InvalidData("CAR entry index overflow".to_string()))?;
+            if done {
+                return Ok(true);
             }
         }
     }
@@ -520,9 +889,6 @@ impl<R: Read> CarBlockReader<R> {
     ///
     /// The caller can reuse `scratch` across calls to avoid reallocating the
     /// payload buffer while scanning a whole archive.
-    ///
-    /// Use [`Self::read_decoded_node_record_with_scratch`] when you also need
-    /// the CAR framing lengths or want to recycle data-frame buffers.
     pub fn read_lossless_node_with_scratch(
         &mut self,
         scratch: &mut Vec<u8>,
@@ -547,28 +913,120 @@ impl<R: Read> CarBlockReader<R> {
     where
         F: FnMut(usize) -> Vec<u8>,
     {
-        let Some(entry) = self.read_entry_payload_with_scratch(scratch)? else {
-            return Ok(None);
+        self.read_decoded_node_record_with_scratch_tracked(scratch, take_data_buffer)
+            .map(|record| record.map(|(record, _)| record))
+    }
+
+    fn read_decoded_node_record_with_scratch_tracked<F>(
+        &mut self,
+        scratch: &mut Vec<u8>,
+        take_data_buffer: &mut F,
+    ) -> CarReadResult<Option<(DecodedNodeRecord, DecodedPayloadSource)>>
+    where
+        F: FnMut(usize) -> Vec<u8>,
+    {
+        self.read_node_record_with_scratch_tracked(scratch, &mut |location, cid, payload| {
+            crate::reconstruct::decode_raw_node_with_data_buffers(
+                location,
+                cid,
+                payload,
+                take_data_buffer,
+            )
+        })
+        .map(|record| {
+            record.map(|record| {
+                (
+                    DecodedNodeRecord {
+                        node: record.value,
+                        payload_len: record.payload_len,
+                        entry_len: record.entry_len,
+                        total_len: record.total_len,
+                    },
+                    record.payload_source,
+                )
+            })
+        })
+    }
+
+    fn read_node_record_with_scratch_tracked<T, F>(
+        &mut self,
+        scratch: &mut Vec<u8>,
+        decode: &mut F,
+    ) -> CarReadResult<Option<InternalDecodedRecord<T>>>
+    where
+        F: FnMut(NodeLocation, Cid36, &[u8]) -> Result<T, crate::reconstruct::ReconstructError>,
+    {
+        let entry_offset = self.offset;
+        let current_entry_index = self.entry_index;
+        let (entry_len, varint_len) = match read_uvarint64_with_len(&mut self.reader) {
+            Ok((value, varint_len)) => {
+                self.offset += varint_len as u64;
+                (value as usize, varint_len)
+            }
+            Err(CarReadError::Eof) => return Ok(None),
+            Err(err) => return Err(err),
         };
 
-        let node = crate::reconstruct::decode_raw_node_with_data_buffers(
-            entry.location,
-            entry.cid,
-            entry.payload,
-            take_data_buffer,
-        )
-        .map_err(|err| {
+        let mut cid_buf = [0u8; CAR_CID_LEN];
+        self.reader.read_exact(&mut cid_buf)?;
+        self.offset += cid_buf.len() as u64;
+
+        let payload_len = entry_len
+            .checked_sub(CAR_CID_LEN)
+            .ok_or_else(|| CarReadError::InvalidData("entry_len < cid_len".to_string()))?;
+        let total_len = varint_len
+            .checked_add(entry_len)
+            .ok_or_else(|| CarReadError::InvalidData("entry length overflow".to_string()))?;
+        let location = NodeLocation {
+            entry_index: current_entry_index,
+            car_offset: entry_offset,
+        };
+        let cid = Cid36::from_car_bytes(cid_buf);
+
+        // The decoded raw node owns every byte that must outlive this call. If
+        // the full payload is already buffered, decode it before consuming the
+        // buffer and avoid the otherwise redundant entry-scratch copy.
+        scratch.clear();
+        let direct_decode = {
+            let available = loop {
+                match self.reader.fill_buf() {
+                    Ok(available) => break available,
+                    Err(err) if err.kind() == io::ErrorKind::Interrupted => continue,
+                    Err(err) => return Err(CarReadError::Io(err.to_string())),
+                }
+            };
+            (available.len() >= payload_len)
+                .then(|| decode(location, cid, &available[..payload_len]))
+        };
+
+        let (decoded, payload_source) = if let Some(decoded) = direct_decode {
+            self.reader.consume(payload_len);
+            (decoded, DecodedPayloadSource::DirectBuffer)
+        } else {
+            append_exact_from_bufread(&mut self.reader, scratch, payload_len)?;
+            (
+                decode(location, cid, scratch),
+                DecodedPayloadSource::Scratch,
+            )
+        };
+
+        // Preserve the existing consumption contract: a complete payload is
+        // consumed and counted even when its node fails to decode.
+        self.offset += payload_len as u64;
+        self.entry_index += 1;
+        let value = decoded.map_err(|err| {
             CarReadError::InvalidData(format!(
                 "entry {} at offset {}: {}",
-                entry.location.entry_index, entry.location.car_offset, err
+                location.entry_index, location.car_offset, err
             ))
         })?;
 
-        Ok(Some(DecodedNodeRecord {
-            node,
-            payload_len: entry.payload_len,
-            entry_len: entry.entry_len,
-            total_len: entry.total_len,
+        Ok(Some(InternalDecodedRecord {
+            value,
+            payload_len,
+            entry_len,
+            total_len,
+            payload_source,
         }))
     }
 
@@ -681,7 +1139,7 @@ pub fn read_uvarint64_with_bytes<R: BufRead>(r: &mut R) -> CarReadResult<(u64, V
 
         let buf = r.fill_buf().map_err(|e| CarReadError::Io(e.to_string()))?;
         if buf.is_empty() {
-            if x != 0 {
+            if i != 0 {
                 return Err(CarReadError::UnexpectedEof(
                     "EOF while reading uvarint".to_string(),
                 ));
@@ -724,7 +1182,7 @@ pub fn read_uvarint64_with_len<R: BufRead>(r: &mut R) -> CarReadResult<(u64, usi
 
         let buf = r.fill_buf().map_err(|e| CarReadError::Io(e.to_string()))?;
         if buf.is_empty() {
-            if x != 0 {
+            if i != 0 {
                 return Err(CarReadError::UnexpectedEof(
                     "EOF while reading uvarint".to_string(),
                 ));
@@ -769,7 +1227,11 @@ pub fn read_uvarint64_with_len<R: BufRead>(r: &mut R) -> CarReadResult<(u64, usi
 mod tests {
     use std::io::{self, BufReader, Cursor, Read};
 
-    use super::{CarBlockReader, CarPayloadRead, append_exact_from_bufread, entry_payload_slice};
+    use super::{
+        CarBlockReader, CarPayloadRead, DecodedPayloadSource, LosslessBlockReadStats,
+        append_exact_from_bufread, entry_payload_slice, read_uvarint64_with_bytes,
+        read_uvarint64_with_len,
+    };
     use crate::error::CarReadError;
     use crate::reconstruct::RawNode;
 
@@ -833,6 +1295,165 @@ mod tests {
     }
 
     #[test]
+    fn decoded_node_record_uses_direct_buffer_when_payload_is_available() {
+        let payload = dataframe_payload(&[1, 2, 3, 4]);
+        let car = framing_car(&[&payload]);
+        let mut reader = CarBlockReader::with_capacity(&car[..], car.len());
+        reader.skip_header().unwrap();
+        let mut scratch = vec![0xaa; 16];
+        let mut take_data_buffer = |len| Vec::with_capacity(len);
+
+        let (record, source) = reader
+            .read_decoded_node_record_with_scratch_tracked(&mut scratch, &mut take_data_buffer)
+            .unwrap()
+            .unwrap();
+
+        assert_eq!(source, DecodedPayloadSource::DirectBuffer);
+        assert!(scratch.is_empty());
+        assert_eq!(record.payload_len, payload.len());
+        assert_eq!(reader.offset, car.len() as u64);
+        assert_eq!(reader.entry_index, 1);
+        let RawNode::DataFrame(frame) = record.node else {
+            panic!("expected dataframe node");
+        };
+        assert_eq!(frame.frame.data, [1, 2, 3, 4]);
+    }
+
+    #[test]
+    fn direct_and_split_decodes_have_exact_node_and_offset_parity() {
+        let first = dataframe_payload(&[1, 2, 3, 4]);
+        let second = dataframe_payload(&[5, 6, 7]);
+        let car = framing_car(&[&first, &second]);
+        let mut direct = CarBlockReader::with_capacity(&car[..], car.len());
+        let mut split = CarBlockReader::with_capacity(&car[..], 2);
+        direct.skip_header().unwrap();
+        split.skip_header().unwrap();
+        let mut direct_scratch = Vec::new();
+        let mut split_scratch = Vec::new();
+
+        for expected_index in 0..2 {
+            let mut direct_buffer = |len| Vec::with_capacity(len);
+            let (direct_record, direct_source) = direct
+                .read_decoded_node_record_with_scratch_tracked(
+                    &mut direct_scratch,
+                    &mut direct_buffer,
+                )
+                .unwrap()
+                .unwrap();
+            let mut split_buffer = |len| Vec::with_capacity(len);
+            let (split_record, split_source) = split
+                .read_decoded_node_record_with_scratch_tracked(
+                    &mut split_scratch,
+                    &mut split_buffer,
+                )
+                .unwrap()
+                .unwrap();
+
+            assert_eq!(direct_source, DecodedPayloadSource::DirectBuffer);
+            assert_eq!(split_source, DecodedPayloadSource::Scratch);
+            assert_eq!(direct_record, split_record);
+            assert_eq!(direct_record.node.location().entry_index, expected_index);
+            assert_eq!(
+                direct_record.node.location().car_offset,
+                if expected_index == 0 {
+                    1
+                } else {
+                    (2 + 36 + first.len()) as u64
+                }
+            );
+            assert_eq!(direct.offset, split.offset);
+            assert_eq!(direct.entry_index, split.entry_index);
+        }
+
+        assert_eq!(direct.offset, car.len() as u64);
+        assert_eq!(direct.entry_index, 2);
+    }
+
+    #[test]
+    fn direct_and_split_decode_errors_consume_the_same_complete_entry() {
+        let invalid_payload = [0xff, 0x00, 0x01];
+        let car = framing_car(&[&invalid_payload]);
+
+        for capacity in [car.len(), 2] {
+            let mut reader = CarBlockReader::with_capacity(&car[..], capacity);
+            reader.skip_header().unwrap();
+            let mut scratch = Vec::new();
+            let mut take_data_buffer = |len| Vec::with_capacity(len);
+            let error = reader
+                .read_decoded_node_record_with_scratch_tracked(&mut scratch, &mut take_data_buffer)
+                .unwrap_err();
+
+            assert!(matches!(error, CarReadError::InvalidData(_)));
+            assert_eq!(reader.offset, car.len() as u64);
+            assert_eq!(reader.entry_index, 1);
+            assert!(
+                reader
+                    .read_decoded_node_record_with_scratch_tracked(
+                        &mut scratch,
+                        &mut take_data_buffer,
+                    )
+                    .unwrap()
+                    .is_none()
+            );
+        }
+    }
+
+    #[test]
+    fn lossless_stats_count_direct_and_scratch_payloads() {
+        let payload = dataframe_payload(&[1, 2, 3, 4]);
+        let car = framing_car(&[&payload]);
+
+        for (capacity, expected_source) in [
+            (car.len(), DecodedPayloadSource::DirectBuffer),
+            (2, DecodedPayloadSource::Scratch),
+        ] {
+            let mut reader = CarBlockReader::with_capacity(&car[..], capacity);
+            reader.skip_header().unwrap();
+            let mut scratch = Vec::new();
+            let mut take_data_buffer = |len| Vec::with_capacity(len);
+            let (record, source) = reader
+                .read_decoded_node_record_with_scratch_tracked(&mut scratch, &mut take_data_buffer)
+                .unwrap()
+                .unwrap();
+            assert_eq!(source, expected_source);
+
+            let mut stats = LosslessBlockReadStats::default();
+            stats.record(&record, source).unwrap();
+            assert_eq!(stats.car_entries, 1);
+            assert_eq!(stats.payload_bytes, payload.len() as u64);
+            match source {
+                DecodedPayloadSource::DirectBuffer => {
+                    assert_eq!(stats.direct_buffer_entries, 1);
+                    assert_eq!(stats.direct_buffer_payload_bytes, payload.len() as u64);
+                    assert_eq!(stats.scratch_entries, 0);
+                    assert_eq!(stats.scratch_payload_bytes, 0);
+                }
+                DecodedPayloadSource::Scratch => {
+                    assert_eq!(stats.direct_buffer_entries, 0);
+                    assert_eq!(stats.direct_buffer_payload_bytes, 0);
+                    assert_eq!(stats.scratch_entries, 1);
+                    assert_eq!(stats.scratch_payload_bytes, payload.len() as u64);
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn partial_zero_payload_varint_is_unexpected_eof() {
+        let mut with_len = Cursor::new([0x80]);
+        assert!(matches!(
+            read_uvarint64_with_len(&mut with_len),
+            Err(CarReadError::UnexpectedEof(_))
+        ));
+
+        let mut with_bytes = Cursor::new([0x80]);
+        assert!(matches!(
+            read_uvarint64_with_bytes(&mut with_bytes),
+            Err(CarReadError::UnexpectedEof(_))
+        ));
+    }
+
+    #[test]
     fn entry_payload_slice_extracts_payload() {
         let mut entry = Vec::with_capacity(1 + 36 + 2);
         entry.push(38);
@@ -884,7 +1505,6 @@ mod tests {
 
         assert_eq!(entry.prefix, [0xaa, 0xbb]);
         assert_eq!(entry.payload, Some(payload.as_slice()));
-        drop(entry);
         assert_eq!(scratch.capacity(), capacity);
         assert_eq!(reader.offset, car.len() as u64);
         assert_eq!(reader.entry_index, 1);
@@ -951,7 +1571,6 @@ mod tests {
         assert_eq!(entry.payload, payload);
         assert_eq!(entry.payload_len, payload.len());
         assert_eq!(entry.total_len, 1 + 36 + payload.len());
-        drop(entry);
 
         assert_eq!(scratch.capacity(), capacity);
         assert_eq!(reader.offset, car.len() as u64);
@@ -977,7 +1596,6 @@ mod tests {
             .unwrap();
         assert_eq!(prefix.prefix, [1, 2, 3]);
         assert!(prefix.payload.is_none());
-        drop(prefix);
 
         let full = reader
             .read_entry_payload_select_with_scratch(&mut scratch, 1, |initial| {
@@ -988,7 +1606,6 @@ mod tests {
             .unwrap();
         assert_eq!(full.prefix, second);
         assert_eq!(full.payload, Some(second.as_slice()));
-        drop(full);
 
         assert_eq!(scratch.capacity(), capacity);
         assert_eq!(reader.offset, car.len() as u64);

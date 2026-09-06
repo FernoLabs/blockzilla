@@ -517,7 +517,6 @@ pub enum ArtifactKind {
     VoteHashRegistry,
     BlockAccess,
     BlockAccessIndex,
-    PreviousBlockhashTail,
     /// Whether `poh.wincode`'s `CompactPohEntry` records carry `signature_count`, letting
     /// `verify-archive-v2-poh` skip decompressing the hot block. Backfilled by
     /// `migrate-poh-signature-counts`; see `poh_signature_count_migration_artifact`.
@@ -5807,6 +5806,21 @@ fn blockhash_registry_valid(output: &Path) -> bool {
     bytes > 0 && bytes.is_multiple_of(32)
 }
 
+fn blockhash_registry_matches_block_rows(output: &Path, block_rows: u64) -> bool {
+    blockhash_registry_bytes_match_block_rows(
+        file_len(&output.join(BLOCKHASH_REGISTRY_FILE)),
+        block_rows,
+    )
+}
+
+fn blockhash_registry_bytes_match_block_rows(registry_bytes: u64, block_rows: u64) -> bool {
+    if registry_bytes == 0 || !registry_bytes.is_multiple_of(32) {
+        return false;
+    }
+    let registry_rows = registry_bytes / 32;
+    registry_rows == block_rows || block_rows.checked_add(1) == Some(registry_rows)
+}
+
 fn optional_blockhash_v3_valid(output: &Path) -> bool {
     let path = output.join(BLOCKHASH_INDEX_V3_FILE);
     if !path.exists() {
@@ -5820,7 +5834,7 @@ fn optional_blockhash_v3_valid(output: &Path) -> bool {
         && u16::from_le_bytes(header[8..10].try_into().unwrap()) == BLOCKHASH_INDEX_V3_VERSION
         && u16::from_le_bytes(header[10..12].try_into().unwrap())
             == BLOCKHASH_INDEX_V3_ROW_LEN as u16
-        && rows == file_len(&output.join(BLOCKHASH_REGISTRY_FILE)) / 32
+        && blockhash_registry_matches_block_rows(output, rows)
         && file_len(&path)
             == (BLOCKHASH_INDEX_V3_HEADER_LEN as u64)
                 .saturating_add(rows.saturating_mul(BLOCKHASH_INDEX_V3_ROW_LEN))
@@ -5936,9 +5950,8 @@ fn predecessor_seed_sidecars_usable(config: &SchedulerConfig, epoch: u64) -> boo
     if let Some(owner) = read_ownership(&output) {
         // Generated reader files can become structurally complete just before
         // their child exits. Only the controller's completed commit is a safe
-        // predecessor boundary; active and failed pipeline-owned predecessors
-        // must not release their successor. A successor with its own durable
-        // prev tail bypasses this function in legacy_compact_dependency_ready.
+        // reader core. The flat predecessor blockhash registry is checked
+        // separately by legacy_compact_dependency_ready.
         if owner.id != previous.to_string()
             || owner.state != "complete"
             || !matches!(
@@ -5964,38 +5977,20 @@ fn legacy_compact_dependency_ready(config: &SchedulerConfig, epoch: u64) -> bool
     if epoch == 0 {
         return true;
     }
-    previous_tail_valid(&config.archive_root.join(format!("epoch-{epoch}")))
-        || predecessor_seed_sidecars_usable(config, epoch)
+    let predecessor = config.archive_root.join(format!("epoch-{}", epoch - 1));
+    blockhash_registry_valid(&predecessor) || predecessor_seed_sidecars_usable(config, epoch)
 }
 
-/// Admit a first-seen scan only after its in-range predecessor has published
-/// stable blockhash sidecars. Without this gate, adjacent scans fall back to
-/// rereading the predecessor CAR in `Prev Blockhash Seed`, doubling archive
-/// I/O while competing sequential readers collapse NAS throughput.
-fn historical_scan_dependency_ready(
-    config: &SchedulerConfig,
-    epochs: &[EpochSnapshot],
-    epoch: u64,
-) -> bool {
-    if epoch == 0 || previous_tail_valid(&config.archive_root.join(format!("epoch-{epoch}"))) {
+/// Admit a first-seen scan as soon as its predecessor has published the flat
+/// blockhash registry. The builder reads only its final 32-byte record, so it
+/// does not need the predecessor scan or compaction to finish.
+fn historical_scan_dependency_ready(config: &SchedulerConfig, epoch: u64) -> bool {
+    if epoch == 0 {
         return true;
     }
 
     let previous = epoch - 1;
-    match epochs.iter().find(|candidate| candidate.epoch == previous) {
-        Some(candidate) => matches!(
-            candidate.state,
-            HistoricalState::ScanReady | HistoricalState::Finalizing | HistoricalState::Complete
-        ),
-        // A scheduler may intentionally manage only a suffix of history. At
-        // that boundary, accept an already committed predecessor archive. If
-        // only a CAR exists, preserve the explicit boundary fallback used by
-        // older deployments; contiguous in-range epochs never take this path.
-        None => {
-            predecessor_seed_sidecars_usable(config, epoch)
-                || car_path(&config.car_root, previous).is_some()
-        }
-    }
+    blockhash_registry_valid(&config.archive_root.join(format!("epoch-{previous}")))
 }
 
 fn legacy_compact_reuse_status(config: &SchedulerConfig, epoch: u64) -> LegacyCompactReuseStatus {
@@ -6545,13 +6540,6 @@ fn epoch_artifacts(
             legacy_no_access_complete,
             legacy_compact_reuse_complete,
         ),
-        archive_file_artifact(
-            ArtifactKind::PreviousBlockhashTail,
-            output.join(PREVIOUS_BLOCKHASH_TAIL_FILE),
-            ArtifactRequirement::Optional,
-            false,
-            true,
-        ),
     ]);
     if let Some(registry) = artifacts
         .iter_mut()
@@ -6791,7 +6779,7 @@ fn hot_block_index_matches_blob_and_blockhashes(path: &Path) -> bool {
                 .saturating_add(rows.saturating_mul(HOT_BLOCK_INDEX_ROW_LEN))
         && blob_bytes > 0
         && blob_bytes == actual_blob_bytes
-        && rows == file_len(&path.join(BLOCKHASH_REGISTRY_FILE)) / 32
+        && blockhash_registry_matches_block_rows(path, rows)
 }
 
 fn legacy_compact_reader_complete(path: &Path) -> bool {
@@ -8419,39 +8407,6 @@ fn read_repair_block_access_row<R: Read, A: Read>(
     ))
 }
 
-fn validate_repair_previous_blockhash_tail(
-    output: &Path,
-    marker: &PublishedRepairCompactedMarker,
-) -> Result<[u8; 32]> {
-    let path = output.join(PREVIOUS_BLOCKHASH_TAIL_FILE);
-    let metadata = repair_regular_file_metadata(&path, 40, false)?;
-    anyhow::ensure!(
-        metadata.len() == 40,
-        "repair previous-blockhash tail has {} bytes; expected exactly one 40-byte predecessor row",
-        metadata.len()
-    );
-    let mut reader = BufReader::with_capacity(
-        16 * 1024,
-        File::open(&path).with_context(|| format!("open {}", path.display()))?,
-    );
-    let mut previous_slot = None;
-    let mut predecessor_hash = None;
-    let mut row = [0u8; 40];
-    for row_index in 0..metadata.len() / 40 {
-        reader
-            .read_exact(&mut row)
-            .with_context(|| format!("read repair previous-blockhash tail row {row_index}"))?;
-        let slot = u64::from_le_bytes(row[32..40].try_into().unwrap());
-        anyhow::ensure!(
-            slot < marker.epoch_start_slot && previous_slot.is_none_or(|previous| slot > previous),
-            "repair previous-blockhash tail slots are not strictly increasing before the repaired epoch"
-        );
-        previous_slot = Some(slot);
-        predecessor_hash = Some(row[..32].try_into().expect("tail hash has 32 bytes"));
-    }
-    predecessor_hash.context("repair previous-blockhash tail is empty")
-}
-
 fn validate_repair_block_access(
     output: &Path,
     marker: &PublishedRepairCompactedMarker,
@@ -8511,13 +8466,33 @@ fn validate_repair_block_access(
         64 * 1024,
         File::open(&access_path).with_context(|| format!("open {}", access_path.display()))?,
     );
-    let predecessor_hash = validate_repair_previous_blockhash_tail(output, marker)?;
     let blockhash_path = output.join(BLOCKHASH_REGISTRY_FILE);
-    let mut first_blockhash = [0u8; 32];
+    let blockhash_metadata = repair_regular_file_metadata(&blockhash_path, u64::MAX, false)?;
+    let expected_blockhash_bytes = marker
+        .produced_blocks
+        .checked_add(1)
+        .and_then(|rows| rows.checked_mul(32))
+        .context("repair blockhash registry byte length overflow")?;
+    anyhow::ensure!(
+        blockhash_metadata.len() == expected_blockhash_bytes,
+        "repair blockhash registry must contain one boundary row plus every produced block"
+    );
+    let mut boundary_and_first_blockhash = [0u8; 64];
     File::open(&blockhash_path)
         .with_context(|| format!("open {}", blockhash_path.display()))?
-        .read_exact(&mut first_blockhash)
-        .with_context(|| format!("read first blockhash from {}", blockhash_path.display()))?;
+        .read_exact(&mut boundary_and_first_blockhash)
+        .with_context(|| {
+            format!(
+                "read boundary and first blockhash from {}",
+                blockhash_path.display()
+            )
+        })?;
+    let predecessor_hash: [u8; 32] = boundary_and_first_blockhash[..32]
+        .try_into()
+        .expect("boundary hash has 32 bytes");
+    let first_blockhash: [u8; 32] = boundary_and_first_blockhash[32..]
+        .try_into()
+        .expect("first blockhash has 32 bytes");
 
     let get_block_path = output.join(GET_BLOCK_INDEX_FILE);
     let get_block_metadata = repair_regular_file_metadata(&get_block_path, u64::MAX, false)?;
@@ -8566,11 +8541,11 @@ fn validate_repair_block_access(
     )?;
     anyhow::ensure!(
         first_blob.previous_blockhash == predecessor_hash,
-        "first repair block-access previous blockhash differs from the predecessor tail"
+        "first repair block-access previous blockhash differs from blockhash registry record 0"
     );
     anyhow::ensure!(
         first_blob.blockhash == first_blockhash,
-        "first repair block-access blockhash differs from blockhash registry row 0"
+        "first repair block-access blockhash differs from blockhash registry record 1"
     );
     let mut next = Some(first);
     let mut get_block_row = [0u8; ARCHIVE_V2_GET_BLOCK_INDEX_ROW_LEN];
@@ -8793,7 +8768,7 @@ fn repair_compacted_fingerprint(
     output: &Path,
     bundle: &PublishedRepairBundle,
 ) -> Result<RepairCompactedFingerprint> {
-    let mut files = Vec::with_capacity(19);
+    let mut files = Vec::with_capacity(18);
     for path in [
         output.to_path_buf(),
         output.join(LIVE_REPAIR_COMPACTED_MARKER),
@@ -8826,7 +8801,6 @@ fn repair_compacted_fingerprint(
         output.join(BLOCK_ACCESS_FILE),
         output.join(BLOCK_ACCESS_INDEX_FILE),
         output.join(GET_BLOCK_INDEX_FILE),
-        output.join(PREVIOUS_BLOCKHASH_TAIL_FILE),
     ] {
         let metadata = match fs::symlink_metadata(&path) {
             Ok(metadata) => Some(metadata),
@@ -9001,8 +8975,10 @@ fn read_published_repair_compacted_legacy(
         "degraded-compaction compressed byte count differs from the blocks file"
     );
     anyhow::ensure!(
-        file_len(&output_dir.join(BLOCKHASH_REGISTRY_FILE))
-            == marker.produced_blocks.saturating_mul(32),
+        blockhash_registry_bytes_match_block_rows(
+            file_len(&output_dir.join(BLOCKHASH_REGISTRY_FILE)),
+            marker.produced_blocks,
+        ),
         "degraded-compaction blockhash registry length is inconsistent"
     );
     anyhow::ensure!(
@@ -9175,7 +9151,7 @@ fn read_published_repair_compacted(
     let access_file_layout_ready = marker.files.block_access.as_deref() == Some(BLOCK_ACCESS_FILE)
         && marker.files.block_access_index.as_deref() == Some(BLOCK_ACCESS_INDEX_FILE)
         && marker.files.get_block_index.as_deref() == Some(GET_BLOCK_INDEX_FILE)
-        && marker.files.previous_blockhash_tail.as_deref() == Some(PREVIOUS_BLOCKHASH_TAIL_FILE);
+        && marker.files.previous_blockhash_tail.is_none();
     let access_file_layout_absent = marker.files.block_access.is_none()
         && marker.files.block_access_index.is_none()
         && marker.files.get_block_index.is_none()
@@ -9247,6 +9223,7 @@ fn read_published_repair_compacted(
         SHREDDING_FILE,
         "poh/poh.wincode",
         "shredding/shredding.wincode",
+        PREVIOUS_BLOCKHASH_TAIL_FILE,
     ] {
         let path = output.join(forbidden);
         match fs::symlink_metadata(&path) {
@@ -9262,7 +9239,6 @@ fn read_published_repair_compacted(
             BLOCK_ACCESS_FILE,
             BLOCK_ACCESS_INDEX_FILE,
             GET_BLOCK_INDEX_FILE,
-            PREVIOUS_BLOCKHASH_TAIL_FILE,
         ] {
             let path = output.join(forbidden);
             match fs::symlink_metadata(&path) {
@@ -9303,11 +9279,7 @@ fn read_published_repair_compacted(
         "repair pubkey registry byte length is not a multiple of 32"
     );
     anyhow::ensure!(
-        blockhash_metadata.len()
-            == marker
-                .produced_blocks
-                .checked_mul(32)
-                .context("repair blockhash byte count overflows u64")?,
+        blockhash_registry_bytes_match_block_rows(blockhash_metadata.len(), marker.produced_blocks),
         "repair blockhash registry byte length differs from produced block count"
     );
     anyhow::ensure!(
@@ -15163,7 +15135,7 @@ async fn schedule_work(
     let queued = prioritized_epochs(config, &snapshot.epochs)
         .filter(|epoch| epoch.state == HistoricalState::Queued)
         .filter(|epoch| acquisition_action(config, epoch).is_none())
-        .filter(|epoch| historical_scan_dependency_ready(config, &snapshot.epochs, epoch.epoch))
+        .filter(|epoch| historical_scan_dependency_ready(config, epoch.epoch))
         .filter(|epoch| {
             legacy_compact_reuse_status(config, epoch.epoch)
                 == LegacyCompactReuseStatus::NotCandidate
@@ -15540,7 +15512,7 @@ async fn spawn_historical_scan(
         // after source-CAR cleanup so the fast sidecar path remains available.
         // If the admission invariant is ever violated, the synthetic missing
         // path makes the fallback fail closed instead of silently building an
-        // archive without its predecessor tail.
+        // archive without its predecessor boundary hash.
         let previous_car = car_path(&config.car_root, previous_epoch).unwrap_or_else(|| {
             config
                 .car_root
@@ -27820,6 +27792,15 @@ fn append_control_event(config: &SchedulerConfig, action: &str, target: &str) ->
 mod tests {
     use super::*;
 
+    #[test]
+    fn blockhash_registry_rows_accept_legacy_and_boundary_layouts() {
+        assert!(blockhash_registry_bytes_match_block_rows(3 * 32, 3));
+        assert!(blockhash_registry_bytes_match_block_rows(4 * 32, 3));
+        assert!(!blockhash_registry_bytes_match_block_rows(5 * 32, 3));
+        assert!(!blockhash_registry_bytes_match_block_rows(3 * 32 + 1, 3));
+        assert!(!blockhash_registry_bytes_match_block_rows(0, 0));
+    }
+
     fn test_config(root: &Path) -> SchedulerConfig {
         SchedulerConfig {
             status_bind: "127.0.0.1:0".parse().unwrap(),
@@ -33897,7 +33878,9 @@ mod tests {
         config.end_epoch = Some(701);
         let snapshot =
             schedulable_snapshot(&root, vec![test_epoch(&root, 701, HistoricalState::Queued)]);
-        fs::write(config.car_root.join("epoch-700.car"), b"car").unwrap();
+        let predecessor = config.archive_root.join("epoch-700");
+        fs::create_dir_all(&predecessor).unwrap();
+        fs::write(predecessor.join(BLOCKHASH_REGISTRY_FILE), [7u8; 32]).unwrap();
         let auditor = RegistryReprocessAuditor::new(config.clone());
         let mut runtime = RuntimeState::default();
         enqueue_claimed_registry_reprocess_audit(
@@ -35398,6 +35381,8 @@ mod tests {
         .unwrap();
 
         let marker = read_poh_migration_marker(&config.state_root, 700).unwrap();
+        wait_for_spawned_process(|| trusted_adopted_poh_migration(&config, 700, &marker).is_some())
+            .await;
         let adopted = trusted_adopted_poh_migration(&config, 700, &marker).unwrap();
         assert!(adopted.identity_trusted);
         assert_eq!(adopted.worker_threads, Some(2));
@@ -36221,7 +36206,11 @@ mod tests {
 
         write_structural_registry_and_index(&output, 1);
         fs::write(output.join(REGISTRY_COUNTS_FILE), [1]).unwrap();
-        fs::write(output.join(BLOCKHASH_REGISTRY_FILE), [9; 96]).unwrap();
+        let mut blockhash_registry = vec![7u8; 32];
+        blockhash_registry.extend_from_slice(&[9u8; 32]);
+        blockhash_registry.extend_from_slice(&[1u8; 32]);
+        blockhash_registry.extend_from_slice(&[2u8; 32]);
+        fs::write(output.join(BLOCKHASH_REGISTRY_FILE), blockhash_registry).unwrap();
         fs::write(output.join(SIGNATURES_FILE), []).unwrap();
         fs::write(output.join(VOTE_HASH_REGISTRY_FILE), [1]).unwrap();
 
@@ -36394,22 +36383,12 @@ mod tests {
         write_archive_v2_get_block_index(&output.join(GET_BLOCK_INDEX_FILE), &get_block_rows)
             .unwrap();
 
-        assert!(
-            start > 0,
-            "test repaired access tail requires a prior epoch"
-        );
-        let mut previous_tail = vec![7; 32];
-        previous_tail.extend_from_slice(&(start - 1).to_le_bytes());
-        fs::write(output.join(PREVIOUS_BLOCKHASH_TAIL_FILE), previous_tail).unwrap();
-
         let marker_path = output.join(LIVE_REPAIR_COMPACTED_MARKER);
         let mut marker: Value = serde_json::from_slice(&fs::read(&marker_path).unwrap()).unwrap();
         marker["block_access_ready"] = serde_json::json!(true);
         marker["files"]["block_access"] = serde_json::json!(BLOCK_ACCESS_FILE);
         marker["files"]["block_access_index"] = serde_json::json!(BLOCK_ACCESS_INDEX_FILE);
         marker["files"]["get_block_index"] = serde_json::json!(GET_BLOCK_INDEX_FILE);
-        marker["files"]["previous_blockhash_tail"] =
-            serde_json::json!(PREVIOUS_BLOCKHASH_TAIL_FILE);
         fs::write(marker_path, serde_json::to_vec(&marker).unwrap()).unwrap();
     }
 
@@ -36501,12 +36480,17 @@ mod tests {
         assert!(message.contains("with block access"));
         assert!(message.contains("canonical PoH and shredding sidecars"));
         assert!(!message.contains("block-access sidecars remain"));
+        assert!(!output.join(PREVIOUS_BLOCKHASH_TAIL_FILE).exists());
+        let marker: Value =
+            serde_json::from_slice(&fs::read(output.join(LIVE_REPAIR_COMPACTED_MARKER)).unwrap())
+                .unwrap();
+        assert!(marker["files"].get("previous_blockhash_tail").is_none());
         fs::remove_dir_all(root).unwrap();
     }
 
     #[test]
-    fn repaired_block_access_provenance_hashes_must_match_tail_and_registry() {
-        for mutation in ["tail", "multi_tail", "previous", "current"] {
+    fn repaired_block_access_hashes_must_match_registry_boundary_and_first_record() {
+        for mutation in ["boundary", "first_record", "previous", "current"] {
             let root = temp_root(&format!("repair-compacted-hash-{mutation}"));
             let config = test_config(&root);
             fs::create_dir_all(&config.live_root).unwrap();
@@ -36527,29 +36511,27 @@ mod tests {
             assert_eq!(valid.state, LiveState::Packaged, "valid {mutation}");
 
             let expected_message = match mutation {
-                "tail" => {
-                    let tail_path = output.join(PREVIOUS_BLOCKHASH_TAIL_FILE);
-                    let mut tail = fs::read(&tail_path).unwrap();
-                    tail[0] ^= 1;
-                    fs::write(tail_path, tail).unwrap();
-                    "previous blockhash differs"
+                "boundary" => {
+                    let registry_path = output.join(BLOCKHASH_REGISTRY_FILE);
+                    let mut registry = fs::read(&registry_path).unwrap();
+                    registry[0] ^= 1;
+                    fs::write(registry_path, registry).unwrap();
+                    "previous blockhash differs from blockhash registry record 0"
                 }
-                "multi_tail" => {
-                    let tail_path = output.join(PREVIOUS_BLOCKHASH_TAIL_FILE);
-                    let tail = fs::read(&tail_path).unwrap();
-                    let mut rows = vec![6; 32];
-                    rows.extend_from_slice(&(1000 * SLOTS_PER_EPOCH - 2).to_le_bytes());
-                    rows.extend_from_slice(&tail);
-                    fs::write(tail_path, rows).unwrap();
-                    "invalid byte length"
+                "first_record" => {
+                    let registry_path = output.join(BLOCKHASH_REGISTRY_FILE);
+                    let mut registry = fs::read(&registry_path).unwrap();
+                    registry[32] ^= 1;
+                    fs::write(registry_path, registry).unwrap();
+                    "blockhash differs from blockhash registry record 1"
                 }
                 "previous" => {
                     add_test_repair_block_access_with_first_hashes(&output, 1000, [9; 32], [8; 32]);
-                    "previous blockhash differs"
+                    "previous blockhash differs from blockhash registry record 0"
                 }
                 "current" => {
                     add_test_repair_block_access_with_first_hashes(&output, 1000, [8; 32], [7; 32]);
-                    "blockhash differs from blockhash registry"
+                    "blockhash differs from blockhash registry record 1"
                 }
                 _ => unreachable!(),
             };
@@ -36579,7 +36561,6 @@ mod tests {
             BLOCK_ACCESS_FILE,
             BLOCK_ACCESS_INDEX_FILE,
             GET_BLOCK_INDEX_FILE,
-            PREVIOUS_BLOCKHASH_TAIL_FILE,
         ] {
             let root = temp_root(&format!("repair-compacted-invalid-{artifact}"));
             let config = test_config(&root);
@@ -39133,7 +39114,7 @@ mod tests {
     }
 
     #[test]
-    fn legacy_compact_never_races_active_or_failed_pipeline_predecessor() {
+    fn legacy_compact_uses_available_registry_from_active_or_failed_predecessor() {
         let root = temp_root("legacy-compact-predecessor-race");
         let config = test_config(&root);
         fs::create_dir_all(&config.car_root).unwrap();
@@ -39155,7 +39136,7 @@ mod tests {
         assert!(!predecessor_seed_sidecars_usable(&config, 700));
         assert_eq!(
             legacy_compact_reuse_status(&config, 700),
-            LegacyCompactReuseStatus::WaitingForPrevious
+            LegacyCompactReuseStatus::Ready
         );
 
         write_ownership(
@@ -39167,16 +39148,20 @@ mod tests {
         )
         .unwrap();
         assert!(!predecessor_seed_sidecars_usable(&config, 700));
+        assert_eq!(
+            legacy_compact_reuse_status(&config, 700),
+            LegacyCompactReuseStatus::Ready
+        );
 
         fs::write(predecessor.join(OWNERSHIP_MARKER), b"{malformed").unwrap();
         assert!(!predecessor_seed_sidecars_usable(&config, 700));
         assert_eq!(
             legacy_compact_reuse_status(&config, 700),
-            LegacyCompactReuseStatus::WaitingForPrevious
+            LegacyCompactReuseStatus::Ready
         );
 
-        // A candidate's own durable tail is authoritative and allows an
-        // independent start even while the predecessor is still active.
+        // The predecessor registry is now the dependency. A candidate's old
+        // tail does not release it when that registry is absent.
         write_ownership(
             &predecessor,
             LEGACY_COMPACT_OWNERSHIP_KIND,
@@ -39185,12 +39170,19 @@ mod tests {
             None,
         )
         .unwrap();
+        fs::remove_file(predecessor.join(BLOCKHASH_REGISTRY_FILE)).unwrap();
         fs::write(output.join(PREVIOUS_BLOCKHASH_TAIL_FILE), [0u8; 40]).unwrap();
+        assert_eq!(
+            legacy_compact_reuse_status(&config, 700),
+            LegacyCompactReuseStatus::WaitingForPrevious
+        );
+        fs::remove_file(output.join(PREVIOUS_BLOCKHASH_TAIL_FILE)).unwrap();
+
+        fs::write(predecessor.join(BLOCKHASH_REGISTRY_FILE), [9u8; 64]).unwrap();
         assert_eq!(
             legacy_compact_reuse_status(&config, 700),
             LegacyCompactReuseStatus::Ready
         );
-        fs::remove_file(output.join(PREVIOUS_BLOCKHASH_TAIL_FILE)).unwrap();
 
         write_ownership(
             &predecessor,
@@ -40566,44 +40558,34 @@ mod tests {
     }
 
     #[test]
-    fn historical_scan_waits_for_in_range_predecessor_sidecars() {
+    fn historical_scan_starts_when_the_predecessor_registry_is_available() {
         let root = temp_root("historical-scan-dependency");
         let config = test_config(&root);
-        let mut epochs = vec![
-            test_epoch(&root, 1004, HistoricalState::Complete),
-            test_epoch(&root, 1005, HistoricalState::Queued),
-            test_epoch(&root, 1006, HistoricalState::Queued),
-        ];
 
-        assert!(historical_scan_dependency_ready(&config, &epochs, 1005));
-        assert!(!historical_scan_dependency_ready(&config, &epochs, 1006));
+        let first_predecessor = config.archive_root.join("epoch-1004");
+        fs::create_dir_all(&first_predecessor).unwrap();
+        fs::write(first_predecessor.join(BLOCKHASH_REGISTRY_FILE), [6; 32]).unwrap();
+        assert!(historical_scan_dependency_ready(&config, 1005));
+        assert!(!historical_scan_dependency_ready(&config, 1006));
 
-        epochs[1].state = HistoricalState::Scanning;
-        assert!(!historical_scan_dependency_ready(&config, &epochs, 1006));
-        epochs[1].state = HistoricalState::ScanReady;
-        assert!(historical_scan_dependency_ready(&config, &epochs, 1006));
-        epochs[1].state = HistoricalState::Finalizing;
-        assert!(historical_scan_dependency_ready(&config, &epochs, 1006));
-        epochs[1].state = HistoricalState::Complete;
-        assert!(historical_scan_dependency_ready(&config, &epochs, 1006));
+        let predecessor = config.archive_root.join("epoch-1005");
+        fs::create_dir_all(&predecessor).unwrap();
+        fs::write(predecessor.join(BLOCKHASH_REGISTRY_FILE), [7; 32]).unwrap();
+        assert!(historical_scan_dependency_ready(&config, 1006));
+
+        fs::remove_file(predecessor.join(BLOCKHASH_REGISTRY_FILE)).unwrap();
+        assert!(!historical_scan_dependency_ready(&config, 1006));
 
         fs::remove_dir_all(root).ok();
     }
 
     #[test]
-    fn durable_target_tail_allows_dependency_retry() {
-        let root = temp_root("historical-scan-existing-tail");
+    fn epoch_zero_needs_no_predecessor_registry() {
+        let root = temp_root("historical-scan-epoch-zero-dependency");
         let config = test_config(&root);
-        let epochs = vec![
-            test_epoch(&root, 1005, HistoricalState::Failed),
-            test_epoch(&root, 1006, HistoricalState::Queued),
-        ];
-        let output = config.archive_root.join("epoch-1006");
-        fs::create_dir_all(&output).unwrap();
-        fs::write(output.join(PREVIOUS_BLOCKHASH_TAIL_FILE), vec![7; 40]).unwrap();
 
-        assert!(historical_scan_dependency_ready(&config, &epochs, 1006));
-        fs::remove_dir_all(root).unwrap();
+        assert!(historical_scan_dependency_ready(&config, 0));
+        fs::remove_dir_all(root).ok();
     }
 
     #[test]
@@ -40634,7 +40616,11 @@ mod tests {
                 test_epoch(&root, 701, HistoricalState::ScanReady),
             ],
         );
-        fs::write(config.car_root.join("epoch-699.car"), b"car").unwrap();
+        for epoch in [699, 701] {
+            let predecessor = config.archive_root.join(format!("epoch-{epoch}"));
+            fs::create_dir_all(&predecessor).unwrap();
+            fs::write(predecessor.join(BLOCKHASH_REGISTRY_FILE), [7u8; 32]).unwrap();
+        }
         snapshot.summary.scan_capacity_admitted = 2;
         let mut runtime = RuntimeState::default();
 

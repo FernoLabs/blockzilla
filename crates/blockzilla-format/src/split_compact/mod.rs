@@ -4,6 +4,7 @@ use wincode::{SchemaRead, SchemaWrite};
 use crate::{
     CompactAddressTableLookup, CompactBlockHeader, CompactInstruction, CompactMessage,
     CompactMessageHeader, CompactMetaV1, CompactPubkey, CompactRecentBlockhash, CompactTransaction,
+    CompactTransactionConfig,
 };
 
 #[derive(Debug, Clone, Serialize, Deserialize, SchemaRead, SchemaWrite)]
@@ -38,9 +39,8 @@ pub struct OwnedCompactAddressTableLookup {
 
 #[derive(Debug, Clone, Serialize, Deserialize, SchemaRead, SchemaWrite)]
 pub enum OwnedCompactRecentBlockhash {
-    #[wincode(tag = 0)]
     Id(i32),
-    #[wincode(tag = 1)]
+    /// Raw inline fallback. The variant name is retained for wire compatibility.
     Nonce([u8; 32]),
 }
 
@@ -63,10 +63,21 @@ pub struct OwnedCompactV0Message {
 
 #[derive(Debug, Clone, Serialize, Deserialize, SchemaRead, SchemaWrite)]
 pub enum OwnedCompactMessage {
-    #[wincode(tag = 0)]
     Legacy(OwnedCompactLegacyMessage),
-    #[wincode(tag = 1)]
     V0(OwnedCompactV0Message),
+    // Appended so the existing tags stay put.
+    V1(OwnedCompactV1Message),
+}
+
+/// A v1 message. No lookup tables — v1 carries every account key inline and
+/// its compute budget in the header rather than as instructions.
+#[derive(Debug, Clone, Serialize, Deserialize, SchemaRead, SchemaWrite)]
+pub struct OwnedCompactV1Message {
+    pub header: CompactMessageHeader,
+    pub config: CompactTransactionConfig,
+    pub account_keys: Vec<CompactPubkey>,
+    pub recent_blockhash: OwnedCompactRecentBlockhash,
+    pub instructions: Vec<OwnedCompactInstruction>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, SchemaRead, SchemaWrite)]
@@ -109,6 +120,13 @@ impl OwnedCompactTransaction {
                     .iter()
                     .map(owned_lookup)
                     .collect(),
+            }),
+            CompactMessage::V1(message) => OwnedCompactMessage::V1(OwnedCompactV1Message {
+                header: message.header,
+                config: message.config,
+                account_keys: message.account_keys.clone(),
+                recent_blockhash: owned_recent_blockhash(&message.recent_blockhash),
+                instructions: message.instructions.iter().map(owned_instruction).collect(),
             }),
         };
 

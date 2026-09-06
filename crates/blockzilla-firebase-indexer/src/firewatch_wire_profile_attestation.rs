@@ -10,7 +10,7 @@ use blockzilla_format::{
     ARCHIVE_V2_PUBKEY_REGISTRY_FILE, ARCHIVE_V2_PUBKEY_REGISTRY_INDEX_FILE,
     ARCHIVE_V2_SIGNATURES_FILE,
 };
-use blockzilla_read_sdk::ArchiveV2WireProfile;
+use blockzilla_read_sdk_legacy::ArchiveV2WireProfile;
 use serde::{Deserialize, Serialize};
 
 use crate::format::RegistryFileIdentity;

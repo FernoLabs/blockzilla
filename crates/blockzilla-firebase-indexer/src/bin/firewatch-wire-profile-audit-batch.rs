@@ -43,7 +43,7 @@ use blockzilla_format::{
     ARCHIVE_V2_PUBKEY_REGISTRY_FILE, ARCHIVE_V2_PUBKEY_REGISTRY_INDEX_FILE,
     ARCHIVE_V2_SIGNATURES_FILE,
 };
-use blockzilla_read_sdk::{ArchiveV2WireProfile, wire_profile_marker, wire_profile_marker_bytes};
+use blockzilla_read_sdk_legacy::{ArchiveV2WireProfile, wire_profile_marker, wire_profile_marker_bytes};
 use clap::Parser;
 use reqwest::blocking::Client;
 use serde::{Deserialize, Serialize, de::DeserializeOwned};
@@ -5726,12 +5726,12 @@ mod tests {
             let marker = wire_profile_marker(post);
             fs::write(
                 target.join(&marker.name),
-                blockzilla_read_sdk::wire_profile_marker_bytes(post),
+                blockzilla_read_sdk_legacy::wire_profile_marker_bytes(post),
             )
             .unwrap();
             target_bindings.insert(
                 marker.name,
-                file_binding(blockzilla_read_sdk::wire_profile_marker_bytes(post)),
+                file_binding(blockzilla_read_sdk_legacy::wire_profile_marker_bytes(post)),
             );
         }
         let source_generation = registry_generation_digest(&source_bindings);

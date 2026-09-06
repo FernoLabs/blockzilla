@@ -308,6 +308,11 @@ pub enum Node<'a> {
 #[inline]
 pub fn decode_node(data: &[u8]) -> Result<Node<'_>> {
     let kind = peek_node_type(data)?;
+    decode_node_with_kind(data, kind)
+}
+
+#[inline]
+pub(crate) fn decode_node_with_kind(data: &[u8], kind: u64) -> Result<Node<'_>> {
     let mut d = Decoder::new(data);
 
     Ok(match kind {

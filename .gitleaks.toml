@@ -1,0 +1,13 @@
+title = "Blockzilla Gitleaks configuration"
+minVersion = "8.30.1"
+
+[extend]
+useDefault = true
+
+[[allowlists]]
+description = "Allow documented replay artifact SHA-256 identifiers"
+targetRules = ["generic-api-key"]
+condition = "AND"
+regexTarget = "line"
+paths = ['''^docs/benchmarks/replay-runtime-poc-2026-07-28\.md$''']
+regexes = ['''^\s*artifact_key=[0-9a-f]{64}\s*$''']

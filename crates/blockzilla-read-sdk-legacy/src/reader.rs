@@ -4239,6 +4239,9 @@ fn scan_transaction(
     let static_keys = match &message {
         ArchiveV2HotMessagePayload::Legacy(message) => message.account_keys.as_slice(),
         ArchiveV2HotMessagePayload::V0(message) => message.account_keys.as_slice(),
+        // V1 appends a transaction config field; account_keys carries the same
+        // meaning, and this path only reads the static key prefix.
+        ArchiveV2HotMessagePayload::V1(message) => message.account_keys.as_slice(),
     };
     let static_result = evaluate_keys(static_keys, context.filter, context.registry_entries);
     let needs_loaded = is_v0 && row.flags & ARCHIVE_V2_TX_FLAG_HAS_LOADED_ADDRESSES != 0;

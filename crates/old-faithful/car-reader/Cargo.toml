@@ -1,6 +1,6 @@
 [package]
 name = "of-car-reader"
-version = "0.1.3"
+version = "0.2.0"
 edition.workspace = true
 rust-version.workspace = true
 license.workspace = true
@@ -13,12 +13,26 @@ exclude = [
     "benches/*",
     "src/bin/profile_big_block.rs",
 ]
-autobins = false
 
 [[bin]]
 name = "reader"
 path = "src/bin/reader.rs"
 required-features = ["reader"]
+
+[[bin]]
+name = "car_continuations"
+path = "src/bin/car_continuations.rs"
+required-features = ["zstd-native"]
+
+[[bin]]
+name = "car_skipped_slots"
+path = "src/bin/car_skipped_slots.rs"
+required-features = ["zstd-native"]
+
+[[bin]]
+name = "car_validate_lossless"
+path = "src/bin/car_validate_lossless.rs"
+required-features = ["zstd-native"]
 
 [[bench]]
 name = "big_block"
@@ -29,13 +43,14 @@ default = ["genesis", "zstd-native"]
 compact-index = ["dep:xxhash-rust"]
 genesis = ["dep:bzip2", "dep:tar"]
 reader = ["dep:clap", "dep:tracing", "dep:tracing-subscriber", "dep:reqwest", "zstd-native"]
+query-sdk = ["dep:blockzilla-query-sdk", "dep:bs58", "dep:thiserror"]
+query-sdk-http = ["query-sdk", "dep:reqwest"]
 zstd-native = ["dep:zstd"]
 zstd-wasm = ["dep:ruzstd"]
 
 [dependencies]
 minicbor = { version = "2.2.2", features = ["full"] }
-solana-short-vec = { version = "=3.2.1", default-features = false, features = ["wincode"] }
-wincode = { version = "=0.5.5", features = ["derive"] }
+wincode = { version = "=0.6.1", features = ["derive"] }
 zstd = { version = "0.13.3", optional = true }
 ruzstd = { version = "0.8.3", optional = true }
 prost = "0.14.3"
@@ -53,6 +68,9 @@ reqwest = { version = "0.13.3", default-features = false, features = [
     "blocking",
     "rustls",
 ], optional = true }
+blockzilla-query-sdk = { path = "../../blockzilla-query-sdk", optional = true }
+bs58 = { version = "0.5.1", optional = true }
+thiserror = { version = "2.0.18", optional = true }
 
 [dev-dependencies]
 criterion = { version = "0.8.2", features = ["html_reports"] }
@@ -65,23 +83,3 @@ protoc-bin-vendored = "3.2.0"
 
 [package.metadata.cargo-machete]
 ignored = ["pb-rs", "prost-build", "protoc-bin-vendored"]
-
-[[bin]]
-name = "car_continuations"
-path = "src/bin/car_continuations.rs"
-
-[[bin]]
-name = "car_df_graph"
-path = "src/bin/car_df_graph.rs"
-
-[[bin]]
-name = "car_skipped_slots"
-path = "src/bin/car_skipped_slots.rs"
-
-[[bin]]
-name = "car_validate_lossless"
-path = "src/bin/car_validate_lossless.rs"
-
-[[bin]]
-name = "profile_big_block"
-path = "src/bin/profile_big_block.rs"

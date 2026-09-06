@@ -24,6 +24,7 @@ pub const ARCHIVE_V2_FIRST_SEEN_REGISTRY_MANIFEST_FILE: &str = "registry-first-s
 pub const ARCHIVE_V2_PUBKEY_HOT_SEED_FILE: &str = "registry-hot-seed.bin";
 pub const ARCHIVE_V2_BLOCKHASH_REGISTRY_FILE: &str = "blockhash_registry.bin";
 pub const ARCHIVE_V2_BLOCKHASH_INDEX_V3_FILE: &str = "blockhash_index_v3.bin";
+/// Legacy compatibility sidecar. Current archives use blockhash registry record 0.
 pub const ARCHIVE_V2_PREV_BLOCKHASH_TAIL_FILE: &str = "prev_blockhash_tail.bin";
 pub const ARCHIVE_V2_BLOCK_ACCESS_FILE: &str = "archive-v2-block-access.wincode";
 pub const ARCHIVE_V2_BLOCK_ACCESS_INDEX_FILE: &str = "archive-v2-block-access.index";
@@ -55,7 +56,7 @@ pub const ARCHIVE_V2_BLOCK_ACCESS_INDEX_ROW_LEN: usize = 4 + 8 + 8 + 4 + 4 + 4;
 
 pub const ARCHIVE_V2_GET_BLOCK_INDEX_ROW_LEN: usize = 8 + 4 + 8 + 4;
 
-#[derive(Debug)]
+#[derive(Debug, Clone)]
 pub struct ArchiveV2HotBlockIndex {
     pub blob_file_bytes: u64,
     pub level: i32,
@@ -284,26 +285,38 @@ pub fn write_archive_v2_get_block_index(
 
 pub fn read_archive_v2_hot_block_index(path: &Path) -> Result<ArchiveV2HotBlockIndex> {
     let file = File::open(path).with_context(|| format!("open {}", path.display()))?;
+    read_archive_v2_hot_block_index_file(file, path)
+}
+
+/// Read the hot-block index through an already pinned descriptor.
+pub fn read_archive_v2_hot_block_index_file(
+    file: File,
+    label: &Path,
+) -> Result<ArchiveV2HotBlockIndex> {
+    let actual_len = file
+        .metadata()
+        .with_context(|| format!("stat {}", label.display()))?
+        .len();
     let mut reader = BufReader::with_capacity(8 << 20, file);
     let mut header = [0u8; ARCHIVE_V2_HOT_INDEX_HEADER_LEN];
     reader
         .read_exact(&mut header)
-        .with_context(|| format!("read {}", path.display()))?;
+        .with_context(|| format!("read {}", label.display()))?;
     anyhow::ensure!(
         &header[..8] == ARCHIVE_V2_HOT_INDEX_MAGIC,
         "{} is not an Archive V2 hot-block index",
-        path.display()
+        label.display()
     );
     let version = u16::from_le_bytes(header[8..10].try_into().unwrap());
     anyhow::ensure!(
         version == ARCHIVE_V2_HOT_INDEX_VERSION,
         "{} has unsupported Archive V2 hot-block index version {version}",
-        path.display()
+        label.display()
     );
     anyhow::ensure!(
         header[10..12] == [0, 0],
         "{} has non-zero reserved Archive V2 hot-block index header bytes",
-        path.display()
+        label.display()
     );
     let row_count = u64::from_le_bytes(header[12..20].try_into().unwrap());
     let blob_file_bytes = u64::from_le_bytes(header[20..28].try_into().unwrap());
@@ -312,7 +325,7 @@ pub fn read_archive_v2_hot_block_index(path: &Path) -> Result<ArchiveV2HotBlockI
     anyhow::ensure!(
         flags & !ARCHIVE_V2_HOT_INDEX_KNOWN_FLAGS == 0,
         "{} has unknown Archive V2 hot-block index flags {:#x}",
-        path.display(),
+        label.display(),
         flags & !ARCHIVE_V2_HOT_INDEX_KNOWN_FLAGS
     );
     let row_count_usize = usize::try_from(row_count).context("index row count exceeds usize")?;
@@ -322,13 +335,10 @@ pub fn read_archive_v2_hot_block_index(path: &Path) -> Result<ArchiveV2HotBlockI
     let expected_len = (ARCHIVE_V2_HOT_INDEX_HEADER_LEN as u64)
         .checked_add(rows_len)
         .context("Archive V2 hot-block index length overflows u64")?;
-    let actual_len = std::fs::metadata(path)
-        .with_context(|| format!("stat {}", path.display()))?
-        .len();
     anyhow::ensure!(
         actual_len == expected_len,
         "{} has size {}, expected {} for {} rows",
-        path.display(),
+        label.display(),
         actual_len,
         expected_len,
         row_count
@@ -341,7 +351,7 @@ pub fn read_archive_v2_hot_block_index(path: &Path) -> Result<ArchiveV2HotBlockI
     for _ in 0..row_count_usize {
         reader
             .read_exact(&mut row_buf)
-            .with_context(|| format!("read row from {}", path.display()))?;
+            .with_context(|| format!("read row from {}", label.display()))?;
         rows.push(ArchiveV2HotBlockIndexRow {
             block_id: u32::from_le_bytes(row_buf[0..4].try_into().unwrap()),
             slot: u64::from_le_bytes(row_buf[4..12].try_into().unwrap()),
