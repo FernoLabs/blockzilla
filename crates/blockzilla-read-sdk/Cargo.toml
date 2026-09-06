@@ -13,9 +13,10 @@ categories = ["database", "filesystem"]
 
 [features]
 default = []
-http = ["dep:blockzilla-source-http", "dep:blockzilla-source-cache"]
+http = ["dep:blockzilla-source-http", "dep:blockzilla-source-cache", "dep:url"]
 
 [dependencies]
+url = { version = "2.5.8", optional = true }
 blockzilla-source = { version = "0.2.0", path = "../source/blockzilla-source" }
 blockzilla-source-local = { version = "0.2.0", path = "../source/blockzilla-source-local" }
 blockzilla-source-http = { version = "0.2.0", path = "../source/blockzilla-source-http", optional = true }

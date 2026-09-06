@@ -14,7 +14,10 @@ Progress, 2026-09-06:
 - The transport extraction passes `cargo check --workspace --all-targets` and
   all 33 local, HTTP, and cache unit tests. One existing cache fixture needed
   persistent interrupted responses to exhaust the reader's retry policy.
-- Legacy consumer migration, facade consolidation, format splits, converter
+- The V2 facade implementation now lives in the reader engine (`archive`
+  module). The old facade crate only re-exports it until the naming step.
+  Its 11 module tests pass; the workspace compilation check also passes.
+- Legacy consumer migration, crate renaming, format splits, converter
   commands, and final folder moves remain pending. Archive compatibility and
   performance have not been established by these compilation checks.
 
@@ -75,9 +78,10 @@ crates/
     blockzilla-index-archive-reader
 
   index/
-    blockzilla-signer-program-index    blockzilla-spyx-query
-    blockzilla-user-program-index      blockzilla-token-transaction-dump
-    blockzilla-token-metadata-index    blockzilla-token-balance-audit
+    blockzilla-user-program-index      signer-to-program relations
+    blockzilla-spyx-query              token postings and market queries
+    blockzilla-token-transaction-dump  token transaction extraction
+    blockzilla-token-balance-audit     token balance verification
 
   compat/                          deletable in one command
     blockzilla-archive-v2-compat   legacy decoders
@@ -112,6 +116,14 @@ web/    docs/    scripts/
 Every format folder has the same shape: **types plus one reader**. That symmetry
 is why `blockzilla-car-read-sdk` folds into `of-car-reader` and
 `blockzilla-compact-v2-read-sdk` folds into the V2 engine.
+
+## Corrections after the merge
+
+The old index rename mapping is not valid. `blockzilla-user-program-index`
+already implements signer-to-program relations. The transaction dumper and
+balance audit are separate tools, not substitutes for that index or a token
+metadata index. Preserve their names and behavior when moving them. New index
+products need their own design; a folder move must not imply they exist.
 
 ## Decisions and why
 

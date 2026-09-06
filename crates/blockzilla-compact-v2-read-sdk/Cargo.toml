@@ -12,12 +12,7 @@ keywords = ["solana", "archive", "streaming", "indexer"]
 categories = ["database", "filesystem"]
 
 [dependencies]
-blockzilla-format = { version = "0.2.0", path = "../blockzilla-format" }
-blockzilla-query-sdk = { version = "0.2.0", path = "../blockzilla-query-sdk" }
 blockzilla-read-sdk = { version = "0.2.0", path = "../blockzilla-read-sdk", features = ["http"] }
-sha2 = "0.11.0"
-thiserror = "2.0.18"
-url = "2.5.8"
 
 [dev-dependencies]
 tempfile = "3.27.0"

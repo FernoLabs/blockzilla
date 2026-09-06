@@ -4,6 +4,8 @@
 //! validates publication metadata before exposing blocks, reads one independent
 //! zstd frame at a time, and fetches signatures only for selected transactions.
 
+#[cfg(feature = "http")]
+pub mod archive;
 pub mod archive_integrity;
 pub mod archive_signatures;
 pub mod blockhash;
@@ -122,3 +124,6 @@ pub use source::{
     LocalRangeSource, OverlayRangeSource, PinnedLocalObjectIdentity, PinnedLocalRangeSource,
     PinnedLocalRangeSourceStats, RangeSource, SourceResult,
 };
+
+#[cfg(feature = "http")]
+pub use archive::{CompactV2Archive, CompactV2OpenOptions, CompactV2LocalDescriptor, CompactV2TransportKind, CompactV2TransportReceipt};
