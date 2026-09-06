@@ -14,7 +14,19 @@ known-program-logs = [
     "blockzilla-program-logs/known-program-logs",
     "blockzilla-compact/known-program-logs",
     "blockzilla-archive-v2/known-program-logs",
+    "known-drift",
+    "known-okx-router",
+    "known-phoenix-perps",
+    "known-phoenix-v1",
+    "known-raydium-amm",
+    "known-static-programs",
 ]
+known-drift = ["blockzilla-program-logs/known-drift", "blockzilla-archive-v2/known-drift"]
+known-okx-router = ["blockzilla-program-logs/known-okx-router"]
+known-phoenix-perps = ["blockzilla-program-logs/known-phoenix-perps"]
+known-phoenix-v1 = ["blockzilla-program-logs/known-phoenix-v1"]
+known-raydium-amm = ["blockzilla-program-logs/known-raydium-amm"]
+known-static-programs = ["blockzilla-program-logs/known-static-programs"]
 
 [dependencies]
 blockzilla-archive-v2 = { path = "../blockzilla-archive-v2", default-features = false }

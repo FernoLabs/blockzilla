@@ -14,7 +14,10 @@ default = ["known-program-logs"]
 known-program-logs = [
     "blockzilla-program-logs/known-program-logs",
     "blockzilla-compact/known-program-logs",
+    "known-drift",
 ]
+# wire_rewrite gates test fixtures on this directly, so it must exist here too.
+known-drift = ["blockzilla-program-logs/known-drift"]
 
 [dependencies]
 blockzilla-primitives = { path = "../blockzilla-primitives" }

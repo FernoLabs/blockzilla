@@ -31,7 +31,7 @@ pub struct CompactPohEntry {
 
 /// `CompactPohEntry` before `signature_count` was added. Every `poh.wincode` sidecar
 /// written before that migration lands has this layout; see
-/// [`blockzilla_archive_v2::deserialize_archive_v2_poh_record`].
+/// `blockzilla_archive_v2::deserialize_archive_v2_poh_record`.
 #[derive(Debug, Clone, Serialize, Deserialize, SchemaRead, SchemaWrite)]
 pub struct CompactPohEntryLegacyNoSignatureCount {
     pub num_hashes: u64,
