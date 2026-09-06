@@ -15,8 +15,10 @@ Progress, 2026-09-06:
   all 33 local, HTTP, and cache unit tests. One existing cache fixture needed
   persistent interrupted responses to exhaust the reader's retry policy.
 - The V2 facade implementation now lives in the reader engine (`archive`
-  module). The old facade crate only re-exports it until the naming step.
-  Its 11 module tests pass; the workspace compilation check also passes.
+  module). The package is named `blockzilla-compact-v2-reader`; its directory
+  remains `crates/blockzilla-read-sdk` until the final folder move. The former
+  facade crate is removed and its consumers use the engine directly. Its 11
+  module tests and six public API tests pass. The workspace check passes.
 - Legacy consumer migration, crate renaming, format splits, converter
   commands, and final folder moves remain pending. Archive compatibility and
   performance have not been established by these compilation checks.

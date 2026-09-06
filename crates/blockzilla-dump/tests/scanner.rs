@@ -1,4 +1,4 @@
-use blockzilla_read_sdk::{CompactV2MessageSchema, CompactV2MetadataSchema};
+use blockzilla_compact_v2_reader::{CompactV2MessageSchema, CompactV2MetadataSchema};
 use std::{
     fs,
     io::{Read, Write},
@@ -29,7 +29,7 @@ use blockzilla_format::{
     WINCODE_ARCHIVE_V2_HOT_BLOCK_VERSION, WincodeArchiveV2Footer, WincodeArchiveV2Header,
     wincode_leb128_config, write_archive_v2_hot_block_index, write_registry,
 };
-use blockzilla_read_sdk::{
+use blockzilla_compact_v2_reader::{
     COMPACT_V2_CURRENT_MESSAGE_SCHEMA_MARKER_BYTES, COMPACT_V2_CURRENT_MESSAGE_SCHEMA_MARKER_FILE,
     manifest::{
         GENERATION_MANIFEST_FILE, GenerationFile, GenerationManifest, compute_generation_digest,

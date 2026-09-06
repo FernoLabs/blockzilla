@@ -2,7 +2,7 @@
 
 use std::{error::Error, io::Write, time::Instant};
 
-use blockzilla_compact_v2_read_sdk::{ArchiveInstructionSource, CompactV2ParallelScanConfig};
+use blockzilla_compact_v2_reader::archive::{ArchiveInstructionSource, CompactV2ParallelScanConfig};
 use blockzilla_example_workloads::TransactionIdentityDumpSink;
 use blockzilla_read_compact_v2::{
     finish_archive, open_archive, output_file, positional_arguments, scan_request,
@@ -117,8 +117,8 @@ fn main() -> Result<(), Box<dyn Error>> {
 }
 
 fn transaction_request(
-    request: blockzilla_compact_v2_read_sdk::ScanRequest,
-) -> blockzilla_compact_v2_read_sdk::ScanRequest {
+    request: blockzilla_compact_v2_reader::archive::ScanRequest,
+) -> blockzilla_compact_v2_reader::archive::ScanRequest {
     request
         .allow_incomplete_instructions()
         .allow_incomplete_cpi()

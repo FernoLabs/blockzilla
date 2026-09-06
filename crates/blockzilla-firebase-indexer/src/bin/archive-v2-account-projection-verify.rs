@@ -9,7 +9,7 @@ fn main() {
         let operational = error.chain().any(|cause| {
             cause.downcast_ref::<std::io::Error>().is_some()
                 || cause
-                    .downcast_ref::<blockzilla_read_sdk::SourceError>()
+                    .downcast_ref::<blockzilla_compact_v2_reader::SourceError>()
                     .is_some()
         });
         let receipt = serde_json::json!({

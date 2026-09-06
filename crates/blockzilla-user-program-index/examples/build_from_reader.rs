@@ -1,7 +1,7 @@
 use std::{env, path::PathBuf};
 
 use anyhow::{Context, Result};
-use blockzilla_read_sdk::{ArchiveReader, PinnedLocalRangeSource};
+use blockzilla_compact_v2_reader::{ArchiveReader, PinnedLocalRangeSource};
 use blockzilla_user_program_index::build::{DenseIndexBuildOptions, build_dense_index_from_reader};
 
 fn main() -> Result<()> {

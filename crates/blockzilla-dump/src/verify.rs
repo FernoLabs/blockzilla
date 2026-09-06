@@ -3,7 +3,7 @@
 use std::time::Instant;
 
 use anyhow::{Context, Result, ensure};
-use blockzilla_read_sdk::{
+use blockzilla_compact_v2_reader::{
     ArchiveReader, ArchiveSignatureConfig, HashVerification, OpenOptions, PinnedLocalRangeSource,
     archive_integrity::{
         ArchiveContinuityConfig, ArchiveIntegrityConfig, PohProtocolBounds, PohSidecarSchema,
@@ -112,9 +112,9 @@ pub fn run_verify(config: VerifyRunConfig) -> Result<VerifyRunResult> {
     );
     ensure!(
         config.threads > 0
-            && config.threads <= blockzilla_read_sdk::MAX_ORDERED_PARALLEL_DECODE_WORKERS,
+            && config.threads <= blockzilla_compact_v2_reader::MAX_ORDERED_PARALLEL_DECODE_WORKERS,
         "threads must be in 1..={}",
-        blockzilla_read_sdk::MAX_ORDERED_PARALLEL_DECODE_WORKERS
+        blockzilla_compact_v2_reader::MAX_ORDERED_PARALLEL_DECODE_WORKERS
     );
     if config.poh_requested {
         ensure!(
@@ -307,7 +307,7 @@ fn verify_local_poh(
     poh_schema: PohSidecarSchema,
     max_hash_rounds_per_block: u64,
     max_total_hash_rounds: u64,
-) -> Result<blockzilla_read_sdk::archive_integrity::ArchiveIntegrityReport> {
+) -> Result<blockzilla_compact_v2_reader::archive_integrity::ArchiveIntegrityReport> {
     let options = OpenOptions {
         hash_verification: HashVerification::ControlFiles,
         ..OpenOptions::default()

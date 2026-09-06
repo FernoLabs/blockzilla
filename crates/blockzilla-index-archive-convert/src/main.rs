@@ -194,7 +194,7 @@ use blockzilla_index_archive_format::{
         token_balances as token_balances_codec,
     },
 };
-use blockzilla_read_sdk::{
+use blockzilla_compact_v2_reader::{
     ArchiveReader, BorrowedDecodedBlock, HashVerification, MAX_ORDERED_PARALLEL_DECODE_WORKERS,
     OpenOptions, OrderedParallelBlockConfig, PinnedLocalRangeSource, RangeSource,
     manifest::{GENERATION_MANIFEST_FILE, TrustedGenerationIdentity},
@@ -663,7 +663,7 @@ fn validate_source_publication(source: &Path, args: &Args) -> Result<SourceConte
 }
 
 fn validate_published_blockhash_bindings(
-    manifest: &blockzilla_read_sdk::manifest::GenerationManifest,
+    manifest: &blockzilla_compact_v2_reader::manifest::GenerationManifest,
     block_count: usize,
 ) -> Result<BlockhashRegistryLayout> {
     let registry = manifest
@@ -687,7 +687,7 @@ fn validate_published_blockhash_bindings(
 }
 
 fn select_published_metadata_schema(
-    manifest: &blockzilla_read_sdk::manifest::GenerationManifest,
+    manifest: &blockzilla_compact_v2_reader::manifest::GenerationManifest,
 ) -> Result<CompactV2MetadataSchema> {
     bail!(
         "published source generation {} has no manifest-bound Compact V2 metadata-schema selector; refusing to infer current-typed-error or legacy-raw-error from transaction data",
@@ -5371,8 +5371,8 @@ mod tests {
     fn blockhash_manifest(
         epoch: u64,
         files: impl IntoIterator<Item = (&'static str, u64)>,
-    ) -> blockzilla_read_sdk::manifest::GenerationManifest {
-        blockzilla_read_sdk::manifest::GenerationManifest {
+    ) -> blockzilla_compact_v2_reader::manifest::GenerationManifest {
+        blockzilla_compact_v2_reader::manifest::GenerationManifest {
             schema_version: 1,
             cluster_id: "mainnet-beta".to_owned(),
             epoch,
@@ -5383,7 +5383,7 @@ mod tests {
             files: files
                 .into_iter()
                 .map(
-                    |(name, size)| blockzilla_read_sdk::manifest::GenerationFile {
+                    |(name, size)| blockzilla_compact_v2_reader::manifest::GenerationFile {
                         name: name.to_owned(),
                         size,
                         sha256: "0".repeat(64),
@@ -5610,7 +5610,7 @@ mod tests {
 
     #[test]
     fn published_source_without_bound_metadata_selector_fails_closed() {
-        let manifest = blockzilla_read_sdk::manifest::GenerationManifest {
+        let manifest = blockzilla_compact_v2_reader::manifest::GenerationManifest {
             schema_version: 1,
             cluster_id: "mainnet-beta".to_owned(),
             epoch: 900,

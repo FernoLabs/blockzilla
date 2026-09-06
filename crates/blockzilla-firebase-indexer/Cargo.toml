@@ -23,7 +23,7 @@ anyhow = "1.0.102"
 blockzilla-format = { path = "../blockzilla-format" }
 blockzilla-index-archive-format = { path = "../blockzilla-index-archive-format" }
 blockzilla-query-sdk = { path = "../blockzilla-query-sdk" }
-blockzilla-read-sdk = { path = "../blockzilla-read-sdk", features = ["http"] }
+blockzilla-compact-v2-reader = { path = "../blockzilla-read-sdk", features = ["http"] }
 blockzilla-user-program-index = { version = "0.2.0", path = "../blockzilla-user-program-index" }
 of-car-reader = { path = "../old-faithful/car-reader", default-features = false, features = ["zstd-native"] }
 bs58 = "0.5.1"

@@ -16,7 +16,7 @@ use blockzilla_format::{
     ARCHIVE_V2_TX_FLAG_TX_RAW_FALLBACK, ArchiveV2HotMessagePayload, ArchiveV2HotTxRow,
     CompactMessageHeader, CompactMetaV1, CompactPubkey,
 };
-use blockzilla_read_sdk::{
+use blockzilla_compact_v2_reader::{
     ArchiveIdentity, ArchiveReader, ArchiveSourceBinding, BorrowedDecodedBlock,
     COMPACT_V2_OPTIONAL_OBJECTS, COMPACT_V2_REQUIRED_OBJECTS, CompactV2MessageSchema,
     CompactV2MetadataSchema, CompiledPubkeyFilter, HashVerification, HttpObjectIdentity,
@@ -35,7 +35,7 @@ use crate::database::{
 
 const CACHE_DOWNLOAD_CHUNK: usize = 8 * 1024 * 1024;
 const REGISTRY_RESOLVER_ENTRIES: usize = 16_384;
-const MAX_THREADS: usize = blockzilla_read_sdk::MAX_ORDERED_PARALLEL_DECODE_WORKERS;
+const MAX_THREADS: usize = blockzilla_compact_v2_reader::MAX_ORDERED_PARALLEL_DECODE_WORKERS;
 const OBJECT_SET_ID_DOMAIN: &[u8] = b"blockzilla/dump/compact-v2-etag-set/v1\0";
 pub(crate) const LOCAL_OBJECT_SET: [&str; 19] = [
     blockzilla_format::ARCHIVE_V2_BLOCKS_FILE,
@@ -838,12 +838,12 @@ fn project_block(
 
 enum Selected {
     Program(
-        SelectorOutcome<blockzilla_read_sdk::ProgramInvocationMatch>,
+        SelectorOutcome<blockzilla_compact_v2_reader::ProgramInvocationMatch>,
         Option<ArchiveV2HotMessagePayload>,
         Option<CompactMetaV1>,
     ),
     Token(
-        SelectorOutcome<blockzilla_read_sdk::TokenBalanceMatch>,
+        SelectorOutcome<blockzilla_compact_v2_reader::TokenBalanceMatch>,
         Option<ArchiveV2HotMessagePayload>,
         Option<CompactMetaV1>,
     ),

@@ -10,7 +10,7 @@ use std::{
     time::Instant,
 };
 
-use blockzilla_compact_v2_read_sdk::{
+use blockzilla_compact_v2_reader::archive::{
     CompactV2Archive, CompactV2LocalDescriptor, CompactV2ParallelScanConfig,
     CompactV2ParallelScanReceipt, CompactV2TransportReceipt, MAX_COMPACT_V2_PARALLEL_WORKERS,
     ScanReceipt, ScanRequest,
@@ -303,7 +303,7 @@ fn positive_blocks(value: &str) -> Result<NonZeroU32, Box<dyn Error>> {
 
 pub fn open_archive(
     arguments: &Arguments,
-) -> blockzilla_compact_v2_read_sdk::Result<CompactV2Archive> {
+) -> blockzilla_compact_v2_reader::archive::Result<CompactV2Archive> {
     match &arguments.source {
         Source::Network { origin, cache_root } => {
             CompactV2Archive::open(origin, arguments.epoch, cache_root)
@@ -321,7 +321,7 @@ pub fn open_archive(
 pub fn scan_request(
     archive: &CompactV2Archive,
     max_blocks: Option<NonZeroU32>,
-) -> blockzilla_compact_v2_read_sdk::Result<ScanRequest> {
+) -> blockzilla_compact_v2_reader::archive::Result<ScanRequest> {
     max_blocks.map_or_else(
         || Ok(ScanRequest::all()),
         |count| Ok(ScanRequest::bounded(archive.bounded_range(0, count)?)),
@@ -643,7 +643,7 @@ fn print_pipeline(receipt: &CompactV2ParallelScanReceipt) {
 
 pub fn finish_archive(
     archive: CompactV2Archive,
-) -> blockzilla_compact_v2_read_sdk::Result<CompactV2TransportReceipt> {
+) -> blockzilla_compact_v2_reader::archive::Result<CompactV2TransportReceipt> {
     archive.verify_local_unchanged()?;
     Ok(archive.finish_transport_io())
 }

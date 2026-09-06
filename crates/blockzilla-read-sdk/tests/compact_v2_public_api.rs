@@ -1,4 +1,4 @@
-use blockzilla_compact_v2_read_sdk::{
+use blockzilla_compact_v2_reader::archive::{
     ArchiveInstructionSource, ArchiveIoSnapshot, CompactV2Archive, CompactV2LocalDescriptor,
     CompactV2OpenOptions, CompactV2ParallelScanConfig, CompactV2ParallelScanReceipt,
     CompactV2RegistryReadPolicy, CompactV2TransportKind, CompactV2TransportReceipt,
@@ -12,7 +12,7 @@ fn archive_implements_the_common_source_contract() {
     fn assert_send_sync<T: Send + Sync>() {}
 
     assert_source::<CompactV2Archive>();
-    assert_send_sync::<blockzilla_compact_v2_read_sdk::Error>();
+    assert_send_sync::<blockzilla_compact_v2_reader::archive::Error>();
 }
 
 #[test]

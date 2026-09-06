@@ -1,4 +1,4 @@
-# blockzilla-read-sdk
+# blockzilla-compact-v2-reader
 
 For format choice and the common all-format API, start with
 [`Archive formats and the read SDK`](../../docs/reference/archive-formats-and-read-sdk.md).
@@ -48,12 +48,12 @@ for a complete local generation and `--gateway URL` for a Cloudflare gateway.
 For direct SDK use, open a local generation with `LocalRangeSource`:
 
 ```rust,no_run
-use blockzilla_read_sdk::{ArchiveReader, LocalRangeSource};
+use blockzilla_compact_v2_reader::{ArchiveReader, LocalRangeSource};
 
 let source = LocalRangeSource::new("archive/epoch-900");
 let archive = ArchiveReader::open(source)?;
 println!("{} blocks", archive.index().rows.len());
-# Ok::<(), blockzilla_read_sdk::Error>(())
+# Ok::<(), blockzilla_compact_v2_reader::Error>(())
 ```
 
 ## Local cache plus HTTP streaming
@@ -61,7 +61,7 @@ println!("{} blocks", archive.index().rows.len());
 Enable the HTTP source:
 
 ```toml
-blockzilla-read-sdk = { version = "0.2", features = ["http"] }
+blockzilla-compact-v2-reader = { version = "0.2", features = ["http"] }
 ```
 
 The gateway routes are:
@@ -81,7 +81,7 @@ metadata, and `registry.bin`. A user-program index build also caches the bound
 so the overlay streams their bounded ranges from the gateway:
 
 ```rust,no_run
-use blockzilla_read_sdk::{
+use blockzilla_compact_v2_reader::{
     ArchiveReader, HashVerification, HttpRangeSource, LocalRangeSource,
     OpenOptions, OverlayRangeSource, SelectorOutcome, TransactionMatch,
 };
@@ -146,7 +146,7 @@ for block in archive.scan(&filter)? {
         }
     }
 }
-# Ok::<(), blockzilla_read_sdk::Error>(())
+# Ok::<(), blockzilla_compact_v2_reader::Error>(())
 ```
 
 `ControlFiles` hashes `registry.bin`, `archive-v2-blocks.index`,
@@ -206,5 +206,12 @@ a circular digest. See the function documentation for the byte-exact layout.
 ## Test
 
 ```bash
-cargo test -p blockzilla-read-sdk --all-features
+cargo test -p blockzilla-compact-v2-reader --all-features
 ```
+
+## High-level archive interface
+
+With the `http` feature, `archive::CompactV2Archive` opens local or network
+archives. This module replaces the former `blockzilla-compact-v2-read-sdk`
+crate. Its error and result types are `archive::Error` and `archive::Result`;
+the low-level reader retains the root `Error` and `Result` types.

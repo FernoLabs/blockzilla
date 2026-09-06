@@ -2,7 +2,7 @@ use blockzilla_example_workloads::ProgressSink;
 
 use std::{error::Error, io, time::Instant};
 
-use blockzilla_compact_v2_read_sdk::{
+use blockzilla_compact_v2_reader::archive::{
     ArchiveInstructionSource, BlockSink, BlockView, CompactV2Archive, CompactV2LocalDescriptor,
     CompactV2ParallelScanConfig, QueryError, QueryResult, ScanRequest,
 };

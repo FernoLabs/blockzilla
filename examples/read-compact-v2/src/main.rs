@@ -1,6 +1,6 @@
 use std::{env, error::Error, num::NonZeroU32, path::PathBuf, time::Instant};
 
-use blockzilla_compact_v2_read_sdk::{
+use blockzilla_compact_v2_reader::archive::{
     ArchiveInstructionSource, ArchiveInstructionSourceExt, CompactV2Archive,
     CompactV2LocalDescriptor, CompactV2TransportReceipt, ScanRequest,
 };
@@ -72,7 +72,7 @@ fn main() -> Result<(), Box<dyn Error>> {
     Ok(())
 }
 
-fn benchmark_request(range: blockzilla_compact_v2_read_sdk::ScanRange) -> ScanRequest {
+fn benchmark_request(range: blockzilla_compact_v2_reader::archive::ScanRange) -> ScanRequest {
     ScanRequest::bounded(range)
         .allow_incomplete_instructions()
         .allow_incomplete_cpi()
@@ -84,8 +84,8 @@ fn benchmark_request(range: blockzilla_compact_v2_read_sdk::ScanRange) -> ScanRe
 fn print_result(
     format: &str,
     epoch: u64,
-    verification: blockzilla_compact_v2_read_sdk::SourceVerification,
-    transport_kind: blockzilla_compact_v2_read_sdk::CompactV2TransportKind,
+    verification: blockzilla_compact_v2_reader::archive::SourceVerification,
+    transport_kind: blockzilla_compact_v2_reader::archive::CompactV2TransportKind,
     candidate_id: &str,
     requested_blocks: u32,
     bound_source_size_bytes: u64,

@@ -11,7 +11,7 @@ use anyhow::{Context, Result};
 use blockzilla_format::{
     ARCHIVE_V2_PUBKEY_REGISTRY_FILE, ARCHIVE_V2_PUBKEY_REGISTRY_INDEX_FILE, FileBackedKeyIndex,
 };
-use blockzilla_read_sdk::manifest::{GENERATION_MANIFEST_FILE, GenerationManifest};
+use blockzilla_compact_v2_reader::manifest::{GENERATION_MANIFEST_FILE, GenerationManifest};
 use serde::Serialize;
 use sha2::{Digest, Sha256};
 
@@ -358,7 +358,7 @@ mod tests {
         ARCHIVE_V2_PUBKEY_REGISTRY_FILE, ARCHIVE_V2_PUBKEY_REGISTRY_INDEX_FILE, KeyIndex,
         write_registry,
     };
-    use blockzilla_read_sdk::manifest::{
+    use blockzilla_compact_v2_reader::manifest::{
         GENERATION_MANIFEST_SCHEMA_VERSION, GenerationFile, compute_generation_digest,
     };
 

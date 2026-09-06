@@ -3,7 +3,7 @@
 mod allocation;
 
 use anyhow::{Context, Result, ensure};
-use blockzilla_compact_v2_read_sdk::{
+use blockzilla_compact_v2_reader::archive::{
     CompactV2Archive, CompactV2LocalDescriptor, CompactV2ParallelScanConfig,
 };
 use blockzilla_example_workloads::{

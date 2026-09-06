@@ -222,7 +222,7 @@ pub enum MessageSchemaArg {
     May24,
 }
 
-impl From<MessageSchemaArg> for blockzilla_read_sdk::CompactV2MessageSchema {
+impl From<MessageSchemaArg> for blockzilla_compact_v2_reader::CompactV2MessageSchema {
     fn from(value: MessageSchemaArg) -> Self {
         match value {
             MessageSchemaArg::Current => Self::Current,
@@ -237,7 +237,7 @@ pub enum MetadataSchemaArg {
     LegacyRawError,
 }
 
-impl From<MetadataSchemaArg> for blockzilla_read_sdk::CompactV2MetadataSchema {
+impl From<MetadataSchemaArg> for blockzilla_compact_v2_reader::CompactV2MetadataSchema {
     fn from(value: MetadataSchemaArg) -> Self {
         match value {
             MetadataSchemaArg::CurrentTypedError => Self::CurrentTypedError,
@@ -351,7 +351,7 @@ fn run_verify_command(args: VerifyArgs) -> Result<CommandOutcome> {
     let poh_requested = args.poh || args.all_checks;
     let signatures_requested = args.signatures || args.all_checks;
     let poh_bounds = if poh_requested {
-        Some(blockzilla_read_sdk::archive_integrity::PohProtocolBounds {
+        Some(blockzilla_compact_v2_reader::archive_integrity::PohProtocolBounds {
             ticks_per_slot: args.poh_ticks_per_slot,
             hashes_per_tick: args
                 .poh_hashes_per_tick
@@ -385,7 +385,7 @@ fn run_verify_command(args: VerifyArgs) -> Result<CommandOutcome> {
     })
 }
 
-impl From<PohSchemaArg> for blockzilla_read_sdk::archive_integrity::PohSidecarSchema {
+impl From<PohSchemaArg> for blockzilla_compact_v2_reader::archive_integrity::PohSidecarSchema {
     fn from(value: PohSchemaArg) -> Self {
         match value {
             PohSchemaArg::Current => Self::Current,

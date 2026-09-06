@@ -33,7 +33,7 @@ use blockzilla_format::{
     ARCHIVE_V2_TX_FLAG_MESSAGE_V0, ARCHIVE_V2_TX_FLAG_METADATA_RAW_FALLBACK,
     ARCHIVE_V2_TX_FLAG_TX_RAW_FALLBACK, ArchiveV2HotTxRow, CompactPubkey, FileBackedKeyIndex,
 };
-use blockzilla_read_sdk::{
+use blockzilla_compact_v2_reader::{
     ArchiveReader, HashVerification, OpenOptions, PinnedLocalRangeSource,
     manifest::TrustedGenerationIdentity,
 };

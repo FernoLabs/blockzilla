@@ -1,5 +1,5 @@
 [package]
-name = "blockzilla-read-sdk"
+name = "blockzilla-compact-v2-reader"
 version.workspace = true
 edition.workspace = true
 rust-version.workspace = true
@@ -38,3 +38,8 @@ zstd = "0.13.3"
 [dev-dependencies]
 ed25519-dalek = "2.2.0"
 tempfile = "3.24.0"
+
+[[test]]
+name = "compact_v2_public_api"
+path = "tests/compact_v2_public_api.rs"
+required-features = ["http"]

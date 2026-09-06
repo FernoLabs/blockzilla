@@ -65,7 +65,7 @@ use blockzilla_format::{
     CompactMessageHeader, CompactPubkey, CompactReward, CompactTokenBalance,
     CompactTransactionConfig, DataArray, OwnedCompactRecentBlockhash, WincodeLeb128Config,
 };
-use blockzilla_read_sdk::{CompactV2MessageSchema, CompactV2MetadataSchema};
+use blockzilla_compact_v2_reader::{CompactV2MessageSchema, CompactV2MetadataSchema};
 use wincode::{ReadResult, SchemaRead, error::invalid_tag_encoding, io::Reader};
 
 pub type Cfg = WincodeLeb128Config;

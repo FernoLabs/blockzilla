@@ -38,7 +38,7 @@ use blockzilla_query_sdk::{
     TokenBalanceCoverage, TokenBalanceRequirement, TokenBalanceSide, TransactionHeader,
     validate_request,
 };
-use blockzilla_read_sdk::{
+use blockzilla_compact_v2_reader::{
     BLOCKHASH_RECORD_LEN, BlockhashResolver, BlockhashResolverError, CompactV2ExecutionStatus,
     CompactV2MessageProjectionError, CompactV2MessageProjector, CompactV2MetadataProjectionError,
     CompactV2MetadataProjectionLimits, CompactV2MetadataProjector, MAX_BLOCKHASH_REGISTRY_BYTES,
@@ -250,7 +250,7 @@ pub enum IndexerV3InstructionSourceError {
     Reader(#[source] anyhow::Error),
 
     #[error("Indexer V3 range source error: {0}")]
-    RangeSource(#[from] blockzilla_read_sdk::SourceError),
+    RangeSource(#[from] blockzilla_compact_v2_reader::SourceError),
 
     #[error("Indexer V3 message projection error: {0}")]
     Message(#[from] CompactV2MessageProjectionError),
@@ -314,7 +314,7 @@ pub struct IndexerV3InstructionSource {
 struct TransactionProjectionScratch {
     account_keys: Vec<[u8; 32]>,
     selected_references: Vec<CompactPubkey>,
-    token_balances: blockzilla_read_sdk::ProjectedCompactV2TokenBalances,
+    token_balances: blockzilla_compact_v2_reader::ProjectedCompactV2TokenBalances,
 }
 
 impl TransactionProjectionScratch {
@@ -1838,7 +1838,7 @@ impl IndexerV3InstructionSource {
                             &mut signature_cursor,
                         )?;
                         if request.counts_only {
-                            use blockzilla_read_sdk::count_projection::{
+                            use blockzilla_compact_v2_reader::count_projection::{
                                 CountMetadata, count_transaction,
                             };
                             anyhow::ensure!(
@@ -2605,8 +2605,8 @@ impl IndexerV3InstructionSource {
     fn project_transaction(
         context: &mut ExactContext,
         request: &ScanRequest,
-        message_schema: blockzilla_read_sdk::CompactV2MessageSchema,
-        metadata_schema: blockzilla_read_sdk::CompactV2MetadataSchema,
+        message_schema: blockzilla_compact_v2_reader::CompactV2MessageSchema,
+        metadata_schema: blockzilla_compact_v2_reader::CompactV2MetadataSchema,
         transaction: SemanticTransaction<'_>,
         signatures: Option<&[[u8; 64]]>,
         scratch: &mut TransactionProjectionScratch,
@@ -2627,8 +2627,8 @@ impl IndexerV3InstructionSource {
     fn project_transaction_inner(
         context: &mut ExactContext,
         request: &ScanRequest,
-        message_schema: blockzilla_read_sdk::CompactV2MessageSchema,
-        metadata_schema: blockzilla_read_sdk::CompactV2MetadataSchema,
+        message_schema: blockzilla_compact_v2_reader::CompactV2MessageSchema,
+        metadata_schema: blockzilla_compact_v2_reader::CompactV2MetadataSchema,
         transaction: SemanticTransaction<'_>,
         signatures: Option<&[[u8; 64]]>,
         scratch: &mut TransactionProjectionScratch,
@@ -4331,25 +4331,25 @@ impl CountingRangeSource {
         })
     }
 
-    fn record(&self, bytes: usize) -> blockzilla_read_sdk::SourceResult<()> {
+    fn record(&self, bytes: usize) -> blockzilla_compact_v2_reader::SourceResult<()> {
         let bytes = u64::try_from(bytes).map_err(|_| {
-            blockzilla_read_sdk::SourceError::Protocol("V3 returned-byte count exceeds u64".into())
+            blockzilla_compact_v2_reader::SourceError::Protocol("V3 returned-byte count exceeds u64".into())
         })?;
         let mut stats = self.stats.lock().map_err(|_| {
-            blockzilla_read_sdk::SourceError::Protocol("V3 source read counter is poisoned".into())
+            blockzilla_compact_v2_reader::SourceError::Protocol("V3 source read counter is poisoned".into())
         })?;
         stats.calls = stats.calls.checked_add(1).ok_or_else(|| {
-            blockzilla_read_sdk::SourceError::Protocol("V3 source read-call count overflow".into())
+            blockzilla_compact_v2_reader::SourceError::Protocol("V3 source read-call count overflow".into())
         })?;
         stats.bytes = stats.bytes.checked_add(bytes).ok_or_else(|| {
-            blockzilla_read_sdk::SourceError::Protocol("V3 source read-byte count overflow".into())
+            blockzilla_compact_v2_reader::SourceError::Protocol("V3 source read-byte count overflow".into())
         })?;
         Ok(())
     }
 }
 
 impl RangeSource for CountingRangeSource {
-    fn size(&self, object: &str) -> blockzilla_read_sdk::SourceResult<Option<u64>> {
+    fn size(&self, object: &str) -> blockzilla_compact_v2_reader::SourceResult<Option<u64>> {
         self.inner.size(object)
     }
 
@@ -4358,7 +4358,7 @@ impl RangeSource for CountingRangeSource {
         object: &str,
         offset: u64,
         length: usize,
-    ) -> blockzilla_read_sdk::SourceResult<Vec<u8>> {
+    ) -> blockzilla_compact_v2_reader::SourceResult<Vec<u8>> {
         let bytes = self.inner.read_range(object, offset, length)?;
         self.record(bytes.len())?;
         Ok(bytes)
@@ -4370,7 +4370,7 @@ impl RangeSource for CountingRangeSource {
         offset: u64,
         length: usize,
         destination: &mut Vec<u8>,
-    ) -> blockzilla_read_sdk::SourceResult<()> {
+    ) -> blockzilla_compact_v2_reader::SourceResult<()> {
         self.inner
             .read_range_into(object, offset, length, destination)?;
         self.record(destination.len())
@@ -4381,7 +4381,7 @@ impl RangeSource for CountingRangeSource {
         object: &str,
         offset: u64,
         destination: &mut [u8],
-    ) -> blockzilla_read_sdk::SourceResult<()> {
+    ) -> blockzilla_compact_v2_reader::SourceResult<()> {
         self.inner
             .read_range_into_slice(object, offset, destination)?;
         self.record(destination.len())
@@ -4778,7 +4778,7 @@ struct SharedExactSidecars {
 
 struct ExactContext {
     output_pool: blockzilla_query_sdk::projection_pool::ProjectionPool,
-    query_keys: Arc<blockzilla_read_sdk::query_keys::BoundQueryKeys>,
+    query_keys: Arc<blockzilla_compact_v2_reader::query_keys::BoundQueryKeys>,
     source: Arc<dyn RangeSource>,
     registry_entries: u32,
     sidecars: SidecarGeometry,
@@ -4797,7 +4797,7 @@ struct ExactContext {
     vote_hashes_loaded: bool,
     vote_hashes: Option<Arc<VoteHashRegistry>>,
     blockhashes: Option<Arc<BlockhashResolver>>,
-    message_schema: blockzilla_read_sdk::CompactV2MessageSchema,
+    message_schema: blockzilla_compact_v2_reader::CompactV2MessageSchema,
 }
 
 impl std::fmt::Debug for ExactContext {
@@ -4822,7 +4822,7 @@ impl ExactContext {
         source: Arc<dyn RangeSource>,
         registry_entries: u32,
         sidecars: SidecarGeometry,
-        message_schema: blockzilla_read_sdk::CompactV2MessageSchema,
+        message_schema: blockzilla_compact_v2_reader::CompactV2MessageSchema,
     ) -> Self {
         Self {
             source,
@@ -5056,7 +5056,7 @@ impl ExactContext {
     ) -> IndexerV3InstructionSourceResult<()> {
         if !self.query_keys.covers(request) {
             self.query_keys = Arc::new(
-                blockzilla_read_sdk::query_keys::BoundQueryKeys::bind_with_registry(
+                blockzilla_compact_v2_reader::query_keys::BoundQueryKeys::bind_with_registry(
                     self.source.as_ref(),
                     self.registry_entries,
                     request,
@@ -5744,7 +5744,7 @@ fn semantic_plane_selection(request: &ScanRequest) -> SemanticPlaneSelection {
 enum ProjectedMetadata<'a> {
     Absent,
     Raw,
-    Exact(blockzilla_read_sdk::ProjectedCompactV2Metadata<'a>),
+    Exact(blockzilla_compact_v2_reader::ProjectedCompactV2Metadata<'a>),
     ExactUnprojected,
 }
 
@@ -5779,7 +5779,7 @@ mod tests {
         ArchiveInstructionSourceExt, BlockView, CpiCoverage, Error as QueryError, ExecutionStatus,
         InstructionCoverage, InstructionDataCoverage, ScanRange,
     };
-    use blockzilla_read_sdk::{
+    use blockzilla_compact_v2_reader::{
         LocalRangeSource, SignedInstruction, SignedMessage,
         reconstruct_instruction_data_candidates, serialize_signed_message,
     };
@@ -5852,7 +5852,7 @@ mod tests {
     }
 
     impl RangeSource for SignatureTrackingSource {
-        fn size(&self, object: &str) -> blockzilla_read_sdk::SourceResult<Option<u64>> {
+        fn size(&self, object: &str) -> blockzilla_compact_v2_reader::SourceResult<Option<u64>> {
             self.inner.size(object)
         }
 
@@ -5861,7 +5861,7 @@ mod tests {
             object: &str,
             offset: u64,
             length: usize,
-        ) -> blockzilla_read_sdk::SourceResult<Vec<u8>> {
+        ) -> blockzilla_compact_v2_reader::SourceResult<Vec<u8>> {
             if object == ARCHIVE_V2_SIGNATURES_FILE {
                 self.signature_reads
                     .lock()
@@ -5941,8 +5941,8 @@ mod tests {
                 slots_per_epoch: 100,
                 selected_blocks: 2,
                 selected_transactions: 1,
-                message_schema: blockzilla_read_sdk::CompactV2MessageSchema::Current,
-                metadata_schema: blockzilla_read_sdk::CompactV2MetadataSchema::CurrentTypedError,
+                message_schema: blockzilla_compact_v2_reader::CompactV2MessageSchema::Current,
+                metadata_schema: blockzilla_compact_v2_reader::CompactV2MetadataSchema::CurrentTypedError,
                 prefix: false,
             };
             let mut writers = Writers::create_v3(directory.path(), binding, plan).unwrap();
@@ -6052,8 +6052,8 @@ mod tests {
                 slots_per_epoch,
                 selected_blocks,
                 selected_transactions,
-                message_schema: blockzilla_read_sdk::CompactV2MessageSchema::Current,
-                metadata_schema: blockzilla_read_sdk::CompactV2MetadataSchema::CurrentTypedError,
+                message_schema: blockzilla_compact_v2_reader::CompactV2MessageSchema::Current,
+                metadata_schema: blockzilla_compact_v2_reader::CompactV2MetadataSchema::CurrentTypedError,
                 prefix,
             };
             let mut writers = Writers::create_v3(directory.path(), binding, plan).unwrap();
@@ -7630,7 +7630,7 @@ mod tests {
                 previous_blockhash_size: None,
                 vote_hash_size: None,
             },
-            blockzilla_read_sdk::CompactV2MessageSchema::Current,
+            blockzilla_compact_v2_reader::CompactV2MessageSchema::Current,
         );
         let before = context.registry_stats;
         let mut first_chunk_buffer = None;
@@ -8558,7 +8558,7 @@ mod tests {
         }
 
         impl RangeSource for SizeOverrideSource {
-            fn size(&self, object: &str) -> blockzilla_read_sdk::SourceResult<Option<u64>> {
+            fn size(&self, object: &str) -> blockzilla_compact_v2_reader::SourceResult<Option<u64>> {
                 if object == self.object {
                     Ok(Some(self.size))
                 } else {
@@ -8571,7 +8571,7 @@ mod tests {
                 object: &str,
                 offset: u64,
                 length: usize,
-            ) -> blockzilla_read_sdk::SourceResult<Vec<u8>> {
+            ) -> blockzilla_compact_v2_reader::SourceResult<Vec<u8>> {
                 if object == self.object {
                     self.body_reads.fetch_add(1, Ordering::Relaxed);
                 }

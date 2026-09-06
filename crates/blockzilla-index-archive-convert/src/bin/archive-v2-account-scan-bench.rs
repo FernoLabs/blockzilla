@@ -26,7 +26,7 @@ use blockzilla_index_archive_convert::source_v2::{
     CompactV2MessageSchema, CompactV2MetadataSchema, decode_message_lane_with_schema,
     decode_metadata_lane, validate_v0_loaded_address_counts,
 };
-use blockzilla_read_sdk::{
+use blockzilla_compact_v2_reader::{
     ArchiveReader, BorrowedDecodedBlock, HashVerification, MAX_ORDERED_PARALLEL_DECODE_WORKERS,
     OpenOptions, OrderedParallelBlockConfig, OrderedParallelBlockStats, PinnedLocalRangeSource,
     manifest::TrustedGenerationIdentity,

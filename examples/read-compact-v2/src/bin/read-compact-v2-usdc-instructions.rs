@@ -14,7 +14,7 @@ use std::{
     time::Instant,
 };
 
-use blockzilla_compact_v2_read_sdk::{
+use blockzilla_compact_v2_reader::archive::{
     ArchiveInstructionSource, CompactV2Archive, CompactV2LocalDescriptor, CompactV2TransportReceipt,
 };
 use blockzilla_dump::{
@@ -209,10 +209,10 @@ fn with_suffix(path: &Path, suffix: &str) -> PathBuf {
 #[allow(clippy::too_many_arguments)]
 fn print_result(
     arguments: &Arguments,
-    source: &blockzilla_compact_v2_read_sdk::SourceIdentity,
+    source: &blockzilla_compact_v2_reader::archive::SourceIdentity,
     selected_blocks: u32,
     bound_source_size_bytes: u64,
-    receipt: blockzilla_compact_v2_read_sdk::ScanReceipt,
+    receipt: blockzilla_compact_v2_reader::archive::ScanReceipt,
     timing: TokenEventScanTiming,
     setup_seconds: f64,
     pipeline_plus_checkpoint_seconds: f64,

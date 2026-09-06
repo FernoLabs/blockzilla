@@ -15,8 +15,8 @@ use blockzilla_format::{
     ArchiveV2VoteTowerSync, CompactMetaV1, CompactPubkey, OwnedCompactAddressTableLookup,
     PubkeyResolver,
 };
-pub use blockzilla_read_sdk::{CompactV2MessageSchema, CompactV2MetadataSchema};
-use blockzilla_read_sdk::{
+pub use blockzilla_compact_v2_reader::{CompactV2MessageSchema, CompactV2MetadataSchema};
+use blockzilla_compact_v2_reader::{
     PinnedLocalRangeSource, SourceError, SourceResult, decode_compact_v2_message,
     decode_compact_v2_metadata,
 };

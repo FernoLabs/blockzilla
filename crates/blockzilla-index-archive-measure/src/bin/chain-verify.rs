@@ -27,7 +27,7 @@ use std::{env, fs, os::unix::fs::FileExt, path::Path};
 
 use anyhow::{Context, Result};
 use blockzilla_format::ARCHIVE_V2_BLOCKHASH_REGISTRY_FILE;
-use blockzilla_read_sdk::{
+use blockzilla_compact_v2_reader::{
     ArchiveReader, HashVerification, OpenOptions, PinnedLocalRangeSource,
     manifest::TrustedGenerationIdentity,
 };

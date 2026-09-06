@@ -11,7 +11,7 @@ publish = false
 anyhow = "1.0.104"
 blockzilla-format = { path = "../blockzilla-format" }
 blockzilla-index-archive-format = { path = "../blockzilla-index-archive-format" }
-blockzilla-read-sdk = { path = "../blockzilla-read-sdk" }
+blockzilla-compact-v2-reader = { path = "../blockzilla-read-sdk" }
 of-car-reader = { path = "../old-faithful/car-reader", version = "0.2.0", default-features = false, features = ["zstd-native"] }
 serde = { version = "1.0.229", features = ["derive"] }
 serde_json = "1.0.151"

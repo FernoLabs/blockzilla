@@ -20,7 +20,7 @@ use std::{
 
 use anyhow::{Context, Result, bail, ensure};
 use blockzilla_index_archive_format::indexes::accounts as postings;
-use blockzilla_read_sdk::{
+use blockzilla_compact_v2_reader::{
     CompactV2MessageSchema, CompactV2MetadataSchema, PinnedLocalRangeSource, RangeSource,
 };
 use serde::Serialize;
@@ -4619,7 +4619,7 @@ fn decode_adaptive_v3_coverage_records(
 mod tests {
     use super::*;
     use blockzilla_format::{ARCHIVE_V2_TX_FLAG_TX_RAW_FALLBACK, ArchiveV2HotBlockIndexRow};
-    use blockzilla_read_sdk::{LocalRangeSource, SourceResult};
+    use blockzilla_compact_v2_reader::{LocalRangeSource, SourceResult};
     use std::sync::atomic::{AtomicU64, Ordering};
     use tempfile::tempdir;
 

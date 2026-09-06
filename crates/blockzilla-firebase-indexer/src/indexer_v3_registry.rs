@@ -10,7 +10,7 @@ use blockzilla_format::{
     ARCHIVE_V2_PUBKEY_REGISTRY_FILE, ARCHIVE_V2_PUBKEY_REGISTRY_INDEX_FILE,
     registry::{KeyIndexRangeSource, RangeBackedKeyIndex},
 };
-use blockzilla_read_sdk::RangeSource;
+use blockzilla_compact_v2_reader::RangeSource;
 
 const REGISTRY_KEY_BYTES: u64 = 32;
 
@@ -113,7 +113,7 @@ mod tests {
     use std::collections::HashMap;
 
     use blockzilla_format::registry::KeyIndex;
-    use blockzilla_read_sdk::{SourceError, SourceResult};
+    use blockzilla_compact_v2_reader::{SourceError, SourceResult};
     use tempfile::TempDir;
 
     use super::*;

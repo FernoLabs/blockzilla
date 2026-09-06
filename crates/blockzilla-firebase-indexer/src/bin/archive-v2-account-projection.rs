@@ -30,11 +30,11 @@ use blockzilla_format::{
     ARCHIVE_V2_TX_FLAG_TX_RAW_FALLBACK, ArchiveV2HotBlockIndexRow, ArchiveV2HotTxRow,
     CompactPubkey,
 };
-use blockzilla_read_sdk::archive_integrity::{
+use blockzilla_compact_v2_reader::archive_integrity::{
     ArchiveIntegrityConfig, ArchiveIntegrityReport, PohProtocolBounds, PohSidecarSchema,
     verify_archive_v2_integrity,
 };
-use blockzilla_read_sdk::{
+use blockzilla_compact_v2_reader::{
     ArchiveReader, BorrowedDecodedBlock, CompactV2MessageSchema, CompactV2MetadataSchema,
     HashVerification, OpenOptions, OrderedParallelBlockConfig, OrderedParallelBlockStats,
     PinnedLocalRangeSource, RangeSource, SourceError, SourceResult,

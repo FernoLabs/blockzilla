@@ -11,7 +11,7 @@ use std::{
     time::Duration,
 };
 
-use blockzilla_read_sdk::{CompactV2MessageSchema, CompactV2MetadataSchema};
+use blockzilla_compact_v2_reader::{CompactV2MessageSchema, CompactV2MetadataSchema};
 use blockzilla_dump::{
     scan::SourceOptions,
     verify::{CheckState, DEFAULT_POH_MAX_HASH_ROUNDS_PER_BLOCK, VerifyRunConfig, run_verify},
@@ -31,7 +31,7 @@ use blockzilla_format::{
     WincodeArchiveV2PohRecord, derive_replay_entry_hash, wincode_leb128_config,
     write_archive_v2_hot_block_index, write_registry, write_u32_varint,
 };
-use blockzilla_read_sdk::{
+use blockzilla_compact_v2_reader::{
     COMPACT_V2_CURRENT_MESSAGE_SCHEMA_MARKER_BYTES, COMPACT_V2_CURRENT_MESSAGE_SCHEMA_MARKER_FILE,
     SignedInstruction, SignedMessage, SignedMessageVersion,
     archive_integrity::{PohProtocolBounds, PohSidecarSchema},

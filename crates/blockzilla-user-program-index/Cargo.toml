@@ -14,7 +14,7 @@ categories = ["database", "data-structures"]
 [dependencies]
 anyhow = "1.0.102"
 blockzilla-format = { version = "0.2.0", path = "../blockzilla-format" }
-blockzilla-read-sdk = { version = "0.2.0", path = "../blockzilla-read-sdk" }
+blockzilla-compact-v2-reader = { version = "0.2.0", path = "../blockzilla-read-sdk" }
 bs58 = "0.5.1"
 rustix = { version = "1.1.4", features = ["fs"] }
 serde = { version = "1.0.228", features = ["derive"] }

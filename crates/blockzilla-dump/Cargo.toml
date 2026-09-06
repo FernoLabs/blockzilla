@@ -17,7 +17,7 @@ path = "src/main.rs"
 anyhow = "1.0.104"
 blockzilla-format = { version = "0.2.0", path = "../blockzilla-format" }
 blockzilla-query-sdk = { version = "0.2.0", path = "../blockzilla-query-sdk" }
-blockzilla-read-sdk = { version = "0.2.0", path = "../blockzilla-read-sdk", features = ["http"] }
+blockzilla-compact-v2-reader = { version = "0.2.0", path = "../blockzilla-read-sdk", features = ["http"] }
 blockzilla-user-program-index = { version = "0.2.0", path = "../blockzilla-user-program-index" }
 bs58 = "0.5.1"
 clap = { version = "4.6.1", features = ["derive"] }

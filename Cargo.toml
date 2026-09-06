@@ -8,7 +8,6 @@ members = [
 
     "blockzilla",
     "crates/blockzilla-car-read-sdk",
-    "crates/blockzilla-compact-v2-read-sdk",
     "crates/blockzilla-dex-parser",
     "crates/blockzilla-dump",
     "crates/blockzilla-example-workloads",
