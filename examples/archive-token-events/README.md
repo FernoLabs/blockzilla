@@ -1,5 +1,10 @@
 # Archive token-event example
 
+This example is parked and excluded from the workspace. Its former
+`blockzilla-archive-sdk` dependency was removed, so the commands below do not
+currently build. The source and usage notes remain for the planned port. See
+[PORT-REQUIRED.md](PORT-REQUIRED.md) for the required reader changes.
+
 This example reads the same ordered classic SPL Token instruction stream from
 three archive formats:
 

@@ -213,11 +213,11 @@ fn main() -> Result<()> {
     let car_path = args
         .next()
         .map(PathBuf::from)
-        .context("usage: blockzilla-index-archive-measure <fixture.car> [report.json]")?;
+        .context("usage: blockzilla-archive-v3-measure <fixture.car> [report.json]")?;
     let report_path = args.next().map(PathBuf::from);
     ensure!(
         args.next().is_none(),
-        "usage: blockzilla-index-archive-measure <fixture.car> [report.json]"
+        "usage: blockzilla-archive-v3-measure <fixture.car> [report.json]"
     );
 
     let source_bytes = fs::metadata(&car_path)

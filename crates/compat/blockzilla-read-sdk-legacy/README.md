@@ -158,5 +158,5 @@ a circular digest. See the function documentation for the byte-exact layout.
 ## Test
 
 ```bash
-cargo test -p blockzilla-read-sdk --all-features
+cargo test -p blockzilla-read-sdk-legacy --all-features
 ```

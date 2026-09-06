@@ -928,6 +928,16 @@ fn project_decoded_transaction(
         Some(metadata) => {
             validate_metadata_geometry(&message, metadata, limits)?;
             let failed = decode_failed_outer_index(metadata)?;
+            // The retained failure header must remain bound to the source message,
+            // including when instruction output is omitted.
+            if let Some(index) = failed
+                && index as usize >= message.instructions.len()
+            {
+                return Err(CarQueryError::InvalidArchive(format!(
+                    "failed outer instruction index {index} is outside {} source outer instructions",
+                    message.instructions.len()
+                )));
+            }
             let status = if metadata.err.is_some() {
                 ExecutionStatus::Failed
             } else {
@@ -954,6 +964,27 @@ fn project_decoded_transaction(
     } else {
         CpiCoverage::Unknown(CoverageReason::ProjectionNotRequested)
     };
+
+    // Skip unrequested failure details before key resolution and CPI projection.
+    // Full-detail requests still validate instruction order below.
+    if request.omit_failed_transaction_details && recorded_status == ExecutionStatus::Failed {
+        return Ok(Some(CanonicalTransaction {
+            header: TransactionHeader {
+                tx_index,
+                status,
+                failed_outer_instruction_index,
+                instruction_coverage: InstructionCoverage::Unknown(
+                    CoverageReason::ProjectionNotRequested,
+                ),
+                cpi_coverage: CpiCoverage::Unknown(CoverageReason::ProjectionNotRequested),
+            },
+            primary_signature: None,
+            required_signers: Vec::new(),
+            instructions: Vec::new(),
+            token_balance_coverage: TokenBalanceCoverage::NotRequested,
+            token_balances: Vec::new(),
+        }));
+    }
 
     let loaded_keys = if !request.include_instructions {
         None
@@ -2863,6 +2894,52 @@ mod tests {
     }
 
     #[test]
+    fn retained_failed_index_is_bound_to_message_with_or_without_details() {
+        for failed_index in [0, 1, u8::MAX] {
+            let failed = FixtureTransaction {
+                cid: cid(0x60),
+                transaction: simple_transaction(1),
+                metadata: metadata(TransactionStatusMeta {
+                    err: Some(TransactionError {
+                        err: wincode::serialize(&StoredTransactionError::InstructionError(
+                            failed_index,
+                            StoredInstructionError::GenericError,
+                        ))
+                        .unwrap(),
+                    }),
+                    inner_instructions_none: false,
+                    ..TransactionStatusMeta::default()
+                }),
+                index: Some(0),
+            };
+            let mut car = car_header();
+            append_block(&mut car, FIRST_SLOT, &[failed], &[0], &[0], 0x67);
+            for request in [
+                ScanRequest::all(),
+                ScanRequest::all().without_instructions(),
+                ScanRequest::all().without_failed_transaction_details(),
+                ScanRequest::all()
+                    .without_instructions()
+                    .without_failed_transaction_details(),
+            ] {
+                let result = collect(&mut source(car.clone(), vec![FIRST_SLOT]), &request);
+                if failed_index == 0 {
+                    let (_, blocks) = result.unwrap();
+                    let header = blocks[0].transactions[0].header;
+                    assert_eq!(header.status, ExecutionStatus::Failed);
+                    assert_eq!(header.failed_outer_instruction_index, Some(0));
+                } else {
+                    assert!(
+                        format!("{:?}", result.unwrap_err()).contains(&format!(
+                            "failed outer instruction index {failed_index} is outside 1 source outer instructions"
+                        ))
+                    );
+                }
+            }
+        }
+    }
+
+    #[test]
     fn failed_outer_index_and_metadata_coverage_states_are_preserved() {
         let keys = [[1; 32], [2; 32]];
         let instructions = [(1, &[][..], &[10][..]), (1, &[][..], &[11][..])];
@@ -2962,7 +3039,28 @@ mod tests {
         };
         let mut car = car_header();
         append_block(&mut car, FIRST_SLOT, &[cpi_after_failure], &[0], &[0], 0x66);
-        assert!(collect(&mut source(car, vec![FIRST_SLOT]), &ScanRequest::all()).is_err());
+        assert!(
+            collect(
+                &mut source(car.clone(), vec![FIRST_SLOT]),
+                &ScanRequest::all()
+            )
+            .is_err()
+        );
+
+        let request = ScanRequest::all().without_failed_transaction_details();
+        let (_, blocks) = collect(&mut source(car, vec![FIRST_SLOT]), &request).unwrap();
+        let transaction = &blocks[0].transactions[0];
+        assert_eq!(transaction.header.status, ExecutionStatus::Failed);
+        assert_eq!(transaction.header.failed_outer_instruction_index, Some(0));
+        assert!(transaction.instructions.is_empty());
+        assert_eq!(
+            transaction.header.instruction_coverage,
+            InstructionCoverage::Unknown(CoverageReason::ProjectionNotRequested)
+        );
+        assert_eq!(
+            transaction.header.cpi_coverage,
+            CpiCoverage::Unknown(CoverageReason::ProjectionNotRequested)
+        );
     }
 
     #[test]

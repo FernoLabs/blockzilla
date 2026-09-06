@@ -1,0 +1,494 @@
+{
+  "format": "compact-v2",
+  "mode": "local",
+  "epoch": 300,
+  "workload": "slot-hours",
+  "binary": "read-compact-v2-slot-hours",
+  "status": "PASS",
+  "attempt": "/volume1/blockzilla/benchmark-results/epoch-300-ssd-input-20260905/jobs/compact-v2/local/epoch-300/slot-hours/attempt-001",
+  "started_at": 1788606168.9919968,
+  "wall_s": 73.28189873799965,
+  "exit_code": 0,
+  "source": "local",
+  "threads": "12",
+  "requested_workers": "12",
+  "effective_workers": "12",
+  "max_active_workers": "12",
+  "blocks": "408989",
+  "transactions": "724730034",
+  "instructions": "983615850",
+  "recorded_inner_instructions": "102252970",
+  "transactions_with_incomplete_instructions": "0",
+  "transactions_with_incomplete_cpi": "0",
+  "setup_s": "0.084588",
+  "scan_s": "73.153926",
+  "total_s": "73.239604",
+  "scan_tps": "9906919.168",
+  "total_tps": "9895329.824",
+  "bound_source_size_bytes": "99504005950",
+  "scan_logical_read_calls": "11250",
+  "scan_logical_read_bytes": "43682534695",
+  "scan_logical_read_mb_s": "597.131787",
+  "setup_network_bytes": "0",
+  "scan_network_bytes": "0",
+  "total_network_bytes": "0",
+  "scan_network_mb_s": "0.000000",
+  "total_network_mb_s": "0.000000",
+  "setup_cache_read_bytes": "0",
+  "scan_cache_read_bytes": "0",
+  "total_cache_read_bytes": "0",
+  "setup_local_read_calls": "2",
+  "scan_local_read_calls": "11250",
+  "total_local_read_calls": "11252",
+  "setup_local_read_bytes": "21267529",
+  "scan_local_read_bytes": "43682534695",
+  "total_local_read_bytes": "43703802224",
+  "scan_local_read_mb_s": "597.131787",
+  "total_local_read_mb_s": "596.723631",
+  "scan_source_bytes": "43682534695",
+  "scan_source_mb_s": "597.131787",
+  "indeterminate_transactions": null,
+  "scan_blocks_s": 5590.800417191554,
+  "total_blocks_s": 5584.260122433213,
+  "buckets": [
+    {
+      "approximate_hour": "0",
+      "start_slot": "129600000",
+      "end_slot_exclusive": "129609000",
+      "blocks": "8314",
+      "transactions": "13185300",
+      "recorded_inner_instructions": "1805987"
+    },
+    {
+      "approximate_hour": "1",
+      "start_slot": "129609000",
+      "end_slot_exclusive": "129618000",
+      "blocks": "8470",
+      "transactions": "14828490",
+      "recorded_inner_instructions": "1996258"
+    },
+    {
+      "approximate_hour": "2",
+      "start_slot": "129618000",
+      "end_slot_exclusive": "129627000",
+      "blocks": "8311",
+      "transactions": "14252854",
+      "recorded_inner_instructions": "1689212"
+    },
+    {
+      "approximate_hour": "3",
+      "start_slot": "129627000",
+      "end_slot_exclusive": "129636000",
+      "blocks": "8438",
+      "transactions": "14597885",
+      "recorded_inner_instructions": "2157388"
+    },
+    {
+      "approximate_hour": "4",
+      "start_slot": "129636000",
+      "end_slot_exclusive": "129645000",
+      "blocks": "8656",
+      "transactions": "15719206",
+      "recorded_inner_instructions": "2034977"
+    },
+    {
+      "approximate_hour": "5",
+      "start_slot": "129645000",
+      "end_slot_exclusive": "129654000",
+      "blocks": "8679",
+      "transactions": "15772299",
+      "recorded_inner_instructions": "1937947"
+    },
+    {
+      "approximate_hour": "6",
+      "start_slot": "129654000",
+      "end_slot_exclusive": "129663000",
+      "blocks": "8674",
+      "transactions": "15760999",
+      "recorded_inner_instructions": "2302012"
+    },
+    {
+      "approximate_hour": "7",
+      "start_slot": "129663000",
+      "end_slot_exclusive": "129672000",
+      "blocks": "8546",
+      "transactions": "15471322",
+      "recorded_inner_instructions": "2202799"
+    },
+    {
+      "approximate_hour": "8",
+      "start_slot": "129672000",
+      "end_slot_exclusive": "129681000",
+      "blocks": "8529",
+      "transactions": "15389632",
+      "recorded_inner_instructions": "2203382"
+    },
+    {
+      "approximate_hour": "9",
+      "start_slot": "129681000",
+      "end_slot_exclusive": "129690000",
+      "blocks": "8491",
+      "transactions": "15142652",
+      "recorded_inner_instructions": "2150050"
+    },
+    {
+      "approximate_hour": "10",
+      "start_slot": "129690000",
+      "end_slot_exclusive": "129699000",
+      "blocks": "8503",
+      "transactions": "15548002",
+      "recorded_inner_instructions": "2274115"
+    },
+    {
+      "approximate_hour": "11",
+      "start_slot": "129699000",
+      "end_slot_exclusive": "129708000",
+      "blocks": "8469",
+      "transactions": "15252065",
+      "recorded_inner_instructions": "2238365"
+    },
+    {
+      "approximate_hour": "12",
+      "start_slot": "129708000",
+      "end_slot_exclusive": "129717000",
+      "blocks": "8383",
+      "transactions": "14904400",
+      "recorded_inner_instructions": "2301787"
+    },
+    {
+      "approximate_hour": "13",
+      "start_slot": "129717000",
+      "end_slot_exclusive": "129726000",
+      "blocks": "8283",
+      "transactions": "14061176",
+      "recorded_inner_instructions": "2050714"
+    },
+    {
+      "approximate_hour": "14",
+      "start_slot": "129726000",
+      "end_slot_exclusive": "129735000",
+      "blocks": "8260",
+      "transactions": "13707769",
+      "recorded_inner_instructions": "1800579"
+    },
+    {
+      "approximate_hour": "15",
+      "start_slot": "129735000",
+      "end_slot_exclusive": "129744000",
+      "blocks": "8415",
+      "transactions": "14845501",
+      "recorded_inner_instructions": "2316751"
+    },
+    {
+      "approximate_hour": "16",
+      "start_slot": "129744000",
+      "end_slot_exclusive": "129753000",
+      "blocks": "8416",
+      "transactions": "14499167",
+      "recorded_inner_instructions": "2160081"
+    },
+    {
+      "approximate_hour": "17",
+      "start_slot": "129753000",
+      "end_slot_exclusive": "129762000",
+      "blocks": "8505",
+      "transactions": "15335080",
+      "recorded_inner_instructions": "2126885"
+    },
+    {
+      "approximate_hour": "18",
+      "start_slot": "129762000",
+      "end_slot_exclusive": "129771000",
+      "blocks": "8585",
+      "transactions": "15670567",
+      "recorded_inner_instructions": "1954347"
+    },
+    {
+      "approximate_hour": "19",
+      "start_slot": "129771000",
+      "end_slot_exclusive": "129780000",
+      "blocks": "8348",
+      "transactions": "14670050",
+      "recorded_inner_instructions": "2114768"
+    },
+    {
+      "approximate_hour": "20",
+      "start_slot": "129780000",
+      "end_slot_exclusive": "129789000",
+      "blocks": "8590",
+      "transactions": "15622890",
+      "recorded_inner_instructions": "1954685"
+    },
+    {
+      "approximate_hour": "21",
+      "start_slot": "129789000",
+      "end_slot_exclusive": "129798000",
+      "blocks": "8540",
+      "transactions": "15621082",
+      "recorded_inner_instructions": "2227803"
+    },
+    {
+      "approximate_hour": "22",
+      "start_slot": "129798000",
+      "end_slot_exclusive": "129807000",
+      "blocks": "8680",
+      "transactions": "16059653",
+      "recorded_inner_instructions": "2049278"
+    },
+    {
+      "approximate_hour": "23",
+      "start_slot": "129807000",
+      "end_slot_exclusive": "129816000",
+      "blocks": "8563",
+      "transactions": "15794955",
+      "recorded_inner_instructions": "2188024"
+    },
+    {
+      "approximate_hour": "24",
+      "start_slot": "129816000",
+      "end_slot_exclusive": "129825000",
+      "blocks": "8527",
+      "transactions": "15648423",
+      "recorded_inner_instructions": "2405626"
+    },
+    {
+      "approximate_hour": "25",
+      "start_slot": "129825000",
+      "end_slot_exclusive": "129834000",
+      "blocks": "8540",
+      "transactions": "15527337",
+      "recorded_inner_instructions": "1908378"
+    },
+    {
+      "approximate_hour": "26",
+      "start_slot": "129834000",
+      "end_slot_exclusive": "129843000",
+      "blocks": "8745",
+      "transactions": "16174849",
+      "recorded_inner_instructions": "2002031"
+    },
+    {
+      "approximate_hour": "27",
+      "start_slot": "129843000",
+      "end_slot_exclusive": "129852000",
+      "blocks": "8687",
+      "transactions": "16042126",
+      "recorded_inner_instructions": "2163412"
+    },
+    {
+      "approximate_hour": "28",
+      "start_slot": "129852000",
+      "end_slot_exclusive": "129861000",
+      "blocks": "8533",
+      "transactions": "15695148",
+      "recorded_inner_instructions": "2283962"
+    },
+    {
+      "approximate_hour": "29",
+      "start_slot": "129861000",
+      "end_slot_exclusive": "129870000",
+      "blocks": "8354",
+      "transactions": "14605975",
+      "recorded_inner_instructions": "2357400"
+    },
+    {
+      "approximate_hour": "30",
+      "start_slot": "129870000",
+      "end_slot_exclusive": "129879000",
+      "blocks": "8304",
+      "transactions": "14152382",
+      "recorded_inner_instructions": "2200165"
+    },
+    {
+      "approximate_hour": "31",
+      "start_slot": "129879000",
+      "end_slot_exclusive": "129888000",
+      "blocks": "8294",
+      "transactions": "14039541",
+      "recorded_inner_instructions": "2643018"
+    },
+    {
+      "approximate_hour": "32",
+      "start_slot": "129888000",
+      "end_slot_exclusive": "129897000",
+      "blocks": "8472",
+      "transactions": "14741281",
+      "recorded_inner_instructions": "3159618"
+    },
+    {
+      "approximate_hour": "33",
+      "start_slot": "129897000",
+      "end_slot_exclusive": "129906000",
+      "blocks": "8383",
+      "transactions": "14333483",
+      "recorded_inner_instructions": "1868579"
+    },
+    {
+      "approximate_hour": "34",
+      "start_slot": "129906000",
+      "end_slot_exclusive": "129915000",
+      "blocks": "8533",
+      "transactions": "15198088",
+      "recorded_inner_instructions": "2140065"
+    },
+    {
+      "approximate_hour": "35",
+      "start_slot": "129915000",
+      "end_slot_exclusive": "129924000",
+      "blocks": "8640",
+      "transactions": "15621093",
+      "recorded_inner_instructions": "2131449"
+    },
+    {
+      "approximate_hour": "36",
+      "start_slot": "129924000",
+      "end_slot_exclusive": "129933000",
+      "blocks": "8652",
+      "transactions": "15622983",
+      "recorded_inner_instructions": "2315833"
+    },
+    {
+      "approximate_hour": "37",
+      "start_slot": "129933000",
+      "end_slot_exclusive": "129942000",
+      "blocks": "8716",
+      "transactions": "15333751",
+      "recorded_inner_instructions": "2042642"
+    },
+    {
+      "approximate_hour": "38",
+      "start_slot": "129942000",
+      "end_slot_exclusive": "129951000",
+      "blocks": "8665",
+      "transactions": "15591208",
+      "recorded_inner_instructions": "2104028"
+    },
+    {
+      "approximate_hour": "39",
+      "start_slot": "129951000",
+      "end_slot_exclusive": "129960000",
+      "blocks": "8677",
+      "transactions": "15459694",
+      "recorded_inner_instructions": "1910013"
+    },
+    {
+      "approximate_hour": "40",
+      "start_slot": "129960000",
+      "end_slot_exclusive": "129969000",
+      "blocks": "8728",
+      "transactions": "15451728",
+      "recorded_inner_instructions": "1680373"
+    },
+    {
+      "approximate_hour": "41",
+      "start_slot": "129969000",
+      "end_slot_exclusive": "129978000",
+      "blocks": "8681",
+      "transactions": "15156172",
+      "recorded_inner_instructions": "1661615"
+    },
+    {
+      "approximate_hour": "42",
+      "start_slot": "129978000",
+      "end_slot_exclusive": "129987000",
+      "blocks": "8595",
+      "transactions": "14799201",
+      "recorded_inner_instructions": "1783735"
+    },
+    {
+      "approximate_hour": "43",
+      "start_slot": "129987000",
+      "end_slot_exclusive": "129996000",
+      "blocks": "8654",
+      "transactions": "15233006",
+      "recorded_inner_instructions": "2008332"
+    },
+    {
+      "approximate_hour": "44",
+      "start_slot": "129996000",
+      "end_slot_exclusive": "130005000",
+      "blocks": "8623",
+      "transactions": "15220982",
+      "recorded_inner_instructions": "2031992"
+    },
+    {
+      "approximate_hour": "45",
+      "start_slot": "130005000",
+      "end_slot_exclusive": "130014000",
+      "blocks": "8642",
+      "transactions": "15459171",
+      "recorded_inner_instructions": "2509843"
+    },
+    {
+      "approximate_hour": "46",
+      "start_slot": "130014000",
+      "end_slot_exclusive": "130023000",
+      "blocks": "8441",
+      "transactions": "14440150",
+      "recorded_inner_instructions": "2107109"
+    },
+    {
+      "approximate_hour": "47",
+      "start_slot": "130023000",
+      "end_slot_exclusive": "130032000",
+      "blocks": "8255",
+      "transactions": "13469266",
+      "recorded_inner_instructions": "2595558"
+    }
+  ],
+  "pipeline_read_s": "21.696790",
+  "pipeline_input_wait_s": "0.055478",
+  "pipeline_buffer_wait_s": "51.415775",
+  "pipeline_decode_project_wall_s": "72.988229",
+  "pipeline_worker_decode_sum_s": "200.715601",
+  "pipeline_worker_projection_sum_s": "438.995753",
+  "pipeline_consume_s": "0.238037",
+  "pipeline_projection_buffer_wait_s": "0.006213",
+  "pipeline_result_send_wait_s": "0.036988",
+  "pipeline_signature_read_s": "0.021892",
+  "pipeline_signature_assign_s": "0.022963",
+  "pipeline_publish_s": "0.097860",
+  "raw_metrics": {
+    "format": "compact-v2",
+    "workload": "slot-hours",
+    "epoch": "300",
+    "source": "local",
+    "threads": "12",
+    "requested_workers": "12",
+    "effective_workers": "12",
+    "max_active_workers": "12",
+    "blocks": "408989",
+    "transactions": "724730034",
+    "instructions": "983615850",
+    "recorded_inner_instructions": "102252970",
+    "transactions_with_incomplete_instructions": "0",
+    "transactions_with_incomplete_cpi": "0",
+    "setup_s": "0.084588",
+    "scan_s": "73.153926",
+    "total_s": "73.239604",
+    "scan_tps": "9906919.168",
+    "total_tps": "9895329.824",
+    "bound_source_size_bytes": "99504005950",
+    "scan_logical_read_calls": "11250",
+    "scan_logical_read_bytes": "43682534695",
+    "scan_logical_read_mb_s": "597.131787",
+    "setup_network_bytes": "0",
+    "scan_network_bytes": "0",
+    "total_network_bytes": "0",
+    "scan_network_mb_s": "0.000000",
+    "total_network_mb_s": "0.000000",
+    "setup_cache_read_bytes": "0",
+    "scan_cache_read_bytes": "0",
+    "total_cache_read_bytes": "0",
+    "setup_local_read_calls": "2",
+    "scan_local_read_calls": "11250",
+    "total_local_read_calls": "11252",
+    "setup_local_read_bytes": "21267529",
+    "scan_local_read_bytes": "43682534695",
+    "total_local_read_bytes": "43703802224",
+    "scan_local_read_mb_s": "597.131787",
+    "total_local_read_mb_s": "596.723631"
+  },
+  "stored_archive_bytes": 99504005950,
+  "parity": "PENDING"
+}

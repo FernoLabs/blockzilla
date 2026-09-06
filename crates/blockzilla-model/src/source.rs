@@ -140,6 +140,11 @@ pub struct ScanRequest {
     /// Return per-block instruction counts instead of transaction objects.
     #[serde(default)]
     pub counts_only: bool,
+    /// Allow adapters to omit expensive details of known failed transactions.
+    /// The failed header remains visible; consumers must skip it. Unknown status
+    /// is never treated as failed. Adapters may still decode details as a fallback.
+    #[serde(default)]
+    pub omit_failed_transaction_details: bool,
     /// Permit omission of signatures for complete, non-matching program queries.
     #[serde(default)]
     pub primary_signatures_for_matches: bool,
@@ -208,6 +213,11 @@ impl ScanRequest {
     }
 
     pub fn needs_primary_signature(&self, transaction: &crate::CanonicalTransaction) -> bool {
+        if self.omit_failed_transaction_details
+            && transaction.header.status == ExecutionStatus::Failed
+        {
+            return false;
+        }
         if !self.include_primary_signatures {
             return false;
         }
@@ -242,12 +252,14 @@ impl ScanRequest {
         self.include_instructions = true;
         self.token_balances = TokenBalanceRequirement::None;
         self.counts_only = true;
+        self.omit_failed_transaction_details = false;
         self
     }
 
     pub const fn all() -> Self {
         Self {
             counts_only: false,
+            omit_failed_transaction_details: false,
             primary_signatures_for_matches: false,
             range: None,
             require_verified_source: true,
@@ -271,6 +283,7 @@ impl ScanRequest {
     pub const fn bounded(range: ScanRange) -> Self {
         Self {
             counts_only: false,
+            omit_failed_transaction_details: false,
             primary_signatures_for_matches: false,
             range: Some(range),
             require_verified_source: true,
@@ -307,6 +320,14 @@ impl ScanRequest {
     }
 
     pub const fn allow_unknown_execution(mut self) -> Self {
+        self.require_known_execution = false;
+        self
+    }
+
+    /// Read status and retain failed headers, without requiring failed payloads.
+    pub const fn without_failed_transaction_details(mut self) -> Self {
+        self.omit_failed_transaction_details = true;
+        self.include_execution_status = true;
         self.require_known_execution = false;
         self
     }
@@ -400,10 +421,11 @@ impl ScanRequest {
         self
     }
 
-    /// Omit execution status from canonical output.
+    /// Omit execution status and disable failure-detail omission.
     pub const fn without_execution_status(mut self) -> Self {
         self.include_execution_status = false;
         self.require_known_execution = false;
+        self.omit_failed_transaction_details = false;
         self
     }
 
@@ -716,6 +738,11 @@ impl<'a> OrderedBlockPublisher<'a> {
         }
 
         for transaction in &block.transactions {
+            if self.request.omit_failed_transaction_details
+                && transaction.header.status == ExecutionStatus::Failed
+            {
+                continue; // Omitted failed details are not missing source evidence.
+            }
             if !matches!(
                 transaction.header.instruction_coverage,
                 InstructionCoverage::Complete
@@ -855,6 +882,11 @@ impl<'a> OrderedBlockPublisher<'a> {
 
 /// Apply request-level gates which are common to all adapters.
 pub fn validate_request(identity: &SourceIdentity, request: &ScanRequest) -> Result<()> {
+    if request.omit_failed_transaction_details && !request.include_execution_status {
+        return Err(Error::InvalidRequest(
+            "failure-detail omission requires execution status".into(),
+        ));
+    }
     if request.counts_only
         && (!request.include_instructions
             || request.include_primary_signatures
@@ -1095,6 +1127,45 @@ mod tests {
                 },
             ],
         }
+    }
+
+    #[test]
+    fn failure_detail_options_keep_execution_and_counts_consistent() {
+        let identity = fixture(SourceVerification::ObjectSetBound).identity;
+        let without_status = ScanRequest::all()
+            .without_failed_transaction_details()
+            .without_execution_status();
+        assert!(!without_status.omit_failed_transaction_details);
+        assert!(!without_status.include_execution_status);
+        validate_request(&identity, &without_status).unwrap();
+
+        let filtered = without_status.without_failed_transaction_details();
+        assert!(filtered.omit_failed_transaction_details);
+        assert!(filtered.include_execution_status);
+        validate_request(&identity, &filtered).unwrap();
+        let counts = filtered.count_instructions_only();
+        assert!(counts.counts_only);
+        assert!(!counts.omit_failed_transaction_details);
+        validate_request(&identity, &counts).unwrap();
+        assert!(validate_request(&identity, &counts.without_failed_transaction_details()).is_err());
+
+        let mut invalid = ScanRequest::all().without_execution_status();
+        invalid.omit_failed_transaction_details = true;
+        assert!(matches!(
+            validate_request(&identity, &invalid),
+            Err(Error::InvalidRequest(_))
+        ));
+    }
+
+    #[test]
+    fn old_serialized_requests_keep_all_transaction_details() {
+        let mut json = serde_json::to_value(ScanRequest::all()).unwrap();
+        json.as_object_mut()
+            .unwrap()
+            .remove("omit_failed_transaction_details");
+        let request: ScanRequest = serde_json::from_value(json).unwrap();
+        assert!(!request.omit_failed_transaction_details);
+        assert_eq!(request, ScanRequest::all());
     }
 
     #[test]

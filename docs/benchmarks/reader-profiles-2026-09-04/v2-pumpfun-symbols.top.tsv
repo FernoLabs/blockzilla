@@ -1,0 +1,56 @@
+samples	function
+1369	
+293	<blockzilla_read_sdk::compact_query::ContiguousSignatureScan<blockzilla_read_sdk::source::PinnedLocalRangeSource>>::read_block_selected
+282	<blockzilla_read_sdk::metadata_projection::CompactV2MetadataProjector>::project_impl
+254	<u64 as wincode::schema::SchemaRead<wincode::config::Configuration<true, 18446744073709551615, wincode::len::UseIntLen<u64, 0>, wincode::schema::int_encoding::LittleEndian, blockzilla_format::v2::Leb128>>>::read::<&mut &[u8]>
+246	<blockzilla_read_sdk::message_projection::CompactV2MessageProjector>::project_with_instruction_data_for_programs
+225	ZSTD_decompressFrame
+138	<blockzilla_read_sdk::compact_query::CompactV2InstructionSource<blockzilla_read_sdk::source::PinnedLocalRangeSource>>::scan_ordered_parallel::{closure#5}
+103	<blockzilla_read_sdk::compact_query::CompactV2InstructionSource<blockzilla_read_sdk::source::PinnedLocalRangeSource>>::project_transaction_inner
+88	<blockzilla_read_sdk::compact_query::CompactV2InstructionSource<blockzilla_read_sdk::source::PinnedLocalRangeSource>>::project_instructions
+88	rayon::iter::plumbing::bridge_producer_consumer::helper::<rayon::iter::enumerate::EnumerateProducer<rayon::slice::IterProducer<blockzilla_format::v2::archive::ArchiveV2HotBlockIndexRow>>, rayon::iter::map::MapConsumer<rayon::iter::collect::consumer::CollectConsumer<core::result::Result<blockzilla_read_sdk::compact_query::ParallelProjectedBlock, blockzilla_read_sdk::compact_query::CompactV2ParallelScanError>>, <blockzilla_read_sdk::reader::ArchiveReader<blockzilla_read_sdk::source::PinnedLocalRangeSource>>::process_borrowed_blocks_parallel_ordered<blockzilla_read_sdk::compact_query::ParallelProjectionWorker, blockzilla_read_sdk::compact_query::ParallelProjectedBlock, blockzilla_read_sdk::compact_query::CompactV2ParallelScanError, <blockzilla_read_sdk::compact_query::CompactV2InstructionSource<blockzilla_read_sdk::source::PinnedLocalRangeSource>>::scan_ordered_parallel::{closure#4}, <blockzilla_read_sdk::compact_query::CompactV2InstructionSource<blockzilla_read_sdk::source::PinnedLocalRangeSource>>::scan_ordered_parallel::{closure#5}, <blockzilla_read_sdk::compact_query::CompactV2InstructionSource<blockzilla_read_sdk::source::PinnedLocalRangeSource>>::scan_ordered_parallel::{closure#6}>::{closure#3}::{closure#1}::{closure#0}::{closure#0}>>::{closure#0}
+82	rayon::iter::plumbing::bridge_producer_consumer::helper::<rayon::iter::enumerate::EnumerateProducer<rayon::slice::IterProducer<blockzilla_format::v2::archive::ArchiveV2HotBlockIndexRow>>, rayon::iter::map::MapConsumer<rayon::iter::collect::consumer::CollectConsumer<core::result::Result<blockzilla_read_sdk::compact_query::ParallelProjectedBlock, blockzilla_read_sdk::compact_query::CompactV2ParallelScanError>>, <blockzilla_read_sdk::reader::ArchiveReader<blockzilla_read_sdk::source::PinnedLocalRangeSource>>::process_borrowed_blocks_parallel_ordered<blockzilla_read_sdk::compact_query::ParallelProjectionWorker, blockzilla_read_sdk::compact_query::ParallelProjectedBlock, blockzilla_read_sdk::compact_query::CompactV2ParallelScanError, <blockzilla_read_sdk::compact_query::CompactV2InstructionSource<blockzilla_read_sdk::source::PinnedLocalRangeSource>>::scan_ordered_parallel::{closure#4}, <blockzilla_read_sdk::compact_query::CompactV2InstructionSource<blockzilla_read_sdk::source::PinnedLocalRangeSource>>::scan_ordered_parallel::{closure#5}, <blockzilla_read_sdk::compact_query::CompactV2InstructionSource<blockzilla_read_sdk::source::PinnedLocalRangeSource>>::scan_ordered_parallel::{closure#6}>::{closure#3}::{closure#1}::{closure#0}::{closure#0}>>::{closure#1}
+80	<blockzilla_format::compact::pubkey::CompactPubkey as wincode::schema::SchemaRead<wincode::config::Configuration<true, 18446744073709551615, wincode::len::UseIntLen<u64, 0>, wincode::schema::int_encoding::LittleEndian, blockzilla_format::v2::Leb128>>>::get::<&mut &[u8]>
+68	<blockzilla_read_sdk::metadata_projection::CompactV2MetadataProjector>::project
+59	blockzilla_read_sdk::message_projection::skip_instruction_data::<false>
+46	<blockzilla_query_sdk::source::OrderedBlockPublisher>::publish
+39	blockzilla_read_sdk::message_projection::decode_message::<false>
+30	<blockzilla_read_sdk::query_keys::BoundQueryKeys>::bind
+27	blockzilla_read_sdk::metadata_projection::skip_log_event
+21	<blockzilla_format::compact::meta::CompactReward as wincode::schema::SchemaRead<wincode::config::Configuration<true, 18446744073709551615, wincode::len::UseIntLen<u64, 0>, wincode::schema::int_encoding::LittleEndian, blockzilla_format::v2::Leb128>>>::get::<&mut &[u8]>
+20	ZSTD_buildSeqTable
+15	<blockzilla_read_sdk::source::PinnedLocalRangeSource as blockzilla_read_sdk::source::RangeSource>::read_range_into
+14	std::thread::lifecycle::spawn_unchecked::<<blockzilla_read_sdk::reader::ArchiveReader<blockzilla_read_sdk::source::PinnedLocalRangeSource>>::process_borrowed_blocks_parallel_ordered<blockzilla_read_sdk::compact_query::ParallelProjectionWorker, blockzilla_read_sdk::compact_query::ParallelProjectedBlock, blockzilla_read_sdk::compact_query::CompactV2ParallelScanError, <blockzilla_read_sdk::compact_query::CompactV2InstructionSource<blockzilla_read_sdk::source::PinnedLocalRangeSource>>::scan_ordered_parallel::{closure#4}, <blockzilla_read_sdk::compact_query::CompactV2InstructionSource<blockzilla_read_sdk::source::PinnedLocalRangeSource>>::scan_ordered_parallel::{closure#5}, <blockzilla_read_sdk::compact_query::CompactV2InstructionSource<blockzilla_read_sdk::source::PinnedLocalRangeSource>>::scan_ordered_parallel::{closure#6}>::{closure#3}::{closure#0}, core::result::Result<blockzilla_read_sdk::reader::OrderedProducerStats, blockzilla_read_sdk::error::Error>>::{closure#1}::{closure#0}
+13	blockzilla_read_sdk::metadata_projection::skip_logs
+11	<blockzilla_read_sdk::reader::ArchiveReader<blockzilla_read_sdk::source::PinnedLocalRangeSource>>::decode_uncompressed_block_borrowed
+11	ph::utils::read_bits::<dyn std::io::Read>
+10	<ph::fmph::gofunction::GOFunction>::read
+10	<smallvec::SmallVec<[blockzilla_format::compact::pubkey::CompactPubkey; 8]>>::try_reserve_exact
+10	blockzilla_read_sdk::metadata_projection::read_inner_instruction_groups
+9	<i64 as wincode::schema::SchemaRead<wincode::config::Configuration<true, 18446744073709551615, wincode::len::UseIntLen<u64, 0>, wincode::schema::int_encoding::LittleEndian, blockzilla_format::v2::Leb128>>>::read::<&mut &[u8]>
+9	<rayon_core::registry::WorkerThread>::wait_until::<rayon_core::latch::OnceLatch>
+7	blockzilla_read_sdk::reader::validate_borrowed_decoded_block
+7	core::ptr::drop_glue::<blockzilla_query_sdk::model::CanonicalBlock>
+6	<blockzilla_format::v2::ArchiveV2ComputeBudgetInstructionData as wincode::schema::SchemaRead<wincode::config::Configuration<true, 18446744073709551615, wincode::len::UseIntLen<u64, 0>, wincode::schema::int_encoding::LittleEndian, blockzilla_format::v2::Leb128>>>::get::<&mut &[u8]>
+6	<rayon_core::registry::WorkerThread>::steal::{closure#1}
+5	<blockzilla_format::program_logs::known_programs::raydium_amm::RaydiumAmmLog as wincode::schema::SchemaRead<wincode::config::Configuration<true, 18446744073709551615, wincode::len::UseIntLen<u64, 0>, wincode::schema::int_encoding::LittleEndian, blockzilla_format::v2::Leb128>>>::get::<&mut &[u8]>
+5	core::ptr::drop_glue::<blockzilla_read_sdk::compact_query::ProjectedMetadata>
+3	<alloc::raw_vec::RawVecInner>::with_capacity_in
+3	<blockzilla_format::split_compact::OwnedCompactRecentBlockhash as wincode::schema::SchemaRead<wincode::config::Configuration<true, 18446744073709551615, wincode::len::UseIntLen<u64, 0>, wincode::schema::int_encoding::LittleEndian, blockzilla_format::v2::Leb128>>>::get::<&mut &[u8]>
+3	<blockzilla_format::v2::ArchiveV2VoteHashRef as wincode::schema::SchemaRead<wincode::config::Configuration<true, 18446744073709551615, wincode::len::UseIntLen<u64, 0>, wincode::schema::int_encoding::LittleEndian, blockzilla_format::v2::Leb128>>>::get::<&mut &[u8]>
+3	<rayon_core::registry::WorkerThread>::wait_until::<rayon_core::latch::SpinLatch>
+2	<core::option::Option<u32> as wincode::schema::SchemaRead<wincode::config::Configuration<true, 18446744073709551615, wincode::len::UseIntLen<u64, 0>, wincode::schema::int_encoding::LittleEndian, blockzilla_format::v2::Leb128>>>::get::<&mut &[u8]>
+2	HUF_decompress4X1_DCtx_wksp
+2	ZSTD_findFrameCompressedSize_advanced
+2	core::ptr::drop_glue::<core::option::Option<blockzilla_read_sdk::reader::OrderedParallelWorker<blockzilla_read_sdk::compact_query::ParallelProjectionWorker>>>
+1	<alloc::vec::Vec<blockzilla_query_sdk::model::ResolvedInstruction>>::push_mut
+1	<crossbeam_epoch::internal::Global>::collect
+1	<fn() -> core::result::Result<(), anyhow::Error> as core::ops::function::FnOnce<()>>::call_once
+1	<rayon_core::job::JobRef>::execute
+1	<rayon_core::registry::WorkerThread>::take_local_job
+1	<rayon_core::sleep::Sleep>::wake_any_threads
+1	<smallvec::SmallVec<[blockzilla_read_sdk::message_projection::ProjectedCompactV2Instruction; 4]>>::try_reserve_exact
+1	<std::sys::sync::mutex::futex::Mutex>::lock
+1	HUF_readStats_body
+1	ZSTD_decompress_usingDDict
+1	blockzilla_read_sdk::compact_query::load_signature_batch::<blockzilla_read_sdk::source::PinnedLocalRangeSource>

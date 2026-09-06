@@ -1,7 +1,8 @@
 use std::io::Write;
 
 use blockzilla_model::{
-    BlockSink, BlockView, CpiCoverage, InstructionCoverage, ScanRequest, TransactionView,
+    BlockSink, BlockView, CpiCoverage, ExecutionStatus, InstructionCoverage, ScanRequest,
+    TransactionView,
 };
 
 use crate::{
@@ -17,8 +18,8 @@ pub const MAINNET_PUMP_FUN_PROGRAM: [u8; 32] = [
 
 pub const PUMP_HEADER_BYTES: usize = 44;
 pub const PUMP_RECORD_BYTES: usize = 92;
-const PUMP_SCHEMA: &str = "blockzilla-example-pump-transaction/v1";
-const PUMP_MAGIC: [u8; 8] = *b"BZPUMP01";
+const PUMP_SCHEMA: &str = "blockzilla-example-pump-transaction-exclude-failed/v2";
+const PUMP_MAGIC: [u8; 8] = *b"BZPUMP02";
 
 /// Some outer program evidence can be absent.
 pub const PUMP_COVERAGE_INCOMPLETE_INSTRUCTIONS: u8 = 1 << 0;
@@ -26,6 +27,8 @@ pub const PUMP_COVERAGE_INCOMPLETE_INSTRUCTIONS: u8 = 1 << 0;
 pub const PUMP_COVERAGE_INCOMPLETE_CPI: u8 = 1 << 1;
 /// A confirmed match cannot be written without its primary signature.
 pub const PUMP_COVERAGE_PRIMARY_SIGNATURE_UNAVAILABLE: u8 = 1 << 2;
+/// Execution status is unknown, so a match is not confirmed successful.
+pub const PUMP_COVERAGE_EXECUTION_UNKNOWN: u8 = 1 << 3;
 
 /// Select program identities and signatures, but not instruction payloads.
 pub fn pump_scan_request(request: ScanRequest) -> ScanRequest {
@@ -33,7 +36,7 @@ pub fn pump_scan_request(request: ScanRequest) -> ScanRequest {
         .allow_incomplete_instructions()
         .allow_incomplete_cpi()
         .without_required_signers()
-        .without_execution_status()
+        .without_failed_transaction_details()
         .without_instruction_accounts()
         .without_instruction_data()
         .with_instruction_programs_for([MAINNET_PUMP_FUN_PROGRAM])
@@ -44,6 +47,7 @@ pub fn pump_scan_request(request: ScanRequest) -> ScanRequest {
 pub struct PumpReport {
     pub blocks_seen: u64,
     pub transactions_seen: u64,
+    pub skipped_failed_transactions: u64,
     /// Transactions with at least one confirmed direct or CPI invocation.
     pub matching_transactions: u64,
     /// Matching transactions written with an exact primary signature.
@@ -66,6 +70,7 @@ pub struct PumpSink<W> {
     coverage: CoverageTracker,
     blocks_seen: u64,
     transactions_seen: u64,
+    skipped_failed_transactions: u64,
     matching_transactions: u64,
     written_transactions: u64,
     direct_invocations: u64,
@@ -85,6 +90,7 @@ impl<W: Write> PumpSink<W> {
             coverage: CoverageTracker::default(),
             blocks_seen: 0,
             transactions_seen: 0,
+            skipped_failed_transactions: 0,
             matching_transactions: 0,
             written_transactions: 0,
             direct_invocations: 0,
@@ -109,8 +115,18 @@ impl<W: Write> PumpSink<W> {
     pub fn process_transaction(&mut self, transaction: TransactionView<'_>) -> Result<()> {
         self.order.observe("Pump.fun", transaction)?;
         increment(&mut self.transactions_seen, "Pump.fun transaction")?;
+        if transaction.header.status == ExecutionStatus::Failed {
+            increment(
+                &mut self.skipped_failed_transactions,
+                "Pump.fun skipped failure",
+            )?;
+            return Ok(());
+        }
 
         let mut reason_bits = 0_u8;
+        if matches!(transaction.header.status, ExecutionStatus::Unknown(_)) {
+            reason_bits |= PUMP_COVERAGE_EXECUTION_UNKNOWN;
+        }
         if !matches!(
             transaction.header.instruction_coverage,
             InstructionCoverage::Complete
@@ -188,6 +204,7 @@ impl<W: Write> PumpSink<W> {
             coverage,
             blocks_seen,
             transactions_seen,
+            skipped_failed_transactions,
             matching_transactions,
             written_transactions,
             direct_invocations,
@@ -205,6 +222,7 @@ impl<W: Write> PumpSink<W> {
             report: PumpReport {
                 blocks_seen,
                 transactions_seen,
+                skipped_failed_transactions,
                 matching_transactions,
                 written_transactions,
                 direct_invocations,
@@ -336,6 +354,27 @@ mod tests {
     }
 
     #[test]
+    fn known_failure_is_not_a_match_or_missing_cpi() {
+        let target = [0x44; 32];
+        let mut source = block(
+            70,
+            Some([0x55; 64]),
+            InstructionCoverage::Complete,
+            CpiCoverage::NotRecorded,
+            vec![instruction(0, 0, None, target)],
+        );
+        source.transactions[0].header.status = ExecutionStatus::Failed;
+        let mut sink = PumpSink::new(Vec::new(), target).unwrap();
+        sink.process_block(source.as_view()).unwrap();
+        let report = sink.finish().unwrap().report;
+        assert_eq!(report.transactions_seen, 1);
+        assert_eq!(report.skipped_failed_transactions, 1);
+        assert_eq!(report.matching_transactions, 0);
+        assert_eq!(report.incomplete_cpi_transactions, 0);
+        assert!(report.output_complete);
+    }
+
+    #[test]
     fn omitting_instruction_accounts_preserves_pump_output() {
         let target = [0x44; 32];
         let mut with_accounts = block(
@@ -415,7 +454,8 @@ mod tests {
         assert!(request.include_instructions);
         assert!(!request.include_instruction_accounts);
         assert!(!request.include_required_signers);
-        assert!(!request.include_execution_status);
+        assert!(request.include_execution_status);
+        assert!(request.omit_failed_transaction_details);
         assert!(request.include_primary_signatures);
         assert!(matches!(
             request.instruction_data,

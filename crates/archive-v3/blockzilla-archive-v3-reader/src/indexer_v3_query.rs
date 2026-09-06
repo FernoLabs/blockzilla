@@ -2676,7 +2676,6 @@ impl IndexerV3InstructionSource {
 
         let projector = CompactV2MessageProjector::new(message_schema, context.registry_entries);
         let message = if !request.include_instructions
-            && !request.include_execution_status
             && !request.include_required_signers
             && request.required_signer.is_none()
         {
@@ -2778,16 +2777,36 @@ impl IndexerV3InstructionSource {
                     "decoded V3 metadata also contains raw fallback bytes".into(),
                 ));
             }
-            if !request.include_instructions && !request.include_execution_status {
+            if !request.include_instructions {
                 if transaction.loaded_addresses.is_some()
                     || transaction.inner_instructions.is_some()
-                    || transaction.outcome.is_some()
                 {
                     return Err(IndexerV3InstructionSourceError::Invalid(
                         "unrequested V3 instruction metadata planes are present".into(),
                     ));
                 }
-                ProjectedMetadata::ExactUnprojected
+                if request.include_execution_status {
+                    let status =
+                        CompactV2MetadataProjector::new(metadata_schema, context.registry_entries)
+                            .project_split_outcome(
+                                required_plane(transaction.outcome, "outcome")?,
+                                CompactV2MetadataProjectionLimits::for_message(&message),
+                            )?;
+                    require_flag(
+                        &transaction,
+                        ARCHIVE_V2_TX_FLAG_HAS_ERROR,
+                        "HAS_ERROR",
+                        !status.is_success(),
+                    )?;
+                    ProjectedMetadata::ExactStatus(status)
+                } else {
+                    if transaction.outcome.is_some() {
+                        return Err(IndexerV3InstructionSourceError::Invalid(
+                            "unrequested V3 outcome plane is present".into(),
+                        ));
+                    }
+                    ProjectedMetadata::ExactUnprojected
+                }
             } else {
                 let loaded = required_plane(transaction.loaded_addresses, "loaded-addresses")?;
                 let inner = required_plane(transaction.inner_instructions, "inner-instructions")?;
@@ -2863,6 +2882,22 @@ impl IndexerV3InstructionSource {
                 None,
                 CpiCoverage::Unknown(CoverageReason::ProjectionNotRequested),
             ),
+            ProjectedMetadata::ExactStatus(status) => {
+                let (status, failed) = match status {
+                    CompactV2ExecutionStatus::Succeeded => (ExecutionStatus::Succeeded, None),
+                    CompactV2ExecutionStatus::Failed {
+                        failed_outer_instruction_index,
+                    } => (
+                        ExecutionStatus::Failed,
+                        failed_outer_instruction_index.map(u32::from),
+                    ),
+                };
+                (
+                    status,
+                    failed,
+                    CpiCoverage::Unknown(CoverageReason::ProjectionNotRequested),
+                )
+            }
         };
 
         let (status, failed_outer_instruction_index) = if request.include_execution_status {
@@ -2878,6 +2913,27 @@ impl IndexerV3InstructionSource {
         } else {
             CpiCoverage::Unknown(CoverageReason::ProjectionNotRequested)
         };
+
+        // Preserve the failed header, but do not resolve keys or emit balance rows
+        // when the consumer explicitly excludes failed transaction details.
+        if request.omit_failed_transaction_details && recorded_status == ExecutionStatus::Failed {
+            return Ok(CanonicalTransaction {
+                header: TransactionHeader {
+                    tx_index: transaction.tx_index,
+                    status: ExecutionStatus::Failed,
+                    failed_outer_instruction_index: recorded_failed_outer,
+                    instruction_coverage: InstructionCoverage::Unknown(
+                        CoverageReason::ProjectionNotRequested,
+                    ),
+                    cpi_coverage: CpiCoverage::Unknown(CoverageReason::ProjectionNotRequested),
+                },
+                primary_signature: None,
+                required_signers: Vec::new(),
+                instructions: Vec::new(),
+                token_balance_coverage: TokenBalanceCoverage::NotRequested,
+                token_balances: Vec::new(),
+            });
+        }
 
         let signer_matches = request.required_signer.is_none_or(|key| {
             message
@@ -2945,6 +3001,7 @@ impl IndexerV3InstructionSource {
             }
             ProjectedMetadata::Absent
             | ProjectedMetadata::Raw
+            | ProjectedMetadata::ExactStatus(_)
             | ProjectedMetadata::ExactUnprojected
                 if message.expected_loaded_addresses() == 0 =>
             {
@@ -2952,6 +3009,7 @@ impl IndexerV3InstructionSource {
             }
             ProjectedMetadata::Absent
             | ProjectedMetadata::Raw
+            | ProjectedMetadata::ExactStatus(_)
             | ProjectedMetadata::ExactUnprojected => None,
         };
 
@@ -3005,7 +3063,7 @@ impl IndexerV3InstructionSource {
                 ProjectedMetadata::Absent => CoverageReason::MetadataAbsent,
                 ProjectedMetadata::Raw => CoverageReason::RawMetadata,
                 ProjectedMetadata::Exact(_) => unreachable!("exact metadata supplied loaded keys"),
-                ProjectedMetadata::ExactUnprojected => {
+                ProjectedMetadata::ExactStatus(_) | ProjectedMetadata::ExactUnprojected => {
                     unreachable!("instruction projection requires exact metadata")
                 }
             };
@@ -3015,7 +3073,9 @@ impl IndexerV3InstructionSource {
         let (token_balance_coverage, token_balances) = match &request.token_balances {
             TokenBalanceRequirement::None => (TokenBalanceCoverage::NotRequested, Vec::new()),
             requirement => match &metadata {
-                ProjectedMetadata::Exact(_) | ProjectedMetadata::ExactUnprojected => {
+                ProjectedMetadata::Exact(_)
+                | ProjectedMetadata::ExactStatus(_)
+                | ProjectedMetadata::ExactUnprojected => {
                     let plane = required_plane(transaction.token_balances, "token-balances")?;
                     CompactV2MetadataProjector::new(metadata_schema, context.registry_entries)
                         .project_split_token_balances_reusing(
@@ -3338,6 +3398,7 @@ impl IndexerV3InstructionSource {
             ProjectedMetadata::Exact(metadata) => metadata.inner_instructions.as_deref(),
             ProjectedMetadata::Absent
             | ProjectedMetadata::Raw
+            | ProjectedMetadata::ExactStatus(_)
             | ProjectedMetadata::ExactUnprojected => None,
         };
         let inner_count = inner_groups
@@ -5748,6 +5809,7 @@ enum ProjectedMetadata<'a> {
     Absent,
     Raw,
     Exact(blockzilla_compact_v2_reader::ProjectedCompactV2Metadata<'a>),
+    ExactStatus(CompactV2ExecutionStatus),
     ExactUnprojected,
 }
 
@@ -6492,6 +6554,94 @@ mod tests {
         assert_eq!(receipt.instructions, 0);
         assert_eq!(receipt.transactions_with_incomplete_token_balances, 0);
         assert!(receipt.io.source_read_bytes.is_some_and(|bytes| bytes > 0));
+    }
+
+    #[test]
+    fn status_only_token_scan_does_not_require_instruction_planes() {
+        let message = || {
+            legacy_message(
+                vec![CompactPubkey::Id(1), CompactPubkey::Id(2)],
+                vec![raw_instruction(1, &[0], &[7])],
+            )
+        };
+        let mut success = metadata(2, None, None, vec![], vec![]);
+        success.post_token_balances.push(CompactTokenBalance {
+            account_index: 0,
+            mint: Some(CompactPubkey::Id(3)),
+            owner: None,
+            program_id: None,
+            amount: 22,
+            decimals: 6,
+        });
+        let mut failed = metadata(
+            2,
+            Some(CompactTransactionError::InstructionError(
+                0,
+                CompactInstructionError::Custom(42),
+            )),
+            None,
+            vec![],
+            vec![],
+        );
+        failed.post_token_balances = success.post_token_balances.clone();
+        let fixture = Fixture::build(
+            &[SIGNER, PROGRAM, TARGET_MINT],
+            vec![vec![
+                FixtureTransaction::exact(message(), success, 0),
+                FixtureTransaction::exact(message(), failed, ARCHIVE_V2_TX_FLAG_HAS_ERROR),
+                FixtureTransaction::absent(message()),
+                FixtureTransaction::raw_metadata(message()),
+            ]],
+            None,
+            false,
+            100,
+        );
+        for omit_failed in [false, true] {
+            let mut request = ScanRequest::all()
+                .allow_unverified_source()
+                .without_instructions()
+                .without_required_signers()
+                .without_primary_signatures()
+                .allow_unknown_execution()
+                .with_token_balances_for([TARGET_MINT])
+                .allow_incomplete_token_balances();
+            if omit_failed {
+                request = request.without_failed_transaction_details();
+            }
+            let planes = semantic_plane_selection(&request);
+            assert!(planes.outcomes && planes.token_balances);
+            assert!(!planes.loaded_addresses && !planes.inner_instructions);
+            for workers in [1, 3] {
+                let mut source = fixture.open("status-only-token-scan");
+                let mut blocks = Vec::new();
+                source
+                    .scan_ordered_parallel_with_registry_policy(
+                        &request,
+                        IndexerV3RegistryReadPolicy::sparse_only(),
+                        NonZeroUsize::new(workers).unwrap(),
+                        &mut OwnedBlockSink {
+                            output: &mut blocks,
+                        },
+                    )
+                    .unwrap();
+                let txs = &blocks[0].1;
+                assert_eq!(txs.len(), 4);
+                assert_eq!(txs[0].header.status, ExecutionStatus::Succeeded);
+                assert_eq!(txs[0].token_balances.len(), 1);
+                assert_eq!(txs[1].header.status, ExecutionStatus::Failed);
+                assert_eq!(txs[1].header.failed_outer_instruction_index, Some(0));
+                assert_eq!(txs[1].token_balances.len(), usize::from(!omit_failed));
+                assert_eq!(
+                    txs[2].header.status,
+                    ExecutionStatus::Unknown(CoverageReason::MetadataAbsent)
+                );
+                assert_eq!(
+                    txs[3].header.status,
+                    ExecutionStatus::Unknown(CoverageReason::RawMetadata)
+                );
+                assert!(txs.iter().all(|tx| tx.instructions.is_empty()));
+            }
+        }
     }
 
     #[test]

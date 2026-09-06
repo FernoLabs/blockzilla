@@ -951,7 +951,6 @@ impl<S: RangeSource> CompactV2InstructionSource<S> {
         let projector =
             CompactV2MessageProjector::new(reader.message_schema(), reader.registry_entries());
         let message = if !request.include_instructions
-            && !request.include_execution_status
             && !request.include_required_signers
             && request.required_signer.is_none()
         {
@@ -1012,6 +1011,37 @@ impl<S: RangeSource> CompactV2InstructionSource<S> {
             exact_metadata_bytes = Some(bytes);
             if !request.include_instructions && !request.include_execution_status {
                 ProjectedMetadata::ExactUnprojected
+            } else if !request.include_instructions {
+                // Traverse the complete selected source grammar without
+                // retaining CPI or loaded-key vectors. Flags alone do not
+                // establish a transaction's execution status.
+                let summary = CompactV2MetadataProjector::new(
+                    reader.metadata_schema(),
+                    reader.registry_entries(),
+                )
+                .count(
+                    bytes,
+                    CompactV2MetadataProjectionLimits::for_message(&message),
+                )?;
+                require_flag_state(
+                    row,
+                    ARCHIVE_V2_TX_FLAG_HAS_ERROR,
+                    "HAS_ERROR",
+                    !summary.execution_status.is_success(),
+                )?;
+                require_flag_state(
+                    row,
+                    ARCHIVE_V2_TX_FLAG_HAS_INNER_IX,
+                    "HAS_INNER_IX",
+                    summary.inner.is_some(),
+                )?;
+                require_flag_state(
+                    row,
+                    ARCHIVE_V2_TX_FLAG_HAS_LOADED_ADDRESSES,
+                    "HAS_LOADED_ADDRESSES",
+                    message.expected_loaded_addresses() != 0,
+                )?;
+                ProjectedMetadata::ExactStatus(summary.execution_status)
             } else {
                 let limits = CompactV2MetadataProjectionLimits::for_message(&message);
                 let metadata = CompactV2MetadataProjector::new(
@@ -1070,6 +1100,15 @@ impl<S: RangeSource> CompactV2InstructionSource<S> {
                 };
                 (status, failed, cpi)
             }
+            ProjectedMetadata::ExactStatus(execution) => (
+                if execution.is_success() {
+                    ExecutionStatus::Succeeded
+                } else {
+                    ExecutionStatus::Failed
+                },
+                execution.failed_outer_instruction_index().map(u32::from),
+                CpiCoverage::Unknown(CoverageReason::ProjectionNotRequested),
+            ),
             ProjectedMetadata::ExactUnprojected => (
                 ExecutionStatus::Unknown(CoverageReason::ProjectionNotRequested),
                 None,
@@ -1091,6 +1130,26 @@ impl<S: RangeSource> CompactV2InstructionSource<S> {
             CpiCoverage::Unknown(CoverageReason::ProjectionNotRequested)
         };
 
+        // Omit details only after decoding metadata and checking its row flags.
+        if request.omit_failed_transaction_details && recorded_status == ExecutionStatus::Failed {
+            return Ok(CanonicalTransaction {
+                header: TransactionHeader {
+                    tx_index: row.tx_index,
+                    status: ExecutionStatus::Failed,
+                    failed_outer_instruction_index: recorded_failed_outer,
+                    instruction_coverage: InstructionCoverage::Unknown(
+                        CoverageReason::ProjectionNotRequested,
+                    ),
+                    cpi_coverage: CpiCoverage::Unknown(CoverageReason::ProjectionNotRequested),
+                },
+                primary_signature: None,
+                required_signers: Vec::new(),
+                instructions: Vec::new(),
+                token_balance_coverage: TokenBalanceCoverage::NotRequested,
+                token_balances: Vec::new(),
+            });
+        }
+
         let loaded_key_count = if !request.include_instructions {
             None
         } else {
@@ -1108,6 +1167,7 @@ impl<S: RangeSource> CompactV2InstructionSource<S> {
                 ),
                 ProjectedMetadata::Absent
                 | ProjectedMetadata::Raw
+                | ProjectedMetadata::ExactStatus(_)
                 | ProjectedMetadata::ExactUnprojected
                     if message.expected_loaded_addresses() == 0 =>
                 {
@@ -1115,6 +1175,7 @@ impl<S: RangeSource> CompactV2InstructionSource<S> {
                 }
                 ProjectedMetadata::Absent
                 | ProjectedMetadata::Raw
+                | ProjectedMetadata::ExactStatus(_)
                 | ProjectedMetadata::ExactUnprojected => None,
             }
         };
@@ -1188,7 +1249,7 @@ impl<S: RangeSource> CompactV2InstructionSource<S> {
                 ProjectedMetadata::Absent => CoverageReason::MetadataAbsent,
                 ProjectedMetadata::Raw => CoverageReason::RawMetadata,
                 ProjectedMetadata::Exact(_) => unreachable!("exact metadata supplied loaded keys"),
-                ProjectedMetadata::ExactUnprojected => {
+                ProjectedMetadata::ExactStatus(_) | ProjectedMetadata::ExactUnprojected => {
                     unreachable!("instruction projection requires exact metadata")
                 }
             };
@@ -1229,7 +1290,9 @@ impl<S: RangeSource> CompactV2InstructionSource<S> {
             TokenBalanceRequirement::None => (TokenBalanceCoverage::NotRequested, Vec::new()),
             requirement => match (&metadata, exact_metadata_bytes) {
                 (
-                    ProjectedMetadata::Exact(_) | ProjectedMetadata::ExactUnprojected,
+                    ProjectedMetadata::Exact(_)
+                    | ProjectedMetadata::ExactStatus(_)
+                    | ProjectedMetadata::ExactUnprojected,
                     Some(bytes),
                 ) => {
                     CompactV2MetadataProjector::new(
@@ -1258,7 +1321,12 @@ impl<S: RangeSource> CompactV2InstructionSource<S> {
                     TokenBalanceCoverage::Unknown(CoverageReason::RawMetadata),
                     Vec::new(),
                 ),
-                (ProjectedMetadata::Exact(_) | ProjectedMetadata::ExactUnprojected, None) => {
+                (
+                    ProjectedMetadata::Exact(_)
+                    | ProjectedMetadata::ExactStatus(_)
+                    | ProjectedMetadata::ExactUnprojected,
+                    None,
+                ) => {
                     unreachable!("exact metadata has bytes")
                 }
             },
@@ -1574,6 +1642,7 @@ impl<S: RangeSource> CompactV2InstructionSource<S> {
             ProjectedMetadata::Exact(metadata) => metadata.inner_instructions.as_deref(),
             ProjectedMetadata::Absent
             | ProjectedMetadata::Raw
+            | ProjectedMetadata::ExactStatus(_)
             | ProjectedMetadata::ExactUnprojected => None,
         };
         let mut next_group = inner_groups.into_iter().flatten().peekable();
@@ -2444,6 +2513,7 @@ enum ProjectedMetadata<'a> {
     Absent,
     Raw,
     Exact(crate::ProjectedCompactV2Metadata<'a>),
+    ExactStatus(CompactV2ExecutionStatus),
     ExactUnprojected,
 }
 
@@ -4164,6 +4234,174 @@ mod tests {
     }
 
     #[test]
+    fn failed_detail_filter_keeps_headers_counts_and_unknown_status() {
+        for workers in [1, 3] {
+            let fixture = Fixture::main();
+            let mut source =
+                CompactV2InstructionSource::new(fixture.trusted_reader(), FIRST_SLOT).unwrap();
+            let request = ScanRequest::all()
+                .allow_incomplete_instructions()
+                .allow_incomplete_cpi()
+                .without_primary_signatures()
+                .without_required_signers()
+                .without_instruction_accounts()
+                .without_instruction_data()
+                .without_failed_transaction_details();
+            let mut transactions = Vec::new();
+            let mut sink = blockzilla_model::FnBlockSink::new(|block: BlockView<'_>| {
+                transactions.extend_from_slice(block.transactions);
+                Ok(())
+            });
+            let receipt = source
+                .scan_ordered_parallel(
+                    &request,
+                    &mut sink,
+                    CompactV2ParallelScanConfig::new(workers),
+                )
+                .unwrap();
+            assert_eq!(receipt.scan.transactions, 7);
+            assert_eq!(transactions[2].header.status, ExecutionStatus::Failed);
+            assert_eq!(
+                transactions[2].header.failed_outer_instruction_index,
+                Some(1)
+            );
+            assert!(transactions[2].instructions.is_empty());
+            assert!(transactions[2].token_balances.is_empty());
+            assert!(!request.needs_primary_signature(&transactions[2]));
+            assert!(matches!(
+                transactions[3].header.status,
+                ExecutionStatus::Unknown(CoverageReason::MetadataAbsent)
+            ));
+            assert!(matches!(
+                transactions[4].header.status,
+                ExecutionStatus::Unknown(CoverageReason::RawMetadata)
+            ));
+            assert!(!transactions[0].instructions.is_empty());
+        }
+    }
+
+    #[test]
+    fn status_and_failed_detail_scans_reject_metadata_row_flag_disagreement() {
+        for failed in [false, true] {
+            let error = failed.then_some(CompactTransactionError::InstructionError(
+                0,
+                CompactInstructionError::Custom(42),
+            ));
+            let fixture = Fixture::build(
+                vec![[0x31; 32], TOKEN_PROGRAM],
+                vec![vec![TxFixture::exact(
+                    legacy_message(vec![raw_instruction(1, &[0], &[1])]),
+                    metadata(2, error, None, vec![], vec![]),
+                    if failed {
+                        0
+                    } else {
+                        ARCHIVE_V2_TX_FLAG_HAS_ERROR
+                    },
+                )]],
+                None,
+            );
+            for include_instructions in [false, true] {
+                for omit_failed_details in [false, true] {
+                    for workers in [1, 3] {
+                        let mut source =
+                            CompactV2InstructionSource::new(fixture.trusted_reader(), FIRST_SLOT)
+                                .unwrap();
+                        let mut request = ScanRequest::all()
+                            .without_primary_signatures()
+                            .without_required_signers()
+                            .without_instruction_accounts()
+                            .without_instruction_data()
+                            .allow_incomplete_cpi();
+                        if !include_instructions {
+                            request = request.without_instructions();
+                        }
+                        if omit_failed_details {
+                            request = request.without_failed_transaction_details();
+                        }
+                        let mut published = 0;
+                        let mut sink = blockzilla_model::FnBlockSink::new(|_: BlockView<'_>| {
+                            published += 1;
+                            Ok(())
+                        });
+                        let error = source
+                            .scan_ordered_parallel(
+                                &request,
+                                &mut sink,
+                                CompactV2ParallelScanConfig::new(workers),
+                            )
+                            .unwrap_err();
+                        assert!(format!("{error:?}").contains("HAS_ERROR"), "{error:?}");
+                        assert_eq!(published, 0);
+                    }
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn failed_detail_filter_still_validates_complete_metadata() {
+        for trailing in [false, true] {
+            let mut transaction = TxFixture::exact(
+                legacy_message(vec![raw_instruction(1, &[0], &[1])]),
+                metadata(
+                    2,
+                    Some(CompactTransactionError::InstructionError(
+                        0,
+                        CompactInstructionError::Custom(42),
+                    )),
+                    None,
+                    vec![],
+                    vec![],
+                ),
+                ARCHIVE_V2_TX_FLAG_HAS_ERROR,
+            );
+            let bytes = transaction.metadata.as_mut().unwrap();
+            if trailing {
+                bytes.push(0);
+            } else {
+                bytes.pop(); // Remove the final optional cost-units field.
+            }
+            let fixture = Fixture::build(
+                vec![[0x31; 32], TOKEN_PROGRAM],
+                vec![vec![transaction]],
+                None,
+            );
+            for include_instructions in [false, true] {
+                let mut source =
+                    CompactV2InstructionSource::new(fixture.trusted_reader(), FIRST_SLOT).unwrap();
+                let mut request = ScanRequest::all()
+                    .without_primary_signatures()
+                    .without_required_signers()
+                    .without_instruction_accounts()
+                    .without_instruction_data()
+                    .without_failed_transaction_details();
+                if !include_instructions {
+                    request = request.without_instructions();
+                }
+                let mut published = 0;
+                let error = source
+                    .for_each_block(&request, |_| {
+                        published += 1;
+                        Ok(())
+                    })
+                    .unwrap_err();
+                let QueryError::Source { source: error, .. } = error else {
+                    panic!("unexpected query error: {error:?}");
+                };
+                if trailing {
+                    assert!(error.to_string().contains("trailing bytes"), "{error}");
+                } else {
+                    assert!(
+                        error.to_string().contains("metadata wire decode failed"),
+                        "{error}"
+                    );
+                }
+                assert_eq!(published, 0);
+            }
+        }
+    }
+
+    #[test]
     fn program_only_projection_skips_instruction_account_resolution_and_allocation() {
         let far_account_id = REGISTRY_KEYS_PER_CHUNK + 1;
         let farther_account_id = 2 * REGISTRY_KEYS_PER_CHUNK + 1;
@@ -5160,6 +5398,123 @@ mod tests {
             receipt.io.source_read_bytes,
             Some(fixture.compressed_bytes + 2 * 5 * 32)
         );
+    }
+
+    #[test]
+    fn status_and_token_scan_preserves_headers_and_filters_only_proven_failures() {
+        let with_tokens = || {
+            let mut value = metadata(2, None, None, vec![], vec![]);
+            value.pre_token_balances = vec![CompactTokenBalance {
+                account_index: 0,
+                mint: Some(CompactPubkey::Id(3)),
+                owner: Some(CompactPubkey::Id(1)),
+                program_id: Some(CompactPubkey::Id(2)),
+                amount: 10,
+                decimals: 6,
+            }];
+            value
+        };
+        let success = with_tokens();
+        let mut failed = with_tokens();
+        failed.err = Some(CompactTransactionError::InstructionError(
+            0,
+            CompactInstructionError::Custom(42),
+        ));
+        let message = || legacy_message(vec![raw_instruction(1, &[0], &[1])]);
+        let fixture = Fixture::build(
+            vec![[0x31; 32], TOKEN_PROGRAM, TARGET_MINT],
+            vec![vec![
+                TxFixture::exact(message(), success, 0),
+                TxFixture::exact(message(), failed, ARCHIVE_V2_TX_FLAG_HAS_ERROR),
+                TxFixture::without_metadata(message()),
+                TxFixture::raw_metadata(message()),
+            ]],
+            None,
+        );
+        for omit_failed_details in [false, true] {
+            for workers in [1, 3] {
+                let mut source =
+                    CompactV2InstructionSource::new(fixture.trusted_reader(), FIRST_SLOT).unwrap();
+                let mut request = ScanRequest::all()
+                    .without_instructions()
+                    .without_primary_signatures()
+                    .without_required_signers()
+                    .with_token_balances_for([TARGET_MINT])
+                    .allow_unknown_execution()
+                    .allow_incomplete_token_balances();
+                if omit_failed_details {
+                    request = request.without_failed_transaction_details();
+                }
+                let mut transactions = Vec::new();
+                let mut sink = blockzilla_model::FnBlockSink::new(|block: BlockView<'_>| {
+                    transactions.extend_from_slice(block.transactions);
+                    Ok(())
+                });
+                let receipt = source
+                    .scan_ordered_parallel(
+                        &request,
+                        &mut sink,
+                        CompactV2ParallelScanConfig::new(workers),
+                    )
+                    .unwrap();
+                assert_eq!(receipt.scan.transactions, 4);
+                assert_eq!(receipt.scan.instructions, 0);
+                assert_eq!(transactions[0].header.status, ExecutionStatus::Succeeded);
+                assert_eq!(transactions[0].header.failed_outer_instruction_index, None);
+                assert_eq!(
+                    transactions[0].token_balance_coverage,
+                    TokenBalanceCoverage::Complete
+                );
+                assert_eq!(transactions[0].token_balances.len(), 1);
+                assert_eq!(transactions[0].token_balances[0].amount, 10);
+                assert_eq!(transactions[0].token_balances[0].mint, Some(TARGET_MINT));
+                assert_eq!(transactions[1].header.status, ExecutionStatus::Failed);
+                assert_eq!(
+                    transactions[1].header.failed_outer_instruction_index,
+                    Some(0)
+                );
+                if omit_failed_details {
+                    assert_eq!(
+                        transactions[1].token_balance_coverage,
+                        TokenBalanceCoverage::NotRequested
+                    );
+                    assert!(transactions[1].token_balances.is_empty());
+                } else {
+                    assert_eq!(
+                        transactions[1].token_balance_coverage,
+                        TokenBalanceCoverage::Complete
+                    );
+                    assert_eq!(transactions[1].token_balances.len(), 1);
+                    assert_eq!(transactions[1].token_balances[0].amount, 10);
+                }
+                for (index, reason) in [
+                    (2, CoverageReason::MetadataAbsent),
+                    (3, CoverageReason::RawMetadata),
+                ] {
+                    assert_eq!(
+                        transactions[index].header.status,
+                        ExecutionStatus::Unknown(reason)
+                    );
+                    assert_eq!(
+                        transactions[index].token_balance_coverage,
+                        TokenBalanceCoverage::Unknown(reason)
+                    );
+                }
+                for transaction in transactions {
+                    assert!(transaction.instructions.is_empty());
+                    assert!(transaction.required_signers.is_empty());
+                    assert_eq!(transaction.primary_signature, None);
+                    assert_eq!(
+                        transaction.header.instruction_coverage,
+                        InstructionCoverage::Unknown(CoverageReason::ProjectionNotRequested)
+                    );
+                    assert_eq!(
+                        transaction.header.cpi_coverage,
+                        CpiCoverage::Unknown(CoverageReason::ProjectionNotRequested)
+                    );
+                }
+            }
+        }
     }
 
     #[test]

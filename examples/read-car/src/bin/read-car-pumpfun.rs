@@ -64,7 +64,7 @@ fn main() -> Result<(), Box<dyn Error>> {
         coverage: &report.coverage,
     };
     println!(
-        "{run} {output} program={} matching_transactions={} written_transactions={} direct_invocations={} cpi_invocations={} incomplete_instruction_transactions={} incomplete_cpi_transactions={} matches_without_primary_signature={}",
+        "{run} {output} program={} matching_transactions={} written_transactions={} direct_invocations={} cpi_invocations={} incomplete_instruction_transactions={} incomplete_cpi_transactions={} matches_without_primary_signature={} skipped_failed_transactions={}",
         MAINNET_PUMP_FUN_PROGRAM_BASE58,
         report.matching_transactions,
         report.written_transactions,
@@ -73,6 +73,7 @@ fn main() -> Result<(), Box<dyn Error>> {
         report.incomplete_instruction_transactions,
         report.incomplete_cpi_transactions,
         report.matches_without_primary_signature,
+        report.skipped_failed_transactions,
     );
     Ok(())
 }

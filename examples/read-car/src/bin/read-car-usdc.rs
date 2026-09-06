@@ -67,13 +67,14 @@ fn main() -> Result<(), Box<dyn Error>> {
         coverage: &report.coverage,
     };
     println!(
-        "{run} {output} mint={} matching_transactions={} pre_rows={} post_rows={} token_balances_unavailable_transactions={} token_mint_unavailable_transactions={}",
+        "{run} {output} mint={} matching_transactions={} pre_rows={} post_rows={} token_balances_unavailable_transactions={} token_mint_unavailable_transactions={} skipped_failed_transactions={}",
         MAINNET_USDC_MINT_BASE58,
         report.matching_transactions,
         report.pre_rows,
         report.post_rows,
         report.token_balances_unavailable_transactions,
         report.token_mint_unavailable_transactions,
+        report.skipped_failed_transactions,
     );
     Ok(())
 }

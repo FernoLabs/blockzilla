@@ -21,15 +21,23 @@ bit. A count alone cannot hide gaps at different positions.
 ## Workloads
 
 - `UsdcBalanceSink` writes exact recorded pre- and post-token-balance rows for
-  the selected mint. `mainnet()` selects Solana USDC.
+  the selected mint, except for known failed transactions. `mainnet()` selects
+  Solana USDC.
 - `PumpSink` writes one transaction record with its primary signature and its
-  confirmed direct and CPI invocation counts. It does not filter by execution
-  status. `mainnet()` selects Pump.fun.
+  confirmed direct and CPI invocation counts, except for known failed
+  transactions. `mainnet()` selects Pump.fun.
 - `FirewatchSink` writes the sorted, distinct program set reached by successful
   transactions for one required signer wallet.
 - `TransactionIdentityDumpSink` writes every transaction coordinate and its
   required primary signature. It is a strict cross-format transaction identity
   parity output.
+
+USDC and Pump.fun report `skipped_failed_transactions`. They keep records with
+unknown execution status and mark their coverage as incomplete. Their request
+helpers let the SDK omit details for known failures before key resolution.
+The count example still counts all transactions and recorded inner instructions.
+This filter changes the example output, not the stored archive. It is not
+suitable for an analysis of fees or durable nonce changes in failed transactions.
 
 Each `*_scan_request` helper removes data planes that the workload does not
 use. The format reader can then avoid unnecessary decoding and allocation.
@@ -60,6 +68,8 @@ byte and 32 zero bytes.
 
 ### USDC recorded balance: 136 bytes
 
+Header magic: `BZUSDC02`. Schema: `blockzilla-example-usdc-recorded-balance-exclude-failed/v2`.
+
 `epoch:u64, slot:u64, tx_index:u32, side:u8, balance_index:u32,
 account_index:u32, mint:[u8;32], owner:optional_pubkey,
 token_program:optional_pubkey, amount:u64, decimals:u8`
@@ -68,6 +78,11 @@ The sink writes pre rows before post rows. It keeps source `balance_index`
 values, even when the request selects only one mint.
 
 ### Pump.fun transaction: 92 bytes
+
+Header magic: `BZPUMP02`. Schema: `blockzilla-example-pump-transaction-exclude-failed/v2`.
+
+The previous `BZUSDC01` and `BZPUMP01` outputs did not exclude known failures.
+Do not compare their output files for parity with these version-2 outputs.
 
 `epoch:u64, slot:u64, tx_index:u32, primary_signature:[u8;64],
 direct_count:u32, cpi_count:u32`

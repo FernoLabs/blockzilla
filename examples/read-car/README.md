@@ -16,6 +16,10 @@ one query. The three application jobs stream to shared workload sinks. The
 ordered reader keeps about 48 slot-window counters in memory. No program
 selects an archive format at run time.
 
+USDC and Pump.fun exclude known failed transactions and report their count.
+Unknown execution status remains a coverage warning. The count example still
+includes all transactions. See the [shared workload rules](../workloads/README.md).
+
 ## Start with a local archive
 
 The clean public CAR objects are still being staged. The currently runnable

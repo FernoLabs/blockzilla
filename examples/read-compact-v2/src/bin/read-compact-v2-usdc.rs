@@ -29,7 +29,8 @@ fn main() -> Result<(), Box<dyn Error>> {
     // Shared workload code selects USDC balances and writes the common output format.
     let request = usdc_scan_request(ScanRequest::all(), MAINNET_USDC_MINT);
     let mut sink = UsdcBalanceSink::mainnet(output_file(&args.output)?)?;
-    let config = CompactV2ParallelScanConfig::new(args.threads);
+    // One shared registry, not one copy per worker; avoid tiny-cache rereads.
+    let config = CompactV2ParallelScanConfig::new(args.threads).with_full_registry_limit(3 << 30);
     let scan = Instant::now();
     let expected_blocks = u64::from(archive.identity().block_count);
     let parallel = archive.scan_ordered_parallel(

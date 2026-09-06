@@ -11,6 +11,6 @@ exists), it exposes no parallel scan path, and it defined a second public
 `ArchiveIoSnapshot` with seven fields against the canonical eight, silently
 dropping `incomplete_body_retries`.
 
-To restore this example, port it onto `blockzilla-compact-v2-read-sdk` and
+To restore this example, port it onto `blockzilla-compact-v2-reader::archive` and
 re-add it to the workspace members list. Its workload sinks already come from
 `blockzilla-example-workloads`, so only source setup needs rewriting.

@@ -164,6 +164,13 @@ from the ordered reader's physical-order contract.
    Local fixture tests and successful compilation do not prove production
    archive compatibility or release readiness.
 
+## Main and reader-fix integration
+
+The [merge review](refactor-merge-review.md) records the later integration of
+local main and the sample-reader fixes, including the current test results and
+output-version changes. The checks below describe the completed structural
+refactor before that integration.
+
 ## Verification
 
 The final local workspace run passed **3,703 tests**, with no failures and one

@@ -43,6 +43,7 @@ METRICS = ("blocks", "transactions", "recorded_inner_instructions", "setup_s", "
            "requested_transactions", "candidate_transactions", "skipped_transactions",
            "decoded_transactions", "decoded_scan_tps", "effective_workers", "max_active_workers",
            "output_rows", "output_bytes", "output_complete", "indeterminate_transactions", "coverage_sha256",
+           "skipped_failed_transactions",
            "pipeline_read_s", "pipeline_input_wait_s", "pipeline_buffer_wait_s", "pipeline_decode_project_wall_s",
            "pipeline_worker_decode_sum_s", "pipeline_worker_projection_sum_s", "pipeline_consume_s",
            "pipeline_projection_buffer_wait_s", "pipeline_result_send_wait_s", "pipeline_signature_read_s",
@@ -75,7 +76,8 @@ def binary(fmt, workload):
 def plan(args):
     modes = ("local", "network") if args.mode == "both" else (args.mode,)
     return [dict(format=f, mode=m, epoch=e, workload=w, binary=binary(f, w))
-            for f in FORMATS for m in modes for e in getattr(args, "epochs", EPOCHS) for w in args.workloads]
+            for f in getattr(args, "formats", FORMATS) for m in modes for e in getattr(args, "epochs", EPOCHS) for w in args.workloads
+            if not (getattr(args, "car_count_only", False) and f == "car" and w != "slot-hours")]
 
 
 def job_key(job):
@@ -92,7 +94,7 @@ def inventory(args):
     """Inspect publication object lengths only; never read archive payloads here."""
     rows = []
     if args.archive_root:
-        for fmt in FORMATS:
+        for fmt in getattr(args, "formats", FORMATS):
             for epoch in getattr(args, "epochs", EPOCHS):
                 for name in object_names(fmt, epoch) + (() if fmt == "car" else OPTIONAL):
                     path = args.archive_root / fmt / str(epoch) / name
@@ -104,7 +106,7 @@ def inventory(args):
                     rows.append(dict(format=fmt, epoch=epoch, object=name, size_bytes=stat.st_size,
                                      mtime_ns=stat.st_mtime_ns, source="local"))
     if args.mode in ("network", "both"):
-        keys = [(f, e, n) for f in FORMATS for e in getattr(args, "epochs", EPOCHS)
+        keys = [(f, e, n) for f in getattr(args, "formats", FORMATS) for e in getattr(args, "epochs", EPOCHS)
                 for n in object_names(f, e) + (() if f == "car" else OPTIONAL)]
 
         def head(key):
@@ -165,6 +167,10 @@ def parse_result(job, stdout):
     if raw.get("epoch") != str(job["epoch"]):
         raise ValueError("reader returned a different epoch")
     result = dict(raw)
+    for line in lines:
+        details = fields(line)
+        if "skipped_failed_transactions" in details:
+            result["skipped_failed_transactions"] = details["skipped_failed_transactions"]
     result["blocks"] = raw.get("blocks", raw.get("requested_blocks"))
     result["transactions"] = raw.get("transactions", raw.get("requested_transactions"))
     result["scan_source_bytes"] = raw.get("scan_logical_read_bytes", raw.get("source_read_bytes"))
@@ -329,6 +335,7 @@ def run_one(args, job, sizes, results):
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--mode", choices=("local", "network", "both"), default="both")
+    parser.add_argument("--formats", default=",".join(FORMATS), help="comma-separated archive formats; default: all three")
     parser.add_argument("--archive-root", type=Path)
     parser.add_argument("--origin", default=ORIGIN)
     parser.add_argument("--bin-dir", type=Path, required=True)
@@ -337,9 +344,15 @@ def main():
     parser.add_argument("--wallet", default=WALLET)
     parser.add_argument("--workloads", default=",".join(WORKLOADS), help="comma-separated; default: all four")
     parser.add_argument("--epochs", default=",".join(map(str, EPOCHS)), help="comma-separated sample epochs; each is read in full")
+    parser.add_argument("--car-count-only", action="store_true", help="run all selected V2/V3 examples but only count for CAR")
     parser.add_argument("--interval", type=float, default=10, help="resource log interval in seconds")
     parser.add_argument("--check-only", action="store_true", help="check files, binaries and HTTP HEADs; do not start readers")
+    parser.add_argument("--stop-on-error", action="store_true", help="stop after a reader error; retain all results")
     args = parser.parse_args()
+    args.formats = args.formats.split(",")
+    if len(set(args.formats)) != len(args.formats) or not set(args.formats) <= set(FORMATS):
+        parser.error("invalid format selection")
+    args.formats = [fmt for fmt in FORMATS if fmt in args.formats]
     args.workloads = args.workloads.split(",")
     try:
         args.epochs = [int(epoch) for epoch in args.epochs.split(",")]
@@ -368,6 +381,8 @@ def execute(args, parser):
         raise KeyboardInterrupt()
     signal.signal(signal.SIGTERM, stop)
     jobs = plan(args)
+    if not jobs:
+        parser.error("format and workload filters select no jobs")
     builds = {}
     for name in sorted({j["binary"] for j in jobs}):
         path = args.bin_dir / name
@@ -413,19 +428,21 @@ def execute(args, parser):
             save(args.results_root / "status.json", dict(state="RUNNING", current=job_key(job), completed=len(results), total=len(jobs)))
             results.append(run_one(args, job, sizes, results))
             table(args.results_root / "summary.tsv", ("format", "mode", "epoch", "workload", "status", "parity", "error", "wall_s") + METRICS, results)
+            if args.stop_on_error and results[-1]["status"] != "PASS":
+                save(args.results_root / "status.json", dict(state="FAIL", completed=len(results), total=len(jobs), current=job_key(job)))
+                return 1
     except KeyboardInterrupt:
         save(args.results_root / "status.json", dict(state="INTERRUPTED", completed=len(results), total=len(jobs)))
         raise
     except Exception:
         save(args.results_root / "status.json", dict(state="FAIL", completed=len(results), total=len(jobs)))
         raise
-    expected = len(FORMATS) * (2 if args.mode == "both" else 1)
     parity = []
-    for epoch in args.epochs:
-        for workload in args.workloads:
-            group = [r for r in results if r["epoch"] == epoch and r["workload"] == workload]
-            passed = len(group) == expected and all(r["status"] == "PASS" for r in group)
-            parity.append(dict(epoch=epoch, workload=workload, status="MATCH" if passed else "FAIL_OR_INCOMPLETE"))
+    for epoch, workload in dict.fromkeys((j["epoch"], j["workload"]) for j in jobs):
+        group = [r for r in results if r["epoch"] == epoch and r["workload"] == workload]
+        expected = sum(j["epoch"] == epoch and j["workload"] == workload for j in jobs)
+        passed = len(group) == expected and all(r["status"] == "PASS" for r in group)
+        parity.append(dict(epoch=epoch, workload=workload, status="MATCH" if passed else "FAIL_OR_INCOMPLETE"))
     table(args.results_root / "parity.tsv", ("epoch", "workload", "status"), parity)
     passed = all(row["status"] == "MATCH" for row in parity)
     save(args.results_root / "status.json", dict(state="PASS" if passed else "FAIL", completed=len(results), total=len(jobs)))

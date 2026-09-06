@@ -1,7 +1,7 @@
 use std::io::Write;
 
 use blockzilla_model::{
-    BlockSink, BlockView, RecordedTokenBalance, ScanRequest, TokenBalanceCoverage,
+    BlockSink, BlockView, ExecutionStatus, RecordedTokenBalance, ScanRequest, TokenBalanceCoverage,
     TokenBalanceSide, TransactionView,
 };
 
@@ -18,20 +18,22 @@ pub const MAINNET_USDC_MINT: [u8; 32] = [
 
 pub const USDC_HEADER_BYTES: usize = 44;
 pub const USDC_RECORD_BYTES: usize = 136;
-const USDC_SCHEMA: &str = "blockzilla-example-usdc-recorded-balance/v1";
-const USDC_MAGIC: [u8; 8] = *b"BZUSDC01";
+const USDC_SCHEMA: &str = "blockzilla-example-usdc-recorded-balance-exclude-failed/v2";
+const USDC_MAGIC: [u8; 8] = *b"BZUSDC02";
 
 /// The requested token-balance plane was not complete for this transaction.
 pub const USDC_COVERAGE_TOKEN_BALANCES_UNAVAILABLE: u8 = 1 << 0;
 /// At least one recorded token-balance row did not contain an exact mint.
 pub const USDC_COVERAGE_TOKEN_MINT_UNAVAILABLE: u8 = 1 << 1;
+/// Execution status is unknown, so the row is not confirmed successful.
+pub const USDC_COVERAGE_EXECUTION_UNKNOWN: u8 = 1 << 2;
 
 /// Select only the token-balance plane needed by this workload.
 pub fn usdc_scan_request(request: ScanRequest, mint: [u8; 32]) -> ScanRequest {
     request
         .without_instructions()
         .without_required_signers()
-        .without_execution_status()
+        .without_failed_transaction_details()
         .without_primary_signatures()
         .with_token_balances_for([mint])
         .allow_incomplete_token_balances()
@@ -42,6 +44,7 @@ pub fn usdc_scan_request(request: ScanRequest, mint: [u8; 32]) -> ScanRequest {
 pub struct UsdcReport {
     pub blocks_seen: u64,
     pub transactions_seen: u64,
+    pub skipped_failed_transactions: u64,
     pub matching_transactions: u64,
     pub pre_rows: u64,
     pub post_rows: u64,
@@ -60,6 +63,7 @@ pub struct UsdcBalanceSink<W> {
     coverage: CoverageTracker,
     blocks_seen: u64,
     transactions_seen: u64,
+    skipped_failed_transactions: u64,
     matching_transactions: u64,
     pre_rows: u64,
     post_rows: u64,
@@ -77,6 +81,7 @@ impl<W: Write> UsdcBalanceSink<W> {
             coverage: CoverageTracker::default(),
             blocks_seen: 0,
             transactions_seen: 0,
+            skipped_failed_transactions: 0,
             matching_transactions: 0,
             pre_rows: 0,
             post_rows: 0,
@@ -99,7 +104,17 @@ impl<W: Write> UsdcBalanceSink<W> {
     pub fn process_transaction(&mut self, transaction: TransactionView<'_>) -> Result<()> {
         self.order.observe("USDC", transaction)?;
         increment(&mut self.transactions_seen, "USDC transaction")?;
+        if transaction.header.status == ExecutionStatus::Failed {
+            increment(
+                &mut self.skipped_failed_transactions,
+                "USDC skipped failure",
+            )?;
+            return Ok(());
+        }
         let mut reason_bits = 0_u8;
+        if matches!(transaction.header.status, ExecutionStatus::Unknown(_)) {
+            reason_bits |= USDC_COVERAGE_EXECUTION_UNKNOWN;
+        }
         if !matches!(
             transaction.token_balance_coverage,
             TokenBalanceCoverage::Complete
@@ -158,6 +173,7 @@ impl<W: Write> UsdcBalanceSink<W> {
             coverage,
             blocks_seen,
             transactions_seen,
+            skipped_failed_transactions,
             matching_transactions,
             pre_rows,
             post_rows,
@@ -173,6 +189,7 @@ impl<W: Write> UsdcBalanceSink<W> {
             report: UsdcReport {
                 blocks_seen,
                 transactions_seen,
+                skipped_failed_transactions,
                 matching_transactions,
                 pre_rows,
                 post_rows,
@@ -369,7 +386,8 @@ mod tests {
         assert!(!request.require_known_execution);
         assert!(!request.include_instructions);
         assert!(!request.include_required_signers);
-        assert!(!request.include_execution_status);
+        assert!(request.include_execution_status);
+        assert!(request.omit_failed_transaction_details);
         assert!(!request.include_primary_signatures);
         assert!(!request.require_complete_token_balances);
         assert!(matches!(
@@ -377,5 +395,29 @@ mod tests {
             blockzilla_model::TokenBalanceRequirement::Mints(ref mints)
                 if mints == &[target]
         ));
+    }
+
+    #[test]
+    fn failed_balances_are_skipped_but_unknown_execution_is_reported() {
+        let target = [0xaa; 32];
+        let mut input = block(
+            vec![balance(TokenBalanceSide::Pre, 0, Some(target), 1)],
+            TokenBalanceCoverage::Complete,
+        );
+        input.transactions[0].header.status = ExecutionStatus::Failed;
+        let mut sink = UsdcBalanceSink::new(Vec::new(), target).unwrap();
+        sink.process_block(input.as_view()).unwrap();
+        let report = sink.finish().unwrap().report;
+        assert_eq!(report.transactions_seen, 1);
+        assert_eq!(report.skipped_failed_transactions, 1);
+        assert_eq!(report.output.row_count, 0);
+        assert!(report.output_complete);
+        input.transactions[0].header.status =
+            ExecutionStatus::Unknown(blockzilla_model::CoverageReason::MetadataAbsent);
+        let mut sink = UsdcBalanceSink::new(Vec::new(), target).unwrap();
+        sink.process_block(input.as_view()).unwrap();
+        let report = sink.finish().unwrap().report;
+        assert_eq!(report.skipped_failed_transactions, 0);
+        assert!(!report.output_complete);
     }
 }
