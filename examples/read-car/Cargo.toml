@@ -15,3 +15,6 @@ path = "src/main.rs"
 blockzilla-car-read-sdk = { path = "../../crates/blockzilla-car-read-sdk" }
 blockzilla-example-workloads = { path = "../../crates/blockzilla-example-workloads" }
 bs58 = "0.5.1"
+
+[lints]
+workspace = true

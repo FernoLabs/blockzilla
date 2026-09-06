@@ -10,4 +10,6 @@ description = "Allocation-free instruction classifiers for Solana DEX programs"
 [dependencies]
 
 [lints.rust]
+unexpected_cfgs = "deny"
 unsafe_code = "forbid"
+

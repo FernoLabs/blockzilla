@@ -52,6 +52,15 @@ members = [
     "workers/old-faithful-get-block",
 ]
 
+# Lints every workspace package inherits via `[lints] workspace = true`.
+#
+# unexpected_cfgs is deny because the blockzilla-format split silently deleted a
+# test: archive-v2 gated fixtures on `feature = "known-drift"` while only
+# program-logs declared that feature, and `feature =` cfgs are per-crate. Cargo
+# warned seven times and the warning was missed. As a deny it is a build error.
+[workspace.lints.rust]
+unexpected_cfgs = "deny"
+
 [workspace.package]
 version = "0.2.0"
 edition = "2024"

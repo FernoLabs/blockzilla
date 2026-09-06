@@ -17,3 +17,6 @@ blockzilla-indexer-v3-read-sdk = { path = "../../crates/blockzilla-indexer-v3-re
 blockzilla-example-workloads = { path = "../../crates/blockzilla-example-workloads" }
 blockzilla-query-sdk = { path = "../../crates/blockzilla-query-sdk" }
 bs58 = "0.5.1"
+
+[lints]
+workspace = true

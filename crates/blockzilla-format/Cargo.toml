@@ -35,3 +35,6 @@ blockzilla-live-format = { path = "../blockzilla-live-format" }
 blockzilla-primitives = { path = "../blockzilla-primitives" }
 blockzilla-program-logs = { path = "../blockzilla-program-logs", default-features = false }
 blockzilla-registry = { path = "../blockzilla-registry" }
+
+[lints]
+workspace = true

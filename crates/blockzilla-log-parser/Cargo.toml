@@ -14,3 +14,6 @@ criterion = { version = "0.8.2", features = ["html_reports"] }
 [[bench]]
 name = "parse_line"
 harness = false
+
+[lints]
+workspace = true

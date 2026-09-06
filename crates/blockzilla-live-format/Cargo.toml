@@ -24,3 +24,6 @@ wincode = { version = "=0.6.1", features = ["derive"] }
 
 [dev-dependencies]
 blockzilla-primitives = { path = "../blockzilla-primitives" }
+
+[lints]
+workspace = true

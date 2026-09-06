@@ -116,3 +116,6 @@ tempfile = "3.23"
 [build-dependencies]
 protoc-bin-vendored = "3.2.0"
 tonic-prost-build = "0.14.6"
+
+[lints]
+workspace = true

@@ -44,3 +44,6 @@ tempfile = "3.24.0"
 name = "compact_v2_public_api"
 path = "tests/compact_v2_public_api.rs"
 required-features = ["http"]
+
+[lints]
+workspace = true

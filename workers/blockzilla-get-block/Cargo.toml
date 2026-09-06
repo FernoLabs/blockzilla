@@ -70,3 +70,6 @@ wasm-bindgen-futures = { version = "0.4.71", optional = true }
 worker = { version = "0.8.3", features = ["http"], optional = true }
 wincode = "=0.6.1"
 zstd = { version = "0.13.3", optional = true }
+
+[lints]
+workspace = true

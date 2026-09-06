@@ -72,3 +72,6 @@ path = "src/bin/debug_epoch_slot_window.rs"
 [[bin]]
 name = "fetch_slot_slice"
 path = "src/bin/fetch_slot_slice.rs"
+
+[lints]
+workspace = true

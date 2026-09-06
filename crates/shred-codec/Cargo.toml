@@ -12,3 +12,6 @@ publish = false
 anyhow = "1.0.102"
 serde = { version = "1.0.228", features = ["derive"] }
 zstd = "0.13.3"
+
+[lints]
+workspace = true

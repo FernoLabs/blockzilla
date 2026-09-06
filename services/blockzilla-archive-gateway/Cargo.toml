@@ -43,3 +43,6 @@ zstd = "0.13.3"
 [[bin]]
 name = "blockzilla-archive-gateway"
 path = "src/main.rs"
+
+[lints]
+workspace = true

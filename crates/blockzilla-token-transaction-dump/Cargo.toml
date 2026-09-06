@@ -37,3 +37,6 @@ wincode = { version = "=0.6.1", features = ["derive"] }
 [dev-dependencies]
 tempfile = "3.27.0"
 zstd = "0.13.3"
+
+[lints]
+workspace = true

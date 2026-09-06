@@ -9,3 +9,6 @@ description = "Shared byte-range contract and object-name validation"
 
 [dependencies]
 thiserror = "2.0.18"
+
+[lints]
+workspace = true

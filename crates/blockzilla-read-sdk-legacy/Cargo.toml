@@ -46,3 +46,6 @@ path = "src/bin/archive-v2-read-pattern-bench.rs"
 [[bin]]
 name = "archive-v2-wire-profile-scan"
 path = "src/bin/archive-v2-wire-profile-scan.rs"
+
+[lints]
+workspace = true

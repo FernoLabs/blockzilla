@@ -75,3 +75,6 @@ path = "src/bin/index-bench.rs"
 [[bin]]
 name = "index-parity"
 path = "src/bin/index-parity.rs"
+
+[lints]
+workspace = true

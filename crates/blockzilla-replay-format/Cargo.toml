@@ -11,3 +11,6 @@ description = "Replay Projection V1 payload types and codec (reserved format 8; 
 
 [dependencies]
 sha2 = "0.11.0"
+
+[lints]
+workspace = true

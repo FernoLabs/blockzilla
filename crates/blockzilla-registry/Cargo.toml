@@ -19,3 +19,6 @@ solana-pubkey = "4.2.0"
 [target.'cfg(not(target_arch = "wasm32"))'.dependencies]
 gxhash = "3.5.0"
 ph = { version = "=0.11.0", default-features = false }
+
+[lints]
+workspace = true

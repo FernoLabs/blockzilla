@@ -14,3 +14,6 @@ anyhow = "1.0.102"
 serde = { version = "1.0.228", features = ["derive"] }
 solana-pubkey = "4.2.0"
 wincode = { version = "=0.6.1", features = ["derive"] }
+
+[lints]
+workspace = true

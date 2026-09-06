@@ -98,3 +98,6 @@ path = "src/bin/replay-hotpath-bench.rs"
 [[bin]]
 name = "replay-state-bench"
 path = "src/bin/replay-state-bench.rs"
+
+[lints]
+workspace = true
