@@ -31,12 +31,12 @@ use super::{
     IngestConfig, IngestRoleConfig, IngressRecordMeta, LogicalKey, ObservationId,
     SourceInputConfig, SpoolFullPolicy, SpoolJournalIdentity, SpoolOptions, SpoolWriter,
 };
-pub use blockzilla_shred_codec::{
+pub use solana_shred_codec::{
     ParsedShredHeader, RAW_SOLANA_SHRED_V1, ZSTD_SOLANA_SHRED_V1, decode_stored_shred,
     parse_shred_header,
 };
 
-const MAX_UDP_DATAGRAM_BYTES: usize = blockzilla_shred_codec::MAX_UDP_DATAGRAM_BYTES;
+const MAX_UDP_DATAGRAM_BYTES: usize = solana_shred_codec::MAX_UDP_DATAGRAM_BYTES;
 const UDP_RECEIVE_BUFFER_BYTES: usize = 64 * 1024 * 1024;
 const SOCKET_DRAIN_BURST_MAX_RECORDS: usize = 1_024;
 const DURABLE_BATCH_MAX_RECORDS: usize = 512;

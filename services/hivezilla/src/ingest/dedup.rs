@@ -6,7 +6,7 @@
 //! upstream source to replay data it may no longer retain.
 
 use anyhow::Result;
-pub use blockzilla_shred_codec::ShredKind;
+pub use solana_shred_codec::ShredKind;
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 

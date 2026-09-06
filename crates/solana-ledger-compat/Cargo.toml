@@ -9,7 +9,7 @@ description = "Minimal compatibility facade for Solana shred parsing/inspection 
 publish = false
 
 [dependencies]
-blockzilla-shred-codec = { path = "../shred-codec" }
+solana-shred-codec = { path = "../solana-codec/solana-shred-codec" }
 solana-pubkey = { version = "4.2.0" }
 solana-signature = { version = "3.4.1", features = ["verify"] }
 sha2 = { version = "0.10.9" }

@@ -83,7 +83,7 @@ rustc-hash = "2.1.2"
 rustls = { version = "0.23.40", features = ["ring"] }
 serde = { version = "1.0.228", features = ["derive"] }
 serde_json = "1.0.149"
-blockzilla-shred-codec = { path = "../../crates/shred-codec" }
+solana-shred-codec = { path = "../../crates/solana-codec/solana-shred-codec" }
 solana-entry = { version = "=4.1.2", features = ["agave-unstable-api"], optional = true }
 solana-gossip = { path = "../../crates/solana-gossip-compat", optional = true }
 # Agave 4.1.2 still uses wincode 0.5 for its repair and message wire types. Keep its

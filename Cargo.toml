@@ -37,7 +37,7 @@ members = [
     "crates/hivezilla-protocol",
     "crates/old-faithful/car-reader",
     "crates/old-faithful/slot-ranges",
-    "crates/shred-codec",
+    "crates/solana-codec/solana-shred-codec",
     "crates/solana-gossip-compat",
     "crates/solana-ledger-compat",
     "examples/read-car",

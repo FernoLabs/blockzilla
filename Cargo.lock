@@ -1125,15 +1125,6 @@ dependencies = [
 ]
 
 [[package]]
-name = "blockzilla-shred-codec"
-version = "0.2.0"
-dependencies = [
- "anyhow",
- "serde",
- "zstd",
-]
-
-[[package]]
 name = "blockzilla-source"
 version = "0.2.0"
 dependencies = [
@@ -3046,7 +3037,6 @@ dependencies = [
  "blockzilla-live-format",
  "blockzilla-primitives",
  "blockzilla-registry",
- "blockzilla-shred-codec",
  "clap 4.6.5",
  "ed25519-dalek 3.0.0",
  "five8",
@@ -3078,6 +3068,7 @@ dependencies = [
  "solana-reward-info",
  "solana-rpc-client",
  "solana-short-vec",
+ "solana-shred-codec",
  "solana-signature",
  "tempfile",
  "tokio",
@@ -6265,9 +6256,9 @@ name = "solana-ledger-compat"
 version = "0.2.0"
 dependencies = [
  "anyhow",
- "blockzilla-shred-codec",
  "sha2 0.10.9",
  "solana-pubkey 4.2.0",
+ "solana-shred-codec",
  "solana-signature",
 ]
 
@@ -6802,6 +6793,15 @@ checksum = "7d8250a4495aad49ad20556a607da53bdcb20de78da10b65afbf918b7f1de647"
 dependencies = [
  "serde_core",
  "wincode 0.5.5",
+]
+
+[[package]]
+name = "solana-shred-codec"
+version = "0.2.0"
+dependencies = [
+ "anyhow",
+ "serde",
+ "zstd",
 ]
 
 [[package]]

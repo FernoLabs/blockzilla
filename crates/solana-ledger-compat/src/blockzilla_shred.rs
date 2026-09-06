@@ -1,5 +1,5 @@
 use {
-    blockzilla_shred_codec::parse_shred_header,
+    solana_shred_codec::parse_shred_header,
     core::{convert::TryFrom, error::Error as StdError, fmt},
     sha2::{Digest, Sha256},
     solana_pubkey::Pubkey,
@@ -12,7 +12,7 @@ pub const MAX_CODE_SHREDS_PER_SLOT: usize = 32_768;
 
 const SIZE_OF_SIGNATURE: usize = 64;
 const SIZE_OF_NONCE: usize = 4;
-const SIZE_OF_COMMON_SHRED_HEADER: usize = blockzilla_shred_codec::COMMON_SHRED_HEADER_BYTES;
+const SIZE_OF_COMMON_SHRED_HEADER: usize = solana_shred_codec::COMMON_SHRED_HEADER_BYTES;
 const SIZE_OF_DATA_SHRED_HEADERS: usize = 88;
 const SIZE_OF_CODING_SHRED_HEADERS: usize = 89;
 
