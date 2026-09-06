@@ -2,11 +2,11 @@ use blockzilla_example_workloads::ProgressSink;
 
 use std::{error::Error, io, time::Instant};
 
+use blockzilla_read_car::{CountSource, RunFacts, count_arguments};
 use of_car_reader::archive::{
     ArchiveInstructionSource, BlockSink, BlockView, CarArchive, QueryError, QueryResult,
     ScanRequest,
 };
-use blockzilla_read_car::{CountSource, RunFacts, count_arguments};
 
 const SLOTS_PER_APPROXIMATE_HOUR: u64 = 9_000;
 

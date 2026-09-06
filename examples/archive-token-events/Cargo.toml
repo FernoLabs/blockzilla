@@ -14,8 +14,8 @@ path = "src/main.rs"
 [dependencies]
 anyhow = "1.0.104"
 blockzilla-archive-sdk = { path = "../../crates/blockzilla-archive-sdk" }
-blockzilla-dump = { path = "../../crates/blockzilla-dump" }
-blockzilla-query-sdk = { path = "../../crates/blockzilla-query-sdk" }
+blockzilla-dump = { path = "../../indexer/blockzilla-dump" }
+blockzilla-model = { path = "../../crates/blockzilla-model" }
 bs58 = "0.5.1"
 clap = { version = "4.6.1", features = ["derive"] }
 rusqlite = { version = "=0.40.2", features = ["bundled"] }

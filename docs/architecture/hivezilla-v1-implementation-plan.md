@@ -40,11 +40,11 @@ workers do not create additional ACK or catalog authorities.
 These are migration blockers, not cleanup opportunities:
 
 1. The current receiver ACK is a **local staging ACK**. In
-   `services/hivezilla/src/ingest/receiver.rs`, `push_batch` returns after the
+   `hivezilla/service/src/ingest/receiver.rs`, `push_batch` returns after the
    receiver spool and progress WAL are synced. It does not prove permanent raw
    objects, independent physical copies, or a rebuildable terminal index, and
    therefore must not authorize V1 source deletion.
-2. **Closed in Gate 0:** both `services/hivezilla/src/grpc.rs` conversion paths
+2. **Closed in Gate 0:** both `hivezilla/service/src/grpc.rs` conversion paths
    now preserve and validate the real source parent final PoH hash; a
    non-genesis block without it is rejected. The separate shred/consensus parent
    block ID remains part of the Gate-0 two-identity refactor.
@@ -80,21 +80,21 @@ Until Gate 5 passes, candidate objects stay non-canonical.
 
 | Area | Current asset | Decision |
 | --- | --- | --- |
-| CLI and supervision | `services/hivezilla/src/main.rs`, `ingest/config.rs`, portable supervisor | Reuse validation, redaction, process isolation, limits, and health plumbing. Replace the target `Primary`/`Replica` model with explicit roles only after equivalent commands exist. |
-| Durable journal | `services/hivezilla/src/ingest/spool.rs` | Reuse exclusive locks, no-follow checks, group commit, checkpoints, torn-tail recovery, corruption handling, audit, projection, and retirement ordering. Quota/free-reserve admission mainly comes from receiver and shred-capture code. Do not call the existing `BZIWAL01/BZIF/CMIT` bytes V1. |
-| Yellowstone raw capture | `services/hivezilla/src/grpc_raw.rs` | Reuse reconnect/watchdog, deterministic known-field protobuf encoding, generation cutover, committed cursors, retention recovery, and PoH helpers. V1's exact boundary is the pinned-schema deterministic projection; unknown provider fields are not preserved and require a new schema/stream before use. In particular, Yellowstone schema 12.4 drops Agave's V1-only transaction config and cannot distinguish V1 from V0-without-lookups after decoding. The structural adapter now requires signatures to prove the V0 interpretation in that ambiguous shape, but this only fails closed; capture must gain an explicit version/config-preserving schema before V1 traffic can be retained. |
-| Normalized gRPC path | `services/hivezilla/src/grpc.rs` | Reuse parsing and metadata conversion only after the parent-hash, complete-PoH, and missing-state blockers are fixed. Never use this path as the only raw evidence. |
-| Shred capture | `services/hivezilla/src/ingest/shred_udp.rs` | Reuse high-rate socket draining, bounded queues, group-commit structure, reserve checks, and kernel-drop telemetry. V1 format 2 stores the exact received datagram, not the current zstd storage payload; compression requires another registered format/version. |
-| Repair input | `services/hivezilla/src/shred_reader`, repair WAL tools | Extract leader schedule, trust, signature/Merkle, nonce, and repair-provenance logic from the current binary crate, then revalidate under the pinned processor/job policy. Keep repair and ordinary shreds as separate raw streams and retain legacy readers. |
+| CLI and supervision | `hivezilla/service/src/main.rs`, `ingest/config.rs`, portable supervisor | Reuse validation, redaction, process isolation, limits, and health plumbing. Replace the target `Primary`/`Replica` model with explicit roles only after equivalent commands exist. |
+| Durable journal | `hivezilla/service/src/ingest/spool.rs` | Reuse exclusive locks, no-follow checks, group commit, checkpoints, torn-tail recovery, corruption handling, audit, projection, and retirement ordering. Quota/free-reserve admission mainly comes from receiver and shred-capture code. Do not call the existing `BZIWAL01/BZIF/CMIT` bytes V1. |
+| Yellowstone raw capture | `hivezilla/service/src/grpc_raw.rs` | Reuse reconnect/watchdog, deterministic known-field protobuf encoding, generation cutover, committed cursors, retention recovery, and PoH helpers. V1's exact boundary is the pinned-schema deterministic projection; unknown provider fields are not preserved and require a new schema/stream before use. In particular, Yellowstone schema 12.4 drops Agave's V1-only transaction config and cannot distinguish V1 from V0-without-lookups after decoding. The structural adapter now requires signatures to prove the V0 interpretation in that ambiguous shape, but this only fails closed; capture must gain an explicit version/config-preserving schema before V1 traffic can be retained. |
+| Normalized gRPC path | `hivezilla/service/src/grpc.rs` | Reuse parsing and metadata conversion only after the parent-hash, complete-PoH, and missing-state blockers are fixed. Never use this path as the only raw evidence. |
+| Shred capture | `hivezilla/service/src/ingest/shred_udp.rs` | Reuse high-rate socket draining, bounded queues, group-commit structure, reserve checks, and kernel-drop telemetry. V1 format 2 stores the exact received datagram, not the current zstd storage payload; compression requires another registered format/version. |
+| Repair input | `hivezilla/service/src/shred_reader`, repair WAL tools | Extract leader schedule, trust, signature/Merkle, nonce, and repair-provenance logic from the current binary crate, then revalidate under the pinned processor/job policy. Keep repair and ordinary shreds as separate raw streams and retain legacy readers. |
 | Local receiver and ACK | `receiver.rs`, `receipt_crypto.rs`, `replication.rs` | Reuse ordered WAL/crash recovery and fail-closed deletion ordering only. V1 idempotence is stream/cursor/prefix/object identity; `AckV1` is mTLS-authorized and does not inherit current semantic validation, Ed25519 disposition, primary term, or logical-content digest. |
 | Network runtime | `replication_pull_runtime.rs`, `raw_replication.proto` | Reuse mTLS, static allowlists, deadlines, decoding limits, keepalive, and reconnect infrastructure. Keep the old protocol as migration compatibility; add HiveSync V1 separately. |
-| Object upload | `services/hivezilla/scripts/s3_multipart_upload.py` and supervisor tests | Reuse conditional create, checksum/readback verification, immutable-collision rejection, receipts, and failure tests as reference behavior. Move core custody and retention authority into Rust behind a provider-neutral interface. |
+| Object upload | `hivezilla/service/scripts/s3_multipart_upload.py` and supervisor tests | Reuse conditional create, checksum/readback verification, immutable-collision rejection, receipts, and failure tests as reference behavior. Move core custody and retention authority into Rust behind a provider-neutral interface. |
 | Shred reconstruction | `ingest/shred_compact.rs` | Reuse FEC grouping/recovery, conflict isolation, chained-root consistency, component decoding, and markers. Add all trust and promotion gates before continuous output. |
 | Candidate model | `crates/blockzilla-format/src/candidate_v1.rs`; legacy `live_producer.rs` | The private-field structural candidate is now ledger-only, carries distinct final-PoH/consensus and parent identities, exact fixed signatures/signed-message bytes, and component-aligned marker/data-shred geometry. It has exact-identity and explicitly non-transitive pairwise-compatibility checks but no generic merge. It is still unpromoted: evidence/trust receipts, finality-owned wrappers, and product builders remain open. `LiveBlockDraft` stays incompatible. |
-| Public relay | `services/hivezilla/src/grpc_relay.rs` | Reuse bounded-ring and slow-client tests as reference behavior. Its Yellowstone protobuf, slot/filter, token, and source coupling make a small new exact-cursor exit safer than extracting it wholesale. |
-| Archive builder | `blockzilla/src/archive_v2.rs` | Reuse encoding/build algorithms only after a determinism audit. Current output can include absolute paths and uses process-random hashing in the first-seen registry, whose effect on emitted ordering has not been proved absent; do not yet claim retry-identical physical bytes. |
-| Physical manifest/read path | `crates/blockzilla-read-sdk/src/manifest.rs`, archive gateway | Reuse deterministic file ordering, size/hash validation, range reads, hash-after-write, and no-clobber immutable publication. Add catalog resolution to canonical serving APIs; low-level audit tools may still inspect explicitly supplied generations. |
-| Scheduler | `blockzilla/src/scheduler/mod.rs`, `live_materialize_task_model.rs` | Reuse local inventory, resource admission, restart observation, and status reporting. Do not derive remote leases/fences from PID/path ownership markers or assume current task states are the protocol authority. |
+| Public relay | `hivezilla/service/src/grpc_relay.rs` | Reuse bounded-ring and slow-client tests as reference behavior. Its Yellowstone protobuf, slot/filter, token, and source coupling make a small new exact-cursor exit safer than extracting it wholesale. |
+| Archive builder | `blockzilla/cli/src/archive_v2.rs` | Reuse encoding/build algorithms only after a determinism audit. Current output can include absolute paths and uses process-random hashing in the first-seen registry, whose effect on emitted ordering has not been proved absent; do not yet claim retry-identical physical bytes. |
+| Physical manifest/read path | `crates/compact-v2/blockzilla-compact-v2-reader/src/manifest.rs`, archive gateway | Reuse deterministic file ordering, size/hash validation, range reads, hash-after-write, and no-clobber immutable publication. Add catalog resolution to canonical serving APIs; low-level audit tools may still inspect explicitly supplied generations. |
+| Scheduler | `blockzilla/cli/src/scheduler/mod.rs`, `live_materialize_task_model.rs` | Reuse local inventory, resource admission, restart observation, and status reporting. Do not derive remote leases/fences from PID/path ownership markers or assume current task states are the protocol authority. |
 
 ## Build gates
 
@@ -107,7 +107,7 @@ gate passes.
 Deliverables:
 
 - [x] Add one small dependency-light core crate, provisionally
-  `crates/hivezilla-protocol`, only for persisted stream/registry identity,
+  `hivezilla/protocol`, only for persisted stream/registry identity,
   `RecordV1`, `CursorV1`, journal, overflow, and terminal-custody types. It has no
   storage engine, network client, scheduler, source adapter, cloud SDK, candidate
   model, compaction control, or dependency on the broad `blockzilla-format`
@@ -206,7 +206,7 @@ this does not imply a custody or catalog runtime exists.
 
 Deliverables:
 
-- [ ] Implement `services/hivezilla/src/journal/{writer,reader,recovery,legacy}.rs`
+- [ ] Implement `hivezilla/service/src/journal/{writer,reader,recovery,legacy}.rs`
   beside the legacy spool. Adapt proven locking, fsync, checkpoint, quota, and
   recovery mechanics instead of mechanically converting the old file format.
 - [ ] Add an explicit provisioning transaction before capture: pin the cluster
@@ -455,7 +455,7 @@ Acceptance:
 
 Deliverables:
 
-- [ ] Extract the required leader/trust/proof logic from `services/hivezilla/src/shred_reader`
+- [ ] Extract the required leader/trust/proof logic from `hivezilla/service/src/shred_reader`
   into a reusable library and turn `shred_compact.rs` into a continuous
   processor over protected ordinary and repair streams with a disk-backed
   FEC/fork/evidence index.

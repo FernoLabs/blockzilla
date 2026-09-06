@@ -2,12 +2,12 @@ use blockzilla_example_workloads::ProgressSink;
 
 use std::{error::Error, time::Instant};
 
-use of_car_reader::archive::{ArchiveInstructionSource, CarArchive, ScanRequest};
 use blockzilla_example_workloads::{MAINNET_PUMP_FUN_PROGRAM_BASE58, PumpSink, pump_scan_request};
 use blockzilla_read_car::{
     OutputFacts, RunFacts, WorkloadSource, create_output, validate_workload_counts,
     workload_arguments,
 };
+use of_car_reader::archive::{ArchiveInstructionSource, CarArchive, ScanRequest};
 
 fn main() -> Result<(), Box<dyn Error>> {
     let arguments = workload_arguments("read-car-pumpfun", "car-pumpfun.bin")?;

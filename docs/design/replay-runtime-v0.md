@@ -815,7 +815,7 @@ product configuration.
 
 ## 11. Current POC boundary
 
-`crates/blockzilla-replay` currently proves a small, honest slice of this plan:
+`runtime/blockzilla-replay` currently proves a small, honest slice of this plan:
 
 - extraction from bare, legacy direct, upgradeable Buffer, and ProgramData
   layouts;

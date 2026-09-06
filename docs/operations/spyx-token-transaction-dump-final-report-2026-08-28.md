@@ -245,5 +245,6 @@ transaction is in the set. “Touched” means that at least one instruction pro
 is in the set.
 
 The detailed report, evidence, unknown-program list, IDL files, source snapshots,
-and exact coverage reports are in
-[`benchmark-results/spyx-program-identification-v1/README.md`](../../benchmark-results/spyx-program-identification-v1/README.md).
+and exact coverage reports are local benchmark output at
+`benchmark-results/spyx-program-identification-v1/README.md`. These generated
+files are not included in the repository.

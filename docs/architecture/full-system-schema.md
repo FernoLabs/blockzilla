@@ -224,7 +224,7 @@ historical queries but cannot reproduce either live stream.
 | --- | --- |
 | CAR/CAR.ZST → Blockzilla → local Archive V2 | Implemented |
 | Current Hivezilla capture directory → Blockzilla → local Archive V2 | Implemented prototype path |
-| Yellowstone capture and durable-ingest foundations | Implemented under `services/hivezilla/` |
+| Yellowstone capture and durable-ingest foundations | Implemented under `hivezilla/service/` |
 | Multiple production gRPC instances | Planned |
 | Raw shred receiver, durable spool, replication, and reconstruction foundations | Implemented prototypes; rooted promotion and normalized handoff planned |
 | Per-node private temporary-cloud overflow and ACK-driven cleanup | Verified upload/receipt foundation implemented; unified replay and retirement planned |

@@ -49,7 +49,7 @@ not suppress this error or include its partial run as a successful speed result.
 
 ### 1. P1 — The block comparison helper ignores native counts
 
-`crates/blockzilla-query-sdk/src/fingerprint.rs:25` uses
+`crates/blockzilla-model/src/fingerprint.rs:25` uses
 `block.transactions.len()`. A native count block deliberately has an empty
 transaction slice, with the real total in `block.counts.transactions`.
 
@@ -69,7 +69,7 @@ must change it. Keep the existing checked conversion to `u32`.
 
 ### 2. P2 — The transaction visitor silently accepts count-only requests
 
-`crates/blockzilla-query-sdk/src/source.rs:547` accepts a count-only request,
+`crates/blockzilla-model/src/source.rs:547` accepts a count-only request,
 walks the empty transaction slices, and returns a successful receipt without
 calling the transaction visitor. The receipt can report millions of transactions.
 
@@ -85,8 +85,8 @@ invalid-request error, with no scan. Normal transaction visitors remain unchange
 The USDC request needs recorded token balances, not instruction or signer
 objects. Both adapters still call the general message projection:
 
-- `crates/blockzilla-read-sdk/src/compact_query.rs:934`
-- `crates/blockzilla-firebase-indexer/src/indexer_v3_query.rs:2619`
+- `crates/compact-v2/blockzilla-compact-v2-reader/src/compact_query.rs:934`
+- `indexer/blockzilla-firebase-indexer/src/indexer_v3_query.rs:2619`
 
 The empty instruction-data selection skips payload reconstruction, but still
 retains compact key IDs, outer instruction descriptors, and V0 lookup
@@ -95,7 +95,7 @@ regression to public-key resolution: the unwanted objects contain compact IDs.
 
 Both token-balance projections then allocate complete pre/post lists before
 the adapters apply the bound mint-ID filter:
-`crates/blockzilla-read-sdk/src/metadata_projection.rs:288`, `:352`, and `:941`.
+`crates/compact-v2/blockzilla-compact-v2-reader/src/metadata_projection.rs:288`, `:352`, and `:941`.
 The new output pool cannot reuse these temporary lists.
 
 Fix: use the count/limits message parser for a balances-only request. Add a
@@ -110,7 +110,7 @@ nonmatching valid rows must not require temporary heap lists.
 
 ### 4. P2 — V3 read groups stop at four blocks and recreate signature storage
 
-`crates/blockzilla-firebase-indexer/src/indexer_v3_query.rs:71` sets four blocks
+`indexer/blockzilla-firebase-indexer/src/indexer_v3_query.rs:71` sets four blocks
 per parallel job. At `:1686` each job creates a block-ordinal vector, a result
 vector, and a new signature reader. The signature reader starts with no batch.
 Its buffer reuse therefore does not extend to the next job.
@@ -133,7 +133,7 @@ retained memory; safe stop on the first ordered error.
 
 ### 5. P2 — V3 rewrites the full input buffer with zeroes before each read
 
-`crates/blockzilla-firebase-indexer/src/bin/archive-v2-account-projection/standalone_v2.rs:3992`
+`indexer/blockzilla-firebase-indexer/src/bin/archive-v2-account-projection/standalone_v2.rs:3992`
 clears the reused vector, reserves space, and resizes it with zeroes before the
 source overwrites all bytes. `load_semantic_stored_batch` also clears each plane
 before this helper. Capacity reuse avoids allocation but does not avoid this
@@ -149,7 +149,7 @@ growth and smaller reads remain correct; no stale bytes are exposed on a failure
 
 ### 6. P2 — Pump.fun and FireWatch still allocate temporary CPI/loaded-key lists
 
-`crates/blockzilla-read-sdk/src/metadata_projection.rs:754` allocates a CPI group
+`crates/compact-v2/blockzilla-compact-v2-reader/src/metadata_projection.rs:754` allocates a CPI group
 vector and an instruction vector per nonempty group. At `:990`, loaded key IDs
 also get a new vector. Both V2 and V3 use this projection.
 
@@ -172,7 +172,7 @@ after its source buffer has been reused.
 
 The dense sequential V3 method routes count requests to the native parallel
 implementation with one worker. The selected sequential method at
-`crates/blockzilla-firebase-indexer/src/indexer_v3_query.rs:1203` does not. It
+`indexer/blockzilla-firebase-indexer/src/indexer_v3_query.rs:1203` does not. It
 still projects every transaction and publishes `counts: None`.
 
 Fix: share the native count implementation for selected sequential and parallel

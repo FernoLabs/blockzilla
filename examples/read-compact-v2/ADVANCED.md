@@ -33,6 +33,7 @@ can share one complete registry when it fits the SDK memory limit. The result
 reports the selected registry mode and measured projected-memory high-water
 values.
 
-See the [transaction export guide](../../docs/guides/epoch-900-transaction-export.md)
-and the [workload matrix guide](../../docs/guides/real-world-workload-matrix-runner.md)
-for the test-only commands and acceptance rules.
+See the [transaction exporter source](src/bin/read-compact-v2-transactions.rs)
+for its command arguments and the
+[sample reader matrix guide](../../docs/benchmarks/sample-reader-matrix.md)
+for output comparison and coverage checks.

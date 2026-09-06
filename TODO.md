@@ -27,7 +27,7 @@ documents rather than being duplicated here.
 
 ### Generic signer-to-program index
 
-The implementation currently lives in `crates/blockzilla-firebase-indexer/`;
+The implementation currently lives in `indexer/blockzilla-firebase-indexer/`;
 the package name is provisional because the index is not Firewatch-specific.
 
 - [ ] Choose a product-neutral public crate, binary, and format name before
@@ -43,7 +43,7 @@ the package name is provisional because the index is not Firewatch-specific.
       [Firewatch local archive indexing](docs/guides/firewatch-local-archive-indexing.md).
 
 The detailed index status, validation gates, and remaining risks live in the
-[signer-to-program redesign](crates/blockzilla-firebase-indexer/REDESIGN.md).
+[signer-to-program redesign](indexer/blockzilla-firebase-indexer/REDESIGN.md).
 
 ### Archive lifecycle
 

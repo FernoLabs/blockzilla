@@ -95,13 +95,13 @@ Remaining, in priority order:
 The largest transitional sources are tracked explicitly so they cannot be
 mistaken for approved permanent exceptions:
 
-- `services/hivezilla/scripts/linux-raw-grpc-recorder.sh` and
+- `hivezilla/service/scripts/linux-raw-grpc-recorder.sh` and
   `s3_multipart_upload.py` still own recorder supervision and object-store
   custody. They move only after production S3/R2/B2 adapters exist in Rust.
 - `ingest_status_server.py` still contains a long-running status loop. Its
   replacement reuses the bounded Rust shred-status service core.
   `shred_status_server.py` was retired after its exact-byte output was captured
-  as a test oracle in `services/hivezilla/src/shred_status.rs`.
+  as a test oracle in `hivezilla/service/src/shred_status.rs`.
 - Scheduler incidents still need a typed durable producer and bounded reader.
 - replay-marathon, Compact sync, archive-retirement, RPC-corpus, and benchmark
   scripts remain migration inputs for product subcommands or `xtask`.

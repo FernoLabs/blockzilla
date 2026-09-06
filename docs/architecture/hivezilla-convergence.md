@@ -494,16 +494,16 @@ is still required, label the system shred-primary rather than shred-only.
 
 Keep and converge these foundations:
 
-- `services/hivezilla/src/ingest/spool.rs`;
-- `services/hivezilla/src/ingest/replication_pull_*`;
-- `services/hivezilla/src/grpc_raw.rs`;
-- `services/hivezilla/src/helius.rs`;
-- `services/hivezilla/src/ingest/shred_udp.rs`;
-- `services/hivezilla/src/grpc_relay.rs`, after removing public egress from the
+- `hivezilla/service/src/ingest/spool.rs`;
+- `hivezilla/service/src/ingest/replication_pull_*`;
+- `hivezilla/service/src/grpc_raw.rs`;
+- `hivezilla/service/src/helius.rs`;
+- `hivezilla/service/src/ingest/shred_udp.rs`;
+- `hivezilla/service/src/grpc_relay.rs`, after removing public egress from the
   recorder failure boundary;
-- `services/hivezilla/src/grpc.rs` and
-  `services/hivezilla/src/ingest/shred_compact.rs` as processing foundations;
-- `services/hivezilla/src/shred_reader/`; and
+- `hivezilla/service/src/grpc.rs` and
+  `hivezilla/service/src/ingest/shred_compact.rs` as processing foundations;
+- `hivezilla/service/src/shred_reader/`; and
 - Blockzilla Archive V2 validation, writer, and read code.
 
 Add readers and fixtures for old Helius, repair-WAL, and cloud-generation

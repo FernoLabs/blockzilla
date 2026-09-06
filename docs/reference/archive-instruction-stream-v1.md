@@ -8,7 +8,7 @@ readers and application logic. CAR, Compact V2, and Indexer V3 must produce
 the same ordered records.
 
 The contract is in
-[`blockzilla-query-sdk`](../../crates/blockzilla-query-sdk/README.md). The
+[`blockzilla-model`](../../crates/blockzilla-model/README.md). The
 crate contains the common models, request gates, order validation, source
 identity, scan receipts, and sink boundary. It does not contain an archive
 decoder.

@@ -1,0 +1,33 @@
+[package]
+name = "blockzilla-read-archive-v3"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+publish = false
+
+[[bin]]
+name = "read-archive-v3"
+path = "src/main.rs"
+
+[[bin]]
+name = "ia-read"
+path = "src/bin/ia-read.rs"
+
+[dependencies]
+anyhow = "1.0.104"
+blockzilla-dump = { path = "../../indexer/blockzilla-dump" }
+blockzilla-archive-v3 = { path = "../../crates/archive-v3/blockzilla-archive-v3" }
+blockzilla-archive-v3-convert = { path = "../../crates/archive-v3/blockzilla-archive-v3-convert" }
+blockzilla-archive-v3-reader = { path = "../../crates/archive-v3/blockzilla-archive-v3-reader" }
+blockzilla-example-workloads = { path = "../workloads" }
+blockzilla-model = { path = "../../crates/blockzilla-model" }
+bs58 = "0.5.1"
+solana-pubkey = "4.2.0"
+
+[dev-dependencies]
+tempfile = "3.24.0"
+
+[lints]
+workspace = true

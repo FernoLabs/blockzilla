@@ -2,7 +2,9 @@
 
 use std::{error::Error, io::Write, time::Instant};
 
-use blockzilla_compact_v2_reader::archive::{ArchiveInstructionSource, CompactV2ParallelScanConfig};
+use blockzilla_compact_v2_reader::archive::{
+    ArchiveInstructionSource, CompactV2ParallelScanConfig,
+};
 use blockzilla_example_workloads::TransactionIdentityDumpSink;
 use blockzilla_read_compact_v2::{
     finish_archive, open_archive, output_file, positional_arguments, scan_request,

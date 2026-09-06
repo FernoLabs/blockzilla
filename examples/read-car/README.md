@@ -88,7 +88,7 @@ complete or incomplete state, indeterminate transaction count, and coverage
 SHA-256 to match. Compare the output files byte-for-byte outside the timed run.
 Use the same epoch, block universe, and target.
 The
-[`blockzilla-example-workloads` guide](../../crates/blockzilla-example-workloads/README.md)
+[`blockzilla-example-workloads` guide](../workloads/README.md)
 defines this gate and the canonical records.
 
 CAR scans all requested blocks for each application job. It does not use the
@@ -111,7 +111,7 @@ cargo run --release --locked -p blockzilla-read-car --bin read-car-transactions 
 ```
 
 The
-[`blockzilla-example-workloads` guide](../../crates/blockzilla-example-workloads/README.md)
+[`blockzilla-example-workloads` guide](../workloads/README.md)
 defines its common record and acceptance gate.
 
 ## Ordered read baseline

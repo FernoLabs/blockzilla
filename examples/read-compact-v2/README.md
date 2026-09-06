@@ -122,7 +122,7 @@ candidate name, or metadata flag is required.
 ## What is shared
 
 The three sinks and their record formats are in
-[`blockzilla-example-workloads`](../../crates/blockzilla-example-workloads).
+[`blockzilla-example-workloads`](../workloads).
 They contain the application rules only. The Compact V2 SDK owns object
 discovery, range reads, cache binding, decoding, block order, and parallel
 projection.
@@ -131,5 +131,5 @@ For the deterministic transaction exporter, instruction-ledger runner,
 benchmark fields, and memory limits, see
 [advanced Compact V2 examples](ADVANCED.md).
 The
-[`blockzilla-example-workloads` guide](../../crates/blockzilla-example-workloads/README.md)
+[`blockzilla-example-workloads` guide](../workloads/README.md)
 defines the common output records and cross-format parity checks.

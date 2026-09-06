@@ -48,11 +48,11 @@ checks. No instruction payload copy is required by these count requests.
 
 Relevant code:
 
-- `crates/blockzilla-read-sdk/src/compact_query.rs`: parallel projection,
+- `crates/compact-v2/blockzilla-compact-v2-reader/src/compact_query.rs`: parallel projection,
   `project_instructions`, and `canonical_projection_owned_payload_bytes`.
-- `crates/blockzilla-query-sdk/src/source.rs`: `OrderedBlockPublisher::publish`.
+- `crates/blockzilla-model/src/source.rs`: `OrderedBlockPublisher::publish`.
 - `examples/read-compact-v2/src/bin/read-compact-v2-slot-hours.rs`: count sink.
-- `crates/blockzilla-firebase-indexer/src/indexer_v3_query.rs`:
+- `indexer/blockzilla-firebase-indexer/src/indexer_v3_query.rs`:
   `project_instructions` and `recycle_parallel_transaction_buffer`.
 
 ### 2. V2 has a barrier after each group of 12 blocks

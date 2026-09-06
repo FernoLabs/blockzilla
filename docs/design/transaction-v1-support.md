@@ -64,7 +64,7 @@ may normalise an absent field to zero.
 
 ## 2. What was built
 
-### Decode: `crates/old-faithful/car-reader/src/versioned_transaction.rs`
+### Decode: `crates/old-faithful/of-car-reader/src/versioned_transaction.rs`
 
 `V1Message<'a>` and `V1TransactionConfig`, wired as the `1 =>` arm of the
 existing zero-copy `SchemaRead`. It borrows the account keys and blockhash
@@ -97,7 +97,7 @@ further versions arrive: **append, never reorder.** The golden tests in
 ### Signature verification
 
 `SignedMessageVersion::V1 { config }` and `serialize_signed_v1_message` in
-`crates/blockzilla-index-archive-convert/src/source_v2.rs`. v1 is not
+`crates/archive-v3/blockzilla-archive-v3-convert/src/source_v2.rs`. v1 is not
 legacy-with-extras, so it gets its own serialization pass rather than being
 interleaved into the existing one.
 

@@ -1,0 +1,42 @@
+[package]
+name = "blockzilla-dump"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+description = "Verify and export immutable Blockzilla Archive V2 generations"
+readme = "README.md"
+default-run = "blockzilla-dump"
+
+[[bin]]
+name = "blockzilla-dump"
+path = "src/main.rs"
+
+[dependencies]
+blockzilla-archive-v2 = { path = "../../crates/compact-v2/blockzilla-archive-v2", default-features = false }
+blockzilla-compact = { path = "../../crates/compact-v2/blockzilla-compact", default-features = false }
+blockzilla-primitives = { path = "../../crates/blockzilla-primitives", default-features = false }
+blockzilla-registry = { path = "../../crates/compact-v2/blockzilla-registry", default-features = false }
+blockzilla-replay-format = { path = "../../crates/blockzilla-replay-format" }
+anyhow = "1.0.104"
+blockzilla-model = { version = "0.2.0", path = "../../crates/blockzilla-model" }
+blockzilla-compact-v2-reader = { version = "0.2.0", path = "../../crates/compact-v2/blockzilla-compact-v2-reader", features = ["http"] }
+blockzilla-user-program-index = { version = "0.2.0", path = "../blockzilla-user-program-index" }
+bs58 = "0.5.1"
+clap = { version = "4.6.1", features = ["derive"] }
+rusqlite = { version = "=0.40.2", features = ["bundled"] }
+serde = { version = "1.0.228", features = ["derive"] }
+serde_json = "1.0.149"
+sha2 = "0.11.0"
+solana-pubkey = "4.2.0"
+thiserror = "2.0.18"
+
+[dev-dependencies]
+ed25519-dalek = "2.2.0"
+tempfile = "3.26.0"
+wincode = { version = "=0.6.1", features = ["derive"] }
+zstd = "0.13.3"
+
+[lints]
+workspace = true

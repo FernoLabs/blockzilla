@@ -2,12 +2,12 @@ use blockzilla_example_workloads::ProgressSink;
 
 use std::{error::Error, time::Instant};
 
-use of_car_reader::archive::{ArchiveInstructionSource, CarArchive, ScanRequest};
 use blockzilla_example_workloads::{FirewatchSink, firewatch_scan_request};
 use blockzilla_read_car::{
     DEFAULT_FIREWATCH_WALLET, OutputFacts, RunFacts, WorkloadSource, create_output, parse_pubkey,
     validate_workload_counts, workload_target_arguments,
 };
+use of_car_reader::archive::{ArchiveInstructionSource, CarArchive, ScanRequest};
 
 fn main() -> Result<(), Box<dyn Error>> {
     let arguments = workload_target_arguments(

@@ -5,7 +5,7 @@ Status: implemented reader reference, 2026-08-31.
 CAR, Compact V2, and Indexer V3 have different physical layouts. Each format
 has a dedicated SDK. Each SDK publishes the ordered block and transaction
 views from
-[`blockzilla-query-sdk`](../../crates/blockzilla-query-sdk/README.md).
+[`blockzilla-model`](../../crates/blockzilla-model/README.md).
 
 Use the [sample layout and design guide](archive-sample-layout-and-design.md)
 for the complete public object names and the matching local folder layout.
@@ -14,15 +14,15 @@ for the complete public object names and the matching local folder layout.
 
 | Format | Dedicated SDK | Main read model | Network verification |
 |---|---|---|---|
-| CAR | [`blockzilla-car-read-sdk`](../../crates/blockzilla-car-read-sdk/README.md) | Ordered ranges over one CAR object and its slot-to-offset index | Strong ETags on the sample Worker; explicit `operator-trusted` mode for Old Faithful |
-| Compact V2 | [`blockzilla-compact-v2-read-sdk`](../../crates/blockzilla-compact-v2-read-sdk/README.md) | Compressed block rows, control files, and sidecars | `object-set-bound` |
-| Indexer V3 | [`blockzilla-indexer-v3-read-sdk`](../../crates/blockzilla-indexer-v3-read-sdk/README.md) | Transaction directory, semantic planes, and reverse lookup | `object-set-bound` |
+| CAR | [`of-car-reader`](../../crates/old-faithful/of-car-reader/Readme.md) | Ordered ranges over one CAR object and its slot-to-offset index | Strong ETags on the sample Worker; explicit `operator-trusted` mode for Old Faithful |
+| Compact V2 | [`blockzilla-compact-v2-reader`](../../crates/compact-v2/blockzilla-compact-v2-reader/README.md) | Compressed block rows, control files, and sidecars | `object-set-bound` |
+| Indexer V3 | [`blockzilla-archive-v3-reader`](../../crates/archive-v3/blockzilla-archive-v3-reader/README.md) | Transaction directory, semantic planes, and reverse lookup | `object-set-bound` |
 
 The small reference applications are:
 
 - [`read-car`](../../examples/read-car/README.md)
 - [`read-compact-v2`](../../examples/read-compact-v2/README.md)
-- [`read-indexer-v3`](../../examples/read-indexer-v3/README.md)
+- [`read-indexer-v3`](../../examples/read-archive-v3/README.md)
 
 Each application selects one format at build time. It does not use a large
 run-time format switch.

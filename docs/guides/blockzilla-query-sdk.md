@@ -33,13 +33,13 @@ The format adapter owns this work.
 
 ## What exists now
 
-The [`blockzilla-query-sdk`](../../crates/blockzilla-query-sdk/README.md)
+The [`blockzilla-model`](../../crates/blockzilla-model/README.md)
 contains the source-neutral models and sink direction.
 
 The format-specific readers also exist:
 
-- [`of-car-reader`](../../crates/old-faithful/car-reader/Readme.md) for CAR;
-- [`blockzilla-read-sdk`](../../crates/blockzilla-read-sdk/README.md) for
+- [`of-car-reader`](../../crates/old-faithful/of-car-reader/Readme.md) for CAR;
+- [`blockzilla-read-sdk`](../../crates/compact-v2/blockzilla-compact-v2-reader/README.md) for
   Compact V2;
 - the current local and HTTPS Indexer V3 readers, described in the
   [Indexer V3 section of the product guide](../reference/archive-formats-and-read-sdk.md#indexer-first-standalone-v3).

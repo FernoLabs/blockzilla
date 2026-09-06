@@ -9,7 +9,12 @@ use crate::{
     },
 };
 use anyhow::{Context, Result};
-use blockzilla_archive_v2::{ARCHIVE_V2_TX_FLAG_HAS_ERROR, ARCHIVE_V2_TX_FLAG_HAS_METADATA, ARCHIVE_V2_TX_FLAG_HAS_TOKEN_BALANCES, ARCHIVE_V2_TX_FLAG_METADATA_RAW_FALLBACK, ARCHIVE_V2_TX_FLAG_TX_RAW_FALLBACK, ArchiveV2HotBlockBlob, ArchiveV2HotInstruction, ArchiveV2HotMessagePayload, ArchiveV2HotTxRow};
+use blockzilla_archive_v2::{
+    ARCHIVE_V2_TX_FLAG_HAS_ERROR, ARCHIVE_V2_TX_FLAG_HAS_METADATA,
+    ARCHIVE_V2_TX_FLAG_HAS_TOKEN_BALANCES, ARCHIVE_V2_TX_FLAG_METADATA_RAW_FALLBACK,
+    ARCHIVE_V2_TX_FLAG_TX_RAW_FALLBACK, ArchiveV2HotBlockBlob, ArchiveV2HotInstruction,
+    ArchiveV2HotMessagePayload, ArchiveV2HotTxRow,
+};
 use blockzilla_compact::CompactMetaV1;
 use blockzilla_primitives::CompactPubkey;
 use blockzilla_registry::{KeyIndex, KeyStore};

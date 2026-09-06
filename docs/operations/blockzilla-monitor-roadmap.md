@@ -61,7 +61,7 @@ tick, already served over the wire:
 | `lanes[].auto_paused` / `.auto_pause_reason` | `scheduler/mod.rs:382-384` | No |
 | `errors[]` (ring buffer, last 100, durably persisted to `errors.jsonl`) | `scheduler/mod.rs:105,14379-14392` | Yes (fully piped, just needs a richer UI) |
 
-`services/blockzilla-monitor/src/snapshot.rs`'s `PipelineSummary` (lines
+`blockzilla/monitor/src/snapshot.rs`'s `PipelineSummary` (lines
 44-67) and `LaneStatus` (122-127) only read a subset of what's already on
 the wire. **Adding the missing fields is zero backend work** — the wire
 schema is additive/tolerant (`#[serde(default)]` throughout), so this is
@@ -227,12 +227,12 @@ absolute timestamps, level-colored line markers.
 
 Hivezilla already exposes the kind of bounded endpoint `blockzilla-monitor`
 knows how to consume:
-- `services/hivezilla/src/shred_status.rs`: `GET
+- `hivezilla/service/src/shred_status.rs`: `GET
   /api/v1/sidecars/shred-ingest/status.json` + `/healthz`, explicitly
   designed for external polling (README shows `--cors-origin
   https://watcher.blockzilla.dev`), response shape `PublicShredStatus`
   (`shred_status.rs:313-397`).
-- `services/hivezilla/src/ingest_status.rs`: `GET
+- `hivezilla/service/src/ingest_status.rs`: `GET
   /api/v1/sidecars/ingest-pipeline/status.json` + `/healthz`, currently
   loopback/private-bound only.
 

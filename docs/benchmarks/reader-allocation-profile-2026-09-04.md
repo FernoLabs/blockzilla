@@ -74,7 +74,7 @@ based only on a CPU profile.
 
 ## Reproduction and evidence
 
-Tool: `crates/blockzilla-reader-profile`. This is a diagnostic tool, separate
+Tool: `bench/reader-profile`. This is a diagnostic tool, separate
 from the 12 public examples. Its block-range options do not alter example CLIs.
 It supports all four workloads with V2/V3; V3 Pump.fun and FireWatch use reverse
 candidates by default, with `--dense` available to isolate projection costs.

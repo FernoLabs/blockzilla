@@ -191,10 +191,10 @@ prioritize all three state changes, especially the dirty-journal diff path.
 
 ## Benchmark binaries
 
-- `crates/blockzilla-replay/src/bin/bpf-execution-bench.rs`
-- `crates/blockzilla-replay/src/bin/compact-decode-bench.rs`
-- `crates/blockzilla-replay/src/bin/replay-state-bench.rs`
-- `crates/blockzilla-replay/src/bin/replay-hotpath-bench.rs`
+- `runtime/blockzilla-replay/src/bin/bpf-execution-bench.rs`
+- `runtime/blockzilla-replay/src/bin/compact-decode-bench.rs`
+- `runtime/blockzilla-replay/src/bin/replay-state-bench.rs`
+- `runtime/blockzilla-replay/src/bin/replay-hotpath-bench.rs`
 
 Focused validation passed: 3 BPF tests, 5 Compact tests, 6 state tests, and
 `cargo check` for all three new/expanded benchmark binaries.

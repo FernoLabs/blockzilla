@@ -10,13 +10,21 @@ pre-1.0, so pin the Git revision used to produce an archive.
 
 | Path | Role |
 | --- | --- |
-| [`blockzilla/`](blockzilla/README.md) | Builds and reads Blockzilla archives and includes an experimental finite-work scheduler. |
-| [`services/`](services/README.md) | Runtime daemons for live ingestion, archive delivery, and monitoring. |
-| [`workers/`](workers/README.md) | Cloudflare Workers/edge API consumers that are deployable outside the NAS host. |
-| [`crates/`](crates/) | Shared formats, parsers, protocol types, and Old Faithful interoperability readers. |
-| [`examples/token-api/`](examples/token-api/README.md) | Legacy example | Directly reads Compact V2 wire files; it is not the read-SDK starter. |
-| [`docs/`](docs/README.md) | Implemented formats, architecture, and research/benchmark notes. |
-| [`scripts/`](scripts/README.md) | Replay sync, marathon, benchmarks, and correctness scripts. |
+| [`blockzilla/`](blockzilla/README.md) | CLI, archive gateway, and monitor. |
+| [`hivezilla/`](hivezilla/README.md) | Live capture, replication, protocol, and storage. |
+| [`edgezilla/`](edgezilla/README.md) | Independently deployed Cloudflare Workers. |
+| [`crates/`](crates) | Archive formats, readers, byte sources, and parsers. |
+| [`indexer/`](indexer/README.md) | Index builders, queries, extraction, and audits. |
+| [`runtime/`](runtime/README.md) | Experimental transaction replay. |
+| [`examples/`](examples) | CAR, Compact V2, and Archive V3 reader examples. |
+| [`bench/`](bench) | Reader and conversion measurements. |
+| [`web/`](web/spyx-explorer/README.md) | Web applications. |
+| [`docs/`](docs/README.md) | Format specifications, architecture, and operating guides. |
+| [`scripts/`](scripts/README.md) | Build, benchmark, and operational helpers. |
+
+Archive V3 is the intended replacement for Archive V2. Both remain available
+during the transition. See the [workspace structure](docs/design/workspace-restructure.md)
+for crate locations and the remaining migration work.
 
 The shortest working newcomer path is:
 
@@ -48,7 +56,7 @@ OUT="$(mktemp -d)"
 
 cargo run --locked -p blockzilla -- \
   build-archive-v2-hot-blocks \
-  crates/old-faithful/car-reader/benches/fixtures/epoch-157-biggest.car \
+  crates/old-faithful/of-car-reader/benches/fixtures/epoch-157-biggest.car \
   "$OUT" \
   --max-blocks 1 \
   --no-access

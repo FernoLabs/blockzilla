@@ -49,10 +49,10 @@ was moved (not symlinked) into the tree above, by explicit instruction.
 
 ## Config-driven scheduler flags
 
-`blockzilla scheduler`'s CLI (`blockzilla/src/scheduler/cli.rs`) now
+`blockzilla scheduler`'s CLI (`blockzilla/cli/src/scheduler/cli.rs`) now
 accepts every non-boolean flag via a `BLOCKZILLA_*`-prefixed environment
 variable (clap's native `env =` support -- `cargo add clap --features env`
-equivalent: `features = ["derive", "env"]` in `blockzilla/Cargo.toml`), at
+equivalent: `features = ["derive", "env"]` in `blockzilla/cli/Cargo.toml`), at
 lower precedence than the equivalent CLI flag. This is what lets
 `blockzilla-archive.service`'s `ExecStart=` be just
 `/volume1/blockzilla/bin/blockzilla scheduler --execute`, with every path
@@ -101,7 +101,7 @@ Investigated and confirmed rather than assumed:
   monitor` already has an equivalent-or-stronger security model of its
   own: it never proxies raw upstream JSON, only ever serves a curated,
   explicitly-named signal map built field-by-field from `DashboardState`
-  (`services/blockzilla-monitor/src/api/stream.rs`, `state.rs`'s
+  (`blockzilla/monitor/src/api/stream.rs`, `state.rs`'s
   `to_signals()`). A new field on the wire literally cannot leak through
   monitor until someone explicitly adds it to that map -- safer by
   construction than gateway's generic strip-known-fields redaction, which
@@ -125,7 +125,7 @@ Investigated and confirmed rather than assumed:
   competing for resources -- explicitly filtering out anything
   scheduler-owned to avoid double-reporting
   (`is_scheduler_managed_aria_child`, `is_blockzilla_owned` in
-  `services/blockzilla-monitor/src/process_telemetry.rs`). The
+  `blockzilla/monitor/src/process_telemetry.rs`). The
   scheduler's job is orchestrating its own children; this is system-wide
   observability, which belongs with monitor (the other observability
   process), not with the orchestrator.
@@ -136,11 +136,11 @@ Investigated and confirmed rather than assumed:
   `ProcessSample`/`ProcessCollection`/`ProcessIoStatus`/`ProcessIoEntry`
   in `runtime_operations.rs` were made `pub` (no behavior change -- same
   functions, with their existing tests), and
-  a new `services/blockzilla-monitor/src/runtime_operations.rs` (~90
+  a new `blockzilla/monitor/src/runtime_operations.rs` (~90
   lines) calls them directly on its own 5s tokio task -- no JSON file, no
   HTTP hop. Only the `process_io` portion of the old sidecar schema was
   ported -- `jobs`/`live_capture` (aria2c/sha256sum/hivezilla-capture
-  tracking) existed only for the now-deleted `apps/blockzilla-watcher`
+  tracking) existed only for the now-deleted `web/blockzilla-watcher`
   Svelte frontend and were never read by this dashboard's `snapshot.rs`.
   `state.rs` gained `set_local_process_io` plus a `last_snapshot` cache so
   the independently-ticking sampler can merge into and republish the
@@ -355,7 +355,7 @@ decimal", "is worker count dynamic").
   was run to isolate one file for a before/after test and instead reverted
   *every* uncommitted tracked-file change across the whole repo --
   including substantial pre-existing uncommitted work unrelated to this
-  session (a large `apps/` → `workers/` reorg, multiple crate-level
+  session (a large `web/` → `workers/` reorg, multiple crate-level
   changes). Caught immediately via the unexpected diff in a system
   reminder; `Cargo.lock`'s conflicting local diff (safely regeneratable)
   was reset to `HEAD` and `git stash pop` cleanly restored everything

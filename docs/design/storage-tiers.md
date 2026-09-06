@@ -41,10 +41,10 @@ and the confusion is worth naming because two files share the prefix:
 
 | file | size | what it is |
 |---|---:|---|
-| `archive-v2-block-access.index` | **32 B / block** | the actual index — `ROW_LEN = 4+8+8+4+4+4` ([archive.rs:54](../../crates/blockzilla-format/src/v2/archive.rs:54)) |
+| `archive-v2-block-access.index` | **32 B / block** | the actual index — `ROW_LEN = 4+8+8+4+4+4` ([archive.rs](../../crates/compact-v2/blockzilla-archive-v2/src/v2/archive.rs)) |
 | `archive-v2-block-access.wincode` | **~250 KiB / block** | a denormalised per-block blob |
 
-The blob's own doc says what it carries ([v2/mod.rs](../../crates/blockzilla-format/src/v2/mod.rs)):
+The blob's own doc says what it carries ([v2/mod.rs](../../crates/compact-v2/blockzilla-archive-v2/src/v2/mod.rs)):
 
 > Per-block access sidecar for registry-free hot-path rendering. […] carries
 > only the id->bytes entries that are needed by one block, **plus the block's
@@ -69,10 +69,10 @@ described next.
 
 ## 3. Who reads it, and why the shape is right for them
 
-The only production consumer is `workers/blockzilla-get-block` — a Cloudflare
+The only production consumer is `edgezilla/get-block` — a Cloudflare
 Worker reading R2 with ranged GETs (`use worker::{ Range as R2Range, … }`,
-[worker.rs:41](../../workers/blockzilla-get-block/src/worker.rs:41)). Everything
-else touching the blob in `blockzilla/src` is build, verify or repair tooling;
+[worker.rs](../../edgezilla/get-block/src/worker.rs)). Everything
+else touching the blob in `blockzilla/cli/src` is build, verify or repair tooling;
 nothing else *reads* it.
 
 The blob lets that worker answer `getBlock` in **one object read**. The
@@ -185,15 +185,15 @@ the easy one to get wrong. It reads like an archive index, but its rows are
 `(block_offset, block_len, access_offset, access_len)` — offsets into *both*
 tiers — and `ArchiveV2GetBlockIndexRow::is_missing` reports a block as **missing
 when `access_len == 0`**
-([archive.rs:119](../../crates/blockzilla-format/src/v2/archive.rs:119)). An
+([archive.rs](../../crates/compact-v2/blockzilla-archive-v2/src/v2/archive.rs)). An
 archive index that declares blocks missing because a cache is absent is exactly
 the coupling this split exists to remove. Its only production reader is
-`workers/blockzilla-get-block`, the same consumer as the blob.
+`edgezilla/get-block`, the same consumer as the blob.
 
 The rule is mechanical enough to enforce: **any object whose rows carry an
-`access_offset` is edge tier.** `blockzilla-format` encodes this as
+`access_offset` is edge tier.** `blockzilla-archive-v2` encodes this as
 `EDGE_TIER_FILES` with a test asserting it
-([layout.rs](../../crates/blockzilla-format/src/v2/layout.rs)).
+([layout.rs](../../crates/compact-v2/blockzilla-archive-v2/src/v2/layout.rs)).
 
 The properties that make this the right cut:
 
@@ -237,7 +237,7 @@ parameter explicit and default it to a separate root.
 2. **Writers** (`archive_v2.rs:899/1571/3013/13051`,
    `first_seen_finalization.rs:407`) emit the blob under `edge_dir`.
 
-3. **Readers** (`workers/blockzilla-get-block/src/main.rs:603`) resolve from
+3. **Readers** (`edgezilla/get-block/src/main.rs:603`) resolve from
    `edge_dir`; the Worker itself is unaffected because it already reads objects
    by key from R2, not by filesystem path.
 
@@ -247,7 +247,7 @@ parameter explicit and default it to a separate root.
    currently makes 976 epochs read as incomplete when they are not.
 
 5. **`registry_reprocess`** currently remaps the blob as part of a generation
-   ([registry_reprocess.rs:9393](../../blockzilla/src/archive_v2/registry_reprocess.rs:9393)).
+   ([registry_reprocess.rs](../../blockzilla/cli/src/archive_v2/registry_reprocess.rs)).
    Once split it can skip it entirely and let edgezilla be rebuilt after, which
    removes ~100 GiB of rewrite from every reprocessed epoch.
 

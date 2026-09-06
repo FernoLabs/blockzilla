@@ -16,7 +16,7 @@ STUB = r'''#!/usr/bin/env python3
 import os, pathlib, sys
 args = dict(zip(sys.argv[1::2], sys.argv[2::2]))
 name = pathlib.Path(sys.argv[0]).name
-fmt = 'compact-v2' if 'compact-v2' in name else 'indexer-v3' if 'indexer-v3' in name else 'car'
+fmt = 'compact-v2' if 'compact-v2' in name else 'indexer-v3' if 'archive-v3' in name else 'car'
 epoch = args['--epoch']
 count = name == 'read-car' or name.endswith('slot-hours')
 base = f'format={fmt} epoch={epoch} setup_s=1 scan_s=2 total_s=3 scan_tps=10 total_tps=6.667 bound_source_size_bytes=100 setup_network_bytes=5 scan_network_bytes=20 total_network_bytes=25 scan_network_mb_s=0.00001 total_network_mb_s=0.000008'

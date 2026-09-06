@@ -12,10 +12,10 @@ name = "read-compact-v2"
 path = "src/main.rs"
 
 [dependencies]
-blockzilla-compact-v2-reader = { path = "../../crates/blockzilla-read-sdk", features = ["http"] }
-blockzilla-dump = { path = "../../crates/blockzilla-dump" }
-blockzilla-example-workloads = { path = "../../crates/blockzilla-example-workloads" }
-blockzilla-query-sdk = { path = "../../crates/blockzilla-query-sdk" }
+blockzilla-compact-v2-reader = { path = "../../crates/compact-v2/blockzilla-compact-v2-reader", features = ["http"] }
+blockzilla-dump = { path = "../../indexer/blockzilla-dump" }
+blockzilla-example-workloads = { path = "../workloads" }
+blockzilla-model = { path = "../../crates/blockzilla-model" }
 bs58 = "0.5.1"
 
 [dev-dependencies]

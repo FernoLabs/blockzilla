@@ -1,8 +1,12 @@
 use serde::{Deserialize, Serialize};
 use wincode::{SchemaRead, SchemaWrite};
 
-use blockzilla_archive_v2::{WincodeArchiveV2Block, WincodeArchiveV2Footer, WincodeArchiveV2Header};
-use blockzilla_compact::{CompactMetaV1, CompactPohEntry, CompactReward, CompactShredding, OwnedCompactTransaction};
+use blockzilla_archive_v2::{
+    WincodeArchiveV2Block, WincodeArchiveV2Footer, WincodeArchiveV2Header,
+};
+use blockzilla_compact::{
+    CompactMetaV1, CompactPohEntry, CompactReward, CompactShredding, OwnedCompactTransaction,
+};
 
 pub const LIVE_PRE_HOT_BLOCKS_FILE: &str = "live-pre-hot-blocks.bin";
 pub const LIVE_PUBKEY_RUNS_DIR: &str = "pubkey-runs";
@@ -217,9 +221,16 @@ impl LiveBlockCompleteness {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use blockzilla_archive_v2::{WincodeArchiveV2BlockHeader, WincodeArchiveV2Payload, WincodeArchiveV2Transaction};
-use blockzilla_compact::{CompactBlockHeader, CompactMessageHeader, OwnedCompactInstruction, OwnedCompactLegacyMessage, OwnedCompactMessage, OwnedCompactRecentBlockhash};
-use blockzilla_primitives::{CompactPubkey, WincodeLeb128FramedReader, WincodeLeb128FramedWriter, wincode_leb128_config};
+    use blockzilla_archive_v2::{
+        WincodeArchiveV2BlockHeader, WincodeArchiveV2Payload, WincodeArchiveV2Transaction,
+    };
+    use blockzilla_compact::{
+        CompactBlockHeader, CompactMessageHeader, OwnedCompactInstruction,
+        OwnedCompactLegacyMessage, OwnedCompactMessage, OwnedCompactRecentBlockhash,
+    };
+    use blockzilla_primitives::{
+        CompactPubkey, WincodeLeb128FramedReader, WincodeLeb128FramedWriter, wincode_leb128_config,
+    };
     use std::io::Cursor;
 
     fn sample_block(slot: u64) -> WincodeArchiveV2Block {

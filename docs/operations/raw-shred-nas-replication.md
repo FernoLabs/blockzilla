@@ -35,11 +35,11 @@ segment containing the ACK, and every unacknowledged record remain on Hetzner.
 
 Prepare the two examples as private regular files, never as symlinks:
 
-- Hetzner: [raw-shred-pull-source.example.json](../../services/hivezilla/config/raw-shred-pull-source.example.json)
-- NAS client: [raw-shred-pull-client.example.json](../../services/hivezilla/config/raw-shred-pull-client.example.json)
+- Hetzner: [raw-shred-pull-source.example.json](../../hivezilla/service/config/raw-shred-pull-source.example.json)
+- NAS client: [raw-shred-pull-client.example.json](../../hivezilla/service/config/raw-shred-pull-client.example.json)
 
 The Hetzner Dokploy Compose file is
-[services/hivezilla/docker-compose.hivezilla-shred.dokploy.yml](../../services/hivezilla/docker-compose.hivezilla-shred.dokploy.yml).
+[hivezilla/service/docker-compose.hivezilla-shred.dokploy.yml](../../hivezilla/service/docker-compose.hivezilla-shred.dokploy.yml).
 It now runs the pull listener instead of the old local-only `bridge-shred-spool` copy. Before
 deploying it, provision its private `deploy/hivezilla-shred/{tls,replication,receipts,secrets}`
 mounts and set `SHRED_JOURNAL_ID` to the active journal ID. The small container entrypoint renders

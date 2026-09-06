@@ -69,7 +69,7 @@ def fields(line):
 
 
 def binary(fmt, workload):
-    return "read-car" if (fmt, workload) == ("car", "slot-hours") else "read-{}-{}".format(fmt, workload)
+    return "read-car" if (fmt, workload) == ("car", "slot-hours") else "read-{}-{}".format("archive-v3" if fmt == "indexer-v3" else fmt, workload)
 
 
 def plan(args):

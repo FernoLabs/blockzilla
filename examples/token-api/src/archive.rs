@@ -1,5 +1,9 @@
 use anyhow::{Context, Result};
-use blockzilla_archive_v2::{ARCHIVE_V2_HOT_INDEX_FLAG_RAW_BLOCKS, ArchiveV2HotBlockBlob, ArchiveV2HotBlockIndex, ArchiveV2HotBlockIndexRow, archive_v2_hot_index_path, deserialize_archive_v2_hot_block_blob, read_archive_v2_hot_block_index};
+use blockzilla_archive_v2::{
+    ARCHIVE_V2_HOT_INDEX_FLAG_RAW_BLOCKS, ArchiveV2HotBlockBlob, ArchiveV2HotBlockIndex,
+    ArchiveV2HotBlockIndexRow, archive_v2_hot_index_path, deserialize_archive_v2_hot_block_blob,
+    read_archive_v2_hot_block_index,
+};
 use std::{
     fs::File,
     io::{Read, Seek, SeekFrom},

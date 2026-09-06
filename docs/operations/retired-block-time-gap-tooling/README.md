@@ -18,7 +18,7 @@ at time of retirement:
   PSI/load thresholds before starting new work), a singleton lock, a
   claim-directory mechanism so multiple workers can't double-process an
   epoch, exact process identity verification via `/proc/<pid>/exe` +
-  start-tick comparison (the same technique `blockzilla/src/scheduler/
+  start-tick comparison (the same technique `blockzilla/cli/src/scheduler/
   mod.rs` uses for its own adoption/liveness checks), and receipt-based
   resumability. It also explicitly defers to live capture and to the
   archive finalizer (`FINALIZER_ACTIVE` check) — i.e. it already treats

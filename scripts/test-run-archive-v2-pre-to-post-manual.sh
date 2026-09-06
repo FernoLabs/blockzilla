@@ -50,7 +50,7 @@ sdk_generation_digest() {
 script_dir=$(CDPATH= cd -P "$(dirname "$0")" && pwd -P)
 repo_root=$(CDPATH= cd -P "$script_dir/.." && pwd -P)
 runner=$script_dir/run-archive-v2-pre-to-post-manual.sh
-marker_asset=$repo_root/crates/blockzilla-read-sdk/assets/archive-v2-message-schema-post-unknown-fallbacks-v1.marker
+marker_asset=$repo_root/crates/compat/blockzilla-read-sdk-legacy/assets/archive-v2-message-schema-post-unknown-fallbacks-v1.marker
 
 command -v jq >/dev/null 2>&1 || fail 'jq is required'
 command -v awk >/dev/null 2>&1 || fail 'awk is required'

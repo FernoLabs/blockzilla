@@ -41,7 +41,7 @@ epochs/
 Thumbs.db
 
 # Generated outputs
-/apps/spyx-authority-portfolio-history-by-prefix/
+/web/spyx-authority-portfolio-history-by-prefix/
 /librust_out.rlib
 /*.html
 /HANDOFF-*.md

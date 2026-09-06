@@ -59,7 +59,7 @@ These decisions replace the earlier stateful token-account tracker design.
 ## 3. Active extraction architecture
 
 The active entry point is `extract_epoch_shards` in
-`crates/blockzilla-token-transaction-dump/src/extract.rs`.
+`indexer/blockzilla-token-transaction-dump/src/extract.rs`.
 
 The old stateful implementation remains in the same file as
 `extract_epoch_shards_stateful_removed`, but it has `#[cfg(any())]` and is not compiled. Do not use
@@ -957,31 +957,31 @@ an explicit optional resolver is added later.
 
 ## 12. Main code map
 
-- `crates/blockzilla-token-transaction-dump/src/main.rs`: command-line interface.
-- `crates/blockzilla-token-transaction-dump/src/pipeline.rs`: public configuration and entry points.
-- `crates/blockzilla-token-transaction-dump/src/extract.rs`: two-pass and single-read extractors,
+- `indexer/blockzilla-token-transaction-dump/src/main.rs`: command-line interface.
+- `indexer/blockzilla-token-transaction-dump/src/pipeline.rs`: public configuration and entry points.
+- `indexer/blockzilla-token-transaction-dump/src/extract.rs`: two-pass and single-read extractors,
   probe, fast tables, worker scratch, and raw writer.
-- `crates/blockzilla-token-transaction-dump/src/format.rs`: schema-3 Wincode records and manifests.
-- `crates/blockzilla-token-transaction-dump/src/resume.rs`: authenticated staged resume and
+- `indexer/blockzilla-token-transaction-dump/src/format.rs`: schema-3 Wincode records and manifests.
+- `indexer/blockzilla-token-transaction-dump/src/resume.rs`: authenticated staged resume and
   quarantine logic.
-- `crates/blockzilla-token-transaction-dump/src/progress.rs`: JSONL phase, epoch, rate, and ETA
+- `indexer/blockzilla-token-transaction-dump/src/progress.rs`: JSONL phase, epoch, rate, and ETA
   reports.
-- `crates/blockzilla-token-transaction-dump/src/consolidate.rs`: raw validation; schema-3
+- `indexer/blockzilla-token-transaction-dump/src/consolidate.rs`: raw validation; schema-3
   consolidation is disabled.
-- `crates/blockzilla-token-transaction-dump/src/registry.rs`: registry and rewrite support for the
+- `indexer/blockzilla-token-transaction-dump/src/registry.rs`: registry and rewrite support for the
   future consolidation phase.
-- `crates/blockzilla-token-transaction-dump/src/allocator.rs`: binary-only mimalloc selection.
-- `crates/blockzilla-token-transaction-dump/src/profiling.rs`: feature-gated, bounded in-process CPU
+- `indexer/blockzilla-token-transaction-dump/src/allocator.rs`: binary-only mimalloc selection.
+- `indexer/blockzilla-token-transaction-dump/src/profiling.rs`: feature-gated, bounded in-process CPU
   profiling.
-- `crates/blockzilla-read-sdk/src/reader.rs`: borrowed block pipeline, reusable buffers, storage-row
+- `crates/compact-v2/blockzilla-compact-v2-reader/src/reader.rs`: borrowed block pipeline, reusable buffers, storage-row
   iterator, and reader statistics.
-- `crates/blockzilla-read-sdk/src/message_projection.rs`: exact borrowed message visitors.
-- `crates/blockzilla-read-sdk/src/selective_metadata.rs`: exact streamed inner-instruction and
+- `crates/compact-v2/blockzilla-compact-v2-reader/src/message_projection.rs`: exact borrowed message visitors.
+- `crates/compact-v2/blockzilla-compact-v2-reader/src/selective_metadata.rs`: exact streamed inner-instruction and
   loaded-address visitor.
 - `crates/blockzilla-format/src/v2/wire_rewrite.rs`: existing pubkey wire-rewrite support for the
   later phase.
 
-The crate README is `crates/blockzilla-token-transaction-dump/README.md`.
+The crate README is `indexer/blockzilla-token-transaction-dump/README.md`.
 
 ## 13. Worktree safety
 

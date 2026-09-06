@@ -115,7 +115,7 @@ secret-free config locally:
 ```bash
 cargo run --locked -p hivezilla --bin hivezilla -- \
   validate-ingest-config \
-  --config services/hivezilla/config/ingest-doublezero-edge.example.json
+  --config hivezilla/service/config/ingest-doublezero-edge.example.json
 ```
 
 The manual canary is opt-in, never restarts automatically, writes to a dedicated named volume,

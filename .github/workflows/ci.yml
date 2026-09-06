@@ -29,10 +29,12 @@ jobs:
         run: bash scripts/check-archive-v2-wire-boundary.sh
       - name: Check workspace
         run: cargo check --workspace --all-targets --locked
-      - name: Check opt-in Blockzilla contributor binaries
-        run: cargo check --locked -p blockzilla --features developer-tools --all-targets
+      - name: Check opt-in Blockzilla contributor and repair binaries
+        run: cargo check --locked -p blockzilla --features developer-tools,archive-repair-tools --all-targets
       - name: Test workspace
         run: cargo test --workspace --all-targets --locked
+      - name: Test Archive V2 metadata repair
+        run: cargo test --locked -p blockzilla --features archive-repair-tools --bin archive-v2-normalize-metadata-trusted
       - name: Test Hivezilla shred reconstruction feature
         run: |
           cargo test --locked -p hivezilla --features shred-reconstruction --lib ingest::shred_compact::tests
@@ -43,7 +45,7 @@ jobs:
           output="$RUNNER_TEMP/blockzilla-fixture"
           cargo run --locked -p blockzilla -- \
             build-archive-v2-hot-blocks \
-            crates/old-faithful/car-reader/benches/fixtures/epoch-157-biggest.car \
+            crates/old-faithful/of-car-reader/benches/fixtures/epoch-157-biggest.car \
             "$output" \
             --max-blocks 1 \
             --no-access
@@ -66,14 +68,14 @@ jobs:
           rustup target add wasm32-unknown-unknown
           cargo install worker-build --locked --version 0.8.3
       - name: Build Archive V2 Edgezilla Worker
-        working-directory: workers/blockzilla-get-block
+        working-directory: edgezilla/get-block
         run: worker-build --release . --no-default-features --features worker
       - name: Test Archive V2 Edgezilla Worker
         env:
           RUSTFLAGS: -C target-cpu=native
         run: cargo test --locked -p blockzilla-get-block --no-default-features --features worker --lib
       - name: Build Old Faithful Edgezilla Worker
-        working-directory: workers/old-faithful-get-block
+        working-directory: edgezilla/of-get-block
         run: worker-build --release .
 
   hivezilla-ops:
@@ -84,27 +86,25 @@ jobs:
       - name: Check portable launch scripts
         run: |
           /bin/sh -n \
-            services/hivezilla/scripts/generate-grpc-replication-pki.sh \
-            services/hivezilla/scripts/generate-grpc-pull-pki.sh \
-            services/hivezilla/scripts/run-grpc-raw-receiver.sh \
-            services/hivezilla/scripts/run-grpc-raw-replicator.sh \
-            services/hivezilla/scripts/run-grpc-raw-pull-source.sh \
-            services/hivezilla/scripts/run-grpc-raw-pull-client.sh \
-            services/hivezilla/scripts/run-grpc-receiver-bridge.sh
+            hivezilla/service/scripts/generate-grpc-replication-pki.sh \
+            hivezilla/service/scripts/generate-grpc-pull-pki.sh \
+            hivezilla/service/scripts/run-grpc-raw-receiver.sh \
+            hivezilla/service/scripts/run-grpc-raw-replicator.sh \
+            hivezilla/service/scripts/run-grpc-raw-pull-source.sh \
+            hivezilla/service/scripts/run-grpc-raw-pull-client.sh \
+            hivezilla/service/scripts/run-grpc-receiver-bridge.sh
       - name: Test Python operational helpers
-        run: |
-          python3 services/hivezilla/scripts/test_ingest_status_server.py
-          python3 services/hivezilla/scripts/test_shred_status_server.py
+        run: python3 hivezilla/service/scripts/test_ingest_status_server.py
       - name: Build native Hivezilla recorder support binary
         env:
           RUSTFLAGS: -C target-cpu=native
         run: cargo build --locked -p hivezilla --bin hivezilla
       - name: Test shell operational helpers
         run: |
-          bash services/hivezilla/scripts/test-linux-raw-grpc-cache-supervisor.sh
-          bash services/hivezilla/scripts/test-linux-raw-grpc-recorder-alerts.sh
-          bash services/hivezilla/scripts/test-run-grpc-raw-wrappers.sh
-          bash services/hivezilla/scripts/test-generate-grpc-replication-pki.sh
+          bash hivezilla/service/scripts/test-linux-raw-grpc-cache-supervisor.sh
+          bash hivezilla/service/scripts/test-linux-raw-grpc-recorder-alerts.sh
+          bash hivezilla/service/scripts/test-run-grpc-raw-wrappers.sh
+          bash hivezilla/service/scripts/test-generate-grpc-replication-pki.sh
 
   docs:
     runs-on: ubuntu-latest

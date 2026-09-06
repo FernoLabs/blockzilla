@@ -9,7 +9,7 @@ Two worktrees of the same repository, diverged at `f5ad4758`:
 | OURS | `wip/wire-profile-subsystem` | `b109fa40` | 4 |
 | SAMPLE | `codex/sample-archive-benchmark` | `b5499e69` | 20 |
 
-`crates/blockzilla-read-sdk` diverged by **+24,586 / −5,950 across 30 files**. The
+`crates/compact-v2/blockzilla-compact-v2-reader` diverged by **+24,586 / −5,950 across 30 files**. The
 crate grew from 10,587 to 29,166 source lines. This is a different implementation
 under the same crate name, not a delta that can be cherry-picked.
 
@@ -80,7 +80,7 @@ a crash and a fallback path will be misread as reader performance.
 
 OURS has a signer-prefix-only decode that stops inside `account_keys`
 (`message_projection.rs:95-104, :602-624`). Consumer:
-`crates/blockzilla-firebase-indexer/src/build.rs:1561` — the signer→program index.
+`indexer/blockzilla-firebase-indexer/src/build.rs:1561` — the signer→program index.
 
 > For a signer-discovery pass, OURS reads a few dozen bytes per message and
 > allocates nothing; SAMPLE must parse the entire message body. The gap is
@@ -192,7 +192,7 @@ fixed one; the other remains.
 
 **The harness already exists — do not build one.**
 
-`crates/blockzilla-reader-profile` — *"Diagnostic harness, separate from the
+`bench/reader-profile` — *"Diagnostic harness, separate from the
 small public examples. Calls the same format SDKs and workload sinks; discards
 output bytes, not workload work."*
 
@@ -202,7 +202,7 @@ output bytes, not workload work."*
 --dense --registry-mib --wallet
 ```
 
-`crates/blockzilla-example-workloads` — *"Small, format-neutral application
+`examples/workloads` — *"Small, format-neutral application
 workloads... only the application rules and canonical output... all formats prove
 parity with the same record bytes."* Four sinks: `firewatch`, `pump`, `usdc`,
 `transaction_identity`. Consumed by all three read examples plus reader-profile,

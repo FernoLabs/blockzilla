@@ -1,0 +1,21 @@
+[package]
+name = "solana-ledger-compat"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+description = "Minimal compatibility facade for Solana shred parsing/inspection primitives."
+publish = false
+
+[dependencies]
+solana-shred-codec = { path = "../../crates/solana-codec/solana-shred-codec" }
+solana-pubkey = { version = "4.2.0" }
+solana-signature = { version = "3.4.1", features = ["verify"] }
+sha2 = { version = "0.10.9" }
+
+[dev-dependencies]
+anyhow = "1.0.102"
+
+[lints]
+workspace = true

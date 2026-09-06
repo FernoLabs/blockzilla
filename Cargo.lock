@@ -608,8 +608,8 @@ dependencies = [
  "bincode",
  "blockzilla-archive-gateway",
  "blockzilla-archive-v2",
+ "blockzilla-archive-v3-convert",
  "blockzilla-compact",
- "blockzilla-index-archive-convert",
  "blockzilla-live-format",
  "blockzilla-log-parser",
  "blockzilla-primitives",
@@ -696,6 +696,87 @@ dependencies = [
 ]
 
 [[package]]
+name = "blockzilla-archive-v3"
+version = "0.2.0"
+dependencies = [
+ "serde",
+ "serde_json",
+ "thiserror 2.0.19",
+ "wincode 0.6.1",
+]
+
+[[package]]
+name = "blockzilla-archive-v3-convert"
+version = "0.2.0"
+dependencies = [
+ "anyhow",
+ "blockzilla-archive-v2",
+ "blockzilla-archive-v3",
+ "blockzilla-compact",
+ "blockzilla-compact-v2-reader",
+ "blockzilla-primitives",
+ "blockzilla-program-logs",
+ "blockzilla-registry",
+ "clap 4.6.5",
+ "serde",
+ "serde_json",
+ "sha2 0.11.0",
+ "solana-pubkey 4.2.0",
+ "solana-signature",
+ "tempfile",
+ "wincode 0.6.1",
+ "zstd",
+]
+
+[[package]]
+name = "blockzilla-archive-v3-measure"
+version = "0.2.0"
+dependencies = [
+ "anyhow",
+ "blockzilla-archive-v2",
+ "blockzilla-archive-v3",
+ "blockzilla-archive-v3-convert",
+ "blockzilla-compact",
+ "blockzilla-compact-v2-reader",
+ "blockzilla-primitives",
+ "of-car-reader 0.2.0",
+ "serde",
+ "serde_json",
+ "sha2 0.11.0",
+ "tempfile",
+ "wincode 0.6.1",
+ "zstd",
+]
+
+[[package]]
+name = "blockzilla-archive-v3-reader"
+version = "0.2.0"
+dependencies = [
+ "anyhow",
+ "blockzilla-archive-v2",
+ "blockzilla-archive-v3",
+ "blockzilla-compact",
+ "blockzilla-compact-v2-reader",
+ "blockzilla-model",
+ "blockzilla-primitives",
+ "blockzilla-registry",
+ "blockzilla-source",
+ "blockzilla-source-cache",
+ "blockzilla-source-http",
+ "blockzilla-source-local",
+ "blockzilla-user-program-index",
+ "ed25519-dalek 2.2.0",
+ "serde",
+ "serde_json",
+ "sha2 0.11.0",
+ "tempfile",
+ "thiserror 2.0.19",
+ "url",
+ "wincode 0.6.1",
+ "zstd",
+]
+
+[[package]]
 name = "blockzilla-compact"
 version = "0.2.0"
 dependencies = [
@@ -719,11 +800,11 @@ version = "0.2.0"
 dependencies = [
  "anyhow",
  "blockzilla-archive-v2",
+ "blockzilla-archive-v3",
  "blockzilla-compact",
- "blockzilla-index-archive-format",
+ "blockzilla-model",
  "blockzilla-primitives",
  "blockzilla-program-logs",
- "blockzilla-query-sdk",
  "blockzilla-registry",
  "blockzilla-replay-format",
  "blockzilla-source",
@@ -756,8 +837,8 @@ dependencies = [
  "blockzilla-archive-v2",
  "blockzilla-compact",
  "blockzilla-compact-v2-reader",
+ "blockzilla-model",
  "blockzilla-primitives",
- "blockzilla-query-sdk",
  "blockzilla-registry",
  "blockzilla-replay-format",
  "blockzilla-user-program-index",
@@ -779,7 +860,7 @@ dependencies = [
 name = "blockzilla-example-workloads"
 version = "0.2.0"
 dependencies = [
- "blockzilla-query-sdk",
+ "blockzilla-model",
  "sha2 0.11.0",
  "thiserror 2.0.19",
 ]
@@ -790,13 +871,13 @@ version = "0.2.0"
 dependencies = [
  "anyhow",
  "blockzilla-archive-v2",
+ "blockzilla-archive-v3",
+ "blockzilla-archive-v3-reader",
  "blockzilla-compact",
  "blockzilla-compact-v2-reader",
- "blockzilla-index-archive-format",
- "blockzilla-indexer-v3-read-sdk",
+ "blockzilla-model",
  "blockzilla-primitives",
  "blockzilla-program-logs",
- "blockzilla-query-sdk",
  "blockzilla-read-sdk-legacy",
  "blockzilla-registry",
  "blockzilla-user-program-index",
@@ -854,84 +935,6 @@ dependencies = [
 ]
 
 [[package]]
-name = "blockzilla-index-archive-convert"
-version = "0.2.0"
-dependencies = [
- "anyhow",
- "blockzilla-archive-v2",
- "blockzilla-compact",
- "blockzilla-compact-v2-reader",
- "blockzilla-index-archive-format",
- "blockzilla-primitives",
- "blockzilla-program-logs",
- "blockzilla-registry",
- "clap 4.6.5",
- "serde",
- "serde_json",
- "sha2 0.11.0",
- "solana-pubkey 4.2.0",
- "solana-signature",
- "tempfile",
- "wincode 0.6.1",
- "zstd",
-]
-
-[[package]]
-name = "blockzilla-index-archive-format"
-version = "0.2.0"
-dependencies = [
- "serde",
- "serde_json",
- "thiserror 2.0.19",
- "wincode 0.6.1",
-]
-
-[[package]]
-name = "blockzilla-index-archive-measure"
-version = "0.2.0"
-dependencies = [
- "anyhow",
- "blockzilla-archive-v2",
- "blockzilla-compact-v2-reader",
- "blockzilla-index-archive-format",
- "blockzilla-primitives",
- "of-car-reader 0.2.0",
- "serde",
- "serde_json",
- "sha2 0.11.0",
- "wincode 0.6.1",
- "zstd",
-]
-
-[[package]]
-name = "blockzilla-indexer-v3-read-sdk"
-version = "0.2.0"
-dependencies = [
- "anyhow",
- "blockzilla-archive-v2",
- "blockzilla-compact",
- "blockzilla-compact-v2-reader",
- "blockzilla-index-archive-format",
- "blockzilla-primitives",
- "blockzilla-query-sdk",
- "blockzilla-registry",
- "blockzilla-source",
- "blockzilla-source-cache",
- "blockzilla-source-http",
- "blockzilla-source-local",
- "blockzilla-user-program-index",
- "ed25519-dalek 2.2.0",
- "serde",
- "serde_json",
- "sha2 0.11.0",
- "tempfile",
- "thiserror 2.0.19",
- "url",
- "wincode 0.6.1",
- "zstd",
-]
-
-[[package]]
 name = "blockzilla-live-format"
 version = "0.2.0"
 dependencies = [
@@ -947,6 +950,16 @@ name = "blockzilla-log-parser"
 version = "0.2.0"
 dependencies = [
  "criterion",
+]
+
+[[package]]
+name = "blockzilla-model"
+version = "0.2.0"
+dependencies = [
+ "serde",
+ "serde_json",
+ "sha2 0.11.0",
+ "thiserror 2.0.19",
 ]
 
 [[package]]
@@ -991,13 +1004,19 @@ dependencies = [
 ]
 
 [[package]]
-name = "blockzilla-query-sdk"
+name = "blockzilla-read-archive-v3"
 version = "0.2.0"
 dependencies = [
- "serde",
- "serde_json",
- "sha2 0.11.0",
- "thiserror 2.0.19",
+ "anyhow",
+ "blockzilla-archive-v3",
+ "blockzilla-archive-v3-convert",
+ "blockzilla-archive-v3-reader",
+ "blockzilla-dump",
+ "blockzilla-example-workloads",
+ "blockzilla-model",
+ "bs58",
+ "solana-pubkey 4.2.0",
+ "tempfile",
 ]
 
 [[package]]
@@ -1016,20 +1035,9 @@ dependencies = [
  "blockzilla-compact-v2-reader",
  "blockzilla-dump",
  "blockzilla-example-workloads",
- "blockzilla-query-sdk",
+ "blockzilla-model",
  "bs58",
  "tempfile",
-]
-
-[[package]]
-name = "blockzilla-read-indexer-v3"
-version = "0.2.0"
-dependencies = [
- "blockzilla-dump",
- "blockzilla-example-workloads",
- "blockzilla-indexer-v3-read-sdk",
- "blockzilla-query-sdk",
- "bs58",
 ]
 
 [[package]]
@@ -1061,10 +1069,10 @@ name = "blockzilla-reader-profile"
 version = "0.2.0"
 dependencies = [
  "anyhow",
+ "blockzilla-archive-v3-reader",
  "blockzilla-compact-v2-reader",
  "blockzilla-example-workloads",
- "blockzilla-indexer-v3-read-sdk",
- "blockzilla-query-sdk",
+ "blockzilla-model",
  "bs58",
  "clap 4.6.5",
  "pprof",
@@ -4121,7 +4129,7 @@ dependencies = [
 name = "of-car-reader"
 version = "0.2.0"
 dependencies = [
- "blockzilla-query-sdk",
+ "blockzilla-model",
  "bs58",
  "bzip2 0.6.1",
  "clap 4.6.5",

@@ -12,7 +12,7 @@ use serde_json::{Map, Value};
 use solana_sha256_hasher::Hasher as Sha256Hasher;
 
 use blockzilla_dump::{TokenEventAudit, TokenEventDatabase};
-use blockzilla_query_sdk::token::HistoryCoverage;
+use blockzilla_model::token::HistoryCoverage;
 
 const DATASET_DIGEST_DOMAIN: &[u8] = b"blockzilla.token-event-parity.dataset.v1\0";
 const FORMAT_NAMES: [&str; 3] = ["car", "compact-v2", "indexer-v3"];
@@ -878,7 +878,7 @@ mod tests {
     use std::os::unix::fs::{DirBuilderExt, PermissionsExt};
 
     use blockzilla_dump::{TokenEventDatabase, TokenEventRunSpec};
-    use blockzilla_query_sdk::{
+    use blockzilla_model::{
         ArchiveFormat, BlockHeader, CanonicalBlock, ScanRange, SourceIdentity, SourceVerification,
         token::TargetMintTracker,
     };

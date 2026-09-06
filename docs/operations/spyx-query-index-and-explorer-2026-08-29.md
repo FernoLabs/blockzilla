@@ -23,7 +23,7 @@ transactions for a target address, target token account, recorded program
 invocation, or historical owner of a mentioned SPYx token account. It reads the original frame and signature bytes from the
 consolidated dump. It does not copy transaction payloads into either index.
 
-The SvelteKit explorer is in `apps/spyx-explorer`. It contains overview, data
+The SvelteKit explorer is in `web/spyx-explorer`. It contains overview, data
 integrity, program, transaction-search, and API-reference pages. The release
 data is bound to the final strict public raw-balance replay report. The
 overview has five history-chart modes, the final balance distribution, and the
@@ -599,7 +599,7 @@ a NAS package fault. The smoke tests used the working NAS `wget` client.
 
 ## Firescope parity
 
-`apps/spyx-explorer/FIRESCOPE-PARITY.md` contains the checked feature map. The
+`web/spyx-explorer/FIRESCOPE-PARITY.md` contains the checked feature map. The
 explorer now adds exact executed-swap prices, stable-quote volume, OHLCV,
 pairs, DEX programs, primary pools, instruction paths, and source-transaction
 links to the existing holder, public-balance, program, and audit views. It labels price as

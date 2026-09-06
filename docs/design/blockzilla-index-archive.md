@@ -31,9 +31,9 @@ code rather than assumed.
 
 | Consumer | What it does today | Cost |
 |---|---|---|
-| Firewatch index build | Full archive re-decode **once per 8M-account chunk** — [`build.rs:550`](../../crates/blockzilla-firebase-indexer/src/build.rs#L550), `DEFAULT_MAX_ACCOUNTS_PER_CHUNK = 8_000_000` | N full decodes of an epoch to build **one** index |
-| Account resolution | `decode::decode_metadata_prefix` — a hand-written field-order walker that decodes into transaction status metadata purely to reach `loaded_addresses` ([`decode.rs:976`](../../crates/blockzilla-firebase-indexer/src/decode.rs#L976)) | Every V0 transaction pays a metadata decode to learn its own account list |
-| Remote read | Gateway serves whole files with HTTP `Range` — `/v1/epochs/{epoch}/files/{name}` ([`gateway lib.rs:501`](../../services/blockzilla-archive-gateway/src/lib.rs#L501)) | Access granularity is a ranged GET; per-request latency dominates, so page layout and directory size matter more than raw decode speed |
+| Firewatch index build | Full archive re-decode **once per 8M-account chunk** — [`build.rs:550`](../../indexer/blockzilla-firebase-indexer/src/build.rs#L550), `DEFAULT_MAX_ACCOUNTS_PER_CHUNK = 8_000_000` | N full decodes of an epoch to build **one** index |
+| Account resolution | `decode::decode_metadata_prefix` — a hand-written field-order walker that decodes into transaction status metadata purely to reach `loaded_addresses` ([`decode.rs:976`](../../indexer/blockzilla-firebase-indexer/src/decode.rs#L976)) | Every V0 transaction pays a metadata decode to learn its own account list |
+| Remote read | Gateway serves whole files with HTTP `Range` — `/v1/epochs/{epoch}/files/{name}` ([`gateway lib.rs:501`](../../blockzilla/archive-gateway/src/lib.rs#L501)) | Access granularity is a ranged GET; per-request latency dominates, so page layout and directory size matter more than raw decode speed |
 | Replay | Needs message + account list + recent blockhash, and explicitly *not* effects. `SplitCompactIndexRecord` already splits `block_offset/len` from `runtime_offset/len` | The separation is already understood; it just isn't the published shape |
 
 The first row is the whole argument. **The archive is re-decoded N times to
@@ -105,7 +105,7 @@ Two consequences, both load-bearing:
 The earlier draft proposed `dictionary/pubkey_lookup` as a sorted table of
 64-bit SHA-256 fingerprints + `u32` ID, measured at 62,486 B — 34% of the
 dictionary and the single largest index cost. The repo already solves this
-better: [`registry.rs`](../../crates/blockzilla-format/src/registry.rs) ships a
+better: [`registry.rs`](../../crates/compact-v2/blockzilla-registry/src/registry.rs) ships a
 minimal perfect hash (`fmph::GOFunction`) with a tag table for miss detection,
 file-backed and already bound into the indexer's query path. **Reuse it.** Do
 not introduce a second pubkey→ID structure.
@@ -120,7 +120,7 @@ This is the complaint that started the review, and it is worse than it looked.
 `ARCHIVE_V2_BLOCKHASH_INDEX_V3_VERSION` (a "v3" file inside "V2"),
 `KEY_INDEX_VERSION`, `BLOCK_TIME_GAP_VERSION`, and more — plus ~25
 `V1`/`V2`-suffixed public types. None of them identifies an archive generation.
-Readers additionally *trial-decode*: [`v2/mod.rs:469`](../../crates/blockzilla-format/src/v2/mod.rs#L469)
+Readers additionally *trial-decode*: [`v2/mod.rs`](../../crates/compact-v2/blockzilla-archive-v2/src/v2/mod.rs)
 tries a schema and updates it on fallback.
 
 The rules:
@@ -638,10 +638,10 @@ code does.**
   its reconstruction.** An
   earlier revision of this document claimed it was preserved byte-exact, citing
   `CompactInstruction { data: &'a [u8] }`
-  ([`compact/tx.rs:50`](../../crates/blockzilla-format/src/compact/tx.rs#L50)).
+  ([`compact/tx.rs`](../../crates/compact-v2/blockzilla-compact/src/compact/tx.rs)).
   That is the wrong type. The **published hot block** uses
   `ArchiveV2HotInstructionData`
-  ([`v2/mod.rs:1513`](../../crates/blockzilla-format/src/v2/mod.rs#L1513)), an
+  ([`v2/mod.rs`](../../crates/compact-v2/blockzilla-archive-v2/src/v2/mod.rs)), an
   enum that parses System, Vote, and Compute Budget instructions into typed
   variants — `System(..)`, `VoteTowerSync(..)`, `SetComputeUnitLimit(u32)` —
   and keeps raw bytes only in `Raw`, `UnknownSystem`, and `UnknownVote`. For
@@ -651,7 +651,7 @@ code does.**
   Ed25519 signature. No candidate or more than one candidate is a hard stop.
 - Logs round-trip through a typed event stream with an `Unknown(StrId)` raw
   fallback and existing round-trip tests
-  ([`compact/log.rs:1748`](../../crates/blockzilla-format/src/compact/log.rs#L1748)).
+  ([`compact/log.rs`](../../crates/compact-v2/blockzilla-compact/src/compact/log.rs)).
 - Anything that failed to decode at write time is retained verbatim via
   `WincodeArchiveV2Payload::Raw { bytes, error }`, flagged with
   `TX_RAW_FALLBACK` / `METADATA_RAW_FALLBACK`, and **already counted per
@@ -671,7 +671,7 @@ external shredding sidecar. Shipped legacy hot-block schemas need separate,
 manifest-bound decoders because one legacy schema owns shredding inside the
 block header. Trial decoding is not a migration contract. The converter's
 current source matrix and fail-closed limits are listed in
-[`crates/blockzilla-index-archive-convert/README.md`](../../crates/blockzilla-index-archive-convert/README.md).
+[`crates/archive-v3/blockzilla-archive-v3-convert/README.md`](../../crates/archive-v3/blockzilla-archive-v3-convert/README.md).
 
 The target format can add compatibility lanes for raw fallbacks, but those
 lanes become canonical owners. They cannot coexist with invented decoded rows
@@ -730,7 +730,7 @@ whole source and target files are intentionally not byte-identical.
 
 The reconstruction it needs **already exists and is already in production**:
 `instruction_data_base58` in
-[`workers/blockzilla-get-block/src/worker.rs:5252`](../../workers/blockzilla-get-block/src/worker.rs#L5252)
+[`edgezilla/get-block/src/worker.rs:5252`](../../edgezilla/get-block/src/worker.rs#L5252)
 rebuilds raw instruction bytes from the typed variants — a discriminant byte
 plus little-endian fields for Compute Budget, `system_instruction_bytes` for
 System, `vote_update_instruction_bytes` for the Vote variants.
@@ -1048,4 +1048,4 @@ The output is still an unpublished candidate. Remaining release work is a
 typed target manifest, full semantic parity and finality verification, legacy
 source-profile decoders, raw-fallback compatibility lanes, and the atomic
 consumer cutover. The exact current command and source limits are in the
-[converter README](../../crates/blockzilla-index-archive-convert/README.md).
+[converter README](../../crates/archive-v3/blockzilla-archive-v3-convert/README.md).

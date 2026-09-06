@@ -2,11 +2,11 @@
 
 use std::{env, error::Error, io::Write, num::NonZeroU32, path::PathBuf, time::Instant};
 
+use blockzilla_example_workloads::TransactionIdentityDumpSink;
+use blockzilla_read_car::{Route, create_output};
 use of_car_reader::archive::{
     ArchiveInstructionSource, CarArchive, CarArchiveOptions, ScanRequest,
 };
-use blockzilla_example_workloads::TransactionIdentityDumpSink;
-use blockzilla_read_car::{Route, create_output};
 
 const USAGE: &str = "usage: read-car-transactions <worker|old-faithful|old-faithful-operator-trusted> <origin> <epoch> <canonical-block-count> <output-file> [max-blocks] --http-workers <N> --http-window-chunks <N> --http-chunk-bytes <N> [--allow-insecure-http]";
 

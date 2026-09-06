@@ -342,9 +342,9 @@ Remaining publication work:
 
 ## Local implementation references
 
-- `blockzilla/src/bin/archive_v2_pre_to_post.rs`
+- `blockzilla/cli/src/bin/archive_v2_pre_to_post.rs`
 - `crates/blockzilla-format/src/v2/wire_rewrite.rs`
-- `crates/blockzilla-read-sdk/src/reader.rs`
+- `crates/compact-v2/blockzilla-compact-v2-reader/src/reader.rs`
 - `scripts/run-archive-v2-pre-to-post-fast-canary.sh`
 - `scripts/run-archive-v2-pre-to-post-fast-canary-batch.sh`
 - `scripts/quarantine-archive-v2-cohort-workdirs.sh`

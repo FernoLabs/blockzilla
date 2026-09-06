@@ -164,7 +164,7 @@ Confirm that the serving prefix contains no extra object.
 ## 5. Activate the Worker map
 
 Only after the serving review passes, change `BENCHMARK_RELEASE_MAP` in
-`workers/blockzilla-archive-gateway/wrangler.jsonc` to this exact value:
+`edgezilla/r2-gateway/wrangler.jsonc` to this exact value:
 
 ```text
 compact-v2:0=compact-v2/epoch-0,indexer-v3:0=indexer-v3/epoch-0,compact-v2:900=compact-v2/releases/e900-current-typed-errors-v1,indexer-v3:900=indexer-v3/releases/e900-current-typed-errors-v1

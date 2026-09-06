@@ -7,8 +7,8 @@ network setup, cache behavior, trust levels, and reader file layouts.
 The repository [fixture quick start](../README.md#quick-start-build-and-read-the-fixture)
 is the shortest working path through the project.
 
-Current guides: [Blockzilla CLI](../blockzilla/README.md),
-[supporting services](../services/README.md), and
+Current guides: [Blockzilla CLI](../blockzilla/cli/README.md),
+[supporting services](architecture/services.md), and
 [developer scripts](../scripts/README.md).
 
 The [token API example](../examples/token-api/README.md) is an older,
@@ -28,9 +28,9 @@ recommended read-SDK starting point.
   Blockzilla builders.
 - [Block-time gap sidecar](reference/block-time-gap-sidecar.md) documents the
   locally derived slot/time discontinuity file emitted by current builders.
-- [Blockzilla scheduler](../blockzilla/README.md#scheduler) documents the
+- [Blockzilla scheduler](../blockzilla/cli/README.md#scheduler) documents the
   experimental finite-work scheduler and its read-only status boundary.
-- [Blockzilla monitor](../services/blockzilla-monitor/README.md) documents the
+- [Blockzilla monitor](../blockzilla/monitor/README.md) documents the
   separate read-only operational UI and API contract.
 - [FireWatch local archive indexing](guides/firewatch-local-archive-indexing.md)
   hands off the completed-epoch read SDK and authenticated Range-gateway flow;

@@ -381,7 +381,7 @@ anchor_checkpoint="$(canonical_regular_file '--anchor-checkpoint' "$anchor_check
 run_dir="$(canonical_new_directory '--run-dir' "$run_dir")"
 anchor_sha256="$(lowercase_sha256 "$anchor_sha256")"
 
-[[ -f "$workspace/Cargo.toml" && -f "$workspace/crates/blockzilla-replay/Cargo.toml" ]] \
+[[ -f "$workspace/Cargo.toml" && -f "$workspace/runtime/blockzilla-replay/Cargo.toml" ]] \
   || die '--workspace does not look like the Blockzilla replay checkout'
 [[ -x "$binary" ]] || die "--binary is not executable: $binary"
 

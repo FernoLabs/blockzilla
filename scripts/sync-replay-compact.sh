@@ -640,7 +640,7 @@ readonly message_schema_marker='archive-v2-message-schema-may24-pre-unknown-fall
 # reader that still resolves the marker through the manifest honours it too.
 write_message_schema_marker() {
   local directory="$1"
-  local source_marker="$repo_root/crates/blockzilla-replay/assets/$message_schema_marker"
+  local source_marker="$repo_root/crates/compact-v2/blockzilla-compact-v2-reader/assets/$message_schema_marker"
   verify_regular_nonempty_file "$source_marker"
   if [[ ! -e "$directory/$message_schema_marker" ]]; then
     cp -- "$source_marker" "$directory/$message_schema_marker"

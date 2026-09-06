@@ -12,7 +12,7 @@ use blockzilla_archive_sdk::{
 use blockzilla_dump::{
     TokenEventDatabase, TokenEventRunSpec, TokenEventScanOptions, scan_remaining_token_events,
 };
-use blockzilla_query_sdk::token::TargetMintTracker;
+use blockzilla_model::token::TargetMintTracker;
 use serde::Serialize;
 
 use crate::{

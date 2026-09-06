@@ -29,10 +29,10 @@ smaller committed generations.
 
 ## Components and trust boundary
 
-- [`blockzilla-read-sdk`](../../crates/blockzilla-read-sdk/README.md) parses and
+- [`blockzilla-read-sdk`](../../crates/compact-v2/blockzilla-compact-v2-reader/README.md) parses and
   validates generation manifests, indexes, registries, metadata, compact block
   frames, filters, and signature ranges.
-- [`blockzilla-archive-gateway`](../../services/blockzilla-archive-gateway/README.md)
+- [`blockzilla-archive-gateway`](../../blockzilla/archive-gateway/README.md)
   exposes only files named by a completed generation manifest. It performs no
   block decoding and opens no archive file for writing.
 - The Mac owns its filter snapshot, decoding, FireWatch parsing, SQLite writes,
@@ -305,7 +305,7 @@ Useful Blockzilla decoding references are the
 [hot-block format](../reference/archive-v2-hot-block-format.md), the validated
 index reader in `crates/blockzilla-format/src/v2/archive.rs`, and the existing
 message/metadata rendering path in
-`workers/blockzilla-get-block/src/worker.rs`.
+`edgezilla/get-block/src/worker.rs`.
 
 ## Acceptance gate
 

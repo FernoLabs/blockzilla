@@ -22,7 +22,7 @@ use blockzilla_dump::{
     scan_remaining_token_events, token_event_database::TOKEN_EVENT_SCHEMA_VERSION,
 };
 use blockzilla_example_workloads::{MAINNET_USDC_MINT, MAINNET_USDC_MINT_BASE58};
-use blockzilla_query_sdk::token::{HistoryCoverage, TargetMintTracker};
+use blockzilla_model::token::{HistoryCoverage, TargetMintTracker};
 
 const MAX_BLOCKS: u32 = 10_000;
 const THREADS: usize = 1;

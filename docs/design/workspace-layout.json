@@ -1,0 +1,277 @@
+{
+  "baseline_commit": "0b33120e95eeceda7d56569c5e8c0055c05b965c",
+  "package_renames": {
+    "blockzilla-query-sdk": "blockzilla-model",
+    "blockzilla-index-archive-format": "blockzilla-archive-v3",
+    "blockzilla-indexer-v3-read-sdk": "blockzilla-archive-v3-reader",
+    "blockzilla-index-archive-convert": "blockzilla-archive-v3-convert",
+    "blockzilla-index-archive-measure": "blockzilla-archive-v3-measure",
+    "blockzilla-read-indexer-v3": "blockzilla-read-archive-v3"
+  },
+  "removed_packages": [
+    "blockzilla-car-read-sdk"
+  ],
+  "packages": [
+    {
+      "package": "blockzilla-source",
+      "current": "crates/source/blockzilla-source",
+      "destination": "crates/source/blockzilla-source"
+    },
+    {
+      "package": "blockzilla-source-local",
+      "current": "crates/source/blockzilla-source-local",
+      "destination": "crates/source/blockzilla-source-local"
+    },
+    {
+      "package": "blockzilla-source-http",
+      "current": "crates/source/blockzilla-source-http",
+      "destination": "crates/source/blockzilla-source-http"
+    },
+    {
+      "package": "blockzilla-source-cache",
+      "current": "crates/source/blockzilla-source-cache",
+      "destination": "crates/source/blockzilla-source-cache"
+    },
+    {
+      "package": "blockzilla",
+      "current": "blockzilla",
+      "destination": "blockzilla/cli"
+    },
+    {
+      "package": "blockzilla-archive-gateway",
+      "current": "services/blockzilla-archive-gateway",
+      "destination": "blockzilla/archive-gateway"
+    },
+    {
+      "package": "blockzilla-archive-v2",
+      "current": "crates/blockzilla-archive-v2",
+      "destination": "crates/compact-v2/blockzilla-archive-v2"
+    },
+    {
+      "package": "blockzilla-compact",
+      "current": "crates/blockzilla-compact",
+      "destination": "crates/compact-v2/blockzilla-compact"
+    },
+    {
+      "package": "blockzilla-log-parser",
+      "current": "crates/blockzilla-log-parser",
+      "destination": "crates/parser/blockzilla-log-parser"
+    },
+    {
+      "package": "blockzilla-primitives",
+      "current": "crates/blockzilla-primitives",
+      "destination": "crates/blockzilla-primitives"
+    },
+    {
+      "package": "blockzilla-program-logs",
+      "current": "crates/blockzilla-program-logs",
+      "destination": "crates/parser/blockzilla-program-logs"
+    },
+    {
+      "package": "blockzilla-registry",
+      "current": "crates/blockzilla-registry",
+      "destination": "crates/compact-v2/blockzilla-registry"
+    },
+    {
+      "package": "of-car-reader",
+      "current": "crates/old-faithful/car-reader",
+      "destination": "crates/old-faithful/of-car-reader"
+    },
+    {
+      "package": "blockzilla-query-sdk",
+      "current": "crates/blockzilla-query-sdk",
+      "destination": "crates/blockzilla-model"
+    },
+    {
+      "package": "blockzilla-read-sdk-legacy",
+      "current": "crates/blockzilla-read-sdk-legacy",
+      "destination": "crates/compat/blockzilla-read-sdk-legacy"
+    },
+    {
+      "package": "blockzilla-index-archive-convert",
+      "current": "crates/blockzilla-index-archive-convert",
+      "destination": "crates/archive-v3/blockzilla-archive-v3-convert"
+    },
+    {
+      "package": "blockzilla-compact-v2-reader",
+      "current": "crates/blockzilla-read-sdk",
+      "destination": "crates/compact-v2/blockzilla-compact-v2-reader"
+    },
+    {
+      "package": "blockzilla-index-archive-format",
+      "current": "crates/blockzilla-index-archive-format",
+      "destination": "crates/archive-v3/blockzilla-archive-v3"
+    },
+    {
+      "package": "blockzilla-replay-format",
+      "current": "crates/blockzilla-replay-format",
+      "destination": "crates/blockzilla-replay-format"
+    },
+    {
+      "package": "blockzilla-live-format",
+      "current": "crates/blockzilla-live-format",
+      "destination": "crates/blockzilla-live-format"
+    },
+    {
+      "package": "blockzilla-token-transaction-dump",
+      "current": "crates/blockzilla-token-transaction-dump",
+      "destination": "indexer/blockzilla-token-transaction-dump"
+    },
+    {
+      "package": "blockzilla-dex-parser",
+      "current": "crates/blockzilla-dex-parser",
+      "destination": "crates/parser/blockzilla-dex-parser"
+    },
+    {
+      "package": "blockzilla-token-balance-audit",
+      "current": "crates/blockzilla-token-balance-audit",
+      "destination": "indexer/blockzilla-token-balance-audit"
+    },
+    {
+      "package": "blockzilla-car-read-sdk",
+      "current": "crates/blockzilla-car-read-sdk",
+      "destination": "crates/old-faithful/blockzilla-car-read-sdk"
+    },
+    {
+      "package": "blockzilla-dump",
+      "current": "crates/blockzilla-dump",
+      "destination": "indexer/blockzilla-dump"
+    },
+    {
+      "package": "blockzilla-user-program-index",
+      "current": "crates/blockzilla-user-program-index",
+      "destination": "indexer/blockzilla-user-program-index"
+    },
+    {
+      "package": "blockzilla-example-workloads",
+      "current": "crates/blockzilla-example-workloads",
+      "destination": "examples/workloads"
+    },
+    {
+      "package": "blockzilla-firebase-indexer",
+      "current": "crates/blockzilla-firebase-indexer",
+      "destination": "indexer/blockzilla-firebase-indexer"
+    },
+    {
+      "package": "blockzilla-index-archive-measure",
+      "current": "crates/blockzilla-index-archive-measure",
+      "destination": "bench/archive-v3-measure"
+    },
+    {
+      "package": "blockzilla-indexer-v3-read-sdk",
+      "current": "crates/blockzilla-indexer-v3-read-sdk",
+      "destination": "crates/archive-v3/blockzilla-archive-v3-reader"
+    },
+    {
+      "package": "blockzilla-reader-profile",
+      "current": "crates/blockzilla-reader-profile",
+      "destination": "bench/reader-profile"
+    },
+    {
+      "package": "blockzilla-replay",
+      "current": "crates/blockzilla-replay",
+      "destination": "runtime/blockzilla-replay"
+    },
+    {
+      "package": "blockzilla-spyx-query",
+      "current": "crates/blockzilla-spyx-query",
+      "destination": "indexer/blockzilla-spyx-query"
+    },
+    {
+      "package": "hivezilla-object-store",
+      "current": "crates/hivezilla-object-store",
+      "destination": "hivezilla/object-store"
+    },
+    {
+      "package": "hivezilla-protocol",
+      "current": "crates/hivezilla-protocol",
+      "destination": "hivezilla/protocol"
+    },
+    {
+      "package": "of-slot-ranges",
+      "current": "crates/old-faithful/slot-ranges",
+      "destination": "crates/old-faithful/of-slot-ranges"
+    },
+    {
+      "package": "solana-shred-codec",
+      "current": "crates/solana-codec/solana-shred-codec",
+      "destination": "crates/solana-codec/solana-shred-codec"
+    },
+    {
+      "package": "solana-gossip",
+      "current": "crates/solana-gossip-compat",
+      "destination": "hivezilla/gossip-compat"
+    },
+    {
+      "package": "solana-ledger-compat",
+      "current": "crates/solana-ledger-compat",
+      "destination": "hivezilla/ledger-compat"
+    },
+    {
+      "package": "blockzilla-read-car",
+      "current": "examples/read-car",
+      "destination": "examples/read-car"
+    },
+    {
+      "package": "blockzilla-read-compact-v2",
+      "current": "examples/read-compact-v2",
+      "destination": "examples/read-compact-v2"
+    },
+    {
+      "package": "blockzilla-read-indexer-v3",
+      "current": "examples/read-indexer-v3",
+      "destination": "examples/read-archive-v3"
+    },
+    {
+      "package": "blockzilla-token-api",
+      "current": "examples/token-api",
+      "destination": "examples/token-api"
+    },
+    {
+      "package": "blockzilla-monitor",
+      "current": "services/blockzilla-monitor",
+      "destination": "blockzilla/monitor"
+    },
+    {
+      "package": "hivezilla",
+      "current": "services/hivezilla",
+      "destination": "hivezilla/service"
+    },
+    {
+      "package": "blockzilla-get-block",
+      "current": "workers/blockzilla-get-block",
+      "destination": "edgezilla/get-block"
+    },
+    {
+      "package": "old-faithful-get-block",
+      "current": "workers/old-faithful-get-block",
+      "destination": "edgezilla/of-get-block"
+    }
+  ],
+  "target_renames": {
+    "read-indexer-v3": "read-archive-v3",
+    "read-indexer-v3-firewatch": "read-archive-v3-firewatch",
+    "read-indexer-v3-pumpfun": "read-archive-v3-pumpfun",
+    "read-indexer-v3-slot-hours": "read-archive-v3-slot-hours",
+    "read-indexer-v3-transactions": "read-archive-v3-transactions",
+    "read-indexer-v3-usdc": "read-archive-v3-usdc",
+    "read-indexer-v3-usdc-instructions": "read-archive-v3-usdc-instructions"
+  },
+  "target_relocations": [
+    {
+      "from_package": "blockzilla-archive-v3-convert",
+      "target": "ia-read",
+      "to_package": "blockzilla-read-archive-v3"
+    },
+    {
+      "from_package": "blockzilla-archive-v3-convert",
+      "target": "archive-v2-account-scan-bench",
+      "to_package": "blockzilla-archive-v3-measure"
+    },
+    {
+      "from_package": "blockzilla-archive-v3-convert",
+      "target": "ia-compare-prefix",
+      "to_package": "blockzilla-archive-v3-measure"
+    }
+  ]
+}

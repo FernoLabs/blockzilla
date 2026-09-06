@@ -4,9 +4,9 @@ Status: **implemented format reference**.
 
 This document describes the hot-block Archive V2 files written and read by
 current `main`. The Rust schemas and constants in
-[`crates/blockzilla-format/src/v2/mod.rs`](../../crates/blockzilla-format/src/v2/mod.rs)
+[`crates/compact-v2/blockzilla-archive-v2/src/v2/mod.rs`](../../crates/compact-v2/blockzilla-archive-v2/src/v2/mod.rs)
 and
-[`crates/blockzilla-format/src/v2/archive.rs`](../../crates/blockzilla-format/src/v2/archive.rs)
+[`crates/compact-v2/blockzilla-archive-v2/src/v2/archive.rs`](../../crates/compact-v2/blockzilla-archive-v2/src/v2/archive.rs)
 are the executable source of truth.
 
 This reference covers the independently addressable hot-block family used by

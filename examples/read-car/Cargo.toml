@@ -12,8 +12,8 @@ name = "read-car"
 path = "src/main.rs"
 
 [dependencies]
-of-car-reader = { path = "../../crates/old-faithful/car-reader", default-features = false, features = ["archive"] }
-blockzilla-example-workloads = { path = "../../crates/blockzilla-example-workloads" }
+of-car-reader = { path = "../../crates/old-faithful/of-car-reader", default-features = false, features = ["archive"] }
+blockzilla-example-workloads = { path = "../workloads" }
 bs58 = "0.5.1"
 
 [lints]

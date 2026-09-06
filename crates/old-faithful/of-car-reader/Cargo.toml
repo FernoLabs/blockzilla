@@ -1,0 +1,90 @@
+[package]
+name = "of-car-reader"
+version = "0.2.0"
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+description = "Readers and index primitives for Old Faithful Solana CAR archives"
+readme = "Readme.md"
+keywords = ["solana", "car", "old-faithful"]
+exclude = [
+    ".DS_Store",
+    "benches/*",
+    "src/bin/profile_big_block.rs",
+]
+
+[[bin]]
+name = "reader"
+path = "src/bin/reader.rs"
+required-features = ["reader"]
+
+[[bin]]
+name = "car_continuations"
+path = "src/bin/car_continuations.rs"
+required-features = ["zstd-native"]
+
+[[bin]]
+name = "car_skipped_slots"
+path = "src/bin/car_skipped_slots.rs"
+required-features = ["zstd-native"]
+
+[[bin]]
+name = "car_validate_lossless"
+path = "src/bin/car_validate_lossless.rs"
+required-features = ["zstd-native"]
+
+[[bench]]
+name = "big_block"
+harness = false
+
+[features]
+default = ["genesis", "zstd-native"]
+archive = ["query-sdk-http", "zstd-native", "dep:url"]
+compact-index = ["dep:xxhash-rust"]
+genesis = ["dep:bzip2", "dep:tar"]
+reader = ["dep:clap", "dep:tracing", "dep:tracing-subscriber", "dep:reqwest", "zstd-native"]
+query-sdk = ["dep:blockzilla-model", "dep:bs58", "dep:thiserror"]
+query-sdk-http = ["query-sdk", "dep:reqwest"]
+zstd-native = ["dep:zstd"]
+zstd-wasm = ["dep:ruzstd"]
+
+[dependencies]
+minicbor = { version = "2.2.2", features = ["full"] }
+wincode = { version = "=0.6.1", features = ["derive"] }
+zstd = { version = "0.13.3", optional = true }
+ruzstd = { version = "0.8.3", optional = true }
+prost = "0.14.3"
+quick-protobuf = "0.8.1"
+sha2 = "0.11.0"
+serde = { version = "1.0.228", features = ["derive"] }
+bzip2 = { version = "0.6.1", optional = true }
+tar = { version = "0.4.45", optional = true }
+xxhash-rust = { version = "0.8.15", features = ["xxh64"], optional = true }
+# reader dependencies
+clap = { version = "4.6.1", features = ["derive"], optional = true }
+tracing = { version = "0.1.44", optional = true }
+tracing-subscriber = { version = "0.3.23", optional = true }
+reqwest = { version = "0.13.3", default-features = false, features = [
+    "blocking",
+    "rustls",
+], optional = true }
+blockzilla-model = { path = "../../blockzilla-model", optional = true }
+bs58 = { version = "0.5.1", optional = true }
+thiserror = { version = "2.0.18", optional = true }
+url = { version = "2.5.8", optional = true }
+
+[dev-dependencies]
+criterion = { version = "0.8.2", features = ["html_reports"] }
+postcard = { version = "1.1.3", features = ["alloc"] }
+
+[build-dependencies]
+pb-rs = "0.10.0"
+prost-build = "0.14.3"
+protoc-bin-vendored = "3.2.0"
+
+[package.metadata.cargo-machete]
+ignored = ["pb-rs", "prost-build", "protoc-bin-vendored"]
+
+[lints]
+workspace = true

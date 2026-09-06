@@ -11,19 +11,19 @@ actual="$({
   rg --count-matches -U "$pattern" \
     --glob '*.rs' \
     --glob '!crates/blockzilla-format/**' \
-    --glob '!crates/blockzilla-read-sdk/**' \
+    --glob '!crates/compact-v2/blockzilla-compact-v2-reader/**' \
     . || true
 } | sed 's#^\./##' | LC_ALL=C sort)"
 
 expected="$(LC_ALL=C sort <<'EOF'
-blockzilla/src/archive_v2.rs:3
-blockzilla/src/archive_v2/registry_reprocess.rs:2
-blockzilla/src/bin/upgrade_block_access_vote_hashes.rs:2
-blockzilla/src/bin/verify_access_vote_hashes.rs:1
-blockzilla/src/token_events.rs:5
-crates/blockzilla-token-transaction-dump/src/consolidate_v3.rs:1
+blockzilla/cli/src/archive_v2.rs:3
+blockzilla/cli/src/archive_v2/registry_reprocess.rs:2
+blockzilla/cli/src/bin/upgrade_block_access_vote_hashes.rs:2
+blockzilla/cli/src/bin/verify_access_vote_hashes.rs:1
+blockzilla/cli/src/token_events.rs:5
+indexer/blockzilla-token-transaction-dump/src/consolidate_v3.rs:1
 examples/token-api/src/indexer.rs:1
-workers/blockzilla-get-block/src/worker.rs:1
+edgezilla/get-block/src/worker.rs:1
 EOF
 )"
 

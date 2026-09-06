@@ -1,7 +1,7 @@
 # Rebuilding the 35 first-seen epochs with a sorted registry
 
 > **WITHDRAWN 2026-08-16.** First-seen ordering is a deliberate design, not
-> damage. `blockzilla/src/bin/first_seen_hot_tier_bench.rs` benchmarks "the
+> damage. `blockzilla/cli/src/bin/first_seen_hot_tier_bench.rs` benchmarks "the
 > **one-pass** first-seen interner", alongside a dedicated
 > `first_seen_finalization.rs` and a versioned manifest with seed chaining.
 >

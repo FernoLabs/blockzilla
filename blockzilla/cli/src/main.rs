@@ -1,0 +1,3520 @@
+#![allow(clippy::too_many_arguments)]
+
+use anyhow::Result;
+use blockzilla_read_sdk::ArchiveV2WireProfile;
+use clap::{Parser, Subcommand, ValueEnum};
+use std::{
+    fmt::Write as _,
+    fs::File,
+    io::Write as _,
+    num::NonZeroU64,
+    os::fd::{AsRawFd, FromRawFd, RawFd},
+    path::{Path, PathBuf},
+    time::{Duration, Instant, SystemTime, UNIX_EPOCH},
+};
+use tracing::{Level, info};
+
+mod archive_v2;
+mod archive_verify;
+mod block_time_gap_index;
+mod block_time_gaps;
+mod car_acquire;
+mod car_debug;
+mod car_preflight;
+mod first_seen_finalization;
+mod genesis_epoch0;
+mod pre_hot;
+mod predecessor_tail_seed;
+mod scheduler;
+mod split_compact;
+mod token_events;
+
+pub const BUFFER_SIZE: usize = 256 << 20;
+pub const PROGRESS_REPORT_INTERVAL_SECS: u64 = 3;
+pub const SLOTS_PER_EPOCH: u64 = 432_000;
+
+#[derive(Parser)]
+#[command(name = "blockzilla")]
+#[command(about = "Build, inspect, and benchmark Blockzilla Archive V2 data")]
+#[command(version)]
+struct Cli {
+    #[command(subcommand)]
+    command: Commands,
+
+    /// Resume Archive V2 builders when complete sidecars already exist.
+    #[arg(long, default_value_t = true, global = true)]
+    resume: bool,
+}
+
+#[derive(Subcommand)]
+enum Commands {
+    /// Build and validate Archive V3 candidates and their derived indexes.
+    ArchiveV3 {
+        #[command(subcommand)]
+        command: ArchiveV3Commands,
+    },
+    /// Run the storage scheduler and its read-only status API.
+    Scheduler,
+
+    /// Stream Compact V2 and recompute every available Proof-of-History entry.
+    VerifyArchiveV2Poh {
+        /// Compact V2 epoch directory.
+        archive_dir: PathBuf,
+        /// Worker threads used for independent entry verification.
+        #[arg(long, default_value_t = 0)]
+        threads: usize,
+        /// Stop after N blocks. Intended for local profiling and smoke tests.
+        #[arg(long)]
+        max_blocks: Option<u64>,
+    },
+
+    /// Backfill CompactPohEntry::signature_count into an already-built archive's poh.wincode.
+    ///
+    /// Decompresses every hot block and validates each entry against canonical transaction order.
+    /// It changes only entries whose signature counts differ. It never recomputes PoH hashes.
+    /// Publication uses a temp file and atomic rename, so a crash or concurrent reader never
+    /// observes a partial sidecar. Safe to rerun.
+    MigratePohSignatureCounts {
+        /// Compact V2 epoch directory.
+        archive_dir: PathBuf,
+        /// Worker threads used to validate and, when necessary, patch blocks. 0 uses every
+        /// available core.
+        #[arg(long, default_value_t = 0)]
+        threads: usize,
+    },
+
+    /// Repair one diagnosed PoH-only orphan suffix after strict cross-plane validation.
+    ///
+    /// This manual incident command requires the exact indexed and orphan coordinates. It
+    /// preserves the original under a no-clobber quarantine, publishes by sync and atomic
+    /// rename, and performs a full post-verification. The normal migration remains strict.
+    RepairPohOrphanTail {
+        /// Compact V2 epoch directory. Its basename must be `epoch-N`.
+        archive_dir: PathBuf,
+        /// Exact epoch number expected from the directory and metadata.
+        #[arg(long)]
+        epoch: u64,
+        /// Exact hot-index row count established by the incident diagnosis.
+        #[arg(long)]
+        expected_indexed_blocks: u64,
+        /// Exact number of PoH-only records after the hot-index terminal block.
+        #[arg(long)]
+        expected_trailing_records: u32,
+        /// Exact first orphan block ID. It must follow the indexed terminal ID.
+        #[arg(long)]
+        expected_first_trailing_block_id: u32,
+        /// Exact first orphan slot. It must follow the indexed terminal slot.
+        #[arg(long)]
+        expected_first_trailing_slot: u64,
+        /// Exact last orphan slot. All orphan slots must be contiguous.
+        #[arg(long)]
+        expected_last_trailing_slot: u64,
+        /// Exact lowercase SHA-256 of the canonical PoH file before repair.
+        #[arg(long)]
+        expected_old_poh_sha256: String,
+        /// Independently certified predecessor blockhash for the first indexed PoH entry.
+        #[arg(long)]
+        expected_predecessor_blockhash: String,
+        /// Worker threads used to migrate indexed signature counts. 0 uses all cores.
+        #[arg(long, default_value_t = 0)]
+        threads: usize,
+    },
+
+    /// Microbenchmark the allocation-free PoH hash and signature-mixin core.
+    #[cfg(feature = "benchmark-tools")]
+    BenchArchiveV2PohCore {
+        #[arg(long, default_value_t = 4096)]
+        entries: usize,
+        #[arg(long, default_value_t = 1024)]
+        hashes_per_entry: u64,
+        #[arg(long, default_value_t = 2)]
+        signatures_per_entry: usize,
+        #[arg(long, default_value_t = 5)]
+        iterations: usize,
+        #[arg(long, default_value_t = 0)]
+        threads: usize,
+    },
+
+    /// Stream a CAR to clean EOF and atomically publish a bounded-memory structural receipt.
+    PreflightCar {
+        /// Input CAR or CAR.ZST file, including an in-progress `.car[.zst].part` path.
+        input: PathBuf,
+        /// Epoch expected for slots in this CAR.
+        #[arg(long)]
+        epoch: u64,
+        /// JSON receipt path. Published atomically only after a successful full scan.
+        #[arg(long)]
+        receipt: PathBuf,
+        /// I/O buffer size. Transaction payloads are skipped without allocation.
+        #[arg(
+            long,
+            default_value_t = 8,
+            value_parser = clap::value_parser!(u16).range(1..=256)
+        )]
+        io_buffer_mib: u16,
+        /// Optional atomic progress JSON path for scheduler or monitoring integrations.
+        #[arg(long)]
+        progress_json: Option<PathBuf>,
+    },
+
+    /// Acquire, structurally validate, and durably publish one CAR through aria2c.
+    AcquireCar {
+        /// Source URL passed unchanged to aria2c.
+        #[arg(long)]
+        url: String,
+        /// Resumable download path, normally under `.downloads/`.
+        #[arg(long)]
+        part: PathBuf,
+        /// Final canonical CAR path. An existing entry is never replaced.
+        #[arg(long)]
+        canonical: PathBuf,
+        /// Alternate canonical suffix for the same epoch; it must remain absent.
+        #[arg(long)]
+        alternate: PathBuf,
+        /// Epoch expected for every block in the downloaded CAR.
+        #[arg(long)]
+        epoch: u64,
+        /// Atomic structural-preflight receipt path.
+        #[arg(long)]
+        receipt: PathBuf,
+        /// Optional atomic preflight progress JSON path.
+        #[arg(long)]
+        progress_json: Option<PathBuf>,
+        /// Exact final object size from trusted caller metadata. Used for
+        /// download telemetry and checked before structural preflight.
+        #[arg(long)]
+        expected_bytes: Option<NonZeroU64>,
+        /// aria2c executable or absolute path.
+        #[arg(long, default_value = "aria2c")]
+        aria2c: PathBuf,
+        /// Rust-supervised aria2c attempts. Partial regular files are retained.
+        #[arg(
+            long,
+            default_value_t = 3,
+            value_parser = clap::value_parser!(u8).range(1..=32)
+        )]
+        max_attempts: u8,
+        /// Minimum Linux MemAvailable required before structural preflight.
+        #[arg(long)]
+        required_memory_mib: u64,
+        /// Structural-preflight I/O buffer size.
+        #[arg(
+            long,
+            default_value_t = 8,
+            value_parser = clap::value_parser!(u16).range(1..=256)
+        )]
+        io_buffer_mib: u16,
+    },
+
+    /// Verify and seed predecessor blockhash tails for independent compaction workers.
+    SeedPreviousBlockhashTails {
+        /// Archive root containing `epoch-N` directories.
+        #[arg(long)]
+        archive_root: PathBuf,
+        /// Explicit positive target epochs. Each tail is sourced from epoch N-1.
+        #[arg(
+            long,
+            num_args = 1..,
+            conflicts_with = "discover",
+            required_unless_present = "discover"
+        )]
+        epochs: Vec<u64>,
+        /// Conservatively discover unowned registry-only targets in a bounded range.
+        #[arg(
+            long,
+            conflicts_with = "epochs",
+            requires_all = ["start_epoch", "end_epoch"]
+        )]
+        discover: bool,
+        /// First target epoch to inspect in discovery mode.
+        #[arg(long, requires = "discover")]
+        start_epoch: Option<u64>,
+        /// Last target epoch to inspect in discovery mode.
+        #[arg(long, requires = "discover")]
+        end_epoch: Option<u64>,
+        /// Directory for durable per-target verification receipts.
+        #[arg(long)]
+        receipt_dir: Option<PathBuf>,
+        /// Fully verify sources and targets without publishing tails or receipts.
+        #[arg(long)]
+        dry_run: bool,
+    },
+
+    /// Build a sparse slot-gap and block-time sidecar from a local Archive V2 timestamp index.
+    BuildBlockTimeGaps {
+        /// Input epoch directory or blockhash_index_v3.bin file. No RPC is used.
+        input: PathBuf,
+        /// Epoch expected for every indexed slot.
+        #[arg(long)]
+        epoch: u64,
+        /// Timestamp source. Auto prefers V3 and otherwise scans Archive V2 hot blocks.
+        #[arg(long, value_enum, default_value_t = BlockTimeGapSourceArg::Auto)]
+        source: BlockTimeGapSourceArg,
+        /// Output path. Defaults to block-time-gaps.bin beside the input index.
+        #[arg(long)]
+        output: Option<PathBuf>,
+        /// Atomic progress JSON for monitoring long Archive V2 scans.
+        #[arg(long)]
+        progress_json: Option<PathBuf>,
+        /// Replace an existing sidecar when its source fingerprint or contents differ.
+        #[arg(long)]
+        force: bool,
+    },
+
+    /// Strictly validate an existing block-time gap sidecar without reading its archive source.
+    VerifyBlockTimeGaps {
+        /// block-time-gaps.bin path.
+        input: PathBuf,
+        /// Optional expected epoch.
+        #[arg(long)]
+        epoch: Option<u64>,
+    },
+
+    /// Aggregate validated per-epoch gap sidecars into a compact calendar index.
+    BuildBlockTimeGapIndex {
+        /// Archive root containing epoch-N/block-time-gaps.bin sidecars.
+        archive_root: PathBuf,
+        /// Atomic JSON output path.
+        #[arg(long)]
+        output: PathBuf,
+        /// First epoch whose sidecar coverage should be audited.
+        #[arg(long, default_value_t = 0)]
+        start_epoch: u64,
+        /// Last epoch whose sidecar coverage should be audited.
+        #[arg(long)]
+        end_epoch: u64,
+        /// Minimum positive wall-clock gap included in the calendar index.
+        #[arg(long, default_value_t = 300)]
+        minimum_interruption_secs: u64,
+    },
+
+    /// Build semantic Solana Archive V2 with wincode/LEB128 records.
+    BuildArchiveV2 {
+        /// Input CAR or CAR.ZST file.
+        input: PathBuf,
+        /// Output directory for the archive-v2 files.
+        output_dir: PathBuf,
+        /// Previous epoch CAR/CAR.ZST used to seed strict recent blockhash resolution.
+        #[arg(long)]
+        previous_car: Option<PathBuf>,
+    },
+
+    /// Build semantic Archive V2 in one pass, storing pubkeys inline instead of using registries.
+    BuildArchiveV2NoRegistry {
+        /// Input CAR or CAR.ZST file.
+        input: PathBuf,
+        /// Output directory for the no-registry archive-v2 file.
+        output_dir: PathBuf,
+    },
+
+    /// Stream a CAR/CAR.ZST URL into no-registry Archive V2 without storing the CAR locally.
+    BuildArchiveV2NoRegistryFromUrl {
+        /// Input CAR or CAR.ZST URL.
+        url: String,
+        /// Output directory for the no-registry archive-v2 file.
+        output_dir: PathBuf,
+    },
+
+    /// Build registry.bin, registry_counts.bin, blockhash_registry.bin, and skipped_slots.bin from a CAR/CAR.ZST.
+    BuildArchiveV2Registries {
+        /// Input CAR or CAR.ZST file.
+        input: PathBuf,
+        /// Output directory for the registry files and skipped_slots.bin.
+        output_dir: PathBuf,
+        /// Explicit slot/blockhash provenance file for documented PoH-gap blocks.
+        #[arg(long)]
+        external_blockhashes: Option<PathBuf>,
+        /// Rewrite registries even when they already exist.
+        #[arg(long)]
+        force: bool,
+        /// Block-decoding workers. Values above one use one reader and one merger.
+        #[arg(
+            long,
+            default_value_t = 1,
+            value_parser = clap::value_parser!(u16).range(1..=8)
+        )]
+        workers: u16,
+    },
+
+    /// Benchmark CAR pubkey-registry strategies without building the full archive.
+    BenchCarRegistry {
+        /// Input CAR or CAR.ZST file.
+        input: PathBuf,
+        /// Registry counting/finalization strategy to benchmark.
+        #[arg(long, value_enum, default_value_t = CarRegistryBenchStrategyArg::ExactStream)]
+        strategy: CarRegistryBenchStrategyArg,
+        /// Initial hash-map capacity for exact/unique key storage.
+        #[arg(long, default_value_t = 8_000_000)]
+        initial_capacity: usize,
+        /// Candidate capacity for the SpaceSaving heavy-hitter head.
+        #[arg(long, default_value_t = 262_144)]
+        heavy_hitter_capacity: usize,
+        /// Block-decoding workers for the pipelined-single-merge strategy.
+        #[arg(
+            long,
+            default_value_t = 8,
+            value_parser = clap::value_parser!(u16).range(2..=8)
+        )]
+        workers: u16,
+        /// Optional output directory for registry sidecars from this strategy.
+        #[arg(long)]
+        output_dir: Option<PathBuf>,
+        /// Stop after N block records. Intended for smoke tests.
+        #[arg(long)]
+        max_blocks: Option<u64>,
+    },
+
+    /// Build registry.mphf from an existing registry.bin so compact jobs can reload the account lookup.
+    BuildArchiveV2RegistryIndex {
+        /// Input registry.bin file.
+        registry: PathBuf,
+        /// Output registry index path. Defaults to registry.mphf next to registry.bin.
+        #[arg(long)]
+        output: Option<PathBuf>,
+        /// Rewrite registry.mphf even when it already exists.
+        #[arg(long)]
+        force: bool,
+    },
+
+    /// Prepare registry.bin and registry_counts.bin from a live capture's sorted pubkey runs.
+    PrepareArchiveV2LiveRegistry {
+        /// Live producer capture directory.
+        capture_dir: PathBuf,
+        /// Output directory for registry.bin, registry_counts.bin, and the durable stage marker.
+        output_dir: PathBuf,
+    },
+
+    /// Build the deferred MPHF for a completed first-seen scan and publish metadata last.
+    FinalizeArchiveV2FirstSeen {
+        /// Candidate output directory containing the scan-complete marker and sidecars.
+        output_dir: PathBuf,
+        /// Advisory lock shared by scan-only jobs and held exclusively by the finalizer.
+        /// Defaults to a machine-wide lock in the system temporary directory.
+        #[arg(long)]
+        finalizer_lock: Option<PathBuf>,
+    },
+
+    /// Rewrite a complete first-seen Compact V2 archive into a durable registry-only staging area.
+    ///
+    /// The source is read-only. This phase makes two bounded passes over compact block frames and
+    /// writes no block-access, signature, receipt, or published target. It writes a durable handoff
+    /// last for the separate access-completion command.
+    ReprocessArchiveV2Registry {
+        /// Complete first-seen Compact V2 source directory. It is never modified.
+        source_dir: PathBuf,
+        /// Sibling generation directory. Existing paths are validated but never replaced.
+        target_dir: PathBuf,
+        /// Epoch encoded by the source and required in every target block.
+        #[arg(long)]
+        epoch: u64,
+        /// Parallel block decode/rewrite workers.
+        #[arg(
+            long,
+            default_value_t = 4,
+            value_parser = clap::value_parser!(u16).range(1..=256)
+        )]
+        threads: u16,
+        /// Memory budget for registry ordering scratch space.
+        #[arg(
+            long,
+            default_value_t = 256,
+            value_parser = clap::value_parser!(u32).range(16..=65_536)
+        )]
+        sort_memory_mib: u32,
+        /// Zstd compression level for rewritten independent block frames.
+        #[arg(long, default_value_t = 1)]
+        level: i32,
+        /// Scheduler-owned generation attempt identity.
+        #[arg(long)]
+        attempt_id: String,
+        /// Exact private sibling staging directory for this attempt.
+        #[arg(long)]
+        staging_dir: PathBuf,
+        /// Authoritative hot-message wire grammar for the complete source generation.
+        #[arg(long)]
+        wire_profile: ArchiveV2WireProfile,
+        /// Exact reviewed recovery receipt for a marker-free source generation.
+        #[arg(long)]
+        wire_profile_authority_receipt: Option<PathBuf>,
+    },
+
+    /// Complete block-access for a durable staged registry rewrite and publish it atomically.
+    ///
+    /// This phase remaps the trusted source block-access stream. It never reads signature data
+    /// from signatures.bin. It creates the target signature sidecar as a strict same-filesystem
+    /// hard link, writes receipt v3 last, and publishes only a complete generation.
+    CompleteArchiveV2RegistryAccess {
+        /// Complete first-seen Compact V2 source directory. It is never modified.
+        source_dir: PathBuf,
+        /// Exact private staging directory returned by the core phase.
+        staging_dir: PathBuf,
+        /// Final sibling generation directory. It is never replaced.
+        target_dir: PathBuf,
+        /// Epoch bound by the durable handoff.
+        #[arg(long)]
+        epoch: u64,
+        /// Exact scheduler-owned generation attempt identity.
+        #[arg(long)]
+        attempt_id: String,
+        /// SHA-256 of the durable handoff returned by the core phase.
+        #[arg(long)]
+        handoff_sha256: String,
+        /// Scheduler-admitted access continuation state. The command fails if staging changed.
+        #[arg(long, value_enum)]
+        expected_continuation_state: RegistryReprocessAccessContinuationStateArg,
+        /// Exact wire profile bound by the core handoff.
+        #[arg(long)]
+        wire_profile: ArchiveV2WireProfile,
+        /// Same exact recovery receipt used by the marker-free core phase.
+        #[arg(long)]
+        wire_profile_authority_receipt: Option<PathBuf>,
+    },
+
+    /// Build blockhash_registry.bin, blockhash_index_v3.bin, and its gap sidecar from a CAR file.
+    BuildBlockhashRegistry {
+        /// Input CAR or CAR.ZST file.
+        input: PathBuf,
+        /// Output directory for blockhash_registry.bin, blockhash_index_v3.bin, and block-time-gaps.bin.
+        output_dir: PathBuf,
+        /// Explicit slot/blockhash provenance file for documented PoH-gap blocks.
+        #[arg(long)]
+        external_blockhashes: Option<PathBuf>,
+        /// Rewrite sidecars even when they already exist.
+        #[arg(long)]
+        force: bool,
+    },
+
+    /// Build a pubkey registry from a no-registry Archive V2, then rewrite it with compact IDs.
+    OptimizeArchiveV2NoRegistry {
+        /// Input archive-v2-no-registry.wincode file.
+        input: PathBuf,
+        /// Output directory for registry.bin and archive-v2.wincode.
+        output_dir: PathBuf,
+        /// Previous epoch CAR/CAR.ZST used only to seed the recent blockhash window.
+        #[arg(long)]
+        previous_car: Option<PathBuf>,
+    },
+
+    /// Benchmark sequential Archive V2 read/decode speed.
+    BenchArchiveV2 {
+        /// Input archive-v2.wincode file.
+        input: PathBuf,
+        /// Number of full sequential passes to run.
+        #[arg(long, default_value_t = 1)]
+        iterations: usize,
+    },
+
+    /// Benchmark sequential no-registry Archive V2 read/decode speed.
+    BenchArchiveV2NoRegistry {
+        /// Input archive-v2-no-registry.wincode file.
+        input: PathBuf,
+        /// Number of full sequential passes to run.
+        #[arg(long, default_value_t = 1)]
+        iterations: usize,
+    },
+
+    /// Build a physical block-offset sidecar for indexed Archive V2 reads.
+    BuildArchiveV2Index {
+        /// Input archive-v2.wincode file.
+        input: PathBuf,
+        /// Output index path. Defaults to <input-stem>.index next to the input archive.
+        #[arg(long)]
+        output: Option<PathBuf>,
+    },
+
+    /// Benchmark indexed parallel Archive V2 block reads.
+    BenchArchiveV2Indexed {
+        /// Input archive-v2.wincode file.
+        input: PathBuf,
+        /// Index path. Defaults to <input-stem>.index next to the input archive.
+        #[arg(long)]
+        index: Option<PathBuf>,
+        /// Worker threads for block decode.
+        #[arg(long, default_value_t = 4)]
+        workers: usize,
+        /// Number of consecutive index rows claimed per worker batch.
+        #[arg(long, default_value_t = 64)]
+        chunk_size: usize,
+    },
+
+    /// Repack Archive V2 blocks as independently zstd-compressed blobs with an external index.
+    RepackArchiveV2ZstdBlocks {
+        /// Input archive-v2.wincode file.
+        input: PathBuf,
+        /// Output directory for archive-v2-blocks.zstd, archive-v2-blocks.index, and archive-v2-meta.wincode.
+        output_dir: PathBuf,
+        /// zstd compression level for each independent block frame.
+        #[arg(long, default_value_t = 1)]
+        level: i32,
+        /// Optional shared zstd dictionary bytes. The same dictionary is required for reads.
+        #[arg(long)]
+        dict: Option<PathBuf>,
+        /// Stop after N block records. Intended for smoke tests.
+        #[arg(long)]
+        max_blocks: Option<u64>,
+    },
+
+    /// Build hot-block Archive V2 directly from CAR with signatures and vote hashes in sidecars.
+    BuildArchiveV2HotBlocks {
+        /// Input CAR or CAR.ZST file.
+        input: PathBuf,
+        /// Output directory for archive-v2-blocks.zstd and sidecars.
+        output_dir: PathBuf,
+        /// Previous epoch CAR/CAR.ZST used to seed strict recent blockhash resolution.
+        #[arg(long)]
+        previous_car: Option<PathBuf>,
+        /// Existing Archive V2 registry sidecar directory to reuse.
+        #[arg(long)]
+        registry_dir: Option<PathBuf>,
+        /// Explicit slot/blockhash provenance file for documented PoH-gap blocks.
+        #[arg(long)]
+        external_blockhashes: Option<PathBuf>,
+        /// zstd compression level for each independent block frame.
+        #[arg(long, default_value_t = 1)]
+        level: i32,
+        /// Stop after N block records. Intended for smoke tests.
+        #[arg(long)]
+        max_blocks: Option<u64>,
+        /// Decode CAR records once into a compressed typed PreHot spool, then finalize from it.
+        #[arg(long)]
+        pre_hot: bool,
+        /// Keep the compressed PreHot spool after a successful build for finalize-only benchmarks.
+        #[arg(long)]
+        keep_pre_hot: bool,
+        /// Optional directory for the temporary PreHot spool (for example, local SSD scratch).
+        #[arg(long)]
+        pre_hot_dir: Option<PathBuf>,
+        /// Initial exact pubkey-counter capacity for the PreHot extraction pass.
+        #[arg(long, default_value_t = 8_000_000)]
+        pre_hot_registry_capacity: usize,
+        /// Explicitly finalize from an existing PreHot spool and matching sidecars.
+        #[arg(long)]
+        reuse_pre_hot: bool,
+        /// Assign final pubkey IDs on first occurrence and write hot blocks in one CAR pass.
+        #[arg(
+            long,
+            conflicts_with_all = ["pre_hot", "reuse_pre_hot", "registry_dir"]
+        )]
+        first_seen_registry: bool,
+        /// Optional frequency-sorted registry.bin used to preseed short first-seen IDs.
+        #[arg(long, requires = "first_seen_registry")]
+        first_seen_seed_registry: Option<PathBuf>,
+        /// Keys loaded from the input seed and written to registry-hot-seed.bin for the next epoch.
+        #[arg(long, default_value_t = 65_536, requires = "first_seen_registry")]
+        first_seen_seed_keys: usize,
+        /// Expected unique-key capacity for the first-seen ID table.
+        #[arg(long, default_value_t = 34_000_000, requires = "first_seen_registry")]
+        first_seen_registry_capacity: usize,
+        /// Parallel transaction and metadata decoders. Block publication stays ordered.
+        #[arg(
+            long = "decode-workers",
+            visible_alias = "workers",
+            alias = "first-seen-decode-workers",
+            default_value_t = 4,
+            value_parser = clap::value_parser!(u8).range(1..=8)
+        )]
+        decode_workers: u8,
+        /// Decompressed CAR prefetch chunk size per buffer (two fixed buffers), only for local .car.zst first-seen builds.
+        /// Omit to use the measured 4 MiB default for .car.zst; pass 0 to disable.
+        #[arg(
+            long,
+            requires = "first_seen_registry",
+            value_parser = clap::value_parser!(u8).range(0..=64)
+        )]
+        car_zstd_prefetch_mib: Option<u8>,
+        /// Stop after the CAR scan and durable sidecar writes, deferring the memory-intensive
+        /// registry MPHF build and final metadata publication to finalize-archive-v2-first-seen.
+        #[arg(long, requires = "first_seen_registry")]
+        first_seen_scan_only: bool,
+        /// Machine-wide first-seen memory lock. Scan-only jobs share it; inline builds and the
+        /// deferred finalizer take it exclusively. Defaults to the system temporary directory.
+        #[arg(long, requires = "first_seen_registry")]
+        first_seen_finalizer_lock: Option<PathBuf>,
+        /// Skip archive-v2-block-access.wincode and archive-v2-block-access.index generation.
+        #[arg(long)]
+        no_access: bool,
+    },
+
+    /// Disabled legacy live finalizer; retained only to reject old invocations explicitly.
+    BuildArchiveV2HotBlocksFromLive {
+        /// Live producer capture directory.
+        capture_dir: PathBuf,
+        /// Output directory for archive-v2-blocks.zstd and sidecars.
+        output_dir: PathBuf,
+        /// zstd compression level for each independent block frame.
+        #[arg(long, default_value_t = 1)]
+        level: i32,
+        /// Stop after N block records. Intended for smoke tests.
+        #[arg(long)]
+        max_blocks: Option<u64>,
+        /// Pubkey registry source for live captures.
+        #[arg(long, value_enum, default_value_t = LiveRegistrySourceArg::Auto)]
+        registry_source: LiveRegistrySourceArg,
+    },
+
+    /// Materialize a published RPC-fallback live repair bundle without declaring it canonical.
+    MaterializeArchiveV2LiveRepair {
+        /// Published repair bundle containing REPAIR-REQUIRED.json and its merge plan.
+        repair_dir: PathBuf,
+        /// Fresh final output directory. Work is resumed through a hidden sibling staging dir.
+        output_dir: PathBuf,
+        /// Maximum accepted size of one retained getBlock JSON response.
+        #[arg(
+            long,
+            default_value_t = 32,
+            value_parser = clap::value_parser!(u16).range(1..=256)
+        )]
+        max_rpc_json_mib: u16,
+        /// Flush and publish a durable restart checkpoint every N produced blocks.
+        #[arg(
+            long,
+            default_value_t = 256,
+            value_parser = clap::value_parser!(u32).range(1..=16384)
+        )]
+        checkpoint_every: u32,
+        /// Maximum distinct keys retained in memory before spilling a sorted pubkey run.
+        #[arg(
+            long,
+            default_value_t = 250_000,
+            value_parser = clap::value_parser!(u32).range(1024..=4000000)
+        )]
+        pubkey_run_max_keys: u32,
+        /// Stop after this many additional blocks, leaving a resumable hidden stage.
+        #[arg(long, value_parser = clap::value_parser!(u64).range(1..))]
+        max_blocks: Option<u64>,
+    },
+
+    /// Build a readable degraded hot archive from a validated repair materialization.
+    BuildArchiveV2DegradedHotBlocksFromRepair {
+        /// Completed noncanonical directory containing REPAIR-MATERIALIZED.json.
+        materialized_dir: PathBuf,
+        /// Fresh final output. The archive stays in a hidden sibling until its repair marker is durable.
+        output_dir: PathBuf,
+        /// Per-block zstd compression level.
+        #[arg(long, default_value_t = 1)]
+        level: i32,
+        /// Build a hidden smoke prefix only. A bounded run is never published as complete.
+        #[arg(long, value_parser = clap::value_parser!(u64).range(1..))]
+        max_blocks: Option<u64>,
+    },
+
+    /// Add validated block-access/getBlock sidecars to a noncanonical repair hot archive.
+    BuildArchiveV2RepairBlockAccess {
+        /// Published repair bundle containing the authoritative REPAIR-REQUIRED.json.
+        repair_dir: PathBuf,
+        /// Existing degraded hot archive containing REPAIR-COMPACTED.json.
+        hot_output: PathBuf,
+    },
+
+    /// Benchmark indexed parallel reads of hot-block Archive V2.
+    BenchArchiveV2HotBlocks {
+        /// Input archive-v2-blocks.zstd file.
+        input: PathBuf,
+        /// Index path. Defaults to archive-v2-blocks.index next to the input archive.
+        #[arg(long)]
+        index: Option<PathBuf>,
+        /// Optional shared zstd dictionary bytes used when the blocks were compressed.
+        #[arg(long)]
+        dict: Option<PathBuf>,
+        /// Worker threads for compressed block read/decode.
+        #[arg(long, default_value_t = 4)]
+        workers: usize,
+        /// Number of consecutive index rows claimed per worker batch.
+        #[arg(long, default_value_t = 512)]
+        chunk_size: usize,
+    },
+
+    /// Benchmark sequential CAR/CAR.ZST reads and node decoding.
+    BenchCarArchive {
+        /// Input CAR or CAR.ZST file.
+        input: PathBuf,
+        /// Input storage format.
+        #[arg(long, value_enum, default_value_t = CarBenchInputFormat::Auto)]
+        format: CarBenchInputFormat,
+        /// Stop after N block nodes. Intended for smoke tests.
+        #[arg(long)]
+        max_blocks: Option<u64>,
+    },
+
+    /// Prototype a per-block impacted-account table from hot-block Archive V2.
+    BenchArchiveV2HotBlockAccounts {
+        /// Input archive-v2-blocks.zstd file.
+        input: PathBuf,
+        /// Index path. Defaults to archive-v2-blocks.index next to the input archive.
+        #[arg(long)]
+        index: Option<PathBuf>,
+        /// Pubkey registry path. Defaults to registry.bin next to the input archive.
+        #[arg(long)]
+        registry: Option<PathBuf>,
+        /// Target pubkey to test block filtering against.
+        #[arg(long)]
+        target: Option<String>,
+        /// Include metadata keys such as loaded addresses and token-balance mint/owner/program.
+        #[arg(long)]
+        include_metadata: bool,
+        /// Worker threads for compressed block read/decode.
+        #[arg(long, default_value_t = 4)]
+        workers: usize,
+        /// Number of consecutive index rows claimed per worker batch.
+        #[arg(long, default_value_t = 64)]
+        chunk_size: usize,
+    },
+
+    /// Convert independent zstd hot blocks to raw blocks plus a whole-file zstd companion.
+    RepackArchiveV2HotBlocksRaw {
+        /// Input archive-v2-blocks.zstd file.
+        input: PathBuf,
+        /// Output directory for archive-v2-blocks.wincode, archive-v2-blocks.wincode.zst, and sidecars.
+        output_dir: PathBuf,
+        /// Index path. Defaults to archive-v2-blocks.index next to the input archive.
+        #[arg(long)]
+        index: Option<PathBuf>,
+        /// Optional shared zstd dictionary bytes used when the input blocks were compressed.
+        #[arg(long)]
+        dict: Option<PathBuf>,
+        /// Whole-file zstd compression level for archive-v2-blocks.wincode.zst.
+        #[arg(long, default_value_t = 1)]
+        level: i32,
+        /// Limit repack to the first N block records.
+        #[arg(long)]
+        max_blocks: Option<u64>,
+    },
+
+    /// Build per-block wincode access blobs for hot-block Archive V2.
+    BuildArchiveV2BlockAccess {
+        /// Input archive-v2-blocks.zstd or archive-v2-blocks.wincode file.
+        input: PathBuf,
+        /// Output directory for archive-v2-block-access.wincode and its index. Defaults beside input.
+        #[arg(long)]
+        output_dir: Option<PathBuf>,
+        /// Index path. Defaults to archive-v2-blocks.index next to the input archive.
+        #[arg(long)]
+        index: Option<PathBuf>,
+        /// Optional shared zstd dictionary bytes used when the input blocks were compressed.
+        #[arg(long)]
+        dict: Option<PathBuf>,
+        /// Limit build to the first N block records.
+        #[arg(long)]
+        max_blocks: Option<u64>,
+    },
+
+    /// Build a direct per-slot getBlock offset index for the hot-block and block-access blobs.
+    BuildArchiveV2GetBlockIndex {
+        /// Input archive-v2-blocks.zstd file.
+        input: PathBuf,
+        /// Hot-block index path. Defaults to archive-v2-blocks.index next to the input archive.
+        #[arg(long)]
+        index: Option<PathBuf>,
+        /// Block-access index path. Defaults to archive-v2-block-access.index next to the input archive.
+        #[arg(long)]
+        access_index: Option<PathBuf>,
+        /// Output index path. Defaults to archive-v2-get-block.index next to the input archive.
+        #[arg(long)]
+        output: Option<PathBuf>,
+        /// Epoch number. Defaults to the epoch inferred from the hot-block index.
+        #[arg(long)]
+        epoch: Option<u64>,
+    },
+
+    /// Benchmark raw hot-block Archive V2 reads. Supports raw and whole-file-zstd modes.
+    BenchArchiveV2HotBlocksRaw {
+        /// Input archive-v2-blocks.wincode or archive-v2-blocks.wincode.zst file.
+        input: PathBuf,
+        /// Index path. Defaults to archive-v2-blocks.index next to the input archive.
+        #[arg(long)]
+        index: Option<PathBuf>,
+        /// Treat input as a whole-file zstd stream.
+        #[arg(long)]
+        whole_zstd: bool,
+        /// Worker threads for raw random-read decode. Ignored for --whole-zstd.
+        #[arg(long, default_value_t = 4)]
+        workers: usize,
+        /// Number of consecutive index rows claimed per worker batch.
+        #[arg(long, default_value_t = 64)]
+        chunk_size: usize,
+    },
+
+    /// Dump compact USDC token-account events from CAR and hot-block Archive V2 sources.
+    DumpUsdcTokenEvents {
+        /// Input .car, archive-v2-blocks.zstd, or archive-v2-blocks.wincode.
+        input: PathBuf,
+        /// Output directory for events.bin, wallets.bin, token_accounts.bin, signatures.bin, and meta.txt.
+        output_dir: PathBuf,
+        /// Input storage format.
+        #[arg(long, value_enum, default_value_t = TokenEventInputFormat::Auto)]
+        format: TokenEventInputFormat,
+        /// Index path. Defaults to archive-v2-blocks.index next to the input archive.
+        #[arg(long)]
+        index: Option<PathBuf>,
+        /// Pubkey registry path. Defaults to registry.bin next to the input archive. For CAR inputs, pass the matching Blockzilla epoch registry.
+        #[arg(long)]
+        registry: Option<PathBuf>,
+        /// Signatures sidecar path. Defaults to signatures.bin next to the input archive.
+        #[arg(long)]
+        signatures: Option<PathBuf>,
+        /// Store wallet/token-account fields in local debug registries instead of Blockzilla registry ids.
+        #[arg(long)]
+        local_account_ids: bool,
+        /// Worker threads for hot block archives in Blockzilla account-id mode.
+        #[arg(long, default_value_t = 1)]
+        workers: usize,
+        /// Number of consecutive hot index rows claimed per worker batch.
+        #[arg(long, default_value_t = 512)]
+        chunk_size: usize,
+        /// Mint to track. Defaults to native USDC.
+        #[arg(long, default_value = "EPjFWdd5AufqSSqeM2qN1xzybapC8G4wEGGkZwyTDt1v")]
+        mint: String,
+        /// Stop after N blocks. Intended for smoke tests.
+        #[arg(long)]
+        max_blocks: Option<u64>,
+    },
+
+    /// Dump decoded token-program instructions from CAR and hot-block Archive V2 sources.
+    DumpTokenInstructions {
+        /// Input archive-v2-blocks.zstd or archive-v2-blocks.wincode.
+        input: PathBuf,
+        /// Output directory for token_instructions.bin and meta.txt.
+        output_dir: PathBuf,
+        /// Input storage format.
+        #[arg(long, value_enum, default_value_t = TokenEventInputFormat::Auto)]
+        format: TokenEventInputFormat,
+        /// Index path. Defaults to archive-v2-blocks.index next to the input archive.
+        #[arg(long)]
+        index: Option<PathBuf>,
+        /// Pubkey registry path. Defaults to registry.bin next to the input archive.
+        #[arg(long)]
+        registry: Option<PathBuf>,
+        /// Worker threads for hot block archives.
+        #[arg(long, default_value_t = 1)]
+        workers: usize,
+        /// Number of consecutive hot index rows claimed per worker batch.
+        #[arg(long, default_value_t = 512)]
+        chunk_size: usize,
+        /// Optional direct mint filter. Unchecked transfers do not carry a mint and will be skipped by this filter.
+        #[arg(long)]
+        mint: Option<String>,
+        /// Benchmark mode: scan and count token instructions but do not write token_instructions.bin.
+        #[arg(long)]
+        no_output: bool,
+        /// Benchmark mode: scan only outer instructions and skip metadata/inner instructions.
+        #[arg(long)]
+        outer_only: bool,
+        /// Stop after N blocks. Intended for smoke tests.
+        #[arg(long)]
+        max_blocks: Option<u64>,
+    },
+
+    /// Fast-scan hot-block Archive V2 files for Pump.fun/program transaction touches.
+    DumpPumpfunTransactions {
+        /// Input archive-v2-blocks.zstd or archive-v2-blocks.wincode.
+        input: PathBuf,
+        /// Output directory for program_touches.bin shards and meta.txt.
+        output_dir: PathBuf,
+        /// Input storage format.
+        #[arg(long, value_enum, default_value_t = TokenEventInputFormat::Auto)]
+        format: TokenEventInputFormat,
+        /// Index path. Defaults to archive-v2-blocks.index next to the input archive.
+        #[arg(long)]
+        index: Option<PathBuf>,
+        /// Pubkey registry path. Defaults to registry.bin next to the input archive.
+        #[arg(long)]
+        registry: Option<PathBuf>,
+        /// Program id to match. Defaults to the Pump.fun program. May be repeated.
+        #[arg(long = "program")]
+        programs: Vec<String>,
+        /// Worker threads for hot block archives.
+        #[arg(long, default_value_t = 1)]
+        workers: usize,
+        /// Number of consecutive hot index rows claimed per worker batch.
+        #[arg(long, default_value_t = 512)]
+        chunk_size: usize,
+        /// Benchmark mode: scan and count matches but do not write program_touches.bin.
+        #[arg(long)]
+        no_output: bool,
+        /// Benchmark mode: scan only outer instructions and skip metadata/inner instructions.
+        #[arg(long)]
+        outer_only: bool,
+        /// Stop after N blocks. Intended for smoke tests.
+        #[arg(long)]
+        max_blocks: Option<u64>,
+    },
+
+    /// Extract the largest hot-block Archive V2 block into a single framed wincode record.
+    ExtractLargestArchiveV2HotBlock {
+        /// Input archive-v2-blocks.zstd file.
+        input: PathBuf,
+        /// Output single-block .wincode file.
+        output: PathBuf,
+        /// Index path. Defaults to archive-v2-blocks.index next to the input archive.
+        #[arg(long)]
+        index: Option<PathBuf>,
+        /// Optional shared zstd dictionary bytes used when the blocks were compressed.
+        #[arg(long)]
+        dict: Option<PathBuf>,
+        /// Choose the largest block by transaction count instead of uncompressed byte length.
+        #[arg(long)]
+        by_tx_count: bool,
+    },
+
+    /// Benchmark decoding a single framed hot-block Archive V2 block record.
+    BenchArchiveV2HotBlock {
+        /// Input single-block .wincode file.
+        input: PathBuf,
+        /// Number of decode passes to run.
+        #[arg(long, default_value_t = 100)]
+        iterations: usize,
+    },
+
+    /// Reparse compact log streams in an Archive V2 file with the current log parser.
+    ReparseArchiveV2Logs {
+        /// Input archive-v2.wincode file.
+        input: PathBuf,
+        /// Output archive-v2.wincode file.
+        output: PathBuf,
+        /// Pubkey registry path. Defaults to registry.bin next to the input archive.
+        #[arg(long)]
+        registry: Option<PathBuf>,
+        /// Rebuild every log stream instead of only streams with raw/unknown log leaves.
+        #[arg(long)]
+        full: bool,
+    },
+
+    /// Reparse compact log streams in hot-block Archive V2 and rewrite zstd blocks.
+    RepackArchiveV2HotLogs {
+        /// Input archive-v2-blocks.zstd file.
+        input: PathBuf,
+        /// Output directory for archive-v2-blocks.zstd and archive-v2-blocks.index.
+        output_dir: PathBuf,
+        /// Index path. Defaults to archive-v2-blocks.index next to the input archive.
+        #[arg(long)]
+        index: Option<PathBuf>,
+        /// Optional shared zstd dictionary bytes used when the blocks were compressed.
+        #[arg(long)]
+        dict: Option<PathBuf>,
+        /// Pubkey registry path. Defaults to registry.bin next to the input archive.
+        #[arg(long)]
+        registry: Option<PathBuf>,
+        /// Limit repack to the first N block records.
+        #[arg(long)]
+        max_blocks: Option<u64>,
+        /// Zstd compression level for rewritten blocks.
+        #[arg(long, default_value_t = 1)]
+        level: i32,
+        /// Rebuild every log stream instead of only streams with raw/unknown log leaves.
+        #[arg(long)]
+        full: bool,
+    },
+
+    /// Analyze raw/unknown Archive V2 log leaves and normalized repetition patterns.
+    AnalyzeArchiveV2Logs {
+        /// Input archive-v2.wincode file.
+        input: PathBuf,
+        /// Pubkey registry path. Defaults to registry.bin next to the input archive when present.
+        #[arg(long)]
+        registry: Option<PathBuf>,
+        /// Limit analysis to the first N block records.
+        #[arg(long)]
+        max_blocks: Option<u64>,
+        /// Number of top rows to print per category.
+        #[arg(long, default_value_t = 50)]
+        top: usize,
+        /// Keep at most this many distinct keys per exact/pattern bucket.
+        #[arg(long, default_value_t = 200_000)]
+        max_keys: usize,
+    },
+
+    /// Analyze raw/unknown log leaves in hot-block Archive V2.
+    AnalyzeArchiveV2HotLogs {
+        /// Input archive-v2-blocks.zstd file.
+        input: PathBuf,
+        /// Index path. Defaults to archive-v2-blocks.index next to the input archive.
+        #[arg(long)]
+        index: Option<PathBuf>,
+        /// Optional shared zstd dictionary bytes used when the blocks were compressed.
+        #[arg(long)]
+        dict: Option<PathBuf>,
+        /// Pubkey registry path. Defaults to registry.bin next to the input archive when present.
+        #[arg(long)]
+        registry: Option<PathBuf>,
+        /// Limit analysis to the first N block records.
+        #[arg(long)]
+        max_blocks: Option<u64>,
+        /// Number of top rows to print per category.
+        #[arg(long, default_value_t = 50)]
+        top: usize,
+        /// Keep at most this many distinct keys per exact/pattern bucket.
+        #[arg(long, default_value_t = 200_000)]
+        max_keys: usize,
+    },
+
+    /// Analyze Archive V2 instruction data bytes and repetition patterns.
+    AnalyzeArchiveV2InstructionData {
+        /// Input archive-v2.wincode file.
+        input: PathBuf,
+        /// Pubkey registry path. Defaults to registry.bin next to the input archive when present.
+        #[arg(long)]
+        registry: Option<PathBuf>,
+        /// Limit analysis to the first N block records.
+        #[arg(long)]
+        max_blocks: Option<u64>,
+        /// Number of top rows to print per category.
+        #[arg(long, default_value_t = 50)]
+        top: usize,
+        /// Keep at most this many distinct exact/prefix/program keys per bucket.
+        #[arg(long, default_value_t = 300_000)]
+        max_keys: usize,
+        /// Number of leading instruction-data bytes to group as a prefix.
+        #[arg(long, default_value_t = 8)]
+        prefix_len: usize,
+    },
+
+    /// Analyze instruction data bytes and repetition patterns in hot-block Archive V2.
+    AnalyzeArchiveV2HotInstructionData {
+        /// Input archive-v2-blocks.zstd file.
+        input: PathBuf,
+        /// Index path. Defaults to archive-v2-blocks.index next to the input archive.
+        #[arg(long)]
+        index: Option<PathBuf>,
+        /// Optional shared zstd dictionary bytes used when the blocks were compressed.
+        #[arg(long)]
+        dict: Option<PathBuf>,
+        /// Pubkey registry path. Defaults to registry.bin next to the input archive when present.
+        #[arg(long)]
+        registry: Option<PathBuf>,
+        /// Limit analysis to the first N block records.
+        #[arg(long)]
+        max_blocks: Option<u64>,
+        /// Number of top rows to print per category.
+        #[arg(long, default_value_t = 50)]
+        top: usize,
+        /// Keep at most this many distinct exact/prefix/program keys per bucket.
+        #[arg(long, default_value_t = 300_000)]
+        max_keys: usize,
+        /// Number of leading instruction-data bytes to group as a prefix.
+        #[arg(long, default_value_t = 8)]
+        prefix_len: usize,
+    },
+
+    /// Inspect Archive V2 block-level POH/reward storage.
+    InspectArchiveV2 {
+        /// Input archive-v2.wincode file.
+        input: PathBuf,
+        /// Limit analysis to the first N block records.
+        #[arg(long)]
+        max_blocks: Option<u64>,
+        /// Number of largest space buckets to print.
+        #[arg(long, default_value_t = 24)]
+        top: usize,
+    },
+
+    /// Inspect whether CAR transaction/entry/reward nodes are already in block order.
+    InspectCarOrder {
+        /// Input CAR or CAR.ZST file.
+        input: PathBuf,
+        /// Limit analysis to the first N block records.
+        #[arg(long)]
+        max_blocks: Option<u64>,
+    },
+
+    /// List CAR blocks whose block node has no PoH entry refs.
+    FindPohGaps {
+        /// Input CAR or CAR.ZST file.
+        input: PathBuf,
+        /// Optional TSV output path. Defaults to stdout.
+        #[arg(long)]
+        output: Option<PathBuf>,
+    },
+
+    /// Independently decode one block's PoH entries/transactions straight from a CAR,
+    /// bypassing the Compact V2 compactor. For cross-checking verify-archive-v2-poh mismatches.
+    DumpCarPohEntry {
+        /// Input CAR or CAR.ZST file.
+        input: PathBuf,
+        /// Target slot.
+        #[arg(long)]
+        slot: u64,
+        /// PoH entry index within the block to print transaction signatures for.
+        #[arg(long)]
+        entry: Option<usize>,
+    },
+}
+
+/// Archive V3 candidate construction, taken from the former `ia-*` binaries.
+#[derive(Subcommand)]
+enum ArchiveV3Commands {
+    /// Convert a Compact V2 generation into an unpublished Archive V3 candidate.
+    Convert(blockzilla_archive_v3_convert::convert::ConvertOptions),
+    /// Validate the complete physical layout of an unpublished candidate.
+    ValidateCandidate { candidate_dir: PathBuf, epoch: u64 },
+    /// Build the fixed-width slot index for one target candidate.
+    BuildBasicIndexes { candidate_dir: PathBuf },
+    /// Build the account index, or look one account up by ordinal.
+    AccountIndex {
+        generation_dir: PathBuf,
+        /// Look up this account ordinal instead of building the index.
+        #[arg(long)]
+        find: Option<u32>,
+        #[arg(long, default_value_t = 128)]
+        sort_memory_mib: usize,
+    },
+    /// Build the program index.
+    ProgramIndex {
+        generation_dir: PathBuf,
+        #[arg(long)]
+        sort_memory_mib: Option<usize>,
+    },
+    /// Build the instruction-selector index.
+    SelectorIndex {
+        generation_dir: PathBuf,
+        #[arg(long)]
+        sort_memory_mib: Option<usize>,
+    },
+}
+
+fn run_archive_v3(command: ArchiveV3Commands) -> anyhow::Result<()> {
+    use anyhow::Context as _;
+    use blockzilla_archive_v3_convert::{
+        account_index::{AccountIndexBuildOptions, build_account_index, find_account},
+        basic_indexes::{BasicIndexBuildOptions, build_basic_indexes},
+        candidate::validate_complete_candidate,
+        program_index::{ProgramIndexBuildOptions, build_program_index},
+        selector_index::{SelectorIndexBuildOptions, build_selector_index},
+    };
+
+    fn sort_memory_bytes(mib: usize) -> anyhow::Result<usize> {
+        mib.checked_mul(1 << 20)
+            .context("sort-memory bytes overflow")
+    }
+
+    match command {
+        ArchiveV3Commands::Convert(options) => {
+            blockzilla_archive_v3_convert::convert::run(options)?;
+        }
+        ArchiveV3Commands::ValidateCandidate {
+            candidate_dir,
+            epoch,
+        } => {
+            let result = validate_complete_candidate(&candidate_dir, epoch)?;
+            println!("archive_id={}", result.archive_id.to_hex());
+            println!("required_objects={}", result.required_objects);
+            println!("physical_layout=valid");
+            println!("publication_ready=false");
+        }
+        ArchiveV3Commands::BuildBasicIndexes { candidate_dir } => {
+            let report = build_basic_indexes(&candidate_dir, BasicIndexBuildOptions)?;
+            println!("archive_id={}", report.archive_id.to_hex());
+            println!("blocks={}", report.blocks);
+            println!("transactions={}", report.transactions);
+            println!("slots_object_bytes={}", report.slots_object_bytes);
+        }
+        ArchiveV3Commands::AccountIndex {
+            generation_dir,
+            find,
+            sort_memory_mib,
+        } => {
+            if let Some(ordinal) = find {
+                return find_account(&generation_dir, ordinal);
+            }
+            let started = std::time::Instant::now();
+            let stats = build_account_index(
+                &generation_dir,
+                AccountIndexBuildOptions {
+                    sort_memory_bytes: sort_memory_bytes(sort_memory_mib)?,
+                },
+            )?;
+            println!("account index built");
+            println!("  distinct accounts   {}", stats.distinct_accounts);
+            println!("  postings            {}", stats.postings);
+            println!("  sort runs           {}", stats.sort_runs);
+            println!("  merge passes        {}", stats.merge_passes);
+            println!("  pages               {}", stats.pages);
+            println!("  pages bytes         {}", stats.page_bytes);
+            println!("  directory bytes     {}", stats.directory_bytes);
+            println!("  object bytes        {}", stats.object_bytes);
+            if stats.postings > 0 {
+                println!(
+                    "  bytes per posting   {:.2}",
+                    stats.page_bytes as f64 / stats.postings as f64
+                );
+            }
+            println!("  elapsed             {:?}", started.elapsed());
+        }
+        ArchiveV3Commands::ProgramIndex {
+            generation_dir,
+            sort_memory_mib,
+        } => {
+            let mut options = ProgramIndexBuildOptions::default();
+            if let Some(mib) = sort_memory_mib {
+                options.sort_memory_bytes = sort_memory_bytes(mib)?;
+            }
+            let started = std::time::Instant::now();
+            let report = build_program_index(&generation_dir, options)?;
+            println!("program index built");
+            println!("  postings            {}", report.postings);
+            println!("  object bytes        {}", report.object_bytes);
+            println!("  elapsed             {:?}", started.elapsed());
+        }
+        ArchiveV3Commands::SelectorIndex {
+            generation_dir,
+            sort_memory_mib,
+        } => {
+            let mut options = SelectorIndexBuildOptions::default();
+            if let Some(mib) = sort_memory_mib {
+                options.sort_memory_bytes = sort_memory_bytes(mib)?;
+            }
+            let started = std::time::Instant::now();
+            let report = build_selector_index(&generation_dir, options)?;
+            println!("selector index built");
+            println!("  blocks              {}", report.blocks);
+            println!("  transactions        {}", report.transactions);
+            println!(
+                "  instructions        {} top-level + {} CPI",
+                report.top_level_instructions, report.cpi_instructions
+            );
+            println!("  postings            {}", report.postings);
+            println!("  sort runs           {}", report.sort_runs);
+            println!("  merge passes        {}", report.merge_passes);
+            println!("  pages               {}", report.pages);
+            println!("  continuation pages  {}", report.continuation_pages);
+            println!("  object bytes        {}", report.object_bytes);
+            println!("  elapsed             {:?}", started.elapsed());
+        }
+    }
+    Ok(())
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, ValueEnum)]
+enum BlockTimeGapSourceArg {
+    Auto,
+    V3,
+    Archive,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, ValueEnum)]
+enum RegistryReprocessAccessContinuationStateArg {
+    #[value(name = "receipt-ready")]
+    ReceiptReady,
+    #[value(name = "core-or-partial-rebuild")]
+    CoreOrPartialRebuild,
+}
+
+impl From<RegistryReprocessAccessContinuationStateArg>
+    for archive_v2::registry_reprocess::RegistryReprocessAccessContinuationState
+{
+    fn from(value: RegistryReprocessAccessContinuationStateArg) -> Self {
+        match value {
+            RegistryReprocessAccessContinuationStateArg::ReceiptReady => Self::ReceiptReady,
+            RegistryReprocessAccessContinuationStateArg::CoreOrPartialRebuild => {
+                Self::CoreOrPartialRebuild
+            }
+        }
+    }
+}
+
+impl From<BlockTimeGapSourceArg> for block_time_gaps::BuildBlockTimeGapsSource {
+    fn from(value: BlockTimeGapSourceArg) -> Self {
+        match value {
+            BlockTimeGapSourceArg::Auto => Self::Auto,
+            BlockTimeGapSourceArg::V3 => Self::BlockhashIndexV3,
+            BlockTimeGapSourceArg::Archive => Self::ArchiveV2Hot,
+        }
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, ValueEnum)]
+pub(crate) enum TokenEventInputFormat {
+    Auto,
+    Car,
+    CarZstd,
+    HotZstd,
+    HotRaw,
+    HotRawZstd,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, ValueEnum)]
+pub(crate) enum CarBenchInputFormat {
+    Auto,
+    Car,
+    CarZstd,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, ValueEnum)]
+enum CarRegistryBenchStrategyArg {
+    ExactOld,
+    ExactStream,
+    PipelinedSingleMerge,
+    UniqueSpaceSaving,
+}
+
+impl From<CarRegistryBenchStrategyArg> for split_compact::CarRegistryBenchStrategy {
+    fn from(value: CarRegistryBenchStrategyArg) -> Self {
+        match value {
+            CarRegistryBenchStrategyArg::ExactOld => Self::ExactOld,
+            CarRegistryBenchStrategyArg::ExactStream => Self::ExactStream,
+            CarRegistryBenchStrategyArg::PipelinedSingleMerge => Self::PipelinedSingleMerge,
+            CarRegistryBenchStrategyArg::UniqueSpaceSaving => Self::UniqueSpaceSaving,
+        }
+    }
+}
+
+#[derive(Copy, Clone, Debug, ValueEnum)]
+enum LiveRegistrySourceArg {
+    /// Use live pubkey runs when present, then counts, then touches, otherwise scan live blocks.
+    Auto,
+    /// Require index/pubkey-counts.bin and build registry from it.
+    Counts,
+    /// Require index/pubkey-runs/*.bin and build registry by merging sorted count runs.
+    Runs,
+    /// Require index/pubkey-touches.bin and build registry by external sorting raw touches.
+    Touches,
+    /// Ignore live counts and scan live-no-registry-blocks.bin.
+    Scan,
+}
+
+impl From<LiveRegistrySourceArg> for archive_v2::LiveRegistrySource {
+    fn from(value: LiveRegistrySourceArg) -> Self {
+        match value {
+            LiveRegistrySourceArg::Auto => Self::Auto,
+            LiveRegistrySourceArg::Counts => Self::Counts,
+            LiveRegistrySourceArg::Runs => Self::Runs,
+            LiveRegistrySourceArg::Touches => Self::Touches,
+            LiveRegistrySourceArg::Scan => Self::Scan,
+        }
+    }
+}
+
+fn main() -> Result<()> {
+    tracing_subscriber::fmt().with_max_level(Level::INFO).init();
+
+    // The archive CLI already has a large generated Clap tree. Parse scheduler
+    // options only when that subcommand is selected so unrelated commands do
+    // not build another large option graph on their stack.
+    if let Some(args) = scheduler_invocation_args() {
+        let config = scheduler::SchedulerArgs::parse_from(args).into_config()?;
+        let runtime = tokio::runtime::Builder::new_multi_thread()
+            .enable_all()
+            .build()?;
+        return runtime.block_on(scheduler::run_scheduler(config));
+    }
+
+    let cli = Cli::parse();
+    let resume = cli.resume;
+
+    match cli.command {
+        Commands::ArchiveV3 { command } => run_archive_v3(command),
+        Commands::Scheduler => unreachable!("scheduler arguments are parsed before the main CLI"),
+        Commands::PreflightCar {
+            input,
+            epoch,
+            receipt,
+            io_buffer_mib,
+            progress_json,
+        } => car_preflight::preflight_car(car_preflight::CarPreflightConfig {
+            input: &input,
+            epoch,
+            receipt: &receipt,
+            io_buffer_bytes: usize::from(io_buffer_mib) * 1024 * 1024,
+            progress_json: progress_json.as_deref(),
+        })
+        .map(|_| ()),
+        Commands::AcquireCar {
+            url,
+            part,
+            canonical,
+            alternate,
+            epoch,
+            receipt,
+            progress_json,
+            expected_bytes,
+            aria2c,
+            max_attempts,
+            required_memory_mib,
+            io_buffer_mib,
+        } => car_acquire::acquire_car(car_acquire::CarAcquireConfig {
+            url: &url,
+            part: &part,
+            canonical: &canonical,
+            alternate: &alternate,
+            epoch,
+            receipt: &receipt,
+            progress_json: progress_json.as_deref(),
+            expected_bytes,
+            aria2c: &aria2c,
+            max_attempts,
+            required_memory_mib,
+            io_buffer_bytes: usize::from(io_buffer_mib) * 1024 * 1024,
+        }),
+        Commands::SeedPreviousBlockhashTails {
+            archive_root,
+            epochs,
+            discover,
+            start_epoch,
+            end_epoch,
+            receipt_dir,
+            dry_run,
+        } => {
+            let outcome = predecessor_tail_seed::seed_previous_blockhash_tails(
+                predecessor_tail_seed::SeedPreviousBlockhashTailsConfig {
+                    archive_root: &archive_root,
+                    epochs: &epochs,
+                    discover,
+                    start_epoch,
+                    end_epoch,
+                    receipt_dir: receipt_dir.as_deref(),
+                    dry_run,
+                },
+            )?;
+            if outcome.errors > 0 {
+                anyhow::bail!(
+                    "predecessor-tail discovery completed with {} failed candidate(s)",
+                    outcome.errors
+                );
+            }
+            Ok(())
+        }
+        Commands::BuildBlockTimeGaps {
+            input,
+            epoch,
+            source,
+            output,
+            progress_json,
+            force,
+        } => block_time_gaps::build_block_time_gaps(block_time_gaps::BuildBlockTimeGapsConfig {
+            input: &input,
+            epoch: Some(epoch),
+            output: output.as_deref(),
+            force,
+            source: source.into(),
+            progress_json: progress_json.as_deref(),
+        })
+        .map(|_| ()),
+        Commands::VerifyBlockTimeGaps { input, epoch } => {
+            block_time_gaps::verify_block_time_gaps(&input, epoch)
+        }
+        Commands::BuildBlockTimeGapIndex {
+            archive_root,
+            output,
+            start_epoch,
+            end_epoch,
+            minimum_interruption_secs,
+        } => block_time_gap_index::build_block_time_gap_index(
+            block_time_gap_index::BuildBlockTimeGapIndexConfig {
+                archive_root: &archive_root,
+                output: &output,
+                start_epoch,
+                end_epoch,
+                minimum_interruption_secs,
+            },
+        )
+        .map(|summary| {
+            info!(
+                "Block-time gap aggregate index: output={} indexed_epochs={} missing_epochs={} interruptions={} interruption_days={} source_sidecar_bytes={}",
+                summary.output.display(),
+                summary.indexed_epochs,
+                summary.missing_epochs,
+                summary.interruptions,
+                summary.interruption_days,
+                summary.source_sidecar_bytes,
+            );
+        }),
+        Commands::BuildArchiveV2 {
+            input,
+            output_dir,
+            previous_car,
+        } => archive_v2::build(&input, &output_dir, previous_car.as_deref(), resume),
+        Commands::BuildArchiveV2NoRegistry { input, output_dir } => {
+            archive_v2::build_no_registry(&input, &output_dir)
+        }
+        Commands::BuildArchiveV2NoRegistryFromUrl { url, output_dir } => {
+            archive_v2::build_no_registry_from_url(&url, &output_dir)
+        }
+        Commands::BuildArchiveV2Registries {
+            input,
+            output_dir,
+            external_blockhashes,
+            force,
+            workers,
+        } => archive_v2::build_registries(
+            &input,
+            &output_dir,
+            external_blockhashes.as_deref(),
+            force,
+            usize::from(workers),
+        ),
+        Commands::BenchCarRegistry {
+            input,
+            strategy,
+            initial_capacity,
+            heavy_hitter_capacity,
+            workers,
+            output_dir,
+            max_blocks,
+        } => split_compact::bench_car_registry(split_compact::CarRegistryBenchConfig {
+            input: &input,
+            output_dir: output_dir.as_deref(),
+            strategy: strategy.into(),
+            initial_capacity,
+            heavy_hitter_capacity,
+            workers: usize::from(workers),
+            max_blocks,
+        }),
+        Commands::BuildArchiveV2RegistryIndex {
+            registry,
+            output,
+            force,
+        } => archive_v2::build_registry_index(&registry, output.as_deref(), force),
+        Commands::PrepareArchiveV2LiveRegistry {
+            capture_dir,
+            output_dir,
+        } => archive_v2::prepare_live_registry_from_runs(&capture_dir, &output_dir, resume),
+        Commands::FinalizeArchiveV2FirstSeen {
+            output_dir,
+            finalizer_lock,
+        } => first_seen_finalization::finalize_first_seen_scan(
+            &output_dir,
+            finalizer_lock.as_deref(),
+        ),
+        Commands::ReprocessArchiveV2Registry {
+            source_dir,
+            target_dir,
+            epoch,
+            threads,
+            sort_memory_mib,
+            level,
+            attempt_id,
+            staging_dir,
+            wire_profile,
+            wire_profile_authority_receipt,
+        } => archive_v2::registry_reprocess::reprocess_first_seen_registry(
+            &archive_v2::registry_reprocess::RegistryReprocessOptions {
+                source_dir,
+                target_dir,
+                epoch,
+                threads: usize::from(threads),
+                sort_memory_mib: usize::try_from(sort_memory_mib)
+                    .expect("bounded u32 sort memory fits usize"),
+                level,
+                attempt_id,
+                staging_dir,
+                wire_profile,
+                wire_profile_authority_receipt,
+            },
+        )
+        .and_then(|result| {
+            println!("{}", serde_json::to_string(&result)?);
+            Ok(())
+        }),
+        Commands::CompleteArchiveV2RegistryAccess {
+            source_dir,
+            staging_dir,
+            target_dir,
+            epoch,
+            attempt_id,
+            handoff_sha256,
+            expected_continuation_state,
+            wire_profile,
+            wire_profile_authority_receipt,
+        } => archive_v2::registry_reprocess::complete_first_seen_registry_access(
+            &archive_v2::registry_reprocess::RegistryReprocessAccessOptions {
+                source_dir,
+                staging_dir,
+                target_dir,
+                epoch,
+                attempt_id,
+                handoff_sha256,
+                expected_continuation_state: expected_continuation_state.into(),
+                wire_profile,
+                wire_profile_authority_receipt,
+            },
+        )
+        .and_then(|receipt| {
+            println!("{}", serde_json::to_string(&receipt)?);
+            Ok(())
+        }),
+        Commands::BuildBlockhashRegistry {
+            input,
+            output_dir,
+            external_blockhashes,
+            force,
+        } => archive_v2::build_blockhash_registry(
+            &input,
+            &output_dir,
+            external_blockhashes.as_deref(),
+            force,
+        ),
+        Commands::OptimizeArchiveV2NoRegistry {
+            input,
+            output_dir,
+            previous_car,
+        } => archive_v2::optimize_no_registry(&input, &output_dir, previous_car.as_deref(), resume),
+        Commands::BenchArchiveV2 { input, iterations } => archive_v2::bench(&input, iterations),
+        Commands::BenchArchiveV2NoRegistry { input, iterations } => {
+            archive_v2::bench_no_registry(&input, iterations)
+        }
+        Commands::BuildArchiveV2Index { input, output } => {
+            archive_v2::build_index(&input, output.as_deref())
+        }
+        Commands::BenchArchiveV2Indexed {
+            input,
+            index,
+            workers,
+            chunk_size,
+        } => archive_v2::bench_indexed(&input, index.as_deref(), workers, chunk_size),
+        Commands::RepackArchiveV2ZstdBlocks {
+            input,
+            output_dir,
+            level,
+            dict,
+            max_blocks,
+        } => {
+            archive_v2::repack_zstd_blocks(&input, &output_dir, level, dict.as_deref(), max_blocks)
+        }
+        Commands::BuildArchiveV2HotBlocks {
+            input,
+            output_dir,
+            previous_car,
+            registry_dir,
+            external_blockhashes,
+            level,
+            max_blocks,
+            pre_hot,
+            keep_pre_hot,
+            pre_hot_dir,
+            pre_hot_registry_capacity,
+            reuse_pre_hot,
+            first_seen_registry,
+            first_seen_seed_registry,
+            first_seen_seed_keys,
+            first_seen_registry_capacity,
+            decode_workers,
+            car_zstd_prefetch_mib,
+            first_seen_scan_only,
+            first_seen_finalizer_lock,
+            no_access,
+        } => {
+            if first_seen_registry {
+                let car_zstd_prefetch_mib = car_zstd_prefetch_mib.map_or_else(
+                    || {
+                        if input
+                            .file_name()
+                            .and_then(|name| name.to_str())
+                            .is_some_and(|name| name.to_ascii_lowercase().ends_with(".car.zst")) { 4 } else { 0 }
+                    },
+                    usize::from,
+                );
+                let _memory_lock = if first_seen_scan_only {
+                    first_seen_finalization::acquire_scan_lock(
+                        first_seen_finalizer_lock.as_deref(),
+                    )?
+                } else {
+                    first_seen_finalization::acquire_inline_build_lock(
+                        first_seen_finalizer_lock.as_deref(),
+                    )?
+                };
+                archive_v2::build_hot_blocks_first_seen(
+                    &input,
+                    &output_dir,
+                    previous_car.as_deref(),
+                    external_blockhashes.as_deref(),
+                    level,
+                    max_blocks,
+                    resume,
+                    !no_access,
+                    first_seen_seed_registry.as_deref(),
+                    first_seen_seed_keys,
+                    first_seen_registry_capacity,
+                    usize::from(decode_workers),
+                    car_zstd_prefetch_mib,
+                    first_seen_scan_only,
+                )
+            } else if pre_hot {
+                archive_v2::build_hot_blocks_pre_hot(
+                    &input,
+                    &output_dir,
+                    previous_car.as_deref(),
+                    registry_dir.as_deref(),
+                    external_blockhashes.as_deref(),
+                    level,
+                    max_blocks,
+                    resume,
+                    !no_access,
+                    keep_pre_hot,
+                    pre_hot_dir.as_deref(),
+                    pre_hot_registry_capacity,
+                    reuse_pre_hot,
+                    usize::from(decode_workers),
+                )
+            } else {
+                archive_v2::build_hot_blocks(
+                    &input,
+                    &output_dir,
+                    previous_car.as_deref(),
+                    registry_dir.as_deref(),
+                    external_blockhashes.as_deref(),
+                    level,
+                    max_blocks,
+                    resume,
+                    !no_access,
+                    usize::from(decode_workers),
+                )
+            }
+        }
+        Commands::BuildArchiveV2HotBlocksFromLive {
+            capture_dir,
+            output_dir,
+            level,
+            max_blocks,
+            registry_source,
+        } => archive_v2::build_hot_blocks_from_live_capture(
+            &capture_dir,
+            &output_dir,
+            level,
+            max_blocks,
+            resume,
+            registry_source.into(),
+        ),
+        Commands::MaterializeArchiveV2LiveRepair {
+            repair_dir,
+            output_dir,
+            max_rpc_json_mib,
+            checkpoint_every,
+            pubkey_run_max_keys,
+            max_blocks,
+        } => archive_v2::repair::materialize_live_repair(
+            &repair_dir,
+            &output_dir,
+            archive_v2::repair::RepairMaterializeOptions {
+                max_rpc_json_bytes: u64::from(max_rpc_json_mib) << 20,
+                checkpoint_every,
+                pubkey_run_max_keys: pubkey_run_max_keys as usize,
+                max_blocks,
+            },
+        ),
+        Commands::BuildArchiveV2DegradedHotBlocksFromRepair {
+            materialized_dir,
+            output_dir,
+            level,
+            max_blocks,
+        } => archive_v2::build_degraded_hot_blocks_from_repair(
+            &materialized_dir,
+            &output_dir,
+            level,
+            max_blocks,
+        ),
+        Commands::BuildArchiveV2RepairBlockAccess {
+            repair_dir,
+            hot_output,
+        } => archive_v2::repair::build_repair_block_access(&repair_dir, &hot_output),
+        Commands::BenchArchiveV2HotBlocks {
+            input,
+            index,
+            dict,
+            workers,
+            chunk_size,
+        } => archive_v2::bench_zstd_blocks(
+            &input,
+            index.as_deref(),
+            dict.as_deref(),
+            workers,
+            chunk_size,
+        ),
+        Commands::BenchCarArchive {
+            input,
+            format,
+            max_blocks,
+        } => archive_v2::bench_car_archive(&input, format, max_blocks),
+        Commands::BenchArchiveV2HotBlockAccounts {
+            input,
+            index,
+            registry,
+            target,
+            include_metadata,
+            workers,
+            chunk_size,
+        } => archive_v2::bench_hot_block_accounts(
+            &input,
+            index.as_deref(),
+            registry.as_deref(),
+            target.as_deref(),
+            include_metadata,
+            workers,
+            chunk_size,
+        ),
+        Commands::RepackArchiveV2HotBlocksRaw {
+            input,
+            output_dir,
+            index,
+            dict,
+            level,
+            max_blocks,
+        } => archive_v2::repack_hot_blocks_raw(
+            &input,
+            &output_dir,
+            index.as_deref(),
+            dict.as_deref(),
+            level,
+            max_blocks,
+        ),
+        Commands::BuildArchiveV2BlockAccess {
+            input,
+            output_dir,
+            index,
+            dict,
+            max_blocks,
+        } => archive_v2::build_block_access_sidecar(
+            &input,
+            output_dir.as_deref(),
+            index.as_deref(),
+            dict.as_deref(),
+            max_blocks,
+        ),
+        Commands::BuildArchiveV2GetBlockIndex {
+            input,
+            index,
+            access_index,
+            output,
+            epoch,
+        } => archive_v2::build_get_block_index(
+            &input,
+            index.as_deref(),
+            access_index.as_deref(),
+            output.as_deref(),
+            epoch,
+        ),
+        Commands::BenchArchiveV2HotBlocksRaw {
+            input,
+            index,
+            whole_zstd,
+            workers,
+            chunk_size,
+        } => archive_v2::bench_raw_hot_blocks(
+            &input,
+            index.as_deref(),
+            whole_zstd,
+            workers,
+            chunk_size,
+        ),
+        Commands::DumpUsdcTokenEvents {
+            input,
+            output_dir,
+            format,
+            index,
+            registry,
+            signatures,
+            local_account_ids,
+            workers,
+            chunk_size,
+            mint,
+            max_blocks,
+        } => token_events::dump_usdc_token_events(token_events::TokenEventDumpConfig {
+            input,
+            output_dir,
+            format,
+            index,
+            registry,
+            signatures,
+            blockzilla_account_ids: !local_account_ids,
+            workers,
+            chunk_size,
+            mint,
+            max_blocks,
+        }),
+        Commands::DumpTokenInstructions {
+            input,
+            output_dir,
+            format,
+            index,
+            registry,
+            workers,
+            chunk_size,
+            mint,
+            no_output,
+            outer_only,
+            max_blocks,
+        } => token_events::dump_token_instructions(token_events::TokenInstructionDumpConfig {
+            input,
+            output_dir,
+            format,
+            index,
+            registry,
+            workers,
+            chunk_size,
+            mint_filter: mint,
+            no_output,
+            outer_only,
+            max_blocks,
+        }),
+        Commands::DumpPumpfunTransactions {
+            input,
+            output_dir,
+            format,
+            index,
+            registry,
+            programs,
+            workers,
+            chunk_size,
+            no_output,
+            outer_only,
+            max_blocks,
+        } => token_events::dump_pumpfun_transactions(token_events::ProgramTransactionDumpConfig {
+            input,
+            output_dir,
+            format,
+            index,
+            registry,
+            programs,
+            workers,
+            chunk_size,
+            no_output,
+            outer_only,
+            max_blocks,
+        }),
+        Commands::ExtractLargestArchiveV2HotBlock {
+            input,
+            output,
+            index,
+            dict,
+            by_tx_count,
+        } => archive_v2::extract_largest_zstd_block(
+            &input,
+            index.as_deref(),
+            dict.as_deref(),
+            &output,
+            by_tx_count,
+        ),
+        Commands::BenchArchiveV2HotBlock { input, iterations } => {
+            archive_v2::bench_single_block(&input, iterations)
+        }
+        Commands::ReparseArchiveV2Logs {
+            input,
+            output,
+            registry,
+            full,
+        } => archive_v2::reparse_logs(
+            &input,
+            &output,
+            registry.as_deref(),
+            if full {
+                archive_v2::ArchiveV2LogReparseMode::Full
+            } else {
+                archive_v2::ArchiveV2LogReparseMode::Targeted
+            },
+        ),
+        Commands::RepackArchiveV2HotLogs {
+            input,
+            output_dir,
+            index,
+            dict,
+            registry,
+            max_blocks,
+            level,
+            full,
+        } => archive_v2::repack_hot_logs(
+            &input,
+            &output_dir,
+            index.as_deref(),
+            dict.as_deref(),
+            registry.as_deref(),
+            max_blocks,
+            level,
+            if full {
+                archive_v2::ArchiveV2LogReparseMode::Full
+            } else {
+                archive_v2::ArchiveV2LogReparseMode::Targeted
+            },
+        ),
+        Commands::AnalyzeArchiveV2Logs {
+            input,
+            registry,
+            max_blocks,
+            top,
+            max_keys,
+        } => archive_v2::analyze_logs(&input, registry.as_deref(), max_blocks, top, max_keys),
+        Commands::AnalyzeArchiveV2HotLogs {
+            input,
+            index,
+            dict,
+            registry,
+            max_blocks,
+            top,
+            max_keys,
+        } => archive_v2::analyze_hot_logs(
+            &input,
+            index.as_deref(),
+            dict.as_deref(),
+            registry.as_deref(),
+            max_blocks,
+            top,
+            max_keys,
+        ),
+        Commands::AnalyzeArchiveV2InstructionData {
+            input,
+            registry,
+            max_blocks,
+            top,
+            max_keys,
+            prefix_len,
+        } => archive_v2::analyze_instruction_data(
+            &input,
+            registry.as_deref(),
+            max_blocks,
+            top,
+            max_keys,
+            prefix_len,
+        ),
+        Commands::AnalyzeArchiveV2HotInstructionData {
+            input,
+            index,
+            dict,
+            registry,
+            max_blocks,
+            top,
+            max_keys,
+            prefix_len,
+        } => archive_v2::analyze_hot_instruction_data(
+            &input,
+            index.as_deref(),
+            dict.as_deref(),
+            registry.as_deref(),
+            max_blocks,
+            top,
+            max_keys,
+            prefix_len,
+        ),
+        Commands::InspectArchiveV2 {
+            input,
+            max_blocks,
+            top,
+        } => archive_v2::inspect(&input, max_blocks, top),
+        Commands::InspectCarOrder { input, max_blocks } => {
+            archive_v2::inspect_car_order(&input, max_blocks)
+        }
+        Commands::FindPohGaps { input, output } => {
+            archive_v2::find_poh_gaps(&input, output.as_deref())
+        }
+        Commands::DumpCarPohEntry { input, slot, entry } => {
+            car_debug::dump_car_poh_entry(&input, slot, entry)
+        }
+        Commands::VerifyArchiveV2Poh {
+            archive_dir,
+            threads,
+            max_blocks,
+        } => archive_verify::verify_archive_v2_poh(&archive_dir, threads, max_blocks).map(|report| {
+            println!("{}", serde_json::to_string(&report).expect("serialize PoH report"));
+        }),
+        Commands::MigratePohSignatureCounts { archive_dir, threads } => {
+            archive_verify::migrate_poh_signature_counts(&archive_dir, threads).map(|report| {
+                println!(
+                    "{}",
+                    serde_json::to_string(&report).expect("serialize PoH migration report")
+                );
+            })
+        }
+        Commands::RepairPohOrphanTail {
+            archive_dir,
+            epoch,
+            expected_indexed_blocks,
+            expected_trailing_records,
+            expected_first_trailing_block_id,
+            expected_first_trailing_slot,
+            expected_last_trailing_slot,
+            expected_old_poh_sha256,
+            expected_predecessor_blockhash,
+            threads,
+        } => archive_verify::repair_poh_orphan_tail(
+            &archive_verify::PohOrphanTailRepairOptions {
+                archive_dir,
+                epoch,
+                expected_indexed_blocks,
+                expected_trailing_records,
+                expected_first_trailing_block_id,
+                expected_first_trailing_slot,
+                expected_last_trailing_slot,
+                expected_old_poh_sha256,
+                expected_predecessor_blockhash,
+                threads,
+            },
+        )
+        .map(|report| {
+            println!(
+                "{}",
+                serde_json::to_string(&report).expect("serialize PoH orphan-tail repair report")
+            );
+        }),
+        #[cfg(feature = "benchmark-tools")]
+        Commands::BenchArchiveV2PohCore {
+            entries,
+            hashes_per_entry,
+            signatures_per_entry,
+            iterations,
+            threads,
+        } => archive_verify::bench_poh_core(
+            entries,
+            hashes_per_entry,
+            signatures_per_entry,
+            iterations,
+            threads,
+        )
+        .map(|report| {
+            println!(
+                "{}",
+                serde_json::to_string(&report).expect("serialize PoH benchmark report")
+            );
+        }),
+    }
+}
+
+fn scheduler_invocation_args() -> Option<Vec<std::ffi::OsString>> {
+    let mut args = std::env::args_os();
+    args.next()?;
+    (args.next()?.as_os_str() == std::ffi::OsStr::new("scheduler")).then(|| {
+        std::iter::once(std::ffi::OsString::from("blockzilla scheduler"))
+            .chain(args)
+            .collect()
+    })
+}
+
+pub(crate) fn file_nonempty(path: &Path) -> bool {
+    std::fs::metadata(path)
+        .map(|m| m.is_file() && m.len() > 0)
+        .unwrap_or(false)
+}
+
+pub(crate) fn format_duration(seconds: f64) -> String {
+    let total_secs = seconds as u64;
+
+    let days = total_secs / 86400;
+    let hours = (total_secs % 86400) / 3600;
+    let minutes = (total_secs % 3600) / 60;
+    let secs = total_secs % 60;
+
+    if days > 0 {
+        format!("{}d {}h {}m {}s", days, hours, minutes, secs)
+    } else if hours > 0 {
+        format!("{}h {}m {}s", hours, minutes, secs)
+    } else if minutes > 0 {
+        format!("{}m {}s", minutes, secs)
+    } else {
+        format!("{}s", secs)
+    }
+}
+
+pub(crate) struct ProgressTracker {
+    start_time: Instant,
+    last_report: Instant,
+    blocks: u64,
+    txs: u64,
+    report_interval: Duration,
+    estimated_total_blocks: u64,
+    total_blocks_is_exact: bool,
+    first_slot: Option<u64>,
+    last_slot: Option<u64>,
+    blocks_since_report: u64,
+    txs_since_report: u64,
+    input_bytes_done: Option<u64>,
+    input_bytes_at_last_report: u64,
+    input_mib_per_sec: Option<f64>,
+    phase: &'static str,
+    progress_path: Option<PathBuf>,
+    /// Pipe back to a spawning scheduler, set only for job kinds piloting the disk-free
+    /// progress channel (currently PoH migration only -- see `BLOCKZILLA_PROGRESS_FD`).
+    /// Takes over from `progress_path` entirely when present: every snapshot goes to this fd
+    /// instead of a file, since the point is to stop competing with the job's own sequential
+    /// disk I/O for head movement. The scheduler owns crash/restart recovery by re-deriving
+    /// state from what the job already produced, not from a durable progress checkpoint.
+    progress_fd: Option<File>,
+}
+
+impl ProgressTracker {
+    pub(crate) fn new(phase: &'static str) -> Self {
+        let now = Instant::now();
+        let progress_fd = std::env::var("BLOCKZILLA_PROGRESS_FD")
+            .ok()
+            .and_then(|value| value.parse::<RawFd>().ok())
+            // SAFETY: the scheduler opens this fd across the exec boundary specifically for
+            // this process to own; it is never inherited by anything else and never reused.
+            .map(|fd| unsafe { File::from_raw_fd(fd) });
+        Self {
+            start_time: now,
+            last_report: now,
+            blocks: 0,
+            txs: 0,
+            report_interval: Duration::from_secs(PROGRESS_REPORT_INTERVAL_SECS),
+            estimated_total_blocks: SLOTS_PER_EPOCH,
+            total_blocks_is_exact: false,
+            first_slot: None,
+            last_slot: None,
+            blocks_since_report: 0,
+            txs_since_report: 0,
+            input_bytes_done: None,
+            input_bytes_at_last_report: 0,
+            input_mib_per_sec: None,
+            phase,
+            progress_path: (progress_fd.is_none())
+                .then(|| std::env::var_os("BLOCKZILLA_PROGRESS_FILE").map(PathBuf::from))
+                .flatten(),
+            progress_fd,
+        }
+    }
+
+    #[inline(always)]
+    pub(crate) fn update_slot(&mut self, slot: u64) {
+        if self.first_slot.is_none() {
+            self.first_slot = Some(slot);
+        }
+        self.last_slot = Some(slot);
+    }
+
+    /// Overrides the `SLOTS_PER_EPOCH` default with an exact known unit count
+    /// (e.g. an index's row count), for phases that iterate a fixed, already-known
+    /// set of items rather than scanning an epoch of unknown density.
+    #[inline(always)]
+    pub(crate) fn set_estimated_total_blocks(&mut self, total: u64) {
+        self.estimated_total_blocks = total;
+        self.total_blocks_is_exact = true;
+    }
+
+    fn progress_metrics(
+        &self,
+        slots_processed: Option<u64>,
+        blocks_per_sec: f64,
+    ) -> (Option<f64>, Option<f64>) {
+        let completed_units = if self.total_blocks_is_exact {
+            Some(self.blocks)
+        } else {
+            slots_processed
+        };
+        let progress_pct = completed_units.map(|completed| {
+            if self.estimated_total_blocks == 0 {
+                100.0
+            } else {
+                (completed as f64 / self.estimated_total_blocks as f64 * 100.0).min(100.0)
+            }
+        });
+        let eta_secs = completed_units.and_then(|completed| {
+            let remaining = self.estimated_total_blocks.saturating_sub(completed);
+            if remaining == 0 {
+                return Some(0.0);
+            }
+            if !blocks_per_sec.is_finite() || blocks_per_sec <= 0.0 {
+                return None;
+            }
+            if self.total_blocks_is_exact {
+                return Some(remaining as f64 / blocks_per_sec);
+            }
+            if completed == 0 {
+                return None;
+            }
+            let blocks_per_unit = self.blocks as f64 / completed as f64;
+            let eta = remaining as f64 * blocks_per_unit / blocks_per_sec;
+            (eta.is_finite() && eta >= 0.0).then_some(eta)
+        });
+        (progress_pct, eta_secs)
+    }
+
+    /// Records cumulative useful input bytes consumed by this phase. This is
+    /// logical payload progress, not physical device I/O; the scheduler uses
+    /// it to compare aggregate useful throughput across lane counts.
+    #[inline(always)]
+    pub(crate) fn update_input_bytes(&mut self, cumulative_bytes: u64) {
+        self.input_bytes_done = Some(
+            self.input_bytes_done
+                .map_or(cumulative_bytes, |current| current.max(cumulative_bytes)),
+        );
+    }
+
+    #[inline(always)]
+    pub(crate) fn update(&mut self, blocks_delta: u64, txs_delta: u64) {
+        self.blocks += blocks_delta;
+        self.txs += txs_delta;
+        self.blocks_since_report += blocks_delta;
+        self.txs_since_report += txs_delta;
+
+        let now = Instant::now();
+        if now.duration_since(self.last_report) >= self.report_interval {
+            let interval_secs = now
+                .duration_since(self.last_report)
+                .as_secs_f64()
+                .max(0.001);
+            self.input_mib_per_sec = self.input_bytes_done.and_then(|bytes| {
+                let delta = bytes.checked_sub(self.input_bytes_at_last_report)?;
+                let rate = delta as f64 / (1024.0 * 1024.0) / interval_secs;
+                rate.is_finite().then_some(rate)
+            });
+            self.input_bytes_at_last_report = self.input_bytes_done.unwrap_or_default();
+            self.report();
+            self.last_report = now;
+            self.blocks_since_report = 0;
+            self.txs_since_report = 0;
+        }
+    }
+
+    fn report(&mut self) {
+        let elapsed = self.start_time.elapsed().as_secs_f64();
+        if elapsed < 0.001 {
+            return;
+        }
+
+        self.write_progress_snapshot("running");
+
+        let blocks_per_sec = self.blocks as f64 / elapsed;
+        let txs_per_sec = self.txs as f64 / elapsed;
+        let slots_processed = self
+            .first_slot
+            .zip(self.last_slot)
+            .map(|(first, last)| last.saturating_sub(first));
+        let (progress_pct, eta_secs) = self.progress_metrics(slots_processed, blocks_per_sec);
+        let slot_summary = self
+            .first_slot
+            .zip(self.last_slot)
+            .map_or_else(String::new, |(first, last)| {
+                format!(" | slots={first}-{last} ({})", last.saturating_sub(first))
+            });
+
+        if let Some(progress_pct) = progress_pct {
+            if let Some(eta_secs) = eta_secs {
+                info!(
+                    "[{}] progress={:.1}% ETA={} | blocks={} ({:.0} blk/s) txs={} ({:.0} tx/s){} | elapsed={}",
+                    self.phase,
+                    progress_pct,
+                    format_duration(eta_secs),
+                    self.blocks,
+                    blocks_per_sec,
+                    self.txs,
+                    txs_per_sec,
+                    slot_summary,
+                    format_duration(elapsed)
+                );
+            } else {
+                info!(
+                    "[{}] progress={:.1}% | blocks={} ({:.0} blk/s) txs={} ({:.0} tx/s){} | elapsed={}",
+                    self.phase,
+                    progress_pct,
+                    self.blocks,
+                    blocks_per_sec,
+                    self.txs,
+                    txs_per_sec,
+                    slot_summary,
+                    format_duration(elapsed)
+                );
+            }
+        } else {
+            info!(
+                "[{}] blocks={} ({:.0} blk/s) txs={} ({:.0} tx/s) | elapsed={}",
+                self.phase,
+                self.blocks,
+                blocks_per_sec,
+                self.txs,
+                txs_per_sec,
+                format_duration(elapsed)
+            );
+        }
+    }
+
+    pub(crate) fn final_report(&mut self) {
+        let elapsed = self.start_time.elapsed().as_secs_f64();
+        let blocks_per_sec = self.blocks as f64 / elapsed;
+        let txs_per_sec = self.txs as f64 / elapsed;
+
+        self.write_progress_snapshot("complete");
+
+        let mut msg = format!(
+            "[{}] Complete: blocks={} txs={} | {:.0} blk/s, {:.0} tx/s | elapsed={}",
+            self.phase,
+            self.blocks,
+            self.txs,
+            blocks_per_sec,
+            txs_per_sec,
+            format_duration(elapsed)
+        );
+
+        if let (Some(first), Some(last)) = (self.first_slot, self.last_slot) {
+            let slots_processed = last.saturating_sub(first);
+            msg.push_str(&format!(
+                " | slots={}-{} ({})",
+                first, last, slots_processed
+            ));
+        }
+
+        info!("{}", msg);
+    }
+
+    fn write_progress_snapshot(&mut self, state: &str) {
+        if self.progress_fd.is_none() && self.progress_path.is_none() {
+            return;
+        }
+        let elapsed_secs = self.start_time.elapsed().as_secs_f64().max(0.001);
+        let blocks_per_sec = self.blocks as f64 / elapsed_secs;
+        let txs_per_sec = self.txs as f64 / elapsed_secs;
+        let slots_processed = self
+            .first_slot
+            .zip(self.last_slot)
+            .map(|(first, last)| last.saturating_sub(first));
+        let (progress_pct, eta_secs) = self.progress_metrics(slots_processed, blocks_per_sec);
+        let updated_unix_secs = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .map_or(0, |duration| duration.as_secs());
+        let mut json = String::with_capacity(512);
+        let _ = writeln!(
+            json,
+            "{{\"schema_version\":1,\"pid\":{},\"phase\":\"{}\",\"state\":\"{}\",\"blocks_done\":{},\"transactions_done\":{},\"blocks_total_estimate\":{},\"first_slot\":{},\"last_slot\":{},\"slots_processed\":{},\"elapsed_secs\":{:.3},\"blocks_per_sec\":{:.3},\"transactions_per_sec\":{:.3},\"input_bytes_done\":{},\"input_mib_per_sec\":{},\"progress_pct\":{},\"eta_secs\":{},\"updated_unix_secs\":{}}}",
+            std::process::id(),
+            self.phase,
+            state,
+            self.blocks,
+            self.txs,
+            self.estimated_total_blocks,
+            json_u64(self.first_slot),
+            json_u64(self.last_slot),
+            json_u64(slots_processed),
+            elapsed_secs,
+            blocks_per_sec,
+            txs_per_sec,
+            json_u64(self.input_bytes_done),
+            json_f64(self.input_mib_per_sec),
+            json_f64(progress_pct),
+            json_f64(eta_secs),
+            updated_unix_secs,
+        );
+
+        if let Some(fd) = self.progress_fd.as_mut() {
+            // The scheduler makes this descriptor non-blocking before exec. Keep each snapshot
+            // at or below this pipe's atomic-write bound, then make exactly one write attempt:
+            // a full pipe drops telemetry instead of ever stalling the migration's real work.
+            let pipe_buf = unsafe { libc::fpathconf(fd.as_raw_fd(), libc::_PC_PIPE_BUF) };
+            let pipe_buf = usize::try_from(pipe_buf).unwrap_or(512);
+            if json.len() <= pipe_buf {
+                match fd.write(json.as_bytes()) {
+                    Ok(written) if written == json.len() => {}
+                    Ok(_) => {}
+                    Err(error) if error.kind() == std::io::ErrorKind::WouldBlock => {}
+                    Err(_) => {}
+                }
+            }
+            return;
+        }
+        let Some(path) = self.progress_path.as_deref() else {
+            return;
+        };
+        if let Some(parent) = path.parent()
+            && std::fs::create_dir_all(parent).is_err()
+        {
+            return;
+        }
+        let name = path
+            .file_name()
+            .and_then(|name| name.to_str())
+            .unwrap_or("progress.json");
+        let temp_path = path.with_file_name(format!(".{name}.{}.tmp", std::process::id()));
+        if std::fs::write(&temp_path, json).is_ok() {
+            let _ = std::fs::rename(temp_path, path);
+        }
+    }
+}
+
+fn json_u64(value: Option<u64>) -> String {
+    value.map_or_else(|| "null".to_string(), |value| value.to_string())
+}
+
+fn json_f64(value: Option<f64>) -> String {
+    value
+        .filter(|value| value.is_finite())
+        .map_or_else(|| "null".to_string(), |value| format!("{value:.3}"))
+}
+
+#[cfg(test)]
+mod cli_tests {
+    #[test]
+    fn archive_v3_convert_command_parses() {
+        use clap::Parser;
+
+        let cli = super::Cli::try_parse_from([
+            "blockzilla",
+            "archive-v3",
+            "convert",
+            "v2-generation",
+            "v3-candidate",
+            "--workers",
+            "2",
+            "--pipeline-memory-limit-mib",
+            "128",
+        ])
+        .unwrap();
+        match cli.command {
+            super::Commands::ArchiveV3 {
+                command: super::ArchiveV3Commands::Convert(options),
+            } => {
+                assert_eq!(options.source, std::path::Path::new("v2-generation"));
+                assert_eq!(options.output, std::path::Path::new("v3-candidate"));
+                assert_eq!(options.workers, 2);
+                assert_eq!(options.pipeline_memory_limit_mib, 128);
+            }
+            _ => panic!("unexpected command"),
+        }
+    }
+
+    use super::*;
+
+    #[test]
+    fn poh_orphan_tail_repair_cli_requires_exact_incident_coordinates() {
+        let args = [
+            "blockzilla",
+            "repair-poh-orphan-tail",
+            "/archives/epoch-998",
+            "--epoch",
+            "998",
+            "--expected-indexed-blocks",
+            "369334",
+            "--expected-trailing-records",
+            "5",
+            "--expected-first-trailing-block-id",
+            "369334",
+            "--expected-first-trailing-slot",
+            "431559125",
+            "--expected-last-trailing-slot",
+            "431559129",
+            "--expected-old-poh-sha256",
+            "b8d64f16f5da7f696cc15611c01575fac106d9e5faa5c9d7bc63ff73c0789eb0",
+            "--expected-predecessor-blockhash",
+            "a58c285531b7a3bd7a76756207b5f068935030f5a1be0374e1cba8ce3ef9d5f9",
+        ];
+        let cli = Cli::try_parse_from(args).unwrap();
+        assert!(matches!(
+            cli.command,
+            Commands::RepairPohOrphanTail {
+                epoch: 998,
+                expected_indexed_blocks: 369334,
+                expected_trailing_records: 5,
+                expected_first_trailing_block_id: 369334,
+                expected_first_trailing_slot: 431559125,
+                expected_last_trailing_slot: 431559129,
+                expected_old_poh_sha256,
+                expected_predecessor_blockhash,
+                threads: 0,
+                ..
+            } if expected_old_poh_sha256
+                == "b8d64f16f5da7f696cc15611c01575fac106d9e5faa5c9d7bc63ff73c0789eb0"
+                && expected_predecessor_blockhash
+                    == "a58c285531b7a3bd7a76756207b5f068935030f5a1be0374e1cba8ce3ef9d5f9"
+        ));
+        let mut missing_predecessor = args.to_vec();
+        missing_predecessor.truncate(missing_predecessor.len() - 2);
+        assert!(Cli::try_parse_from(missing_predecessor).is_err());
+    }
+
+    #[test]
+    fn compact_v1_commands_are_not_exposed() {
+        for command in ["analyze-compact", "dump-compact-log-strings"] {
+            let error = Cli::try_parse_from(["blockzilla", command])
+                .err()
+                .expect("Compact V1 commands must remain outside the public CLI");
+            assert!(error.to_string().contains("unrecognized subcommand"));
+        }
+    }
+
+    #[test]
+    fn car_registry_worker_counts_use_the_safe_shared_limit() {
+        for workers in ["1", "8"] {
+            assert!(
+                Cli::try_parse_from([
+                    "blockzilla",
+                    "build-archive-v2-registries",
+                    "input.car",
+                    "output",
+                    "--workers",
+                    workers,
+                ])
+                .is_ok()
+            );
+        }
+        for workers in ["0", "9"] {
+            assert!(
+                Cli::try_parse_from([
+                    "blockzilla",
+                    "build-archive-v2-registries",
+                    "input.car",
+                    "output",
+                    "--workers",
+                    workers,
+                ])
+                .is_err()
+            );
+        }
+        for workers in ["2", "8"] {
+            assert!(
+                Cli::try_parse_from([
+                    "blockzilla",
+                    "bench-car-registry",
+                    "input.car",
+                    "--strategy",
+                    "pipelined-single-merge",
+                    "--workers",
+                    workers,
+                ])
+                .is_ok()
+            );
+        }
+        for workers in ["1", "9"] {
+            assert!(
+                Cli::try_parse_from([
+                    "blockzilla",
+                    "bench-car-registry",
+                    "input.car",
+                    "--strategy",
+                    "pipelined-single-merge",
+                    "--workers",
+                    workers,
+                ])
+                .is_err()
+            );
+        }
+    }
+
+    #[test]
+    fn preflight_car_cli_has_bounded_default_and_receipt() {
+        let cli = Cli::try_parse_from([
+            "blockzilla",
+            "preflight-car",
+            "/cars/.downloads/epoch-900.car.zst.part",
+            "--epoch",
+            "900",
+            "--receipt",
+            "/state/epoch-900.json",
+        ])
+        .unwrap();
+        let Commands::PreflightCar {
+            input,
+            epoch,
+            receipt,
+            io_buffer_mib,
+            progress_json,
+        } = cli.command
+        else {
+            panic!("expected preflight-car command");
+        };
+        assert_eq!(
+            input,
+            PathBuf::from("/cars/.downloads/epoch-900.car.zst.part")
+        );
+        assert_eq!(epoch, 900);
+        assert_eq!(receipt, PathBuf::from("/state/epoch-900.json"));
+        assert_eq!(io_buffer_mib, 8);
+        assert!(progress_json.is_none());
+    }
+
+    #[test]
+    fn acquire_car_cli_keeps_aria2_and_publication_paths_explicit() {
+        let cli = Cli::try_parse_from([
+            "blockzilla",
+            "acquire-car",
+            "--url",
+            "https://files.example/epoch-900.car.zst",
+            "--part",
+            "/cars/.downloads/epoch-900.car.zst.part",
+            "--canonical",
+            "/cars/epoch-900.car.zst",
+            "--alternate",
+            "/cars/epoch-900.car",
+            "--epoch",
+            "900",
+            "--receipt",
+            "/state/preflight/epoch-900.json",
+            "--required-memory-mib",
+            "2560",
+        ])
+        .unwrap();
+        let Commands::AcquireCar {
+            url,
+            part,
+            canonical,
+            alternate,
+            epoch,
+            receipt,
+            progress_json,
+            expected_bytes,
+            aria2c,
+            max_attempts,
+            required_memory_mib,
+            io_buffer_mib,
+        } = cli.command
+        else {
+            panic!("expected acquire-car command");
+        };
+        assert_eq!(url, "https://files.example/epoch-900.car.zst");
+        assert_eq!(
+            part,
+            PathBuf::from("/cars/.downloads/epoch-900.car.zst.part")
+        );
+        assert_eq!(canonical, PathBuf::from("/cars/epoch-900.car.zst"));
+        assert_eq!(alternate, PathBuf::from("/cars/epoch-900.car"));
+        assert_eq!(epoch, 900);
+        assert_eq!(receipt, PathBuf::from("/state/preflight/epoch-900.json"));
+        assert!(progress_json.is_none());
+        assert!(expected_bytes.is_none());
+        assert_eq!(aria2c, PathBuf::from("aria2c"));
+        assert_eq!(max_attempts, 3);
+        assert_eq!(required_memory_mib, 2560);
+        assert_eq!(io_buffer_mib, 8);
+    }
+
+    #[test]
+    fn acquire_car_cli_expected_bytes_is_optional_but_must_be_positive() {
+        let arguments = [
+            "blockzilla",
+            "acquire-car",
+            "--url",
+            "https://files.example/epoch-900.car.zst",
+            "--part",
+            "/cars/.downloads/epoch-900.car.zst.part",
+            "--canonical",
+            "/cars/epoch-900.car.zst",
+            "--alternate",
+            "/cars/epoch-900.car",
+            "--epoch",
+            "900",
+            "--receipt",
+            "/state/preflight/epoch-900.json",
+            "--required-memory-mib",
+            "0",
+            "--expected-bytes",
+            "123456",
+        ];
+        let parsed = Cli::try_parse_from(arguments).unwrap();
+        let Commands::AcquireCar { expected_bytes, .. } = parsed.command else {
+            panic!("expected acquire-car command");
+        };
+        assert_eq!(expected_bytes.map(NonZeroU64::get), Some(123_456));
+
+        let mut invalid = arguments;
+        *invalid.last_mut().unwrap() = "0";
+        assert!(Cli::try_parse_from(invalid).is_err());
+    }
+
+    #[test]
+    fn predecessor_tail_cli_supports_explicit_and_bounded_discovery_modes() {
+        let explicit = Cli::try_parse_from([
+            "blockzilla",
+            "seed-previous-blockhash-tails",
+            "--archive-root",
+            "/archive-v2",
+            "--epochs",
+            "799",
+            "713",
+            "799",
+            "--receipt-dir",
+            "/state/tail-receipts",
+        ])
+        .unwrap();
+        let Commands::SeedPreviousBlockhashTails {
+            archive_root,
+            epochs,
+            discover,
+            start_epoch,
+            end_epoch,
+            receipt_dir,
+            dry_run,
+        } = explicit.command
+        else {
+            panic!("expected seed-previous-blockhash-tails command");
+        };
+        assert_eq!(archive_root, PathBuf::from("/archive-v2"));
+        assert_eq!(epochs, [799, 713, 799]);
+        assert!(!discover);
+        assert_eq!(start_epoch, None);
+        assert_eq!(end_epoch, None);
+        assert_eq!(receipt_dir, Some(PathBuf::from("/state/tail-receipts")));
+        assert!(!dry_run);
+
+        let discovery = Cli::try_parse_from([
+            "blockzilla",
+            "seed-previous-blockhash-tails",
+            "--archive-root",
+            "/archive-v2",
+            "--discover",
+            "--start-epoch",
+            "713",
+            "--end-epoch",
+            "799",
+            "--dry-run",
+        ])
+        .unwrap();
+        let Commands::SeedPreviousBlockhashTails {
+            epochs,
+            discover,
+            start_epoch,
+            end_epoch,
+            dry_run,
+            ..
+        } = discovery.command
+        else {
+            panic!("expected seed-previous-blockhash-tails command");
+        };
+        assert!(epochs.is_empty());
+        assert!(discover);
+        assert_eq!(start_epoch, Some(713));
+        assert_eq!(end_epoch, Some(799));
+        assert!(dry_run);
+    }
+
+    #[test]
+    fn block_time_gap_cli_parses_local_source_and_output() {
+        let cli = Cli::try_parse_from([
+            "blockzilla",
+            "build-block-time-gaps",
+            "/archive-v2/epoch-314",
+            "--epoch",
+            "314",
+            "--output",
+            "/state/epoch-314/block-time-gaps.bin",
+        ])
+        .unwrap();
+        let Commands::BuildBlockTimeGaps {
+            input,
+            epoch,
+            source,
+            output,
+            progress_json,
+            force,
+        } = cli.command
+        else {
+            panic!("expected build-block-time-gaps command");
+        };
+        assert_eq!(input, PathBuf::from("/archive-v2/epoch-314"));
+        assert_eq!(epoch, 314);
+        assert_eq!(source, BlockTimeGapSourceArg::Auto);
+        assert_eq!(
+            output,
+            Some(PathBuf::from("/state/epoch-314/block-time-gaps.bin"))
+        );
+        assert!(progress_json.is_none());
+        assert!(!force);
+    }
+
+    #[test]
+    fn block_time_gap_cli_can_force_archive_source_with_progress() {
+        let cli = Cli::try_parse_from([
+            "blockzilla",
+            "build-block-time-gaps",
+            "/archive-v2/epoch-314",
+            "--epoch",
+            "314",
+            "--source",
+            "archive",
+            "--progress-json",
+            "/state/epoch-314/gap-progress.json",
+        ])
+        .unwrap();
+        let Commands::BuildBlockTimeGaps {
+            source,
+            progress_json,
+            ..
+        } = cli.command
+        else {
+            panic!("expected build-block-time-gaps command");
+        };
+        assert_eq!(source, BlockTimeGapSourceArg::Archive);
+        assert_eq!(
+            progress_json,
+            Some(PathBuf::from("/state/epoch-314/gap-progress.json"))
+        );
+    }
+
+    #[test]
+    fn verify_block_time_gap_cli_parses_expected_epoch() {
+        let cli = Cli::try_parse_from([
+            "blockzilla",
+            "verify-block-time-gaps",
+            "/archive-v2/epoch-314/block-time-gaps.bin",
+            "--epoch",
+            "314",
+        ])
+        .unwrap();
+        let Commands::VerifyBlockTimeGaps { input, epoch } = cli.command else {
+            panic!("expected verify-block-time-gaps command");
+        };
+        assert_eq!(
+            input,
+            PathBuf::from("/archive-v2/epoch-314/block-time-gaps.bin")
+        );
+        assert_eq!(epoch, Some(314));
+    }
+
+    #[test]
+    fn block_time_gap_index_cli_parses_audited_range_and_threshold() {
+        let cli = Cli::try_parse_from([
+            "blockzilla",
+            "build-block-time-gap-index",
+            "/archive-v2",
+            "--output",
+            "/ui/api/v1/sidecars/block-time-gaps/index.json",
+            "--start-epoch",
+            "0",
+            "--end-epoch",
+            "1000",
+            "--minimum-interruption-secs",
+            "300",
+        ])
+        .unwrap();
+        let Commands::BuildBlockTimeGapIndex {
+            archive_root,
+            output,
+            start_epoch,
+            end_epoch,
+            minimum_interruption_secs,
+        } = cli.command
+        else {
+            panic!("expected build-block-time-gap-index command");
+        };
+        assert_eq!(archive_root, PathBuf::from("/archive-v2"));
+        assert_eq!(
+            output,
+            PathBuf::from("/ui/api/v1/sidecars/block-time-gaps/index.json")
+        );
+        assert_eq!(start_epoch, 0);
+        assert_eq!(end_epoch, 1000);
+        assert_eq!(minimum_interruption_secs, 300);
+    }
+
+    #[test]
+    fn progress_tracker_publishes_atomic_json_snapshot() {
+        let unique = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap()
+            .as_nanos();
+        let path = std::env::temp_dir().join(format!(
+            "blockzilla-progress-{}-{unique}.json",
+            std::process::id()
+        ));
+        let mut tracker = ProgressTracker::new("test phase");
+        tracker.progress_path = Some(path.clone());
+        tracker.update_input_bytes(8 * 1024 * 1024);
+        tracker.update_slot(432_000);
+        tracker.update(1, 7);
+        tracker.update_slot(432_100);
+        tracker.final_report();
+
+        let json = std::fs::read_to_string(&path).unwrap();
+        assert!(json.contains("\"state\":\"complete\""));
+        assert!(json.contains("\"phase\":\"test phase\""));
+        assert!(json.contains("\"blocks_done\":1"));
+        assert!(json.contains("\"input_bytes_done\":8388608"));
+        assert!(json.contains("\"last_slot\":432100"));
+        std::fs::remove_file(path).unwrap();
+    }
+
+    #[test]
+    fn progress_tracker_drops_snapshot_when_nonblocking_pipe_is_full() {
+        let (reader, mut writer) = std::io::pipe().unwrap();
+        // SAFETY: fcntl only reads and updates status flags for this live test descriptor.
+        let flags = unsafe { libc::fcntl(writer.as_raw_fd(), libc::F_GETFL) };
+        assert!(flags >= 0);
+        assert!(
+            unsafe { libc::fcntl(writer.as_raw_fd(), libc::F_SETFL, flags | libc::O_NONBLOCK) }
+                >= 0
+        );
+
+        let chunk = [0u8; 4096];
+        loop {
+            match writer.write(&chunk) {
+                Ok(_) => {}
+                Err(error) if error.kind() == std::io::ErrorKind::WouldBlock => break,
+                Err(error) => panic!("fill nonblocking progress pipe: {error}"),
+            }
+        }
+
+        let mut tracker = ProgressTracker::new("test migration");
+        tracker.progress_path = None;
+        tracker.progress_fd = Some(File::from(std::os::fd::OwnedFd::from(writer)));
+        tracker.update(1, 0);
+        // A full pipe must make this a best-effort drop, not a wait for the scheduler reader.
+        tracker.final_report();
+        drop(reader);
+    }
+
+    /// A fixed-size migration reports completed rows against its exact row count. Real block
+    /// slots can be sparse, so their span must remain telemetry rather than the numerator.
+    #[test]
+    fn progress_tracker_exact_total_uses_blocks_for_percentage_and_eta() {
+        let unique = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap()
+            .as_nanos();
+        let path = std::env::temp_dir().join(format!(
+            "blockzilla-progress-total-override-{}-{unique}.json",
+            std::process::id()
+        ));
+        let mut tracker = ProgressTracker::new("test migration");
+        tracker.progress_path = Some(path.clone());
+        tracker.start_time = Instant::now() - Duration::from_secs(4);
+        tracker.set_estimated_total_blocks(4);
+        tracker.update_slot(100);
+        tracker.update(1, 0);
+        tracker.update_slot(110);
+        tracker.update(1, 0);
+        tracker.write_progress_snapshot("running");
+
+        let json: serde_json::Value =
+            serde_json::from_slice(&std::fs::read(&path).unwrap()).unwrap();
+        assert_eq!(json["blocks_done"], 2);
+        assert_eq!(json["blocks_total_estimate"], 4);
+        assert_eq!(json["slots_processed"], 10);
+        assert_eq!(json["progress_pct"], 50.0);
+        let eta_secs = json["eta_secs"].as_f64().unwrap();
+        assert!((3.9..=4.1).contains(&eta_secs), "eta_secs={eta_secs}");
+        std::fs::remove_file(path).unwrap();
+    }
+
+    #[test]
+    fn progress_tracker_default_total_keeps_slot_span_basis() {
+        let mut tracker = ProgressTracker::new("test scan");
+        tracker.update_slot(100);
+        tracker.update(1, 0);
+        tracker.update_slot(110);
+        tracker.update(1, 0);
+
+        let (progress_pct, eta_secs) = tracker.progress_metrics(Some(10), 1.0);
+        let expected_pct = 10.0 / SLOTS_PER_EPOCH as f64 * 100.0;
+        assert!((progress_pct.unwrap() - expected_pct).abs() < f64::EPSILON);
+        let expected_eta = (SLOTS_PER_EPOCH - 10) as f64 * (2.0 / 10.0);
+        assert!((eta_secs.unwrap() - expected_eta).abs() < f64::EPSILON);
+    }
+
+    #[test]
+    fn progress_tracker_shared_metrics_never_exceed_one_hundred_percent() {
+        let mut exact = ProgressTracker::new("test exact");
+        exact.set_estimated_total_blocks(4);
+        exact.update(5, 0);
+        let (exact_pct, exact_eta) = exact.progress_metrics(Some(u64::MAX), 1.0);
+        assert_eq!(exact_pct, Some(100.0));
+        assert_eq!(exact_eta, Some(0.0));
+
+        let slot_based = ProgressTracker::new("test slots");
+        let (slot_pct, slot_eta) = slot_based.progress_metrics(Some(SLOTS_PER_EPOCH + 1), 1.0);
+        assert_eq!(slot_pct, Some(100.0));
+        assert_eq!(slot_eta, Some(0.0));
+    }
+
+    /// A migration invoked by hand (e.g. an operator running `migrate-poh-signature-counts`
+    /// directly, outside the scheduler) has no `BLOCKZILLA_PROGRESS_FILE` set. Progress
+    /// reporting must be a silent no-op in that case, not a panic or a stray write.
+    #[test]
+    fn progress_tracker_without_progress_path_reports_without_writing_a_file() {
+        let mut tracker = ProgressTracker::new("test migration");
+        tracker.progress_path = None;
+        tracker.set_estimated_total_blocks(10);
+        tracker.update_slot(1);
+        tracker.update(1, 0);
+        tracker.update_slot(2);
+        // Must not panic with no progress_path set.
+        tracker.final_report();
+    }
+
+    #[test]
+    fn first_seen_scan_only_requires_first_seen_mode() {
+        let error = Cli::try_parse_from([
+            "blockzilla",
+            "build-archive-v2-hot-blocks",
+            "epoch.car.zst",
+            "epoch-out",
+            "--first-seen-scan-only",
+        ])
+        .err()
+        .expect("scan-only without first-seen mode must fail");
+        assert!(error.to_string().contains("--first-seen-registry"));
+    }
+
+    #[test]
+    fn first_seen_scan_only_and_finalizer_commands_parse() {
+        let cli = Cli::try_parse_from([
+            "blockzilla",
+            "build-archive-v2-hot-blocks",
+            "epoch.car.zst",
+            "epoch-out",
+            "--first-seen-registry",
+            "--first-seen-scan-only",
+            "--first-seen-finalizer-lock",
+            "/tmp/test-finalizer.lock",
+        ])
+        .unwrap();
+        match cli.command {
+            Commands::BuildArchiveV2HotBlocks {
+                first_seen_registry,
+                first_seen_scan_only,
+                first_seen_finalizer_lock,
+                ..
+            } => {
+                assert!(first_seen_registry);
+                assert!(first_seen_scan_only);
+                assert_eq!(
+                    first_seen_finalizer_lock.as_deref(),
+                    Some(Path::new("/tmp/test-finalizer.lock"))
+                );
+            }
+            _ => panic!("unexpected command"),
+        }
+
+        let cli = Cli::try_parse_from([
+            "blockzilla",
+            "finalize-archive-v2-first-seen",
+            "epoch-out",
+            "--finalizer-lock",
+            "/tmp/test-finalizer.lock",
+        ])
+        .unwrap();
+        match cli.command {
+            Commands::FinalizeArchiveV2FirstSeen {
+                output_dir,
+                finalizer_lock,
+            } => {
+                assert_eq!(output_dir, Path::new("epoch-out"));
+                assert_eq!(
+                    finalizer_lock.as_deref(),
+                    Some(Path::new("/tmp/test-finalizer.lock"))
+                );
+            }
+            _ => panic!("unexpected command"),
+        }
+    }
+
+    #[test]
+    fn registry_reprocess_command_parses_bounded_resources() {
+        let cli = Cli::try_parse_from([
+            "blockzilla",
+            "reprocess-archive-v2-registry",
+            "/archives/epoch-1000",
+            "/archives/.usage-sorted-generations/epoch-1000",
+            "--epoch",
+            "1000",
+            "--threads",
+            "8",
+            "--sort-memory-mib",
+            "512",
+            "--level",
+            "2",
+            "--attempt-id",
+            "pilot-1000",
+            "--staging-dir",
+            "/archives/.usage-sorted-generations/.epoch-1000.registry-reprocess.pilot-1000.staging",
+            "--wire-profile",
+            "pre-unknown-instruction-fallbacks-v1",
+            "--wire-profile-authority-receipt",
+            "/state/registry-reprocess-epoch-1000.authority.json",
+        ])
+        .unwrap();
+        match cli.command {
+            Commands::ReprocessArchiveV2Registry {
+                source_dir,
+                target_dir,
+                epoch,
+                threads,
+                sort_memory_mib,
+                level,
+                attempt_id,
+                staging_dir,
+                wire_profile,
+                wire_profile_authority_receipt,
+            } => {
+                assert_eq!(source_dir, Path::new("/archives/epoch-1000"));
+                assert_eq!(
+                    target_dir,
+                    Path::new("/archives/.usage-sorted-generations/epoch-1000")
+                );
+                assert_eq!(epoch, 1000);
+                assert_eq!(threads, 8);
+                assert_eq!(sort_memory_mib, 512);
+                assert_eq!(level, 2);
+                assert_eq!(attempt_id, "pilot-1000");
+                assert_eq!(
+                    staging_dir,
+                    Path::new(
+                        "/archives/.usage-sorted-generations/.epoch-1000.registry-reprocess.pilot-1000.staging"
+                    )
+                );
+                assert_eq!(
+                    wire_profile,
+                    ArchiveV2WireProfile::PreUnknownInstructionFallbacksV1
+                );
+                assert_eq!(
+                    wire_profile_authority_receipt.as_deref(),
+                    Some(Path::new(
+                        "/state/registry-reprocess-epoch-1000.authority.json"
+                    ))
+                );
+            }
+            _ => panic!("unexpected command"),
+        }
+
+        for (option, value) in [
+            ("--threads", "0"),
+            ("--threads", "257"),
+            ("--sort-memory-mib", "15"),
+            ("--sort-memory-mib", "65537"),
+        ] {
+            assert!(
+                Cli::try_parse_from([
+                    "blockzilla",
+                    "reprocess-archive-v2-registry",
+                    "source",
+                    "target",
+                    "--epoch",
+                    "1000",
+                    "--attempt-id",
+                    "pilot-1000",
+                    "--staging-dir",
+                    "/archives/.target.registry-reprocess.pilot-1000.staging",
+                    "--wire-profile",
+                    "post-unknown-instruction-fallbacks-v1",
+                    option,
+                    value,
+                ])
+                .is_err(),
+                "{option}={value} must be rejected before touching the target"
+            );
+        }
+    }
+
+    #[test]
+    fn registry_access_completion_command_parses_exact_handoff_identity() {
+        let cli = Cli::try_parse_from([
+            "blockzilla",
+            "complete-archive-v2-registry-access",
+            "/archives/epoch-1000",
+            "/archives/.usage-sorted-generations/.epoch-1000.registry-reprocess.pilot-1000.staging",
+            "/archives/.usage-sorted-generations/epoch-1000",
+            "--epoch",
+            "1000",
+            "--attempt-id",
+            "pilot-1000",
+            "--handoff-sha256",
+            "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef",
+            "--expected-continuation-state",
+            "receipt-ready",
+            "--wire-profile",
+            "post-unknown-instruction-fallbacks-v1",
+            "--wire-profile-authority-receipt",
+            "/state/registry-reprocess-epoch-1000.authority.json",
+        ])
+        .unwrap();
+        match cli.command {
+            Commands::CompleteArchiveV2RegistryAccess {
+                source_dir,
+                staging_dir,
+                target_dir,
+                epoch,
+                attempt_id,
+                handoff_sha256,
+                expected_continuation_state,
+                wire_profile,
+                wire_profile_authority_receipt,
+            } => {
+                assert_eq!(source_dir, Path::new("/archives/epoch-1000"));
+                assert_eq!(
+                    staging_dir,
+                    Path::new(
+                        "/archives/.usage-sorted-generations/.epoch-1000.registry-reprocess.pilot-1000.staging"
+                    )
+                );
+                assert_eq!(
+                    target_dir,
+                    Path::new("/archives/.usage-sorted-generations/epoch-1000")
+                );
+                assert_eq!(epoch, 1000);
+                assert_eq!(attempt_id, "pilot-1000");
+                assert_eq!(
+                    handoff_sha256,
+                    "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef"
+                );
+                assert_eq!(
+                    expected_continuation_state,
+                    RegistryReprocessAccessContinuationStateArg::ReceiptReady
+                );
+                assert_eq!(
+                    wire_profile,
+                    ArchiveV2WireProfile::PostUnknownInstructionFallbacksV1
+                );
+                assert_eq!(
+                    wire_profile_authority_receipt.as_deref(),
+                    Some(Path::new(
+                        "/state/registry-reprocess-epoch-1000.authority.json"
+                    ))
+                );
+            }
+            _ => panic!("unexpected command"),
+        }
+    }
+
+    #[test]
+    fn registry_access_completion_requires_an_exact_continuation_state() {
+        let base = [
+            "blockzilla",
+            "complete-archive-v2-registry-access",
+            "/archives/epoch-1000",
+            "/archives/.usage-sorted-generations/.epoch-1000.registry-reprocess.pilot-1000.staging",
+            "/archives/.usage-sorted-generations/epoch-1000",
+            "--epoch",
+            "1000",
+            "--attempt-id",
+            "pilot-1000",
+            "--handoff-sha256",
+            "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef",
+            "--wire-profile",
+            "post-unknown-instruction-fallbacks-v1",
+        ];
+        assert!(Cli::try_parse_from(base).is_err());
+
+        for value in ["receipt_ready", "core", "unknown"] {
+            let mut args = base.to_vec();
+            args.extend(["--expected-continuation-state", value]);
+            assert!(Cli::try_parse_from(args).is_err(), "accepted {value}");
+        }
+
+        let mut args = base.to_vec();
+        args.extend(["--expected-continuation-state", "core-or-partial-rebuild"]);
+        let cli = Cli::try_parse_from(args).unwrap();
+        assert!(matches!(
+            cli.command,
+            Commands::CompleteArchiveV2RegistryAccess {
+                expected_continuation_state:
+                    RegistryReprocessAccessContinuationStateArg::CoreOrPartialRebuild,
+                ..
+            }
+        ));
+    }
+
+    #[test]
+    fn registry_reprocess_commands_require_an_explicit_wire_profile() {
+        assert!(
+            Cli::try_parse_from([
+                "blockzilla",
+                "reprocess-archive-v2-registry",
+                "source",
+                "target",
+                "--epoch",
+                "1000",
+                "--attempt-id",
+                "pilot-1000",
+                "--staging-dir",
+                "/archives/.target.registry-reprocess.pilot-1000.staging",
+            ])
+            .is_err()
+        );
+        assert!(
+            Cli::try_parse_from([
+                "blockzilla",
+                "complete-archive-v2-registry-access",
+                "source",
+                "staging",
+                "target",
+                "--epoch",
+                "1000",
+                "--attempt-id",
+                "pilot-1000",
+                "--handoff-sha256",
+                "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef",
+                "--expected-continuation-state",
+                "receipt-ready",
+            ])
+            .is_err()
+        );
+    }
+
+    #[test]
+    fn prepare_live_registry_command_parses() {
+        let cli = Cli::try_parse_from([
+            "blockzilla",
+            "prepare-archive-v2-live-registry",
+            "capture",
+            "epoch-out",
+        ])
+        .unwrap();
+        match cli.command {
+            Commands::PrepareArchiveV2LiveRegistry {
+                capture_dir,
+                output_dir,
+            } => {
+                assert_eq!(capture_dir, Path::new("capture"));
+                assert_eq!(output_dir, Path::new("epoch-out"));
+            }
+            _ => panic!("unexpected command"),
+        }
+    }
+
+    #[test]
+    fn repair_materialize_and_degraded_hot_commands_parse() {
+        let cli = Cli::try_parse_from([
+            "blockzilla",
+            "materialize-archive-v2-live-repair",
+            "repair-view",
+            "materialized",
+            "--max-rpc-json-mib",
+            "24",
+            "--checkpoint-every",
+            "64",
+            "--pubkey-run-max-keys",
+            "100000",
+            "--max-blocks",
+            "1",
+        ])
+        .unwrap();
+        match cli.command {
+            Commands::MaterializeArchiveV2LiveRepair {
+                repair_dir,
+                output_dir,
+                max_rpc_json_mib,
+                checkpoint_every,
+                pubkey_run_max_keys,
+                max_blocks,
+            } => {
+                assert_eq!(repair_dir, Path::new("repair-view"));
+                assert_eq!(output_dir, Path::new("materialized"));
+                assert_eq!(max_rpc_json_mib, 24);
+                assert_eq!(checkpoint_every, 64);
+                assert_eq!(pubkey_run_max_keys, 100_000);
+                assert_eq!(max_blocks, Some(1));
+            }
+            _ => panic!("unexpected command"),
+        }
+
+        let cli = Cli::try_parse_from([
+            "blockzilla",
+            "build-archive-v2-degraded-hot-blocks-from-repair",
+            "materialized",
+            "hot",
+            "--level",
+            "2",
+        ])
+        .unwrap();
+        match cli.command {
+            Commands::BuildArchiveV2DegradedHotBlocksFromRepair {
+                materialized_dir,
+                output_dir,
+                level,
+                max_blocks,
+            } => {
+                assert_eq!(materialized_dir, Path::new("materialized"));
+                assert_eq!(output_dir, Path::new("hot"));
+                assert_eq!(level, 2);
+                assert!(max_blocks.is_none());
+            }
+            _ => panic!("unexpected command"),
+        }
+
+        let cli = Cli::try_parse_from([
+            "blockzilla",
+            "build-archive-v2-repair-block-access",
+            "repair-view",
+            "hot",
+        ])
+        .unwrap();
+        match cli.command {
+            Commands::BuildArchiveV2RepairBlockAccess {
+                repair_dir,
+                hot_output,
+            } => {
+                assert_eq!(repair_dir, Path::new("repair-view"));
+                assert_eq!(hot_output, Path::new("hot"));
+            }
+            _ => panic!("unexpected command"),
+        }
+    }
+}

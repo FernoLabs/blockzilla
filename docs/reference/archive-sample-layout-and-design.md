@@ -201,7 +201,7 @@ epoch geometry. Workload parity uses row counts, byte counts, coverage
 evidence, and direct output comparison outside the timed read.
 
 The public source is a small read-only
-[`blockzilla-archive-samples-v1` Worker](../../workers/blockzilla-archive-samples-v1/README.md).
+[`blockzilla-archive-samples-v1` Worker](../../edgezilla/archive-samples/README.md).
 It exposes only the fixed epoch and object allowlists in this document and
 streams complete or single-range R2 reads without buffering archive payloads.
 
@@ -212,9 +212,9 @@ switch in these beginner examples.
 
 | Format | SDK | Starter guide |
 |---|---|---|
-| CAR | [`blockzilla-car-read-sdk`](../../crates/blockzilla-car-read-sdk/README.md) | [`read-car`](../../examples/read-car/README.md) |
-| Compact V2 | [`blockzilla-compact-v2-read-sdk`](../../crates/blockzilla-compact-v2-read-sdk/README.md) | [`read-compact-v2`](../../examples/read-compact-v2/README.md) |
-| Indexer V3 | [`blockzilla-indexer-v3-read-sdk`](../../crates/blockzilla-indexer-v3-read-sdk/README.md) | [`read-indexer-v3`](../../examples/read-indexer-v3/README.md) |
+| CAR | [`of-car-reader`](../../crates/old-faithful/of-car-reader/Readme.md) | [`read-car`](../../examples/read-car/README.md) |
+| Compact V2 | [`blockzilla-compact-v2-reader`](../../crates/compact-v2/blockzilla-compact-v2-reader/README.md) | [`read-compact-v2`](../../examples/read-compact-v2/README.md) |
+| Indexer V3 | [`blockzilla-archive-v3-reader`](../../crates/archive-v3/blockzilla-archive-v3-reader/README.md) | [`read-indexer-v3`](../../examples/read-archive-v3/README.md) |
 
 The three application jobs are separate source files for each format:
 
@@ -222,14 +222,14 @@ The three application jobs are separate source files for each format:
 |---|---|---|---|
 | CAR | [`read-car-usdc`](../../examples/read-car/src/bin/read-car-usdc.rs) | [`read-car-pumpfun`](../../examples/read-car/src/bin/read-car-pumpfun.rs) | [`read-car-firewatch`](../../examples/read-car/src/bin/read-car-firewatch.rs) |
 | Compact V2 | [`read-compact-v2-usdc`](../../examples/read-compact-v2/src/bin/read-compact-v2-usdc.rs) | [`read-compact-v2-pumpfun`](../../examples/read-compact-v2/src/bin/read-compact-v2-pumpfun.rs) | [`read-compact-v2-firewatch`](../../examples/read-compact-v2/src/bin/read-compact-v2-firewatch.rs) |
-| Indexer V3 | [`read-indexer-v3-usdc`](../../examples/read-indexer-v3/src/bin/read-indexer-v3-usdc.rs) | [`read-indexer-v3-pumpfun`](../../examples/read-indexer-v3/src/bin/read-indexer-v3-pumpfun.rs) | [`read-indexer-v3-firewatch`](../../examples/read-indexer-v3/src/bin/read-indexer-v3-firewatch.rs) |
+| Indexer V3 | [`read-indexer-v3-usdc`](../../examples/read-archive-v3/src/bin/read-archive-v3-usdc.rs) | [`read-indexer-v3-pumpfun`](../../examples/read-archive-v3/src/bin/read-archive-v3-pumpfun.rs) | [`read-indexer-v3-firewatch`](../../examples/read-archive-v3/src/bin/read-archive-v3-firewatch.rs) |
 
 The Compact V2 and Indexer V3 packages also have a small ordered slot-hour
 reader. It scans the complete epoch and prints one count row for each fixed
 9,000-slot window:
 
 - [`read-compact-v2-slot-hours`](../../examples/read-compact-v2/src/bin/read-compact-v2-slot-hours.rs)
-- [`read-indexer-v3-slot-hours`](../../examples/read-indexer-v3/src/bin/read-indexer-v3-slot-hours.rs)
+- [`read-indexer-v3-slot-hours`](../../examples/read-archive-v3/src/bin/read-archive-v3-slot-hours.rs)
 
 Read the starter guide for the exact build and run commands. The default is
 epoch 900 and the complete epoch. Use `--archive-root archive` for the folder

@@ -6,7 +6,7 @@ during the `codex/sample-archive-benchmark` merge.
 `blockzilla-archive-sdk` was the first-generation unified facade (`4a0fa59b`),
 superseded three days later by the three per-format read SDKs (`b3c5765b`) and
 never touched again. It does not compile against the current
-`blockzilla-query-sdk` (`SourceVerification::PublishedManifest` no longer
+`blockzilla-model` (`SourceVerification::PublishedManifest` no longer
 exists), it exposes no parallel scan path, and it defined a second public
 `ArchiveIoSnapshot` with seven fields against the canonical eight, silently
 dropping `incomplete_body_retries`.

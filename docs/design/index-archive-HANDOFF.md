@@ -4,7 +4,7 @@
 > fourteen-plane candidate. The current format of record is
 > [`blockzilla-index-archive.md`](blockzilla-index-archive.md), and the current
 > physical tree is in
-> [`crates/blockzilla-index-archive-format/README.md`](../../crates/blockzilla-index-archive-format/README.md).
+> [`crates/archive-v3/blockzilla-archive-v3/README.md`](../../crates/archive-v3/blockzilla-archive-v3/README.md).
 > Do not implement a reader or writer from the paths below.
 
 Working branch: **`codex/indexer-first-archive`**, rebased onto `main` (merges
@@ -127,11 +127,11 @@ Two outcomes:
   the fallback variants.
 
 The reconstruction already exists in production and is **untested**:
-`instruction_data_base58` at `workers/blockzilla-get-block/src/worker.rs:5198`,
+`instruction_data_base58` at `edgezilla/get-block/src/worker.rs:5198`,
 plus `system_instruction_bytes` and `vote_update_instruction_bytes`. It lives in
 a Cloudflare Worker, so it cannot be shared with a verifier. The vote path pulls
 hashes from the block-access file — a second unchecked surface.
-`services/hivezilla/src/ledger/grpc.rs:165-200` is the reference implementation
+`hivezilla/service/src/ledger/grpc.rs:165-200` is the reference implementation
 of the message serializer + `verify_strict` pattern.
 
 Run it first on epochs whose CAR is still retained (760, 761, 793–799,

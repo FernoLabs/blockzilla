@@ -1,0 +1,51 @@
+[package]
+name = "blockzilla-spyx-query"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+publish = false
+autobins = false
+
+[[bin]]
+name = "blockzilla-spyx-query"
+path = "src/main.rs"
+
+[dependencies]
+blockzilla-archive-v2 = { path = "../../crates/compact-v2/blockzilla-archive-v2", default-features = false }
+blockzilla-compact = { path = "../../crates/compact-v2/blockzilla-compact", default-features = false }
+blockzilla-primitives = { path = "../../crates/blockzilla-primitives", default-features = false }
+anyhow = "1.0.102"
+axum = { version = "0.8.9", features = ["json", "query", "tokio"] }
+base64 = "0.22.1"
+blockzilla-dex-parser = { path = "../../crates/parser/blockzilla-dex-parser" }
+blockzilla-read-sdk = { package = "blockzilla-read-sdk-legacy", path = "../../crates/compat/blockzilla-read-sdk-legacy" }
+blockzilla-token-balance-audit = { path = "../blockzilla-token-balance-audit" }
+blockzilla-token-transaction-dump = { path = "../blockzilla-token-transaction-dump" }
+bs58 = "0.5.1"
+clap = { version = "4.6.1", features = ["derive", "env"] }
+serde = { version = "1.0.228", features = ["derive"] }
+serde_json = "1.0.149"
+sha2 = "0.11.0"
+rustls = { version = "0.23.43", default-features = false, features = ["ring", "std", "tls12"] }
+solana-pubkey = { version = "4.2.0", features = ["curve25519"] }
+spl-token-2022-interface = "3.1.1"
+spl-token-metadata-interface = "1.0.1"
+tokio = { version = "1.52.3", features = ["macros", "net", "rt-multi-thread", "signal", "sync"] }
+tower-http = { version = "0.6.8", features = ["cors", "fs", "trace"] }
+tracing = "0.1.44"
+tracing-subscriber = { version = "0.3.23", features = ["env-filter"] }
+wincode = { version = "=0.6.1", features = ["derive"] }
+
+[dependencies.reqwest]
+version = "0.13.3"
+default-features = false
+features = ["json", "rustls-no-provider"]
+
+[dev-dependencies]
+tempfile = "3.27.0"
+tower = { version = "0.5.2", features = ["util"] }
+
+[lints]
+workspace = true

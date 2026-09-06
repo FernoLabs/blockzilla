@@ -199,7 +199,7 @@ Yellowstone and shred inputs also have different fallback behavior:
 
 ## Implemented foundation
 
-The current `services/hivezilla/src/ingest/` code contains:
+The current `hivezilla/service/src/ingest/` code contains:
 
 - validated, redacted ingest configuration types;
 - domain-separated content identities and explicit deduplication decisions;

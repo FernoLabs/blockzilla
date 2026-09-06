@@ -1,11 +1,11 @@
 use anyhow::{Context, Result};
+use std::io::{Read, Write};
 use wincode::{
     ReadResult, WriteResult,
     error::invalid_value,
     int_encoding::{ByteOrder, IntEncoding},
     io::{Reader, Writer},
 };
-use std::io::{Read, Write};
 
 /// Canonical upper bound for one generic Wincode/LEB128 framed record.
 pub const WINCODE_LEB128_MAX_FRAME_BYTES: usize = 256 * 1024 * 1024;
