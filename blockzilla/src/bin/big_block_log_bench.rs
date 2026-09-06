@@ -9,16 +9,11 @@ use std::{
 };
 
 use anyhow::{Context, Result};
-use blockzilla_format::{
-    CompactLogStream, CompactPubkey, KeyIndex, KeyStore, Leb128, LogEvent,
-    WINCODE_LOG_ARCHIVE_KEYS_FREQUENCY_SORTED, WINCODE_LOG_ARCHIVE_V2_VERSION,
-    WincodeLogArchiveHeaderV2, WincodeLogArchiveV2, WincodeTxLogRange, parse_logs,
-    program_logs::{
-        ProgramLog, account_compression, address_lookup_table, associated_token_account, loader_v3,
-        loader_v4, memo, record, stake, system_program, token, token_2022, transfer_hook,
-        zk_elgamal_proof,
-    },
-};
+use blockzilla_archive_v2::{WINCODE_LOG_ARCHIVE_KEYS_FREQUENCY_SORTED, WINCODE_LOG_ARCHIVE_V2_VERSION, WincodeLogArchiveHeaderV2, WincodeLogArchiveV2, WincodeTxLogRange};
+use blockzilla_compact::{CompactLogStream, LogEvent, parse_logs};
+use blockzilla_primitives::{CompactPubkey, Leb128};
+use blockzilla_program_logs::{program_logs::ProgramLog, program_logs::account_compression, program_logs::address_lookup_table, program_logs::associated_token_account, program_logs::loader_v3, program_logs::loader_v4, program_logs::memo, program_logs::record, program_logs::stake, program_logs::system_program, program_logs::token, program_logs::token_2022, program_logs::transfer_hook, program_logs::zk_elgamal_proof};
+use blockzilla_registry::{KeyIndex, KeyStore};
 use blockzilla_log_parser::{ParsedLogLine, parse_line};
 use clap::Parser;
 use data_encoding::BASE64;
@@ -644,7 +639,7 @@ fn analyze_unknown_payloads(
 fn unknown_program_payload<'a>(
     event: &LogEvent,
     key_store: &KeyStore,
-    st: &'a blockzilla_format::StringTable,
+    st: &'a blockzilla_primitives::StringTable,
 ) -> Option<(&'a str, Option<String>)> {
     match event {
         LogEvent::ProgramLog(ProgramLog::Unknown(id)) => Some((st.resolve(*id), None)),

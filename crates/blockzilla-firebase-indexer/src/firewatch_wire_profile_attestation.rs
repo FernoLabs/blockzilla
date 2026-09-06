@@ -6,10 +6,7 @@ use std::{
 };
 
 use anyhow::{Context, Result, bail, ensure};
-use blockzilla_format::{
-    ARCHIVE_V2_PUBKEY_REGISTRY_FILE, ARCHIVE_V2_PUBKEY_REGISTRY_INDEX_FILE,
-    ARCHIVE_V2_SIGNATURES_FILE,
-};
+use blockzilla_archive_v2::{ARCHIVE_V2_PUBKEY_REGISTRY_FILE, ARCHIVE_V2_PUBKEY_REGISTRY_INDEX_FILE, ARCHIVE_V2_SIGNATURES_FILE};
 use blockzilla_read_sdk_legacy::ArchiveV2WireProfile;
 use serde::{Deserialize, Serialize};
 

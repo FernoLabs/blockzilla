@@ -11,15 +11,8 @@ use axum::{
     response::{IntoResponse, Response},
     routing::{get, post},
 };
-use blockzilla_format::{
-    ARCHIVE_V2_BLOCK_ACCESS_INDEX_HEADER_LEN, ARCHIVE_V2_BLOCK_ACCESS_INDEX_MAGIC,
-    ARCHIVE_V2_BLOCK_ACCESS_INDEX_ROW_LEN, ARCHIVE_V2_BLOCK_ACCESS_INDEX_VERSION,
-    ARCHIVE_V2_GET_BLOCK_INDEX_ROW_LEN, ARCHIVE_V2_HOT_INDEX_HEADER_LEN,
-    ARCHIVE_V2_HOT_INDEX_MAGIC, ARCHIVE_V2_HOT_INDEX_ROW_LEN, ARCHIVE_V2_HOT_INDEX_VERSION,
-    ArchiveV2BlockAccessBlob, WINCODE_ARCHIVE_V2_BLOCK_ACCESS_VERSION,
-    WINCODE_ARCHIVE_V2_FLAG_LEB128, WINCODE_ARCHIVE_V2_HOT_BLOCK_VERSION,
-    WincodeArchiveV2PohRecord, WincodeLeb128FramedReader, wincode_leb128_config, write_u32_varint,
-};
+use blockzilla_archive_v2::{ARCHIVE_V2_BLOCK_ACCESS_INDEX_HEADER_LEN, ARCHIVE_V2_BLOCK_ACCESS_INDEX_MAGIC, ARCHIVE_V2_BLOCK_ACCESS_INDEX_ROW_LEN, ARCHIVE_V2_BLOCK_ACCESS_INDEX_VERSION, ARCHIVE_V2_GET_BLOCK_INDEX_ROW_LEN, ARCHIVE_V2_HOT_INDEX_HEADER_LEN, ARCHIVE_V2_HOT_INDEX_MAGIC, ARCHIVE_V2_HOT_INDEX_ROW_LEN, ARCHIVE_V2_HOT_INDEX_VERSION, ArchiveV2BlockAccessBlob, WINCODE_ARCHIVE_V2_BLOCK_ACCESS_VERSION, WINCODE_ARCHIVE_V2_FLAG_LEB128, WINCODE_ARCHIVE_V2_HOT_BLOCK_VERSION, WincodeArchiveV2PohRecord};
+use blockzilla_primitives::{WincodeLeb128FramedReader, wincode_leb128_config, write_u32_varint};
 use blockzilla_read_sdk::ArchiveV2WireProfile;
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
@@ -8282,7 +8275,7 @@ fn decode_repair_first_block_access_blob<R: Read>(
     signature_count: u32,
 ) -> Result<ArchiveV2BlockAccessBlob> {
     anyhow::ensure!(
-        u64::from(access_len) <= blockzilla_format::ARCHIVE_V2_BLOCK_ACCESS_MAX_FRAME_BYTES,
+        u64::from(access_len) <= blockzilla_archive_v2::ARCHIVE_V2_BLOCK_ACCESS_MAX_FRAME_BYTES,
         "first repair block-access payload has unreasonably large byte length {access_len}"
     );
     let payload_len = usize::try_from(access_len).context("block-access length exceeds usize")?;
@@ -8382,7 +8375,7 @@ fn read_repair_block_access_row<R: Read, A: Read>(
         "repair block-access index offsets or lengths are inconsistent"
     );
     anyhow::ensure!(
-        u64::from(access_len) <= blockzilla_format::ARCHIVE_V2_BLOCK_ACCESS_MAX_FRAME_BYTES,
+        u64::from(access_len) <= blockzilla_archive_v2::ARCHIVE_V2_BLOCK_ACCESS_MAX_FRAME_BYTES,
         "repair block-access index row {expected_id} exceeds the maximum payload size"
     );
     let next_access_offset = access_offset
@@ -30634,11 +30627,9 @@ mod tests {
         use crate::archive_v2::registry_reprocess::{
             REGISTRY_REPROCESS_RECEIPT_FILE, RegistryReprocessReceipt,
         };
-        use blockzilla_format::{
-            ArchiveV2HotBlockBlob, ArchiveV2HotBlockHeader, ArchiveV2HotBlockIndexRow,
-            ArchiveV2HotTxRow, CompactPohEntry, WincodeArchiveV2PohRecord,
-            WincodeLeb128FramedWriter, write_archive_v2_hot_block_index,
-        };
+        use blockzilla_archive_v2::{ArchiveV2HotBlockBlob, ArchiveV2HotBlockHeader, ArchiveV2HotBlockIndexRow, ArchiveV2HotTxRow, WincodeArchiveV2PohRecord, write_archive_v2_hot_block_index};
+        use blockzilla_compact::CompactPohEntry;
+        use blockzilla_primitives::WincodeLeb128FramedWriter;
         use blockzilla_read_sdk::wire_profile_marker;
 
         let (source, target) = write_probe_only_registry_receipt(config, epoch);
@@ -31082,9 +31073,9 @@ mod tests {
         let epoch = 1002;
         let (marker, _, _) = write_stale_poh_registry_recovery_fixture(&config, epoch);
         {
-            use blockzilla_format::{
-                CompactPohEntry, WincodeArchiveV2PohRecord, WincodeLeb128FramedWriter,
-            };
+            use blockzilla_archive_v2::WincodeArchiveV2PohRecord;
+            use blockzilla_compact::CompactPohEntry;
+            use blockzilla_primitives::WincodeLeb128FramedWriter;
             let mut writer =
                 WincodeLeb128FramedWriter::new(File::create(marker.source.join(POH_FILE)).unwrap());
             writer
@@ -31123,9 +31114,9 @@ mod tests {
         let epoch = 1003;
         let (marker, _, _) = write_stale_poh_registry_recovery_fixture(&config, epoch);
         {
-            use blockzilla_format::{
-                CompactPohEntry, WincodeArchiveV2PohRecord, WincodeLeb128FramedWriter,
-            };
+            use blockzilla_archive_v2::WincodeArchiveV2PohRecord;
+            use blockzilla_compact::CompactPohEntry;
+            use blockzilla_primitives::WincodeLeb128FramedWriter;
             let mut writer =
                 WincodeLeb128FramedWriter::new(File::create(marker.source.join(POH_FILE)).unwrap());
             writer
@@ -33909,10 +33900,9 @@ mod tests {
 
     #[test]
     fn poh_signature_count_migration_artifact_distinguishes_schema_and_absence() {
-        use blockzilla_format::{
-            CompactPohEntry, CompactPohEntryLegacyNoSignatureCount, WincodeArchiveV2PohRecord,
-            WincodeArchiveV2PohRecordLegacyNoSignatureCount, WincodeLeb128FramedWriter,
-        };
+        use blockzilla_archive_v2::{WincodeArchiveV2PohRecord, WincodeArchiveV2PohRecordLegacyNoSignatureCount};
+        use blockzilla_compact::{CompactPohEntry, CompactPohEntryLegacyNoSignatureCount};
+        use blockzilla_primitives::WincodeLeb128FramedWriter;
 
         let root = temp_root("poh-sig-migration");
         fs::create_dir_all(&root).unwrap();
@@ -34846,10 +34836,9 @@ mod tests {
 
     #[cfg(target_os = "linux")]
     fn write_poh_reconciliation_fixture(output: &Path, index_signatures: u32, poh_signatures: u32) {
-        use blockzilla_format::{
-            ArchiveV2HotBlockIndexRow, CompactPohEntry, WincodeArchiveV2PohRecord,
-            WincodeLeb128FramedWriter, write_archive_v2_hot_block_index,
-        };
+        use blockzilla_archive_v2::{ArchiveV2HotBlockIndexRow, WincodeArchiveV2PohRecord, write_archive_v2_hot_block_index};
+        use blockzilla_compact::CompactPohEntry;
+        use blockzilla_primitives::WincodeLeb128FramedWriter;
 
         fs::create_dir_all(output).unwrap();
         let rows = vec![ArchiveV2HotBlockIndexRow {
@@ -35473,10 +35462,9 @@ mod tests {
 
     #[test]
     fn poh_migration_status_is_ready_for_legacy_schema_regardless_of_foreign_archival_owner() {
-        use blockzilla_format::{
-            CompactPohEntryLegacyNoSignatureCount, WincodeArchiveV2PohRecordLegacyNoSignatureCount,
-            WincodeLeb128FramedWriter,
-        };
+        use blockzilla_archive_v2::WincodeArchiveV2PohRecordLegacyNoSignatureCount;
+        use blockzilla_compact::CompactPohEntryLegacyNoSignatureCount;
+        use blockzilla_primitives::WincodeLeb128FramedWriter;
 
         let root = temp_root("poh-migration-status-ready");
         let mut config = test_config(&root);
@@ -35543,9 +35531,9 @@ mod tests {
 
     #[test]
     fn poh_migration_status_transitions_through_already_migrated_and_retry_ready() {
-        use blockzilla_format::{
-            CompactPohEntry, WincodeArchiveV2PohRecord, WincodeLeb128FramedWriter,
-        };
+        use blockzilla_archive_v2::WincodeArchiveV2PohRecord;
+        use blockzilla_compact::CompactPohEntry;
+        use blockzilla_primitives::WincodeLeb128FramedWriter;
 
         let root = temp_root("poh-migration-status-current-schema");
         let config = test_config(&root);
@@ -35766,10 +35754,9 @@ mod tests {
 
     #[tokio::test]
     async fn top_up_poh_migrations_skips_epoch_with_an_active_runtime_failure() {
-        use blockzilla_format::{
-            CompactPohEntryLegacyNoSignatureCount, WincodeArchiveV2PohRecordLegacyNoSignatureCount,
-            WincodeLeb128FramedWriter,
-        };
+        use blockzilla_archive_v2::WincodeArchiveV2PohRecordLegacyNoSignatureCount;
+        use blockzilla_compact::CompactPohEntryLegacyNoSignatureCount;
+        use blockzilla_primitives::WincodeLeb128FramedWriter;
 
         let root = temp_root("poh-migration-topup-skips-failed");
         let mut config = test_config(&root);
@@ -35823,10 +35810,9 @@ mod tests {
     #[tokio::test]
     async fn handle_child_exit_poh_migration_success_commits_dedicated_marker_and_leaves_archival_owner_untouched()
      {
-        use blockzilla_format::{
-            ArchiveV2HotBlockIndexRow, CompactPohEntry, WincodeArchiveV2PohRecord,
-            WincodeLeb128FramedWriter, write_archive_v2_hot_block_index,
-        };
+        use blockzilla_archive_v2::{ArchiveV2HotBlockIndexRow, WincodeArchiveV2PohRecord, write_archive_v2_hot_block_index};
+        use blockzilla_compact::CompactPohEntry;
+        use blockzilla_primitives::WincodeLeb128FramedWriter;
 
         let root = temp_root("poh-migration-exit-success");
         let config = test_config(&root);
@@ -36164,11 +36150,8 @@ mod tests {
     }
 
     fn write_test_repair_compacted(config: &SchedulerConfig, bundle: &Path, epoch: u64) -> PathBuf {
-        use blockzilla_format::{
-            ArchiveV2HotBlockIndexRow, ArchiveV2HotMetaRecord, WincodeArchiveV2Footer,
-            WincodeArchiveV2Header, WincodeArchiveV2PohRecord, WincodeLeb128FramedWriter,
-            write_archive_v2_hot_block_index,
-        };
+        use blockzilla_archive_v2::{ArchiveV2HotBlockIndexRow, ArchiveV2HotMetaRecord, WincodeArchiveV2Footer, WincodeArchiveV2Header, WincodeArchiveV2PohRecord, write_archive_v2_hot_block_index};
+        use blockzilla_primitives::WincodeLeb128FramedWriter;
 
         let output = config.archive_root.join(format!("epoch-{epoch}"));
         fs::create_dir_all(output.join("repair")).unwrap();
@@ -36315,10 +36298,7 @@ mod tests {
         first_blockhash: [u8; 32],
         first_previous_blockhash: [u8; 32],
     ) {
-        use blockzilla_format::{
-            ArchiveV2BlockAccessIndexRow, ArchiveV2GetBlockIndexRow,
-            write_archive_v2_block_access_index, write_archive_v2_get_block_index,
-        };
+        use blockzilla_archive_v2::{ArchiveV2BlockAccessIndexRow, ArchiveV2GetBlockIndexRow, write_archive_v2_block_access_index, write_archive_v2_get_block_index};
 
         let start = epoch * SLOTS_PER_EPOCH;
         let mut access_bytes = Vec::new();
@@ -36326,7 +36306,7 @@ mod tests {
         let mut access_rows = Vec::new();
         for block_id in 0..3u32 {
             scratch.clear();
-            blockzilla_format::encode_with_scratch(
+            blockzilla_primitives::encode_with_scratch(
                 &ArchiveV2BlockAccessBlob {
                     version: WINCODE_ARCHIVE_V2_BLOCK_ACCESS_VERSION,
                     flags: 0,

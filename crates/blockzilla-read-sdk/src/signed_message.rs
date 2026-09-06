@@ -8,11 +8,8 @@
 
 use std::{borrow::Cow, fmt};
 
-use blockzilla_format::{
-    ArchiveV2ComputeBudgetInstructionData, ArchiveV2HotInstructionData,
-    ArchiveV2SystemInstructionData, ArchiveV2VoteHashRef, ArchiveV2VoteStateUpdate,
-    ArchiveV2VoteTowerSync, CompactMessageHeader,
-};
+use blockzilla_archive_v2::{ArchiveV2ComputeBudgetInstructionData, ArchiveV2HotInstructionData, ArchiveV2SystemInstructionData, ArchiveV2VoteHashRef, ArchiveV2VoteStateUpdate, ArchiveV2VoteTowerSync};
+use blockzilla_compact::CompactMessageHeader;
 use solana_signature::Signature;
 use thiserror::Error;
 

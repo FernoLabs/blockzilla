@@ -1,7 +1,7 @@
 use anyhow::{Context, Result, anyhow};
-use blockzilla_format::{
-    SkippedSlotMap, write_registry_iter, write_skipped_slot_map, write_u32_varint,
-};
+use blockzilla_archive_v2::{SkippedSlotMap, write_skipped_slot_map};
+use blockzilla_primitives::write_u32_varint;
+use blockzilla_registry::write_registry_iter;
 use gxhash::{GxBuildHasher, HashMap as GxHashMap};
 use of_car_reader::{
     CarBlockReader,

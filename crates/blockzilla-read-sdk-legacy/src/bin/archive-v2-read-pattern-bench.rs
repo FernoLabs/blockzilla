@@ -14,7 +14,7 @@ use std::{
     time::{Instant, SystemTime, UNIX_EPOCH},
 };
 
-use blockzilla_format::ArchiveV2HotBlockIndexRow;
+use blockzilla_archive_v2::ArchiveV2HotBlockIndexRow;
 use blockzilla_read_sdk_legacy::{
     ArchiveReader, ArchiveV2MetadataWireProfile, ArchiveV2WireProfile, HashVerification,
     OpenOptions, PinnedLocalRangeSource, RangeSource,

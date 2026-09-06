@@ -27,12 +27,8 @@ use blockzilla_firebase_indexer::{
     format::RegistryFileIdentity,
 };
 #[cfg(test)]
-use blockzilla_format::ARCHIVE_V2_TX_FLAG_MESSAGE_V0;
-use blockzilla_format::{
-    ARCHIVE_V2_BLOCK_INDEX_FILE, ARCHIVE_V2_BLOCKS_FILE, ARCHIVE_V2_META_FILE,
-    ARCHIVE_V2_PUBKEY_REGISTRY_FILE, ARCHIVE_V2_PUBKEY_REGISTRY_INDEX_FILE,
-    ARCHIVE_V2_SIGNATURES_FILE,
-};
+use blockzilla_archive_v2::ARCHIVE_V2_TX_FLAG_MESSAGE_V0;
+use blockzilla_archive_v2::{ARCHIVE_V2_BLOCKS_FILE, ARCHIVE_V2_BLOCK_INDEX_FILE, ARCHIVE_V2_META_FILE, ARCHIVE_V2_PUBKEY_REGISTRY_FILE, ARCHIVE_V2_PUBKEY_REGISTRY_INDEX_FILE, ARCHIVE_V2_SIGNATURES_FILE};
 #[cfg(test)]
 use blockzilla_read_sdk_legacy::WireProfileAuditOutcome;
 use blockzilla_read_sdk_legacy::{

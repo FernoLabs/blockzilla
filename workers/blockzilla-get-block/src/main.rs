@@ -1,11 +1,6 @@
 use anyhow::{Context, Result, anyhow, bail};
-use blockzilla_format::{
-    ARCHIVE_V2_BLOCK_ACCESS_FILE, ARCHIVE_V2_BLOCKS_FILE, ARCHIVE_V2_GET_BLOCK_INDEX_FILE,
-    ARCHIVE_V2_GET_BLOCK_INDEX_ROW_LEN, ArchiveV2BlockAccessBlob, ArchiveV2BlockAccessBlockhash,
-    ArchiveV2BlockAccessPubkey, ArchiveV2GetBlockIndexRow, ArchiveV2HotRewards, ArchiveV2HotTxRow,
-    CompactPubkey, WINCODE_ARCHIVE_V2_BLOCK_ACCESS_VERSION, WincodeLeb128Config,
-    deserialize_archive_v2_hot_block_blob, wincode_leb128_config,
-};
+use blockzilla_archive_v2::{ARCHIVE_V2_BLOCKS_FILE, ARCHIVE_V2_BLOCK_ACCESS_FILE, ARCHIVE_V2_GET_BLOCK_INDEX_FILE, ARCHIVE_V2_GET_BLOCK_INDEX_ROW_LEN, ArchiveV2BlockAccessBlob, ArchiveV2BlockAccessBlockhash, ArchiveV2BlockAccessPubkey, ArchiveV2GetBlockIndexRow, ArchiveV2HotRewards, ArchiveV2HotTxRow, WINCODE_ARCHIVE_V2_BLOCK_ACCESS_VERSION, deserialize_archive_v2_hot_block_blob};
+use blockzilla_primitives::{CompactPubkey, WincodeLeb128Config, wincode_leb128_config};
 use clap::{Parser, Subcommand};
 use serde::{Deserialize, Serialize};
 use serde_json::json;

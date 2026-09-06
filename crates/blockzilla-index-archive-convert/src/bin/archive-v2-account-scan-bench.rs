@@ -12,16 +12,9 @@ use std::{
 };
 
 use anyhow::{Context, Result, bail, ensure};
-use blockzilla_format::{
-    ARCHIVE_V2_TX_FLAG_HAS_COMPACT_VOTE_IX, ARCHIVE_V2_TX_FLAG_HAS_ERROR,
-    ARCHIVE_V2_TX_FLAG_HAS_INNER_IX, ARCHIVE_V2_TX_FLAG_HAS_LOADED_ADDRESSES,
-    ARCHIVE_V2_TX_FLAG_HAS_LOGS, ARCHIVE_V2_TX_FLAG_HAS_METADATA,
-    ARCHIVE_V2_TX_FLAG_HAS_RETURN_DATA, ARCHIVE_V2_TX_FLAG_HAS_TOKEN_BALANCES,
-    ARCHIVE_V2_TX_FLAG_MESSAGE_V0, ARCHIVE_V2_TX_FLAG_METADATA_RAW_FALLBACK,
-    ARCHIVE_V2_TX_FLAG_TX_RAW_FALLBACK, ArchiveV2HotInstruction, ArchiveV2HotInstructionData,
-    ArchiveV2HotMessagePayload, ArchiveV2HotTxRow, ArchiveV2HotV0Message, CompactMessageHeader,
-    CompactMetaV1, CompactPubkey,
-};
+use blockzilla_archive_v2::{ARCHIVE_V2_TX_FLAG_HAS_COMPACT_VOTE_IX, ARCHIVE_V2_TX_FLAG_HAS_ERROR, ARCHIVE_V2_TX_FLAG_HAS_INNER_IX, ARCHIVE_V2_TX_FLAG_HAS_LOADED_ADDRESSES, ARCHIVE_V2_TX_FLAG_HAS_LOGS, ARCHIVE_V2_TX_FLAG_HAS_METADATA, ARCHIVE_V2_TX_FLAG_HAS_RETURN_DATA, ARCHIVE_V2_TX_FLAG_HAS_TOKEN_BALANCES, ARCHIVE_V2_TX_FLAG_MESSAGE_V0, ARCHIVE_V2_TX_FLAG_METADATA_RAW_FALLBACK, ARCHIVE_V2_TX_FLAG_TX_RAW_FALLBACK, ArchiveV2HotInstruction, ArchiveV2HotInstructionData, ArchiveV2HotMessagePayload, ArchiveV2HotTxRow, ArchiveV2HotV0Message};
+use blockzilla_compact::{CompactMessageHeader, CompactMetaV1};
+use blockzilla_primitives::CompactPubkey;
 use blockzilla_index_archive_convert::source_v2::{
     CompactV2MessageSchema, CompactV2MetadataSchema, decode_message_lane_with_schema,
     decode_metadata_lane, validate_v0_loaded_address_counts,

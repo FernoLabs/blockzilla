@@ -1,13 +1,5 @@
 use anyhow::{Context, Result};
-use blockzilla_format::{
-    ARCHIVE_V2_BLOCK_ACCESS_FILE, ARCHIVE_V2_BLOCK_ACCESS_INDEX_FILE, ARCHIVE_V2_BLOCK_INDEX_FILE,
-    ARCHIVE_V2_BLOCKHASH_INDEX_V3_FILE, ARCHIVE_V2_BLOCKHASH_REGISTRY_FILE, ARCHIVE_V2_BLOCKS_FILE,
-    ARCHIVE_V2_FIRST_SEEN_REGISTRY_MANIFEST_FILE, ARCHIVE_V2_META_FILE, ARCHIVE_V2_POH_FILE,
-    ARCHIVE_V2_PUBKEY_HOT_SEED_FILE, ARCHIVE_V2_PUBKEY_REGISTRY_COUNTS_FILE,
-    ARCHIVE_V2_PUBKEY_REGISTRY_FILE, ARCHIVE_V2_PUBKEY_REGISTRY_INDEX_FILE,
-    ARCHIVE_V2_SHREDDING_FILE, ARCHIVE_V2_SIGNATURES_FILE, ARCHIVE_V2_VOTE_HASH_REGISTRY_FILE,
-    BLOCK_TIME_GAP_FILE,
-};
+use blockzilla_archive_v2::{ARCHIVE_V2_BLOCKHASH_INDEX_V3_FILE, ARCHIVE_V2_BLOCKHASH_REGISTRY_FILE, ARCHIVE_V2_BLOCKS_FILE, ARCHIVE_V2_BLOCK_ACCESS_FILE, ARCHIVE_V2_BLOCK_ACCESS_INDEX_FILE, ARCHIVE_V2_BLOCK_INDEX_FILE, ARCHIVE_V2_FIRST_SEEN_REGISTRY_MANIFEST_FILE, ARCHIVE_V2_META_FILE, ARCHIVE_V2_POH_FILE, ARCHIVE_V2_PUBKEY_HOT_SEED_FILE, ARCHIVE_V2_PUBKEY_REGISTRY_COUNTS_FILE, ARCHIVE_V2_PUBKEY_REGISTRY_FILE, ARCHIVE_V2_PUBKEY_REGISTRY_INDEX_FILE, ARCHIVE_V2_SHREDDING_FILE, ARCHIVE_V2_SIGNATURES_FILE, ARCHIVE_V2_VOTE_HASH_REGISTRY_FILE, BLOCK_TIME_GAP_FILE};
 use std::{
     fs::{File, OpenOptions},
     io::{BufReader, Read, Write},
@@ -643,7 +635,7 @@ fn validate_registry_counts_audit(
     let mut actual = ManifestReferenceAudit { low: 0, high: 0 };
     let mut rows = 0u64;
     let mut references = 0u64;
-    while let Some(count) = blockzilla_format::framed::read_u32_varint(&mut counts)
+    while let Some(count) = blockzilla_primitives::framed::read_u32_varint(&mut counts)
         .with_context(|| format!("read registry counts audit {}", counts_path.display()))?
     {
         anyhow::ensure!(
@@ -715,11 +707,8 @@ pub(crate) fn sync_directory(_path: &Path) -> Result<()> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use blockzilla_format::{
-        ARCHIVE_V2_BLOCKHASH_INDEX_V3_MAGIC, ARCHIVE_V2_BLOCKHASH_INDEX_V3_ROW_LEN,
-        ARCHIVE_V2_BLOCKHASH_INDEX_V3_VERSION, BLOCK_TIME_GAP_FILE, KeyIndex,
-        read_block_time_gap_sidecar,
-    };
+    use blockzilla_archive_v2::{ARCHIVE_V2_BLOCKHASH_INDEX_V3_MAGIC, ARCHIVE_V2_BLOCKHASH_INDEX_V3_ROW_LEN, ARCHIVE_V2_BLOCKHASH_INDEX_V3_VERSION, BLOCK_TIME_GAP_FILE, read_block_time_gap_sidecar};
+    use blockzilla_registry::KeyIndex;
 
     fn write_test_v3(output_dir: &Path, epoch: u64) {
         let mut bytes = Vec::new();
@@ -832,8 +821,8 @@ mod tests {
         let keys = [[1u8; 32], [2u8; 32]];
         std::fs::write(root.join(ARCHIVE_V2_PUBKEY_REGISTRY_FILE), keys.concat()).unwrap();
         let mut count_bytes = Vec::new();
-        blockzilla_format::framed::write_u32_varint(&mut count_bytes, 1).unwrap();
-        blockzilla_format::framed::write_u32_varint(&mut count_bytes, 2).unwrap();
+        blockzilla_primitives::framed::write_u32_varint(&mut count_bytes, 1).unwrap();
+        blockzilla_primitives::framed::write_u32_varint(&mut count_bytes, 2).unwrap();
         let counts_path = root.join(ARCHIVE_V2_PUBKEY_REGISTRY_COUNTS_FILE);
         std::fs::write(&counts_path, &count_bytes).unwrap();
 
@@ -842,8 +831,8 @@ mod tests {
         validate_registry_counts_audit(&root, marker, expected).unwrap();
 
         count_bytes.clear();
-        blockzilla_format::framed::write_u32_varint(&mut count_bytes, 1).unwrap();
-        blockzilla_format::framed::write_u32_varint(&mut count_bytes, 1).unwrap();
+        blockzilla_primitives::framed::write_u32_varint(&mut count_bytes, 1).unwrap();
+        blockzilla_primitives::framed::write_u32_varint(&mut count_bytes, 1).unwrap();
         std::fs::write(&counts_path, &count_bytes).unwrap();
         let error = validate_registry_counts_audit(&root, marker, expected).unwrap_err();
         assert!(
@@ -900,8 +889,8 @@ mod tests {
             std::fs::write(root.join(name), []).unwrap();
         }
         let mut counts = Vec::new();
-        blockzilla_format::framed::write_u32_varint(&mut counts, 1).unwrap();
-        blockzilla_format::framed::write_u32_varint(&mut counts, 2).unwrap();
+        blockzilla_primitives::framed::write_u32_varint(&mut counts, 1).unwrap();
+        blockzilla_primitives::framed::write_u32_varint(&mut counts, 2).unwrap();
         std::fs::write(root.join(ARCHIVE_V2_PUBKEY_REGISTRY_COUNTS_FILE), counts).unwrap();
 
         let meta_path = root.join(ARCHIVE_V2_META_FILE);
@@ -959,8 +948,8 @@ mod tests {
             std::fs::write(root.join(name), []).unwrap();
         }
         let mut count_bytes = Vec::new();
-        blockzilla_format::framed::write_u32_varint(&mut count_bytes, 1).unwrap();
-        blockzilla_format::framed::write_u32_varint(&mut count_bytes, 2).unwrap();
+        blockzilla_primitives::framed::write_u32_varint(&mut count_bytes, 1).unwrap();
+        blockzilla_primitives::framed::write_u32_varint(&mut count_bytes, 2).unwrap();
         std::fs::write(
             root.join(ARCHIVE_V2_PUBKEY_REGISTRY_COUNTS_FILE),
             count_bytes,

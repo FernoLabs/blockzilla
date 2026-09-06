@@ -4,15 +4,10 @@ use std::path::Path;
 use std::sync::Arc;
 
 use anyhow::{Context, Result, bail, ensure};
-use blockzilla_format::program_logs::{
-    ProgramLog,
-    system_program::{PubkeyOrString, SystemAddress, SystemProgramLog},
-    token_2022::Token2022Log,
-};
-use blockzilla_format::{
-    ArchiveV2HotBlockHeader, ArchiveV2HotMessagePayload, CompactLogStream, CompactMetaV1,
-    CompactPubkey, LogEvent, OwnedCompactRecentBlockhash,
-};
+use blockzilla_program_logs::{program_logs::ProgramLog, program_logs::system_program::PubkeyOrString, program_logs::system_program::SystemAddress, program_logs::system_program::SystemProgramLog, program_logs::token_2022::Token2022Log};
+use blockzilla_archive_v2::{ArchiveV2HotBlockHeader, ArchiveV2HotMessagePayload};
+use blockzilla_compact::{CompactLogStream, CompactMetaV1, LogEvent, OwnedCompactRecentBlockhash};
+use blockzilla_primitives::CompactPubkey;
 use memmap2::{Mmap, MmapOptions};
 
 const KEY_BYTES: usize = 32;
@@ -934,11 +929,10 @@ fn read_previous_blockhash_tail(path: &Path) -> Result<Vec<[u8; KEY_BYTES]>> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use blockzilla_format::program_logs::system_program::NonceAction;
-    use blockzilla_format::{
-        ArchiveV2HotLegacyMessage, ArchiveV2HotV0Message, CompactMessageHeader, CompactReturnData,
-        CompactReward, CompactTokenBalance, DataTable, OwnedCompactAddressTableLookup, StringTable,
-    };
+    use blockzilla_program_logs::program_logs::system_program::NonceAction;
+    use blockzilla_archive_v2::{ArchiveV2HotLegacyMessage, ArchiveV2HotV0Message};
+    use blockzilla_compact::{CompactMessageHeader, CompactReturnData, CompactReward, CompactTokenBalance, DataTable, OwnedCompactAddressTableLookup};
+    use blockzilla_primitives::StringTable;
     use tempfile::tempdir;
 
     fn key(marker: u8) -> [u8; KEY_BYTES] {

@@ -8,34 +8,9 @@
 //! archive.
 
 use anyhow::{Context, Result, ensure};
-use blockzilla_format::{
-    ARCHIVE_V2_BLOCK_ACCESS_FILE, ARCHIVE_V2_BLOCK_ACCESS_INDEX_FILE,
-    ARCHIVE_V2_BLOCK_ACCESS_MAX_FRAME_BYTES, ARCHIVE_V2_BLOCK_INDEX_FILE,
-    ARCHIVE_V2_BLOCKHASH_INDEX_V3_FILE, ARCHIVE_V2_BLOCKHASH_REGISTRY_FILE, ARCHIVE_V2_BLOCKS_FILE,
-    ARCHIVE_V2_GENESIS_BIN_FILE, ARCHIVE_V2_GET_BLOCK_INDEX_FILE,
-    ARCHIVE_V2_GET_BLOCK_INDEX_ROW_LEN, ARCHIVE_V2_HOT_INDEX_FLAG_DICTIONARY,
-    ARCHIVE_V2_HOT_INDEX_FLAG_RAW_BLOCKS, ARCHIVE_V2_HOT_INDEX_HEADER_LEN,
-    ARCHIVE_V2_HOT_INDEX_MAGIC, ARCHIVE_V2_HOT_INDEX_ROW_LEN, ARCHIVE_V2_HOT_INDEX_VERSION,
-    ARCHIVE_V2_META_FILE, ARCHIVE_V2_POH_FILE, ARCHIVE_V2_PREV_BLOCKHASH_TAIL_FILE,
-    ARCHIVE_V2_PUBKEY_HOT_SEED_FILE, ARCHIVE_V2_PUBKEY_REGISTRY_COUNTS_FILE,
-    ARCHIVE_V2_PUBKEY_REGISTRY_FILE, ARCHIVE_V2_PUBKEY_REGISTRY_INDEX_FILE,
-    ARCHIVE_V2_SHREDDING_FILE, ARCHIVE_V2_SIGNATURES_FILE, ARCHIVE_V2_TX_FLAG_HAS_ERROR,
-    ARCHIVE_V2_TX_FLAG_HAS_METADATA, ARCHIVE_V2_TX_FLAG_METADATA_RAW_FALLBACK,
-    ARCHIVE_V2_TX_FLAG_TX_RAW_FALLBACK, ARCHIVE_V2_VOTE_HASH_REGISTRY_FILE,
-    ArchiveV2BlockAccessIndexRow, ArchiveV2GetBlockIndexRow, ArchiveV2HotBlockHeader,
-    ArchiveV2HotBlockIndex, ArchiveV2HotBlockIndexRow, ArchiveV2HotMetaRecord, ArchiveV2HotTxRow,
-    ArchiveV2WireFallbackReason, ArchiveV2WireIdentityVisitor, ArchiveV2WireMetadataErrorSchema,
-    ArchiveV2WireRewriteErrorKind, ArchiveV2WireRewriteLimits, BLOCK_TIME_GAP_FILE, CompactMetaV1,
-    WINCODE_ARCHIVE_V2_FLAG_ALL_PUBKEY_REF_COUNTS, WINCODE_ARCHIVE_V2_FLAG_FIRST_SEEN_REGISTRY,
-    WINCODE_ARCHIVE_V2_FLAG_LEB128, WINCODE_ARCHIVE_V2_FLAG_NO_REGISTRY,
-    WINCODE_ARCHIVE_V2_HOT_BLOCK_VERSION, WincodeArchiveV2Footer, WincodeLeb128FramedReader,
-    canonicalize_archive_v2_metadata_owned,
-    deserialize_archive_v2_hot_block_blob_borrowed_current_with_preallocation_limit,
-    read_archive_v2_block_access_index, read_archive_v2_get_block_index,
-    rewrite_archive_v2_metadata_wire,
-    validate_archive_v2_metadata_error_prefix_for_selected_schema, wincode_leb128_config,
-    write_archive_v2_get_block_index, write_archive_v2_hot_block_index,
-};
+use blockzilla_archive_v2::{ARCHIVE_V2_BLOCKHASH_INDEX_V3_FILE, ARCHIVE_V2_BLOCKHASH_REGISTRY_FILE, ARCHIVE_V2_BLOCKS_FILE, ARCHIVE_V2_BLOCK_ACCESS_FILE, ARCHIVE_V2_BLOCK_ACCESS_INDEX_FILE, ARCHIVE_V2_BLOCK_ACCESS_MAX_FRAME_BYTES, ARCHIVE_V2_BLOCK_INDEX_FILE, ARCHIVE_V2_GENESIS_BIN_FILE, ARCHIVE_V2_GET_BLOCK_INDEX_FILE, ARCHIVE_V2_GET_BLOCK_INDEX_ROW_LEN, ARCHIVE_V2_HOT_INDEX_FLAG_DICTIONARY, ARCHIVE_V2_HOT_INDEX_FLAG_RAW_BLOCKS, ARCHIVE_V2_HOT_INDEX_HEADER_LEN, ARCHIVE_V2_HOT_INDEX_MAGIC, ARCHIVE_V2_HOT_INDEX_ROW_LEN, ARCHIVE_V2_HOT_INDEX_VERSION, ARCHIVE_V2_META_FILE, ARCHIVE_V2_POH_FILE, ARCHIVE_V2_PREV_BLOCKHASH_TAIL_FILE, ARCHIVE_V2_PUBKEY_HOT_SEED_FILE, ARCHIVE_V2_PUBKEY_REGISTRY_COUNTS_FILE, ARCHIVE_V2_PUBKEY_REGISTRY_FILE, ARCHIVE_V2_PUBKEY_REGISTRY_INDEX_FILE, ARCHIVE_V2_SHREDDING_FILE, ARCHIVE_V2_SIGNATURES_FILE, ARCHIVE_V2_TX_FLAG_HAS_ERROR, ARCHIVE_V2_TX_FLAG_HAS_METADATA, ARCHIVE_V2_TX_FLAG_METADATA_RAW_FALLBACK, ARCHIVE_V2_TX_FLAG_TX_RAW_FALLBACK, ARCHIVE_V2_VOTE_HASH_REGISTRY_FILE, ArchiveV2BlockAccessIndexRow, ArchiveV2GetBlockIndexRow, ArchiveV2HotBlockHeader, ArchiveV2HotBlockIndex, ArchiveV2HotBlockIndexRow, ArchiveV2HotMetaRecord, ArchiveV2HotTxRow, ArchiveV2WireFallbackReason, ArchiveV2WireIdentityVisitor, ArchiveV2WireMetadataErrorSchema, ArchiveV2WireRewriteErrorKind, ArchiveV2WireRewriteLimits, BLOCK_TIME_GAP_FILE, WINCODE_ARCHIVE_V2_FLAG_ALL_PUBKEY_REF_COUNTS, WINCODE_ARCHIVE_V2_FLAG_FIRST_SEEN_REGISTRY, WINCODE_ARCHIVE_V2_FLAG_LEB128, WINCODE_ARCHIVE_V2_FLAG_NO_REGISTRY, WINCODE_ARCHIVE_V2_HOT_BLOCK_VERSION, WincodeArchiveV2Footer, canonicalize_archive_v2_metadata_owned, deserialize_archive_v2_hot_block_blob_borrowed_current_with_preallocation_limit, read_archive_v2_block_access_index, read_archive_v2_get_block_index, rewrite_archive_v2_metadata_wire, validate_archive_v2_metadata_error_prefix_for_selected_schema, write_archive_v2_get_block_index, write_archive_v2_hot_block_index};
+use blockzilla_compact::CompactMetaV1;
+use blockzilla_primitives::{WincodeLeb128FramedReader, wincode_leb128_config};
 use blockzilla_read_sdk::{PinnedLocalEntryKind, PinnedLocalRangeSource, RangeSource};
 use std::{
     collections::{BTreeMap, BTreeSet},
@@ -1806,15 +1781,10 @@ fn checked_add(left: u64, right: u64, name: &'static str) -> Result<u64> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use blockzilla_format::{
-        ARCHIVE_V2_TX_FLAG_HAS_ERROR, ARCHIVE_V2_TX_FLAG_HAS_METADATA,
-        ArchiveV2BlockAccessIndexRow, ArchiveV2HotBlockBlob, ArchiveV2HotInstruction,
-        ArchiveV2HotInstructionData, ArchiveV2HotLegacyMessage, ArchiveV2HotMessagePayload,
-        CompactInstructionError, CompactMessageHeader, CompactPubkey, CompactTransactionError,
-        KeyIndex, OwnedCompactRecentBlockhash, WINCODE_ARCHIVE_V2_FLAG_LEB128,
-        WincodeArchiveV2Footer, WincodeArchiveV2Header, WincodeLeb128FramedWriter,
-        read_archive_v2_hot_block_index, write_archive_v2_block_access_index,
-    };
+    use blockzilla_archive_v2::{ARCHIVE_V2_TX_FLAG_HAS_ERROR, ARCHIVE_V2_TX_FLAG_HAS_METADATA, ArchiveV2BlockAccessIndexRow, ArchiveV2HotBlockBlob, ArchiveV2HotInstruction, ArchiveV2HotInstructionData, ArchiveV2HotLegacyMessage, ArchiveV2HotMessagePayload, WINCODE_ARCHIVE_V2_FLAG_LEB128, WincodeArchiveV2Footer, WincodeArchiveV2Header, read_archive_v2_hot_block_index, write_archive_v2_block_access_index};
+    use blockzilla_compact::{CompactInstructionError, CompactMessageHeader, CompactTransactionError, OwnedCompactRecentBlockhash};
+    use blockzilla_primitives::{CompactPubkey, WincodeLeb128FramedWriter};
+    use blockzilla_registry::KeyIndex;
     use of_car_reader::stored_transaction::{
         InstructionError as StoredInstructionError, StoredTransactionError,
     };

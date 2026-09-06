@@ -1,7 +1,5 @@
 use anyhow::{Context, Result, ensure};
-use blockzilla_format::{
-    BLOCK_TIME_GAP_FILE, BLOCK_TIME_GAP_MISSING_TIME, BlockTimeGapRow, read_block_time_gap_sidecar,
-};
+use blockzilla_archive_v2::{BLOCK_TIME_GAP_FILE, BLOCK_TIME_GAP_MISSING_TIME, BlockTimeGapRow, read_block_time_gap_sidecar};
 use serde::Serialize;
 use sha2::{Digest, Sha256};
 use std::{
@@ -337,13 +335,13 @@ fn interruption_from_row(
 fn boundary_flags(previous_block_time: i64, next_block_time: i64) -> u32 {
     let mut flags = 0;
     if previous_block_time == BLOCK_TIME_GAP_MISSING_TIME {
-        flags |= blockzilla_format::BLOCK_TIME_GAP_FLAG_PREVIOUS_TIME_MISSING;
+        flags |= blockzilla_archive_v2::BLOCK_TIME_GAP_FLAG_PREVIOUS_TIME_MISSING;
     }
     if next_block_time == BLOCK_TIME_GAP_MISSING_TIME {
-        flags |= blockzilla_format::BLOCK_TIME_GAP_FLAG_NEXT_TIME_MISSING;
+        flags |= blockzilla_archive_v2::BLOCK_TIME_GAP_FLAG_NEXT_TIME_MISSING;
     }
     if flags == 0 && next_block_time < previous_block_time {
-        flags |= blockzilla_format::BLOCK_TIME_GAP_FLAG_TIME_DECREASING;
+        flags |= blockzilla_archive_v2::BLOCK_TIME_GAP_FLAG_TIME_DECREASING;
     }
     flags
 }
@@ -479,11 +477,7 @@ fn hex_digest(bytes: &[u8]) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use blockzilla_format::{
-        BLOCK_TIME_GAP_HEADER_LEN, BLOCK_TIME_GAP_MAGIC, BLOCK_TIME_GAP_ROW_LEN,
-        BLOCK_TIME_GAP_TIME_THRESHOLD_SECS, BLOCK_TIME_GAP_VERSION, BlockTimeGapHeader,
-        BlockTimeGapSidecar, BlockTimeGapSourceKind, write_block_time_gap_sidecar,
-    };
+    use blockzilla_archive_v2::{BLOCK_TIME_GAP_HEADER_LEN, BLOCK_TIME_GAP_MAGIC, BLOCK_TIME_GAP_ROW_LEN, BLOCK_TIME_GAP_TIME_THRESHOLD_SECS, BLOCK_TIME_GAP_VERSION, BlockTimeGapHeader, BlockTimeGapSidecar, BlockTimeGapSourceKind, write_block_time_gap_sidecar};
 
     fn temporary_root(name: &str) -> PathBuf {
         let unique = SystemTime::now()

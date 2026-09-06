@@ -12,25 +12,9 @@ use super::{
 };
 use anyhow::{Context, Result, anyhow, bail};
 use base64::{Engine as _, engine::general_purpose::STANDARD as BASE64_STANDARD};
-use blockzilla_format::{
-    ARCHIVE_V2_BLOCK_ACCESS_FILE, ARCHIVE_V2_BLOCK_ACCESS_INDEX_FILE,
-    ARCHIVE_V2_BLOCK_ACCESS_MAX_FRAME_BYTES, ARCHIVE_V2_BLOCK_INDEX_FILE,
-    ARCHIVE_V2_BLOCKHASH_REGISTRY_FILE, ARCHIVE_V2_BLOCKS_FILE, ARCHIVE_V2_GET_BLOCK_INDEX_FILE,
-    ARCHIVE_V2_META_FILE, ARCHIVE_V2_PREV_BLOCKHASH_TAIL_FILE,
-    ARCHIVE_V2_PUBKEY_REGISTRY_COUNTS_FILE, ARCHIVE_V2_PUBKEY_REGISTRY_FILE,
-    ARCHIVE_V2_PUBKEY_REGISTRY_INDEX_FILE, ARCHIVE_V2_SIGNATURES_FILE,
-    ARCHIVE_V2_VOTE_HASH_REGISTRY_FILE, ArchiveV2BlockAccessBlob, ArchiveV2HotMetaRecord,
-    CompactBlockHeader, CompactInnerInstruction, CompactInnerInstructions, CompactInstructionError,
-    CompactTransactionError, WINCODE_ARCHIVE_V2_BLOCK_ACCESS_VERSION,
-    WincodeArchiveV2NoRegistryBlock, WincodeArchiveV2NoRegistryBlockHeader,
-    WincodeArchiveV2NoRegistryLogs, WincodeArchiveV2NoRegistryMeta,
-    WincodeArchiveV2NoRegistryReturnData, WincodeArchiveV2NoRegistryReward,
-    WincodeArchiveV2NoRegistryRewards, WincodeArchiveV2NoRegistryTokenBalance,
-    WincodeArchiveV2NoRegistryTransaction, WincodeArchiveV2Payload, WincodeLeb128FramedReader,
-    encode_with_scratch, framed::read_u32_varint, framed::write_u32_varint,
-    read_archive_v2_block_access_index, read_archive_v2_get_block_index,
-    read_archive_v2_hot_block_index, wincode_leb128_config,
-};
+use blockzilla_archive_v2::{ARCHIVE_V2_BLOCKHASH_REGISTRY_FILE, ARCHIVE_V2_BLOCKS_FILE, ARCHIVE_V2_BLOCK_ACCESS_FILE, ARCHIVE_V2_BLOCK_ACCESS_INDEX_FILE, ARCHIVE_V2_BLOCK_ACCESS_MAX_FRAME_BYTES, ARCHIVE_V2_BLOCK_INDEX_FILE, ARCHIVE_V2_GET_BLOCK_INDEX_FILE, ARCHIVE_V2_META_FILE, ARCHIVE_V2_PREV_BLOCKHASH_TAIL_FILE, ARCHIVE_V2_PUBKEY_REGISTRY_COUNTS_FILE, ARCHIVE_V2_PUBKEY_REGISTRY_FILE, ARCHIVE_V2_PUBKEY_REGISTRY_INDEX_FILE, ARCHIVE_V2_SIGNATURES_FILE, ARCHIVE_V2_VOTE_HASH_REGISTRY_FILE, ArchiveV2BlockAccessBlob, ArchiveV2HotMetaRecord, WINCODE_ARCHIVE_V2_BLOCK_ACCESS_VERSION, WincodeArchiveV2NoRegistryBlock, WincodeArchiveV2NoRegistryBlockHeader, WincodeArchiveV2NoRegistryLogs, WincodeArchiveV2NoRegistryMeta, WincodeArchiveV2NoRegistryReturnData, WincodeArchiveV2NoRegistryReward, WincodeArchiveV2NoRegistryRewards, WincodeArchiveV2NoRegistryTokenBalance, WincodeArchiveV2NoRegistryTransaction, WincodeArchiveV2Payload, read_archive_v2_block_access_index, read_archive_v2_get_block_index, read_archive_v2_hot_block_index};
+use blockzilla_compact::{CompactBlockHeader, CompactInnerInstruction, CompactInnerInstructions, CompactInstructionError, CompactTransactionError};
+use blockzilla_primitives::{WincodeLeb128FramedReader, encode_with_scratch, framed::read_u32_varint, framed::write_u32_varint, wincode_leb128_config};
 use gxhash::{GxBuildHasher, HashMap as GxHashMap};
 use of_car_reader::versioned_transaction::VersionedTransaction;
 use serde::{Deserialize, Serialize};
@@ -1066,7 +1050,7 @@ fn validate_plan_and_partial_poh(context: &mut ValidatedContext) -> Result<()> {
     let mut last_slot = None;
     // Every frame in this sidecar shares one schema; probing per-frame would decode a legacy
     // (pre-`signature_count`) sidecar twice on every single block.
-    let mut poh_schema = blockzilla_format::PohRecordSchema::default();
+    let mut poh_schema = blockzilla_archive_v2::PohRecordSchema::default();
 
     for produced_id_u64 in 0..context.manifest.produced_blocks {
         let produced_id =
@@ -1128,7 +1112,7 @@ fn validate_plan_and_partial_poh(context: &mut ValidatedContext) -> Result<()> {
             }
             let poh = poh_reader
                 .read_bytes_with_limit(POH_FRAME_MAX_BYTES, |bytes| {
-                    blockzilla_format::deserialize_archive_v2_poh_record_with_schema(
+                    blockzilla_archive_v2::deserialize_archive_v2_poh_record_with_schema(
                         bytes,
                         &mut poh_schema,
                     )
@@ -2000,12 +1984,12 @@ fn visit_no_registry_pubkeys(
             );
         };
         match &value.message {
-            blockzilla_format::WincodeArchiveV2NoRegistryMessage::Legacy(message) => {
+            blockzilla_archive_v2::WincodeArchiveV2NoRegistryMessage::Legacy(message) => {
                 for pubkey in &message.account_keys {
                     visit(*pubkey)?;
                 }
             }
-            blockzilla_format::WincodeArchiveV2NoRegistryMessage::V0(message) => {
+            blockzilla_archive_v2::WincodeArchiveV2NoRegistryMessage::V0(message) => {
                 for pubkey in &message.account_keys {
                     visit(*pubkey)?;
                 }
@@ -2014,7 +1998,7 @@ fn visit_no_registry_pubkeys(
                 }
             }
             // V1 carries the whole address list inline; there are no lookups.
-            blockzilla_format::WincodeArchiveV2NoRegistryMessage::V1(message) => {
+            blockzilla_archive_v2::WincodeArchiveV2NoRegistryMessage::V1(message) => {
                 for pubkey in &message.account_keys {
                     visit(*pubkey)?;
                 }
@@ -2291,10 +2275,10 @@ pub(crate) fn validate_materialized_for_hot(materialized_dir: &Path) -> Result<M
     let mut previous_slot = None;
     // Every frame in this sidecar shares one schema; probing per-frame would decode a legacy
     // (pre-`signature_count`) sidecar twice on every single block.
-    let mut poh_schema = blockzilla_format::PohRecordSchema::default();
+    let mut poh_schema = blockzilla_archive_v2::PohRecordSchema::default();
     while let Some((_len, record)) =
         poh_reader.read_bytes_with_limit(POH_FRAME_MAX_BYTES, |bytes| {
-            blockzilla_format::deserialize_archive_v2_poh_record_with_schema(bytes, &mut poh_schema)
+            blockzilla_archive_v2::deserialize_archive_v2_poh_record_with_schema(bytes, &mut poh_schema)
                 .map_err(|error| anyhow!("{error}"))
         })?
     {
@@ -3661,10 +3645,9 @@ fn current_rss_bytes() -> Option<u64> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use blockzilla_format::{
-        CompactPohEntry, WincodeArchiveV2NoRegistryRewards, WincodeArchiveV2PohRecord,
-        WincodeLeb128FramedWriter,
-    };
+    use blockzilla_archive_v2::{WincodeArchiveV2NoRegistryRewards, WincodeArchiveV2PohRecord};
+    use blockzilla_compact::CompactPohEntry;
+    use blockzilla_primitives::WincodeLeb128FramedWriter;
 
     fn temp_dir(label: &str) -> PathBuf {
         let stamp = SystemTime::now()
@@ -4142,7 +4125,7 @@ mod tests {
         blocks_file.read_exact(&mut compressed).unwrap();
         let decoded =
             zstd::bulk::decompress(&compressed, first_row.uncompressed_len as usize).unwrap();
-        let hot_block = blockzilla_format::deserialize_archive_v2_hot_block_blob(&decoded).unwrap();
+        let hot_block = blockzilla_archive_v2::deserialize_archive_v2_hot_block_blob(&decoded).unwrap();
         assert_eq!(hot_block.header.slot, 10);
         let error = build_repair_block_access(&repair, &hot_output).unwrap_err();
         assert!(

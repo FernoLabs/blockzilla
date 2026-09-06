@@ -8,10 +8,7 @@
 //! promotion and finality.
 
 use anyhow::{Context, Result, ensure};
-use blockzilla_format::{
-    BlockCandidatePartsV1, BlockCandidateV1, PohEntryV1, SignedTransactionEnvelopeV1,
-    TransactionsV1,
-};
+use blockzilla_live_format::{BlockCandidatePartsV1, BlockCandidateV1, PohEntryV1, SignedTransactionEnvelopeV1, TransactionsV1};
 use ed25519_dalek::{Signature, VerifyingKey};
 use yellowstone_grpc_proto::prelude::{Message as GrpcMessage, SubscribeUpdateBlock};
 

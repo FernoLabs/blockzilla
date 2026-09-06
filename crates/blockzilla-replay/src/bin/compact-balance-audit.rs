@@ -3,10 +3,10 @@
 use std::{env, path::PathBuf};
 
 use anyhow::{Context, Result, anyhow, bail};
-use blockzilla_format::{
-    ARCHIVE_V2_PUBKEY_REGISTRY_FILE, ARCHIVE_V2_TX_FLAG_HAS_METADATA,
-    ARCHIVE_V2_TX_FLAG_METADATA_RAW_FALLBACK, CompactMetaV1, KeyStore, wincode_leb128_config,
-};
+use blockzilla_archive_v2::{ARCHIVE_V2_PUBKEY_REGISTRY_FILE, ARCHIVE_V2_TX_FLAG_HAS_METADATA, ARCHIVE_V2_TX_FLAG_METADATA_RAW_FALLBACK};
+use blockzilla_compact::CompactMetaV1;
+use blockzilla_primitives::wincode_leb128_config;
+use blockzilla_registry::KeyStore;
 use blockzilla_read_sdk::{ArchiveReader, HashVerification, LocalRangeSource, OpenOptions};
 use blockzilla_replay::{CompactProbeConfig, probe_compact_generation};
 

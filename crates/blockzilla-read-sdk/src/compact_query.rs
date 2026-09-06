@@ -18,14 +18,9 @@ use std::{
 };
 
 use crate::query_keys::BoundQueryKeys;
-use blockzilla_format::{
-    ARCHIVE_V2_BLOCKHASH_REGISTRY_FILE, ARCHIVE_V2_PREV_BLOCKHASH_TAIL_FILE,
-    ARCHIVE_V2_TX_FLAG_HAS_ERROR, ARCHIVE_V2_TX_FLAG_HAS_INNER_IX,
-    ARCHIVE_V2_TX_FLAG_HAS_LOADED_ADDRESSES, ARCHIVE_V2_TX_FLAG_HAS_METADATA,
-    ARCHIVE_V2_TX_FLAG_MESSAGE_V0, ARCHIVE_V2_TX_FLAG_METADATA_RAW_FALLBACK,
-    ARCHIVE_V2_TX_FLAG_TX_RAW_FALLBACK, ARCHIVE_V2_VOTE_HASH_REGISTRY_FILE, ArchiveV2HotTxRow,
-    CompactPubkey, CompactTokenBalance, OwnedCompactRecentBlockhash,
-};
+use blockzilla_archive_v2::{ARCHIVE_V2_BLOCKHASH_REGISTRY_FILE, ARCHIVE_V2_PREV_BLOCKHASH_TAIL_FILE, ARCHIVE_V2_TX_FLAG_HAS_ERROR, ARCHIVE_V2_TX_FLAG_HAS_INNER_IX, ARCHIVE_V2_TX_FLAG_HAS_LOADED_ADDRESSES, ARCHIVE_V2_TX_FLAG_HAS_METADATA, ARCHIVE_V2_TX_FLAG_MESSAGE_V0, ARCHIVE_V2_TX_FLAG_METADATA_RAW_FALLBACK, ARCHIVE_V2_TX_FLAG_TX_RAW_FALLBACK, ARCHIVE_V2_VOTE_HASH_REGISTRY_FILE, ArchiveV2HotTxRow};
+use blockzilla_compact::{CompactTokenBalance, OwnedCompactRecentBlockhash};
+use blockzilla_primitives::CompactPubkey;
 use blockzilla_query_sdk::{
     ArchiveFormat, ArchiveInstructionSource, BlockHeader, BlockSink, CanonicalBlock,
     CanonicalTransaction, CoverageReason, CpiCoverage, Error as QueryError, ExecutionStatus,
@@ -2540,14 +2535,14 @@ impl<S: RangeSource> ContiguousSignatureScan<'_, S> {
 
     fn read_block(
         &mut self,
-        row: &blockzilla_format::ArchiveV2HotBlockIndexRow,
+        row: &blockzilla_archive_v2::ArchiveV2HotBlockIndexRow,
     ) -> CompactV2InstructionSourceResult<Option<&[[u8; SIGNATURE_BYTES]]>> {
         self.read_block_selected(row, true)
     }
 
     fn read_block_selected(
         &mut self,
-        row: &blockzilla_format::ArchiveV2HotBlockIndexRow,
+        row: &blockzilla_archive_v2::ArchiveV2HotBlockIndexRow,
         selected: bool,
     ) -> CompactV2InstructionSourceResult<Option<&[[u8; SIGNATURE_BYTES]]>> {
         if self.next_block >= self.requested_range.end {
@@ -2758,7 +2753,7 @@ fn load_signature_batch<S: RangeSource>(
 }
 
 fn validate_signature_row(
-    row: &blockzilla_format::ArchiveV2HotBlockIndexRow,
+    row: &blockzilla_archive_v2::ArchiveV2HotBlockIndexRow,
 ) -> CompactV2InstructionSourceResult<()> {
     let length = usize::try_from(row.signature_count)
         .ok()
@@ -3130,18 +3125,9 @@ mod tests {
         sync::{Arc, Mutex},
     };
 
-    use blockzilla_format::{
-        ARCHIVE_V2_TX_FLAG_HAS_ERROR, ARCHIVE_V2_TX_FLAG_HAS_INNER_IX,
-        ARCHIVE_V2_TX_FLAG_HAS_LOADED_ADDRESSES, ArchiveV2HotBlockBlob, ArchiveV2HotBlockHeader,
-        ArchiveV2HotInstruction, ArchiveV2HotInstructionData, ArchiveV2HotLegacyMessage,
-        ArchiveV2HotMetaRecord, ArchiveV2HotV0Message, ArchiveV2VoteHashRef,
-        ArchiveV2VoteStateUpdate, ArchiveV2VoteTowerSync, CompactInnerInstruction,
-        CompactInnerInstructions, CompactInstructionError, CompactMessageHeader, CompactMetaV1,
-        CompactTokenBalance, CompactTransactionError, OwnedCompactAddressTableLookup,
-        WINCODE_ARCHIVE_V2_FLAG_LEB128, WINCODE_ARCHIVE_V2_HOT_BLOCK_VERSION,
-        WincodeArchiveV2Footer, WincodeArchiveV2Header, wincode_leb128_config,
-        write_archive_v2_hot_block_index,
-    };
+    use blockzilla_archive_v2::{ARCHIVE_V2_TX_FLAG_HAS_ERROR, ARCHIVE_V2_TX_FLAG_HAS_INNER_IX, ARCHIVE_V2_TX_FLAG_HAS_LOADED_ADDRESSES, ArchiveV2HotBlockBlob, ArchiveV2HotBlockHeader, ArchiveV2HotInstruction, ArchiveV2HotInstructionData, ArchiveV2HotLegacyMessage, ArchiveV2HotMetaRecord, ArchiveV2HotV0Message, ArchiveV2VoteHashRef, ArchiveV2VoteStateUpdate, ArchiveV2VoteTowerSync, WINCODE_ARCHIVE_V2_FLAG_LEB128, WINCODE_ARCHIVE_V2_HOT_BLOCK_VERSION, WincodeArchiveV2Footer, WincodeArchiveV2Header, write_archive_v2_hot_block_index};
+    use blockzilla_compact::{CompactInnerInstruction, CompactInnerInstructions, CompactInstructionError, CompactMessageHeader, CompactMetaV1, CompactTokenBalance, CompactTransactionError, OwnedCompactAddressTableLookup};
+    use blockzilla_primitives::wincode_leb128_config;
     use blockzilla_query_sdk::{
         ArchiveInstructionSourceExt, BlockView, CanonicalBlock, CpiCoverage, ExecutionStatus,
         InstructionCoverage, InstructionDataCoverage, ScanRange,
@@ -3347,7 +3333,7 @@ mod tests {
             ]);
             let token_and_unrelated_vote_meta = metadata(3, None, Some(Vec::new()), vec![], vec![]);
 
-            let v0 = blockzilla_format::ArchiveV2HotMessagePayload::V0(ArchiveV2HotV0Message {
+            let v0 = blockzilla_archive_v2::ArchiveV2HotMessagePayload::V0(ArchiveV2HotV0Message {
                 header: header(),
                 account_keys: vec![CompactPubkey::Id(1), CompactPubkey::Id(2)],
                 recent_blockhash: OwnedCompactRecentBlockhash::Nonce([12; 32]),
@@ -3636,7 +3622,7 @@ mod tests {
                     wincode::config::serialize(&blob, wincode_leb128_config()).unwrap();
                 let compressed = zstd::bulk::compress(&uncompressed, 1).unwrap();
                 let signature_count = blob.tx_count;
-                index_rows.push(blockzilla_format::ArchiveV2HotBlockIndexRow {
+                index_rows.push(blockzilla_archive_v2::ArchiveV2HotBlockIndexRow {
                     block_id: block_id as u32,
                     slot,
                     compressed_offset,
@@ -3736,7 +3722,7 @@ mod tests {
 
     impl TxFixture {
         fn exact(
-            message: blockzilla_format::ArchiveV2HotMessagePayload,
+            message: blockzilla_archive_v2::ArchiveV2HotMessagePayload,
             metadata: CompactMetaV1,
             flags: u32,
         ) -> Self {
@@ -3747,7 +3733,7 @@ mod tests {
             }
         }
 
-        fn without_metadata(message: blockzilla_format::ArchiveV2HotMessagePayload) -> Self {
+        fn without_metadata(message: blockzilla_archive_v2::ArchiveV2HotMessagePayload) -> Self {
             Self {
                 flags: 0,
                 message: encode(&message),
@@ -3755,7 +3741,7 @@ mod tests {
             }
         }
 
-        fn raw_metadata(message: blockzilla_format::ArchiveV2HotMessagePayload) -> Self {
+        fn raw_metadata(message: blockzilla_archive_v2::ArchiveV2HotMessagePayload) -> Self {
             Self {
                 flags: ARCHIVE_V2_TX_FLAG_HAS_METADATA | ARCHIVE_V2_TX_FLAG_METADATA_RAW_FALLBACK,
                 message: encode(&message),
@@ -3782,7 +3768,7 @@ mod tests {
 
     fn legacy_message(
         instructions: Vec<ArchiveV2HotInstruction>,
-    ) -> blockzilla_format::ArchiveV2HotMessagePayload {
+    ) -> blockzilla_archive_v2::ArchiveV2HotMessagePayload {
         let account_keys = if instructions
             .iter()
             .any(|instruction| instruction.program_id_index == 2)
@@ -3795,7 +3781,7 @@ mod tests {
         } else {
             vec![CompactPubkey::Id(1), CompactPubkey::Id(2)]
         };
-        blockzilla_format::ArchiveV2HotMessagePayload::Legacy(ArchiveV2HotLegacyMessage {
+        blockzilla_archive_v2::ArchiveV2HotMessagePayload::Legacy(ArchiveV2HotLegacyMessage {
             header: header(),
             account_keys,
             recent_blockhash: OwnedCompactRecentBlockhash::Nonce([13; 32]),
@@ -3865,7 +3851,7 @@ mod tests {
         }
     }
 
-    fn encode<T: wincode::SchemaWrite<blockzilla_format::WincodeLeb128Config, Src = T>>(
+    fn encode<T: wincode::SchemaWrite<blockzilla_primitives::WincodeLeb128Config, Src = T>>(
         value: &T,
     ) -> Vec<u8> {
         wincode::config::serialize(value, wincode_leb128_config()).unwrap()
@@ -4169,7 +4155,7 @@ mod tests {
         registry[far_account_id - 1] = [0xa1; 32];
         registry[farther_account_id - 1] = [0xa2; 32];
         let message =
-            blockzilla_format::ArchiveV2HotMessagePayload::Legacy(ArchiveV2HotLegacyMessage {
+            blockzilla_archive_v2::ArchiveV2HotMessagePayload::Legacy(ArchiveV2HotLegacyMessage {
                 header: header(),
                 account_keys: vec![
                     CompactPubkey::Id(1),

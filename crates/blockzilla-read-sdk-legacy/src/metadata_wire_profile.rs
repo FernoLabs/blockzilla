@@ -8,14 +8,9 @@
 
 use std::fmt;
 
-use blockzilla_format::{
-    ARCHIVE_V2_DECODE_PREALLOCATION_LIMIT_BYTES, ARCHIVE_V2_TX_FLAG_HAS_ERROR,
-    ARCHIVE_V2_TX_FLAG_HAS_METADATA, ARCHIVE_V2_TX_FLAG_METADATA_RAW_FALLBACK,
-    ArchiveV2WireIdentityVisitor, ArchiveV2WireRewriteLimits, CompactInnerInstructions,
-    CompactLogStream, CompactMetaV1, CompactPubkey, CompactReturnData, CompactReward,
-    CompactTokenBalance, CompactTransactionError, bounded_wincode_leb128_config,
-    rewrite_archive_v2_successful_metadata_wire, wincode_leb128_config,
-};
+use blockzilla_archive_v2::{ARCHIVE_V2_DECODE_PREALLOCATION_LIMIT_BYTES, ARCHIVE_V2_TX_FLAG_HAS_ERROR, ARCHIVE_V2_TX_FLAG_HAS_METADATA, ARCHIVE_V2_TX_FLAG_METADATA_RAW_FALLBACK, ArchiveV2WireIdentityVisitor, ArchiveV2WireRewriteLimits, rewrite_archive_v2_successful_metadata_wire};
+use blockzilla_compact::{CompactInnerInstructions, CompactLogStream, CompactMetaV1, CompactReturnData, CompactReward, CompactTokenBalance, CompactTransactionError};
+use blockzilla_primitives::{CompactPubkey, bounded_wincode_leb128_config, wincode_leb128_config};
 use serde::{Deserialize, Serialize};
 use wincode::{SchemaRead, SchemaWrite};
 

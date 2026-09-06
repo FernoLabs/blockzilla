@@ -4,24 +4,11 @@ use crate::rpc_access::{
 };
 use base64::Engine as _;
 use base64::engine::general_purpose::STANDARD as BASE64;
-use blockzilla_format::{
-    ARCHIVE_V2_BLOCK_ACCESS_FILE, ARCHIVE_V2_BLOCKS_FILE, ARCHIVE_V2_GET_BLOCK_INDEX_FILE,
-    ARCHIVE_V2_GET_BLOCK_INDEX_ROW_LEN, ARCHIVE_V2_TX_FLAG_HAS_METADATA,
-    ARCHIVE_V2_TX_FLAG_METADATA_RAW_FALLBACK, ARCHIVE_V2_TX_FLAG_TX_RAW_FALLBACK,
-    ArchiveV2BlockAccessBlob, ArchiveV2BlockAccessBlockhash, ArchiveV2BlockAccessPubkey,
-    ArchiveV2GetBlockIndexRow, ArchiveV2HotBlockBlob, ArchiveV2HotBlockIndexRow,
-    ArchiveV2HotInstructionData, ArchiveV2HotMessagePayload, ArchiveV2HotTxRow,
-    ArchiveV2VoteHashRef, ArchiveV2VoteStateUpdate, ArchiveV2VoteTowerSync,
-    BlockzillaGetBlockBlobEncoding, BlockzillaGetBlockBundleV1, CompactInnerInstructions,
-    CompactInstructionError as InstructionError, CompactLogStream, CompactMetaV1, CompactPubkey,
-    CompactReturnData, CompactReward, CompactTokenBalance, CompactTransactionConfig,
-    CompactTransactionError as StoredTransactionError, KeyStore, LogEvent,
-    OwnedCompactAddressTableLookup, OwnedCompactRecentBlockhash,
-    WINCODE_ARCHIVE_V2_BLOCK_ACCESS_VERSION, WINCODE_BLOCKZILLA_GET_BLOCK_BUNDLE_VERSION,
-    WincodeLeb128Config, deserialize_archive_v2_hot_block_blob,
-    program_logs::{self, ProgramLog},
-    wincode_leb128_config,
-};
+use blockzilla_archive_v2::{ARCHIVE_V2_BLOCKS_FILE, ARCHIVE_V2_BLOCK_ACCESS_FILE, ARCHIVE_V2_GET_BLOCK_INDEX_FILE, ARCHIVE_V2_GET_BLOCK_INDEX_ROW_LEN, ARCHIVE_V2_TX_FLAG_HAS_METADATA, ARCHIVE_V2_TX_FLAG_METADATA_RAW_FALLBACK, ARCHIVE_V2_TX_FLAG_TX_RAW_FALLBACK, ArchiveV2BlockAccessBlob, ArchiveV2BlockAccessBlockhash, ArchiveV2BlockAccessPubkey, ArchiveV2GetBlockIndexRow, ArchiveV2HotBlockBlob, ArchiveV2HotBlockIndexRow, ArchiveV2HotInstructionData, ArchiveV2HotMessagePayload, ArchiveV2HotTxRow, ArchiveV2VoteHashRef, ArchiveV2VoteStateUpdate, ArchiveV2VoteTowerSync, BlockzillaGetBlockBlobEncoding, BlockzillaGetBlockBundleV1, WINCODE_ARCHIVE_V2_BLOCK_ACCESS_VERSION, WINCODE_BLOCKZILLA_GET_BLOCK_BUNDLE_VERSION, deserialize_archive_v2_hot_block_blob};
+use blockzilla_compact::{CompactInnerInstructions, CompactInstructionError as InstructionError, CompactLogStream, CompactMetaV1, CompactReturnData, CompactReward, CompactTokenBalance, CompactTransactionConfig, CompactTransactionError as StoredTransactionError, LogEvent, OwnedCompactAddressTableLookup, OwnedCompactRecentBlockhash};
+use blockzilla_primitives::{CompactPubkey, WincodeLeb128Config, wincode_leb128_config};
+use blockzilla_program_logs::{program_logs::ProgramLog, program_logs::self};
+use blockzilla_registry::KeyStore;
 use futures_channel::mpsc;
 use futures_util::{SinkExt, StreamExt, future};
 use ruzstd::decoding::StreamingDecoder;
@@ -3483,7 +3470,7 @@ fn stream_transaction_signatures(
 async fn stream_account_key_objects_value(
     resolver: &mut Resolver<'_>,
     w: &mut JsonByteWriter,
-    header: blockzilla_format::CompactMessageHeader,
+    header: blockzilla_compact::CompactMessageHeader,
     keys: &[CompactPubkey],
     program_id_indices: &[u8],
     loaded_writable_addresses: &[CompactPubkey],
@@ -3610,10 +3597,10 @@ async fn stream_message_value(
 async fn stream_message_fields_value(
     w: &mut JsonByteWriter,
     resolver: &mut Resolver<'_>,
-    header: blockzilla_format::CompactMessageHeader,
+    header: blockzilla_compact::CompactMessageHeader,
     account_keys: &[CompactPubkey],
     recent_blockhash: &OwnedCompactRecentBlockhash,
-    instructions: &[blockzilla_format::ArchiveV2HotInstruction],
+    instructions: &[blockzilla_archive_v2::ArchiveV2HotInstruction],
     address_table_lookups: Option<&[OwnedCompactAddressTableLookup]>,
     account_objects: bool,
 ) -> std::result::Result<(), String> {
@@ -3683,7 +3670,7 @@ async fn stream_address_table_lookups_value(
 async fn stream_instruction_array_value(
     w: &mut JsonByteWriter,
     resolver: &Resolver<'_>,
-    instructions: &[blockzilla_format::ArchiveV2HotInstruction],
+    instructions: &[blockzilla_archive_v2::ArchiveV2HotInstruction],
 ) -> std::result::Result<(), String> {
     w.raw(b"[");
     for (index, instruction) in instructions.iter().enumerate() {
@@ -3815,7 +3802,7 @@ async fn stream_account_metadata_value(
 async fn stream_token_balances_value(
     w: &mut JsonByteWriter,
     resolver: &mut Resolver<'_>,
-    balances: &[blockzilla_format::CompactTokenBalance],
+    balances: &[blockzilla_compact::CompactTokenBalance],
     ui_amount_null: bool,
 ) -> std::result::Result<(), String> {
     w.raw(b"[");
@@ -3832,7 +3819,7 @@ async fn stream_token_balances_value(
 async fn stream_token_balance_value(
     w: &mut JsonByteWriter,
     resolver: &mut Resolver<'_>,
-    balance: &blockzilla_format::CompactTokenBalance,
+    balance: &blockzilla_compact::CompactTokenBalance,
     ui_amount_null: bool,
 ) -> std::result::Result<(), String> {
     w.raw(b"{\"accountIndex\":");
@@ -4112,9 +4099,9 @@ fn apply_log_messages_byte_limit(messages: Vec<String>) -> Vec<String> {
 fn render_program_log_without_pubkey_store(
     log: &ProgramLog,
     empty_store: &KeyStore,
-    strings: &blockzilla_format::StringTable,
+    strings: &blockzilla_primitives::StringTable,
 ) -> Option<String> {
-    if let ProgramLog::Memo(blockzilla_format::program_logs::memo::MemoLog::MemoLenAndDebug {
+    if let ProgramLog::Memo(blockzilla_program_logs::program_logs::memo::MemoLog::MemoLenAndDebug {
         len,
         memo,
     }) = log
@@ -4131,10 +4118,10 @@ fn render_program_log_without_pubkey_store(
 }
 
 fn render_system_log_without_pubkey_store(
-    log: &blockzilla_format::program_logs::system_program::SystemProgramLog,
-    strings: &blockzilla_format::StringTable,
+    log: &blockzilla_program_logs::program_logs::system_program::SystemProgramLog,
+    strings: &blockzilla_primitives::StringTable,
 ) -> Option<String> {
-    use blockzilla_format::program_logs::system_program::{SystemInstructionLog, SystemProgramLog};
+    use blockzilla_program_logs::{program_logs::system_program::SystemInstructionLog, program_logs::system_program::SystemProgramLog};
 
     Some(match log {
         SystemProgramLog::Instruction(instruction) => match instruction {
@@ -4183,9 +4170,9 @@ fn render_system_log_without_pubkey_store(
 }
 
 fn nonce_action_name(
-    action: blockzilla_format::program_logs::system_program::NonceAction,
+    action: blockzilla_program_logs::program_logs::system_program::NonceAction,
 ) -> &'static str {
-    use blockzilla_format::program_logs::system_program::NonceAction;
+    use blockzilla_program_logs::program_logs::system_program::NonceAction;
 
     match action {
         NonceAction::Advance => "Advance",
@@ -4322,7 +4309,7 @@ fn stream_token_balances_lite_value(w: &mut JsonByteWriter, count: usize) {
 async fn stream_rewards_value(
     w: &mut JsonByteWriter,
     resolver: &mut Resolver<'_>,
-    rewards: Option<&blockzilla_format::ArchiveV2HotRewards>,
+    rewards: Option<&blockzilla_archive_v2::ArchiveV2HotRewards>,
 ) -> std::result::Result<(), String> {
     let Some(rewards) = rewards else {
         w.raw(b"null");
@@ -4407,7 +4394,7 @@ async fn account_transactions_value(
 }
 
 struct AccountMessageLite {
-    header: blockzilla_format::CompactMessageHeader,
+    header: blockzilla_compact::CompactMessageHeader,
     account_keys: Vec<CompactPubkey>,
     program_id_indices: Vec<u8>,
     version: AccountMessageVersion,
@@ -4783,7 +4770,7 @@ fn decode_account_message_lite_bytes(
                 tx_index
             )
         })?;
-    let instructions: Vec<blockzilla_format::ArchiveV2HotInstruction> =
+    let instructions: Vec<blockzilla_archive_v2::ArchiveV2HotInstruction> =
         read_wincode_value(&mut reader).map_err(|err| {
             format!(
                 "decode accounts message instructions tx_index {}: {err}",
@@ -4956,7 +4943,7 @@ fn skip_option_log_stream<'de>(reader: &mut impl Reader<'de>) -> std::result::Re
 fn skip_log_events<'de>(reader: &mut impl Reader<'de>) -> std::result::Result<(), String> {
     let len = read_wincode_len(reader)?;
     for _ in 0..len {
-        let _: blockzilla_format::LogEvent = read_wincode_value(reader)?;
+        let _: blockzilla_compact::LogEvent = read_wincode_value(reader)?;
     }
     Ok(())
 }
@@ -5084,10 +5071,10 @@ async fn message_value(
 
 async fn message_fields_value(
     resolver: &mut Resolver<'_>,
-    header: blockzilla_format::CompactMessageHeader,
+    header: blockzilla_compact::CompactMessageHeader,
     account_keys: &[CompactPubkey],
     recent_blockhash: &OwnedCompactRecentBlockhash,
-    instructions: &[blockzilla_format::ArchiveV2HotInstruction],
+    instructions: &[blockzilla_archive_v2::ArchiveV2HotInstruction],
     address_table_lookups: Option<&[OwnedCompactAddressTableLookup]>,
     account_objects: bool,
 ) -> std::result::Result<Value, String> {
@@ -5150,7 +5137,7 @@ async fn compact_pubkey_array_value(
 
 async fn account_key_objects_value(
     resolver: &mut Resolver<'_>,
-    header: blockzilla_format::CompactMessageHeader,
+    header: blockzilla_compact::CompactMessageHeader,
     keys: &[CompactPubkey],
     program_id_indices: &[u8],
     loaded_writable_addresses: &[CompactPubkey],
@@ -5202,7 +5189,7 @@ async fn account_key_objects_value(
 }
 
 fn message_program_id_indices(
-    instructions: &[blockzilla_format::ArchiveV2HotInstruction],
+    instructions: &[blockzilla_archive_v2::ArchiveV2HotInstruction],
 ) -> Vec<u8> {
     let mut indices = instructions
         .iter()
@@ -5232,7 +5219,7 @@ fn is_reserved_readonly_account(pubkey: &str) -> bool {
 }
 
 fn instruction_array_value(
-    instructions: &[blockzilla_format::ArchiveV2HotInstruction],
+    instructions: &[blockzilla_archive_v2::ArchiveV2HotInstruction],
 ) -> std::result::Result<Value, String> {
     Ok(Value::Array(
         instructions
@@ -5260,20 +5247,20 @@ fn instruction_data_base58(
         ArchiveV2HotInstructionData::ComputeBudget(value) => {
             let mut out = Vec::new();
             match value {
-                blockzilla_format::ArchiveV2ComputeBudgetInstructionData::Unused => out.push(0),
-                blockzilla_format::ArchiveV2ComputeBudgetInstructionData::RequestHeapFrame(bytes) => {
+                blockzilla_archive_v2::ArchiveV2ComputeBudgetInstructionData::Unused => out.push(0),
+                blockzilla_archive_v2::ArchiveV2ComputeBudgetInstructionData::RequestHeapFrame(bytes) => {
                     out.push(1);
                     out.extend_from_slice(&bytes.to_le_bytes());
                 }
-                blockzilla_format::ArchiveV2ComputeBudgetInstructionData::SetComputeUnitLimit(units) => {
+                blockzilla_archive_v2::ArchiveV2ComputeBudgetInstructionData::SetComputeUnitLimit(units) => {
                     out.push(2);
                     out.extend_from_slice(&units.to_le_bytes());
                 }
-                blockzilla_format::ArchiveV2ComputeBudgetInstructionData::SetComputeUnitPrice(price) => {
+                blockzilla_archive_v2::ArchiveV2ComputeBudgetInstructionData::SetComputeUnitPrice(price) => {
                     out.push(3);
                     out.extend_from_slice(&price.to_le_bytes());
                 }
-                blockzilla_format::ArchiveV2ComputeBudgetInstructionData::SetLoadedAccountsDataSizeLimit(bytes) => {
+                blockzilla_archive_v2::ArchiveV2ComputeBudgetInstructionData::SetLoadedAccountsDataSizeLimit(bytes) => {
                     out.push(4);
                     out.extend_from_slice(&bytes.to_le_bytes());
                 }
@@ -5406,8 +5393,8 @@ fn push_option_i64(out: &mut Vec<u8>, value: Option<i64>) {
     }
 }
 
-fn system_instruction_bytes(data: &blockzilla_format::ArchiveV2SystemInstructionData) -> Vec<u8> {
-    use blockzilla_format::ArchiveV2SystemInstructionData as SystemIx;
+fn system_instruction_bytes(data: &blockzilla_archive_v2::ArchiveV2SystemInstructionData) -> Vec<u8> {
+    use blockzilla_archive_v2::ArchiveV2SystemInstructionData as SystemIx;
 
     let mut out = Vec::with_capacity(96);
     match data {
@@ -5662,7 +5649,7 @@ fn token_balances_lite_value(_count: usize) -> Value {
 
 async fn token_balances_value(
     resolver: &mut Resolver<'_>,
-    balances: &[blockzilla_format::CompactTokenBalance],
+    balances: &[blockzilla_compact::CompactTokenBalance],
     ui_amount_null: bool,
 ) -> std::result::Result<Value, String> {
     let mut out = Vec::with_capacity(balances.len());
@@ -5674,7 +5661,7 @@ async fn token_balances_value(
 
 async fn token_balance_value(
     resolver: &mut Resolver<'_>,
-    balance: &blockzilla_format::CompactTokenBalance,
+    balance: &blockzilla_compact::CompactTokenBalance,
     ui_amount_null: bool,
 ) -> std::result::Result<Value, String> {
     let mut out = Map::new();
@@ -5773,7 +5760,7 @@ fn inner_instructions_value(inner_instructions: Option<&[CompactInnerInstruction
     )
 }
 
-fn inner_instruction_value(instruction: &blockzilla_format::CompactInnerInstruction) -> Value {
+fn inner_instruction_value(instruction: &blockzilla_compact::CompactInnerInstruction) -> Value {
     json!({
         "programIdIndex": instruction.program_id_index,
         "accounts": instruction.accounts,
@@ -5817,7 +5804,7 @@ async fn compact_reward_value(
 
 async fn rewards_value(
     resolver: &mut Resolver<'_>,
-    rewards: Option<&blockzilla_format::ArchiveV2HotRewards>,
+    rewards: Option<&blockzilla_archive_v2::ArchiveV2HotRewards>,
 ) -> std::result::Result<Value, String> {
     let Some(rewards) = rewards else {
         return Ok(Value::Null);
@@ -6582,8 +6569,8 @@ mod tests {
 
     #[test]
     fn decodes_v1_account_message_after_transaction_config() {
-        let message = ArchiveV2HotMessagePayload::V1(blockzilla_format::ArchiveV2HotV1Message {
-            header: blockzilla_format::CompactMessageHeader {
+        let message = ArchiveV2HotMessagePayload::V1(blockzilla_archive_v2::ArchiveV2HotV1Message {
+            header: blockzilla_compact::CompactMessageHeader {
                 num_required_signatures: 1,
                 num_readonly_signed_accounts: 0,
                 num_readonly_unsigned_accounts: 0,
@@ -6596,7 +6583,7 @@ mod tests {
             },
             account_keys: vec![CompactPubkey::Raw([7; 32])],
             recent_blockhash: OwnedCompactRecentBlockhash::Id(3),
-            instructions: vec![blockzilla_format::ArchiveV2HotInstruction {
+            instructions: vec![blockzilla_archive_v2::ArchiveV2HotInstruction {
                 program_id_index: 1,
                 accounts: vec![0],
                 data: ArchiveV2HotInstructionData::Raw(vec![9]),
@@ -6615,26 +6602,26 @@ mod tests {
 
     #[test]
     fn renders_all_message_versions_for_buffered_and_streaming_paths() {
-        let header = blockzilla_format::CompactMessageHeader {
+        let header = blockzilla_compact::CompactMessageHeader {
             num_required_signatures: 0,
             num_readonly_signed_accounts: 0,
             num_readonly_unsigned_accounts: 0,
         };
         let legacy =
-            ArchiveV2HotMessagePayload::Legacy(blockzilla_format::ArchiveV2HotLegacyMessage {
+            ArchiveV2HotMessagePayload::Legacy(blockzilla_archive_v2::ArchiveV2HotLegacyMessage {
                 header,
                 account_keys: Vec::new(),
                 recent_blockhash: OwnedCompactRecentBlockhash::Id(0),
                 instructions: Vec::new(),
             });
-        let v0 = ArchiveV2HotMessagePayload::V0(blockzilla_format::ArchiveV2HotV0Message {
+        let v0 = ArchiveV2HotMessagePayload::V0(blockzilla_archive_v2::ArchiveV2HotV0Message {
             header,
             account_keys: Vec::new(),
             recent_blockhash: OwnedCompactRecentBlockhash::Id(0),
             instructions: Vec::new(),
             address_table_lookups: Vec::new(),
         });
-        let v1 = ArchiveV2HotMessagePayload::V1(blockzilla_format::ArchiveV2HotV1Message {
+        let v1 = ArchiveV2HotMessagePayload::V1(blockzilla_archive_v2::ArchiveV2HotV1Message {
             header,
             config: CompactTransactionConfig {
                 priority_fee: None,

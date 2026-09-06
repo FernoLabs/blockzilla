@@ -10,9 +10,8 @@ use std::{
 };
 
 use anyhow::{Context, Result, bail, ensure};
-use blockzilla_format::{
-    ARCHIVE_V2_PUBKEY_REGISTRY_FILE, ArchiveV2SystemInstructionData, KeyStore,
-};
+use blockzilla_archive_v2::{ARCHIVE_V2_PUBKEY_REGISTRY_FILE, ArchiveV2SystemInstructionData};
+use blockzilla_registry::KeyStore;
 use blockzilla_read_sdk::{ArchiveReader, HashVerification, LocalRangeSource, OpenOptions};
 use blockzilla_replay::{
     CompactArchivedTransactionOutcome, CompactInstructionData, CompactMessageVersion,

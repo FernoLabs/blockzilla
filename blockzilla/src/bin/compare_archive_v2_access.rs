@@ -5,11 +5,9 @@ use std::{
 };
 
 use anyhow::{Context, Result, ensure};
-use blockzilla_format::{
-    ARCHIVE_V2_BLOCK_ACCESS_FILE, ARCHIVE_V2_BLOCK_ACCESS_INDEX_FILE,
-    ARCHIVE_V2_PUBKEY_REGISTRY_FILE, ArchiveV2BlockAccessBlob, ArchiveV2BlockAccessIndexRow,
-    KeyStore, read_archive_v2_block_access_index, wincode_leb128_config,
-};
+use blockzilla_archive_v2::{ARCHIVE_V2_BLOCK_ACCESS_FILE, ARCHIVE_V2_BLOCK_ACCESS_INDEX_FILE, ARCHIVE_V2_PUBKEY_REGISTRY_FILE, ArchiveV2BlockAccessBlob, ArchiveV2BlockAccessIndexRow, read_archive_v2_block_access_index};
+use blockzilla_primitives::wincode_leb128_config;
+use blockzilla_registry::KeyStore;
 use clap::Parser;
 
 /// Compare two access sidecars while ignoring epoch-local pubkey ID numbers.

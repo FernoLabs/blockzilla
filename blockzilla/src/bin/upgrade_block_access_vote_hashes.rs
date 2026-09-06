@@ -1,23 +1,9 @@
 use anyhow::{Context, Result, anyhow};
-use blockzilla_format::{
-    ARCHIVE_V2_BLOCK_ACCESS_FILE, ARCHIVE_V2_BLOCK_ACCESS_INDEX_FILE,
-    ARCHIVE_V2_BLOCK_ACCESS_MAX_FRAME_BYTES, ARCHIVE_V2_BLOCKHASH_REGISTRY_FILE,
-    ARCHIVE_V2_BLOCKS_FILE, ARCHIVE_V2_GET_BLOCK_INDEX_FILE, ARCHIVE_V2_HOT_INDEX_FLAG_RAW_BLOCKS,
-    ARCHIVE_V2_PREV_BLOCKHASH_TAIL_FILE, ARCHIVE_V2_PUBKEY_REGISTRY_FILE,
-    ARCHIVE_V2_SIGNATURES_FILE, ARCHIVE_V2_TX_FLAG_HAS_METADATA,
-    ARCHIVE_V2_TX_FLAG_METADATA_RAW_FALLBACK, ARCHIVE_V2_TX_FLAG_TX_RAW_FALLBACK,
-    ARCHIVE_V2_VOTE_HASH_REGISTRY_FILE, ArchiveV2BlockAccessBlob, ArchiveV2BlockAccessBlockhash,
-    ArchiveV2BlockAccessIndexRow, ArchiveV2BlockAccessPubkey, ArchiveV2BlockAccessVoteHash,
-    ArchiveV2GetBlockIndexRow, ArchiveV2HotBlockBlob, ArchiveV2HotInstructionData,
-    ArchiveV2HotMessagePayload, ArchiveV2HotTxRow, ArchiveV2VoteHashRef, CompactInnerInstructions,
-    CompactMetaV1, CompactPubkey, CompactReturnData, CompactReward, CompactTokenBalance,
-    CompactTransactionError, KeyStore, LogEvent, OwnedCompactRecentBlockhash,
-    WINCODE_ARCHIVE_V2_BLOCK_ACCESS_VERSION, archive_v2_hot_index_path,
-    deserialize_archive_v2_hot_block_blob,
-    program_logs::{ProgramLog, token_2022::Token2022Log},
-    read_archive_v2_hot_block_index, wincode_leb128_config, write_archive_v2_block_access_index,
-    write_archive_v2_get_block_index,
-};
+use blockzilla_archive_v2::{ARCHIVE_V2_BLOCKHASH_REGISTRY_FILE, ARCHIVE_V2_BLOCKS_FILE, ARCHIVE_V2_BLOCK_ACCESS_FILE, ARCHIVE_V2_BLOCK_ACCESS_INDEX_FILE, ARCHIVE_V2_BLOCK_ACCESS_MAX_FRAME_BYTES, ARCHIVE_V2_GET_BLOCK_INDEX_FILE, ARCHIVE_V2_HOT_INDEX_FLAG_RAW_BLOCKS, ARCHIVE_V2_PREV_BLOCKHASH_TAIL_FILE, ARCHIVE_V2_PUBKEY_REGISTRY_FILE, ARCHIVE_V2_SIGNATURES_FILE, ARCHIVE_V2_TX_FLAG_HAS_METADATA, ARCHIVE_V2_TX_FLAG_METADATA_RAW_FALLBACK, ARCHIVE_V2_TX_FLAG_TX_RAW_FALLBACK, ARCHIVE_V2_VOTE_HASH_REGISTRY_FILE, ArchiveV2BlockAccessBlob, ArchiveV2BlockAccessBlockhash, ArchiveV2BlockAccessIndexRow, ArchiveV2BlockAccessPubkey, ArchiveV2BlockAccessVoteHash, ArchiveV2GetBlockIndexRow, ArchiveV2HotBlockBlob, ArchiveV2HotInstructionData, ArchiveV2HotMessagePayload, ArchiveV2HotTxRow, ArchiveV2VoteHashRef, WINCODE_ARCHIVE_V2_BLOCK_ACCESS_VERSION, archive_v2_hot_index_path, deserialize_archive_v2_hot_block_blob, read_archive_v2_hot_block_index, write_archive_v2_block_access_index, write_archive_v2_get_block_index};
+use blockzilla_compact::{CompactInnerInstructions, CompactMetaV1, CompactReturnData, CompactReward, CompactTokenBalance, CompactTransactionError, LogEvent, OwnedCompactRecentBlockhash};
+use blockzilla_primitives::{CompactPubkey, wincode_leb128_config};
+use blockzilla_program_logs::{program_logs::ProgramLog, program_logs::token_2022::Token2022Log};
+use blockzilla_registry::KeyStore;
 use clap::Parser;
 use serde::{Deserialize, Serialize};
 use std::{
@@ -113,7 +99,7 @@ struct LegacyCompactMetaV1 {
     pre_balances: Vec<u64>,
     post_balances: Vec<u64>,
     inner_instructions: Option<Vec<CompactInnerInstructions>>,
-    logs: Option<blockzilla_format::CompactLogStream>,
+    logs: Option<blockzilla_compact::CompactLogStream>,
     pre_token_balances: Vec<CompactTokenBalance>,
     post_token_balances: Vec<CompactTokenBalance>,
     rewards: Vec<CompactReward>,
@@ -348,7 +334,7 @@ fn read_hot_block(
 
 fn read_block_signatures(
     file: &mut File,
-    row: &blockzilla_format::ArchiveV2HotBlockIndexRow,
+    row: &blockzilla_archive_v2::ArchiveV2HotBlockIndexRow,
     out: &mut Vec<u8>,
 ) -> Result<()> {
     let offset = row
@@ -756,7 +742,7 @@ fn decode_existing_access_blob(bytes: &[u8], block_id: u32) -> Result<ArchiveV2B
     }
 }
 
-fn collect_access_log_refs(logs: &blockzilla_format::CompactLogStream, ids: &mut HashSet<u32>) {
+fn collect_access_log_refs(logs: &blockzilla_compact::CompactLogStream, ids: &mut HashSet<u32>) {
     for event in &logs.events {
         match event {
             LogEvent::LoaderUpgradedProgram { program }
@@ -965,7 +951,7 @@ fn load_vote_hash_registry(path: &Path) -> Result<Vec<VoteHashRegistryRow>> {
         .collect())
 }
 
-fn infer_epoch(rows: &[blockzilla_format::ArchiveV2HotBlockIndexRow]) -> Result<u64> {
+fn infer_epoch(rows: &[blockzilla_archive_v2::ArchiveV2HotBlockIndexRow]) -> Result<u64> {
     let first = rows
         .first()
         .ok_or_else(|| anyhow!("empty hot-block index"))?;
@@ -973,7 +959,7 @@ fn infer_epoch(rows: &[blockzilla_format::ArchiveV2HotBlockIndexRow]) -> Result<
 }
 
 fn build_get_block_index_rows(
-    hot_rows: &[blockzilla_format::ArchiveV2HotBlockIndexRow],
+    hot_rows: &[blockzilla_archive_v2::ArchiveV2HotBlockIndexRow],
     access_rows: &[ArchiveV2BlockAccessIndexRow],
     epoch: u64,
 ) -> Result<Vec<ArchiveV2GetBlockIndexRow>> {

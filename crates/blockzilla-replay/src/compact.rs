@@ -13,19 +13,10 @@ use std::{
 };
 
 use crate::genesis::parse_genesis_bin;
-use blockzilla_format::{
-    ARCHIVE_V2_BLOCKHASH_REGISTRY_FILE, ARCHIVE_V2_PREV_BLOCKHASH_TAIL_FILE,
-    ARCHIVE_V2_PUBKEY_REGISTRY_FILE, ARCHIVE_V2_TX_FLAG_HAS_ERROR, ARCHIVE_V2_TX_FLAG_HAS_METADATA,
-    ARCHIVE_V2_TX_FLAG_MESSAGE_V0, ARCHIVE_V2_TX_FLAG_METADATA_RAW_FALLBACK,
-    ARCHIVE_V2_TX_FLAG_TX_RAW_FALLBACK, ArchiveV2ComputeBudgetInstructionData,
-    ArchiveV2HotBlockHeader, ArchiveV2HotInstruction, ArchiveV2HotInstructionData,
-    ArchiveV2HotMessagePayload, ArchiveV2HotTxRow, ArchiveV2SystemInstructionData,
-    ArchiveV2VoteHashRef, ArchiveV2VoteStateUpdate, ArchiveV2VoteTowerSync, CompactMessageHeader,
-    CompactPubkey, CompactTransactionError, KeyStore, OwnedCompactAddressTableLookup,
-    OwnedCompactRecentBlockhash, WincodeArchiveV2Genesis, WincodeArchiveV2GenesisEpochSchedule,
-    WincodeArchiveV2GenesisFeeParams, WincodeArchiveV2GenesisInflationParams,
-    WincodeArchiveV2GenesisPohParams, WincodeArchiveV2GenesisRentParams, wincode_leb128_config,
-};
+use blockzilla_archive_v2::{ARCHIVE_V2_BLOCKHASH_REGISTRY_FILE, ARCHIVE_V2_PREV_BLOCKHASH_TAIL_FILE, ARCHIVE_V2_PUBKEY_REGISTRY_FILE, ARCHIVE_V2_TX_FLAG_HAS_ERROR, ARCHIVE_V2_TX_FLAG_HAS_METADATA, ARCHIVE_V2_TX_FLAG_MESSAGE_V0, ARCHIVE_V2_TX_FLAG_METADATA_RAW_FALLBACK, ARCHIVE_V2_TX_FLAG_TX_RAW_FALLBACK, ArchiveV2ComputeBudgetInstructionData, ArchiveV2HotBlockHeader, ArchiveV2HotInstruction, ArchiveV2HotInstructionData, ArchiveV2HotMessagePayload, ArchiveV2HotTxRow, ArchiveV2SystemInstructionData, ArchiveV2VoteHashRef, ArchiveV2VoteStateUpdate, ArchiveV2VoteTowerSync, WincodeArchiveV2Genesis, WincodeArchiveV2GenesisEpochSchedule, WincodeArchiveV2GenesisFeeParams, WincodeArchiveV2GenesisInflationParams, WincodeArchiveV2GenesisPohParams, WincodeArchiveV2GenesisRentParams};
+use blockzilla_compact::{CompactMessageHeader, CompactTransactionError, OwnedCompactAddressTableLookup, OwnedCompactRecentBlockhash};
+use blockzilla_primitives::{CompactPubkey, wincode_leb128_config};
+use blockzilla_registry::KeyStore;
 use blockzilla_read_sdk::{
     ArchiveReader, ArchiveV2MessageProjector, BorrowedDecodedBlock, DecodedBlock,
     GenerationBinding, HashVerification, LocatedTransactionRow, OpenOptions,
@@ -1488,12 +1479,7 @@ fn own_exact_genesis(
     inline: &WincodeArchiveV2Genesis,
     genesis: crate::genesis::GenesisConfig,
 ) -> CompactGenesisProbe {
-    use blockzilla_format::{
-        WincodeArchiveV2GenesisEpochSchedule as EpochSchedule,
-        WincodeArchiveV2GenesisFeeParams as Fees,
-        WincodeArchiveV2GenesisInflationParams as Inflation,
-        WincodeArchiveV2GenesisPohParams as Poh, WincodeArchiveV2GenesisRentParams as Rent,
-    };
+    use blockzilla_archive_v2::{WincodeArchiveV2GenesisEpochSchedule as EpochSchedule, WincodeArchiveV2GenesisFeeParams as Fees, WincodeArchiveV2GenesisInflationParams as Inflation, WincodeArchiveV2GenesisPohParams as Poh, WincodeArchiveV2GenesisRentParams as Rent};
     let accounts = genesis
         .accounts
         .into_iter()
@@ -1626,7 +1612,7 @@ fn own_inline_genesis(
 }
 
 fn own_inline_genesis_account(
-    account: &blockzilla_format::WincodeArchiveV2GenesisAccount,
+    account: &blockzilla_archive_v2::WincodeArchiveV2GenesisAccount,
     keys: &KeyStore,
     kind: &str,
     index: usize,
@@ -1794,7 +1780,7 @@ mod tests {
         let system = CompactInstructionData::UnknownSystem(smallvec::smallvec![4, 5]);
         let vote = CompactInstructionData::UnknownVote(smallvec::smallvec![6, 7]);
         let decoded = CompactInstructionData::ComputeBudget(
-            blockzilla_format::ArchiveV2ComputeBudgetInstructionData::SetComputeUnitLimit(10),
+            blockzilla_archive_v2::ArchiveV2ComputeBudgetInstructionData::SetComputeUnitLimit(10),
         );
         assert_eq!(instruction_data_bytes(&raw), Some([1, 2, 3].as_slice()));
         assert_eq!(instruction_data_bytes(&system), Some([4, 5].as_slice()));
@@ -1895,7 +1881,7 @@ mod tests {
 
     #[test]
     fn balance_oracle_decodes_only_the_compact_metadata_prefix() {
-        let metadata = blockzilla_format::CompactMetaV1 {
+        let metadata = blockzilla_compact::CompactMetaV1 {
             err: None,
             fee: 5_000,
             pre_balances: vec![90, 10, 1],
@@ -1930,7 +1916,7 @@ mod tests {
         assert!(!oracle.pre_balances.spilled());
         assert!(!oracle.post_balances.spilled());
 
-        let empty_metadata = blockzilla_format::CompactMetaV1 {
+        let empty_metadata = blockzilla_compact::CompactMetaV1 {
             pre_balances: Vec::new(),
             post_balances: Vec::new(),
             ..metadata
@@ -2136,7 +2122,7 @@ mod tests {
             )
             .collect();
         let decoded = DecodedBlock {
-            index_row: blockzilla_format::ArchiveV2HotBlockIndexRow {
+            index_row: blockzilla_archive_v2::ArchiveV2HotBlockIndexRow {
                 block_id: 7,
                 slot: 42,
                 compressed_offset: 0,
@@ -2147,7 +2133,7 @@ mod tests {
                 first_signature_ordinal: 100,
                 signature_count: 6,
             },
-            block: blockzilla_format::ArchiveV2HotBlockBlob {
+            block: blockzilla_archive_v2::ArchiveV2HotBlockBlob {
                 header: ArchiveV2HotBlockHeader {
                     slot: 42,
                     parent_slot: 41,

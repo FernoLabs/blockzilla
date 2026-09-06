@@ -35,7 +35,7 @@ use std::{
 };
 
 use anyhow::{Context, Result, anyhow, ensure};
-use blockzilla_format::ArchiveV2HotBlockIndexRow;
+use blockzilla_archive_v2::ArchiveV2HotBlockIndexRow;
 use blockzilla_read_sdk::{
     ArchiveReader, HashVerification, LocalRangeSource, OpenOptions, RangeSource, SourceResult,
     manifest::BLOCKS_FILE,

@@ -14,7 +14,7 @@ use blockzilla_dex_parser::{
     DecodeOutcome as DexDecodeOutcome, DispatchTable, InstructionClass as DexInstructionClass,
     PROGRAM_SPECS,
 };
-use blockzilla_format::ArchiveV2WireMetadataErrorSchema;
+use blockzilla_archive_v2::ArchiveV2WireMetadataErrorSchema;
 use blockzilla_read_sdk::{
     BorrowedArchiveV2TokenBalance, ProjectedArchiveV2CompactLogsSummary, TokenBalanceSide,
 };

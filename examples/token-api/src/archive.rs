@@ -1,9 +1,5 @@
 use anyhow::{Context, Result};
-use blockzilla_format::{
-    ARCHIVE_V2_HOT_INDEX_FLAG_RAW_BLOCKS, ArchiveV2HotBlockBlob, ArchiveV2HotBlockIndex,
-    ArchiveV2HotBlockIndexRow, archive_v2_hot_index_path, deserialize_archive_v2_hot_block_blob,
-    read_archive_v2_hot_block_index,
-};
+use blockzilla_archive_v2::{ARCHIVE_V2_HOT_INDEX_FLAG_RAW_BLOCKS, ArchiveV2HotBlockBlob, ArchiveV2HotBlockIndex, ArchiveV2HotBlockIndexRow, archive_v2_hot_index_path, deserialize_archive_v2_hot_block_blob, read_archive_v2_hot_block_index};
 use std::{
     fs::File,
     io::{Read, Seek, SeekFrom},
@@ -127,5 +123,5 @@ pub fn default_registry_path(input: &Path) -> PathBuf {
     input
         .parent()
         .unwrap_or_else(|| Path::new("."))
-        .join(blockzilla_format::ARCHIVE_V2_PUBKEY_REGISTRY_FILE)
+        .join(blockzilla_archive_v2::ARCHIVE_V2_PUBKEY_REGISTRY_FILE)
 }

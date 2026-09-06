@@ -5,7 +5,7 @@ use std::{
 
 use anyhow::{Context, Result, bail, ensure};
 use base64::{Engine as _, engine::general_purpose::STANDARD as BASE64_STANDARD};
-use blockzilla_format::WINCODE_LEB128_MAX_FRAME_BYTES;
+use blockzilla_primitives::WINCODE_LEB128_MAX_FRAME_BYTES;
 use blockzilla_token_transaction_dump::{
     DumpWireProfile,
     consolidated_posting_projection::{

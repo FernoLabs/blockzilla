@@ -7118,10 +7118,9 @@ fn sync_directory(path: &Path) -> Result<()> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use blockzilla_format::{
-        LiveBlockMissingField, WincodeArchiveV2PohRecord, WincodeLeb128FramedReader,
-        WincodeLeb128FramedWriter,
-    };
+    use blockzilla_archive_v2::WincodeArchiveV2PohRecord;
+    use blockzilla_live_format::LiveBlockMissingField;
+    use blockzilla_primitives::{WincodeLeb128FramedReader, WincodeLeb128FramedWriter};
     use std::io::Cursor;
     use yellowstone_grpc_proto::prelude::SubscribeUpdateEntry;
 

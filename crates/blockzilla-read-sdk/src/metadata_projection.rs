@@ -5,14 +5,9 @@
 //! retaining their vectors, strings, or byte buffers. A projector is bound to
 //! one generation schema. It never probes another schema for one record.
 
-use blockzilla_format::{
-    CompactInnerInstruction, CompactMetaV1, CompactPubkey, CompactReturnData, CompactReward,
-    CompactTokenBalance, DataArray, WincodeLeb128Config,
-    program_logs::{
-        system_program::{PubkeyOrString, SystemAddress, SystemProgramLog},
-        token_2022::Token2022Log,
-    },
-};
+use blockzilla_compact::{CompactInnerInstruction, CompactMetaV1, CompactReturnData, CompactReward, CompactTokenBalance, DataArray};
+use blockzilla_primitives::{CompactPubkey, WincodeLeb128Config};
+use blockzilla_program_logs::{program_logs::system_program::PubkeyOrString, program_logs::system_program::SystemAddress, program_logs::system_program::SystemProgramLog, program_logs::token_2022::Token2022Log};
 use thiserror::Error;
 use wincode::{ReadResult, SchemaRead, error::invalid_tag_encoding, io::Reader};
 
@@ -1219,16 +1214,16 @@ fn skip_program_log(
     match get::<u32>(cursor)? {
         0 => {}
         1 => {
-            get::<blockzilla_format::program_logs::token::TokenLog>(cursor)?;
+            get::<blockzilla_program_logs::program_logs::token::TokenLog>(cursor)?;
         }
         2 => {
             validate_token_2022_log(get::<Token2022Log>(cursor)?, registry_entries, references)?;
         }
         3 => {
-            get::<blockzilla_format::program_logs::associated_token_account::TokenLog>(cursor)?;
+            get::<blockzilla_program_logs::program_logs::associated_token_account::TokenLog>(cursor)?;
         }
         4 => {
-            use blockzilla_format::program_logs::address_lookup_table::AddressLookupTableLog as Log;
+            use blockzilla_program_logs::program_logs::address_lookup_table::AddressLookupTableLog as Log;
             match get::<Log>(cursor)? {
                 Log::NotARecentSlot {
                     untrusted_recent_slot,
@@ -1250,7 +1245,7 @@ fn skip_program_log(
             }
         }
         5 => {
-            use blockzilla_format::program_logs::loader_v3::LoaderV3Log as Log;
+            use blockzilla_program_logs::program_logs::loader_v3::LoaderV3Log as Log;
             match get::<Log>(cursor)? {
                 Log::WriteOverflow {
                     buffer_data_len,
@@ -1283,13 +1278,13 @@ fn skip_program_log(
             }
         }
         6 => {
-            use blockzilla_format::program_logs::loader_v4::LoaderV4Log as Log;
+            use blockzilla_program_logs::program_logs::loader_v4::LoaderV4Log as Log;
             if let Log::InsufficientLamportsRequired { required_lamports } = get::<Log>(cursor)? {
                 references.string(required_lamports);
             }
         }
         7 => {
-            use blockzilla_format::program_logs::memo::MemoLog as Log;
+            use blockzilla_program_logs::program_logs::memo::MemoLog as Log;
             match get::<Log>(cursor)? {
                 Log::SignedByDebug { address } => references.string(address),
                 Log::InvalidUtf8FromByte { valid_up_to } => references.string(valid_up_to),
@@ -1300,15 +1295,15 @@ fn skip_program_log(
             }
         }
         8 => {
-            use blockzilla_format::program_logs::record::RecordLog as Log;
+            use blockzilla_program_logs::program_logs::record::RecordLog as Log;
             let Log::ReallocatingPlusBytesDebug { bytes } = get::<Log>(cursor)?;
             references.string(bytes);
         }
         9 => {
-            get::<blockzilla_format::program_logs::transfer_hook::TransferHookLog>(cursor)?;
+            get::<blockzilla_program_logs::program_logs::transfer_hook::TransferHookLog>(cursor)?;
         }
         10 => {
-            use blockzilla_format::program_logs::account_compression::AccountCompressionLog as Log;
+            use blockzilla_program_logs::program_logs::account_compression::AccountCompressionLog as Log;
             match get::<Log>(cursor)? {
                 Log::CanopyLengthMismatch {
                     canopy_bytes_len,
@@ -1329,13 +1324,13 @@ fn skip_program_log(
             }
         }
         11 => {
-            use blockzilla_format::program_logs::stake::StakeProgramLog as Log;
+            use blockzilla_program_logs::program_logs::stake::StakeProgramLog as Log;
             if let Log::Error { msg } = get::<Log>(cursor)? {
                 references.string(msg);
             }
         }
         12 => {
-            use blockzilla_format::program_logs::zk_elgamal_proof::ZkElgamalProofLog as Log;
+            use blockzilla_program_logs::program_logs::zk_elgamal_proof::ZkElgamalProofLog as Log;
             if let Log::ProofVerificationFailed { err } = get::<Log>(cursor)? {
                 references.string(err);
             }
@@ -1366,14 +1361,14 @@ fn skip_known_program_log(cursor: &mut &[u8]) -> ReadResult<()> {
         2 => skip_phoenix_perps_log(cursor),
         3 => skip_phoenix_v1_log(cursor),
         4 => {
-            get::<blockzilla_format::program_logs::known_programs::raydium_amm::RaydiumAmmLog>(
+            get::<blockzilla_program_logs::program_logs::known_programs::raydium_amm::RaydiumAmmLog>(
                 cursor,
             )?;
             Ok(())
         }
         5 => {
             get::<
-                blockzilla_format::program_logs::known_programs::static_programs::StaticProgramLog,
+                blockzilla_program_logs::program_logs::known_programs::static_programs::StaticProgramLog,
             >(cursor)?;
             Ok(())
         }
@@ -1409,7 +1404,7 @@ fn skip_okx_router_log(cursor: &mut &[u8]) -> ReadResult<()> {
             read_archive_string(cursor, MAX_INNER_DATA_BYTES)?;
             get::<u64>(cursor)?;
             get::<u64>(cursor)?;
-            get::<blockzilla_format::program_logs::known_programs::okx_router::AmountInSpelling>(
+            get::<blockzilla_program_logs::program_logs::known_programs::okx_router::AmountInSpelling>(
                 cursor,
             )?;
         }
@@ -1433,12 +1428,12 @@ fn skip_okx_router_log(cursor: &mut &[u8]) -> ReadResult<()> {
             get::<u64>(cursor)?;
         }
         10 => {
-            get::<blockzilla_format::program_logs::known_programs::okx_router::OkxRouteLabel>(
+            get::<blockzilla_program_logs::program_logs::known_programs::okx_router::OkxRouteLabel>(
                 cursor,
             )?;
         }
         12 => {
-            get::<blockzilla_format::program_logs::known_programs::okx_router::OkxMarker>(cursor)?;
+            get::<blockzilla_program_logs::program_logs::known_programs::okx_router::OkxMarker>(cursor)?;
         }
         other => return Err(invalid_tag_encoding(other as usize)),
     }
@@ -1457,7 +1452,7 @@ fn skip_phoenix_perps_log(cursor: &mut &[u8]) -> ReadResult<()> {
         }
         1 => {
             get::<
-                blockzilla_format::program_logs::known_programs::phoenix_perps::PhoenixPerpsStaticLog,
+                blockzilla_program_logs::program_logs::known_programs::phoenix_perps::PhoenixPerpsStaticLog,
             >(cursor)?;
             Ok(())
         }
@@ -1473,7 +1468,7 @@ fn skip_phoenix_v1_log(cursor: &mut &[u8]) -> ReadResult<()> {
     match get::<u32>(cursor)? {
         0 => {
             get::<
-                blockzilla_format::program_logs::known_programs::phoenix_v1::PhoenixInstructionLog,
+                blockzilla_program_logs::program_logs::known_programs::phoenix_v1::PhoenixInstructionLog,
             >(cursor)?;
         }
         1 => {
@@ -1486,7 +1481,7 @@ fn skip_phoenix_v1_log(cursor: &mut &[u8]) -> ReadResult<()> {
             get::<u64>(cursor)?;
         }
         3 => {
-            get::<blockzilla_format::program_logs::known_programs::phoenix_v1::PhoenixStaticLog>(
+            get::<blockzilla_program_logs::program_logs::known_programs::phoenix_v1::PhoenixStaticLog>(
                 cursor,
             )?;
         }
@@ -1713,10 +1708,8 @@ fn assert_metadata_shapes(
 
 #[cfg(test)]
 mod tests {
-    use blockzilla_format::{
-        CompactInnerInstructions, CompactLogStream, CompactTransactionError, DataTable, LogEvent,
-        StringTable, wincode_leb128_config,
-    };
+    use blockzilla_compact::{CompactInnerInstructions, CompactLogStream, CompactTransactionError, DataTable, LogEvent};
+    use blockzilla_primitives::{StringTable, wincode_leb128_config};
     use wincode::SchemaWrite;
 
     use super::*;
@@ -1856,7 +1849,7 @@ mod tests {
         let value = full_metadata(
             Some(CompactTransactionError::InstructionError(
                 1,
-                blockzilla_format::CompactInstructionError::Custom(42),
+                blockzilla_compact::CompactInstructionError::Custom(42),
             )),
             Some(cpi_groups()),
         );
@@ -1938,7 +1931,7 @@ mod tests {
         let value = full_metadata(
             Some(CompactTransactionError::InstructionError(
                 1,
-                blockzilla_format::CompactInstructionError::Custom(42),
+                blockzilla_compact::CompactInstructionError::Custom(42),
             )),
             Some(cpi_groups()),
         );
@@ -2300,7 +2293,7 @@ mod tests {
         let current = current_bytes(&full_metadata(
             Some(CompactTransactionError::InstructionError(
                 0,
-                blockzilla_format::CompactInstructionError::GenericError,
+                blockzilla_compact::CompactInstructionError::GenericError,
             )),
             None,
         ));

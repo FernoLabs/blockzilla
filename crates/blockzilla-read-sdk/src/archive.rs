@@ -42,50 +42,50 @@ const CACHE_NAMESPACE_DOMAIN: &[u8] = b"blockzilla.archive-sdk.cache-namespace.v
 const OBJECT_SET_ID_DOMAIN: &[u8] = b"blockzilla.compact-v2.http-object-set.v1\0";
 
 const REQUIRED_COMPACT_V2_OBJECTS: &[&str] = &[
-    blockzilla_format::ARCHIVE_V2_BLOCKS_FILE,
-    blockzilla_format::ARCHIVE_V2_BLOCK_INDEX_FILE,
-    blockzilla_format::ARCHIVE_V2_META_FILE,
-    blockzilla_format::ARCHIVE_V2_PUBKEY_REGISTRY_FILE,
+    blockzilla_archive_v2::ARCHIVE_V2_BLOCKS_FILE,
+    blockzilla_archive_v2::ARCHIVE_V2_BLOCK_INDEX_FILE,
+    blockzilla_archive_v2::ARCHIVE_V2_META_FILE,
+    blockzilla_archive_v2::ARCHIVE_V2_PUBKEY_REGISTRY_FILE,
 ];
 
 const OPTIONAL_COMPACT_V2_OBJECTS: &[&str] = &[
-    blockzilla_format::ARCHIVE_V2_SIGNATURES_FILE,
-    blockzilla_format::ARCHIVE_V2_GENESIS_BIN_FILE,
-    blockzilla_format::ARCHIVE_V2_BLOCKHASH_REGISTRY_FILE,
-    blockzilla_format::ARCHIVE_V2_BLOCKHASH_INDEX_V3_FILE,
-    blockzilla_format::ARCHIVE_V2_PREV_BLOCKHASH_TAIL_FILE,
-    blockzilla_format::ARCHIVE_V2_VOTE_HASH_REGISTRY_FILE,
-    blockzilla_format::ARCHIVE_V2_POH_FILE,
-    blockzilla_format::ARCHIVE_V2_SHREDDING_FILE,
-    blockzilla_format::ARCHIVE_V2_PUBKEY_REGISTRY_COUNTS_FILE,
-    blockzilla_format::ARCHIVE_V2_PUBKEY_REGISTRY_INDEX_FILE,
-    blockzilla_format::ARCHIVE_V2_FIRST_SEEN_REGISTRY_MANIFEST_FILE,
-    blockzilla_format::ARCHIVE_V2_PUBKEY_HOT_SEED_FILE,
-    blockzilla_format::ARCHIVE_V2_BLOCK_ACCESS_FILE,
-    blockzilla_format::ARCHIVE_V2_BLOCK_ACCESS_INDEX_FILE,
-    blockzilla_format::ARCHIVE_V2_GET_BLOCK_INDEX_FILE,
+    blockzilla_archive_v2::ARCHIVE_V2_SIGNATURES_FILE,
+    blockzilla_archive_v2::ARCHIVE_V2_GENESIS_BIN_FILE,
+    blockzilla_archive_v2::ARCHIVE_V2_BLOCKHASH_REGISTRY_FILE,
+    blockzilla_archive_v2::ARCHIVE_V2_BLOCKHASH_INDEX_V3_FILE,
+    blockzilla_archive_v2::ARCHIVE_V2_PREV_BLOCKHASH_TAIL_FILE,
+    blockzilla_archive_v2::ARCHIVE_V2_VOTE_HASH_REGISTRY_FILE,
+    blockzilla_archive_v2::ARCHIVE_V2_POH_FILE,
+    blockzilla_archive_v2::ARCHIVE_V2_SHREDDING_FILE,
+    blockzilla_archive_v2::ARCHIVE_V2_PUBKEY_REGISTRY_COUNTS_FILE,
+    blockzilla_archive_v2::ARCHIVE_V2_PUBKEY_REGISTRY_INDEX_FILE,
+    blockzilla_archive_v2::ARCHIVE_V2_FIRST_SEEN_REGISTRY_MANIFEST_FILE,
+    blockzilla_archive_v2::ARCHIVE_V2_PUBKEY_HOT_SEED_FILE,
+    blockzilla_archive_v2::ARCHIVE_V2_BLOCK_ACCESS_FILE,
+    blockzilla_archive_v2::ARCHIVE_V2_BLOCK_ACCESS_INDEX_FILE,
+    blockzilla_archive_v2::ARCHIVE_V2_GET_BLOCK_INDEX_FILE,
 ];
 
 const LOCAL_COMPACT_V2_OBJECTS: &[&str] = &[
-    blockzilla_format::ARCHIVE_V2_BLOCKS_FILE,
-    blockzilla_format::ARCHIVE_V2_BLOCK_INDEX_FILE,
-    blockzilla_format::ARCHIVE_V2_META_FILE,
-    blockzilla_format::ARCHIVE_V2_PUBKEY_REGISTRY_FILE,
-    blockzilla_format::ARCHIVE_V2_SIGNATURES_FILE,
-    blockzilla_format::ARCHIVE_V2_GENESIS_BIN_FILE,
-    blockzilla_format::ARCHIVE_V2_BLOCKHASH_REGISTRY_FILE,
-    blockzilla_format::ARCHIVE_V2_BLOCKHASH_INDEX_V3_FILE,
-    blockzilla_format::ARCHIVE_V2_PREV_BLOCKHASH_TAIL_FILE,
-    blockzilla_format::ARCHIVE_V2_VOTE_HASH_REGISTRY_FILE,
-    blockzilla_format::ARCHIVE_V2_POH_FILE,
-    blockzilla_format::ARCHIVE_V2_SHREDDING_FILE,
-    blockzilla_format::ARCHIVE_V2_PUBKEY_REGISTRY_COUNTS_FILE,
-    blockzilla_format::ARCHIVE_V2_PUBKEY_REGISTRY_INDEX_FILE,
-    blockzilla_format::ARCHIVE_V2_FIRST_SEEN_REGISTRY_MANIFEST_FILE,
-    blockzilla_format::ARCHIVE_V2_PUBKEY_HOT_SEED_FILE,
-    blockzilla_format::ARCHIVE_V2_BLOCK_ACCESS_FILE,
-    blockzilla_format::ARCHIVE_V2_BLOCK_ACCESS_INDEX_FILE,
-    blockzilla_format::ARCHIVE_V2_GET_BLOCK_INDEX_FILE,
+    blockzilla_archive_v2::ARCHIVE_V2_BLOCKS_FILE,
+    blockzilla_archive_v2::ARCHIVE_V2_BLOCK_INDEX_FILE,
+    blockzilla_archive_v2::ARCHIVE_V2_META_FILE,
+    blockzilla_archive_v2::ARCHIVE_V2_PUBKEY_REGISTRY_FILE,
+    blockzilla_archive_v2::ARCHIVE_V2_SIGNATURES_FILE,
+    blockzilla_archive_v2::ARCHIVE_V2_GENESIS_BIN_FILE,
+    blockzilla_archive_v2::ARCHIVE_V2_BLOCKHASH_REGISTRY_FILE,
+    blockzilla_archive_v2::ARCHIVE_V2_BLOCKHASH_INDEX_V3_FILE,
+    blockzilla_archive_v2::ARCHIVE_V2_PREV_BLOCKHASH_TAIL_FILE,
+    blockzilla_archive_v2::ARCHIVE_V2_VOTE_HASH_REGISTRY_FILE,
+    blockzilla_archive_v2::ARCHIVE_V2_POH_FILE,
+    blockzilla_archive_v2::ARCHIVE_V2_SHREDDING_FILE,
+    blockzilla_archive_v2::ARCHIVE_V2_PUBKEY_REGISTRY_COUNTS_FILE,
+    blockzilla_archive_v2::ARCHIVE_V2_PUBKEY_REGISTRY_INDEX_FILE,
+    blockzilla_archive_v2::ARCHIVE_V2_FIRST_SEEN_REGISTRY_MANIFEST_FILE,
+    blockzilla_archive_v2::ARCHIVE_V2_PUBKEY_HOT_SEED_FILE,
+    blockzilla_archive_v2::ARCHIVE_V2_BLOCK_ACCESS_FILE,
+    blockzilla_archive_v2::ARCHIVE_V2_BLOCK_ACCESS_INDEX_FILE,
+    blockzilla_archive_v2::ARCHIVE_V2_GET_BLOCK_INDEX_FILE,
 ];
 
 /// Network options for [`CompactV2Archive::open_with_options`].
@@ -324,7 +324,7 @@ impl NetworkObjectInventory {
             objects.insert(name.to_owned(), identity);
         }
         for &name in OPTIONAL_COMPACT_V2_OBJECTS {
-            if name == blockzilla_format::ARCHIVE_V2_GENESIS_BIN_FILE && epoch != 0 {
+            if name == blockzilla_archive_v2::ARCHIVE_V2_GENESIS_BIN_FILE && epoch != 0 {
                 continue;
             }
             match http.strong_identity(name) {
@@ -758,16 +758,16 @@ fn bounded_range(block_count: u32, first_block: u32, max_blocks: NonZeroU32) -> 
 
 fn cache_objects(inventory: &NetworkObjectInventory, epoch: u64) -> Result<Vec<&'static str>> {
     let mut names = vec![
-        blockzilla_format::ARCHIVE_V2_BLOCK_INDEX_FILE,
-        blockzilla_format::ARCHIVE_V2_META_FILE,
-        blockzilla_format::ARCHIVE_V2_PUBKEY_REGISTRY_FILE,
+        blockzilla_archive_v2::ARCHIVE_V2_BLOCK_INDEX_FILE,
+        blockzilla_archive_v2::ARCHIVE_V2_META_FILE,
+        blockzilla_archive_v2::ARCHIVE_V2_PUBKEY_REGISTRY_FILE,
     ];
     if epoch == 0
         && inventory
-            .identity(blockzilla_format::ARCHIVE_V2_GENESIS_BIN_FILE)
+            .identity(blockzilla_archive_v2::ARCHIVE_V2_GENESIS_BIN_FILE)
             .is_some()
     {
-        names.push(blockzilla_format::ARCHIVE_V2_GENESIS_BIN_FILE);
+        names.push(blockzilla_archive_v2::ARCHIVE_V2_GENESIS_BIN_FILE);
     }
     for &name in &names {
         if inventory.identity(name).is_none() {
@@ -966,7 +966,7 @@ mod tests {
         assert!(matches!(
             error,
             Error::Reader(crate::Error::MissingLocalFile(name))
-                if name == blockzilla_format::ARCHIVE_V2_BLOCKS_FILE
+                if name == blockzilla_archive_v2::ARCHIVE_V2_BLOCKS_FILE
         ));
     }
 }

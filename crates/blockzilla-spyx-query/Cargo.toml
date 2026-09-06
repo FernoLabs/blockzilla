@@ -13,11 +13,13 @@ name = "blockzilla-spyx-query"
 path = "src/main.rs"
 
 [dependencies]
+blockzilla-archive-v2 = { path = "../../crates/blockzilla-archive-v2", default-features = false }
+blockzilla-compact = { path = "../../crates/blockzilla-compact", default-features = false }
+blockzilla-primitives = { path = "../../crates/blockzilla-primitives", default-features = false }
 anyhow = "1.0.102"
 axum = { version = "0.8.9", features = ["json", "query", "tokio"] }
 base64 = "0.22.1"
 blockzilla-dex-parser = { path = "../blockzilla-dex-parser" }
-blockzilla-format = { path = "../blockzilla-format" }
 blockzilla-read-sdk = { package = "blockzilla-read-sdk-legacy", path = "../blockzilla-read-sdk-legacy" }
 blockzilla-token-balance-audit = { path = "../blockzilla-token-balance-audit" }
 blockzilla-token-transaction-dump = { path = "../blockzilla-token-transaction-dump" }

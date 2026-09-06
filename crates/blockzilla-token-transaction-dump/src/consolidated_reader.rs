@@ -11,11 +11,8 @@ use std::{
 };
 
 use anyhow::{Context, Result, bail, ensure};
-use blockzilla_format::{
-    ArchiveV2WireMetadataErrorSchema, WINCODE_LEB128_MAX_FRAME_BYTES,
-    bounded_wincode_leb128_config, read_u32_varint,
-    validate_archive_v2_metadata_error_prefix_for_selected_schema,
-};
+use blockzilla_archive_v2::{ArchiveV2WireMetadataErrorSchema, validate_archive_v2_metadata_error_prefix_for_selected_schema};
+use blockzilla_primitives::{WINCODE_LEB128_MAX_FRAME_BYTES, bounded_wincode_leb128_config, read_u32_varint};
 use wincode::{SchemaRead, SchemaWrite};
 
 use crate::format::{
@@ -339,9 +336,8 @@ mod tests {
         io::{Cursor, Seek, SeekFrom},
     };
 
-    use blockzilla_format::{
-        CompactMetaV1, CompactTransactionError, WincodeLeb128FramedWriter, wincode_leb128_config,
-    };
+    use blockzilla_compact::{CompactMetaV1, CompactTransactionError};
+    use blockzilla_primitives::{WincodeLeb128FramedWriter, wincode_leb128_config};
     use blockzilla_read_sdk::{
         ArchiveV2MetadataProjectionLimits, LogPayloadValidation,
         ProjectedArchiveV2TokenMetadataSummary,

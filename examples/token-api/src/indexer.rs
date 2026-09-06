@@ -9,13 +9,10 @@ use crate::{
     },
 };
 use anyhow::{Context, Result};
-use blockzilla_format::{
-    ARCHIVE_V2_TX_FLAG_HAS_ERROR, ARCHIVE_V2_TX_FLAG_HAS_METADATA,
-    ARCHIVE_V2_TX_FLAG_HAS_TOKEN_BALANCES, ARCHIVE_V2_TX_FLAG_METADATA_RAW_FALLBACK,
-    ARCHIVE_V2_TX_FLAG_TX_RAW_FALLBACK, ArchiveV2HotBlockBlob, ArchiveV2HotInstruction,
-    ArchiveV2HotMessagePayload, ArchiveV2HotTxRow, CompactMetaV1, CompactPubkey, KeyIndex,
-    KeyStore,
-};
+use blockzilla_archive_v2::{ARCHIVE_V2_TX_FLAG_HAS_ERROR, ARCHIVE_V2_TX_FLAG_HAS_METADATA, ARCHIVE_V2_TX_FLAG_HAS_TOKEN_BALANCES, ARCHIVE_V2_TX_FLAG_METADATA_RAW_FALLBACK, ARCHIVE_V2_TX_FLAG_TX_RAW_FALLBACK, ArchiveV2HotBlockBlob, ArchiveV2HotInstruction, ArchiveV2HotMessagePayload, ArchiveV2HotTxRow};
+use blockzilla_compact::CompactMetaV1;
+use blockzilla_primitives::CompactPubkey;
+use blockzilla_registry::{KeyIndex, KeyStore};
 use serde_json::to_vec_pretty;
 use std::{
     cell::RefCell,
@@ -35,13 +32,13 @@ type SafeWincodeLeb128Config = wincode::config::Configuration<
     WINCODE_PREALLOCATION_LIMIT,
     wincode::len::BincodeLen,
     wincode::int_encoding::LittleEndian,
-    blockzilla_format::Leb128,
+    blockzilla_primitives::Leb128,
 >;
 
 fn safe_wincode_leb128_config() -> SafeWincodeLeb128Config {
     wincode::config::Configuration::default()
         .with_preallocation_size_limit::<WINCODE_PREALLOCATION_LIMIT>()
-        .with_int_encoding::<blockzilla_format::Leb128>()
+        .with_int_encoding::<blockzilla_primitives::Leb128>()
 }
 
 #[derive(Debug)]
@@ -277,7 +274,7 @@ pub fn index_archive_v2(config: IndexArchiveV2Config) -> Result<IndexMeta> {
     let index_path = config
         .index
         .clone()
-        .unwrap_or_else(|| blockzilla_format::archive_v2_hot_index_path(&config.input));
+        .unwrap_or_else(|| blockzilla_archive_v2::archive_v2_hot_index_path(&config.input));
     let rows: Vec<_> = reader
         .rows()
         .iter()
@@ -501,7 +498,7 @@ fn seed_known_pubkeys(resolver: &RegistryResolver, known: &KnownIds, acc: &mut A
 
 fn process_block(
     block: &ArchiveV2HotBlockBlob,
-    row: &blockzilla_format::ArchiveV2HotBlockIndexRow,
+    row: &blockzilla_archive_v2::ArchiveV2HotBlockIndexRow,
     resolver: &RegistryResolver,
     known: &KnownIds,
     acc: &mut Accumulator,
@@ -729,7 +726,7 @@ fn collect_balance_records(
 }
 
 fn balance_view(
-    balance: &blockzilla_format::CompactTokenBalance,
+    balance: &blockzilla_compact::CompactTokenBalance,
     full_keys: &[Option<u32>],
     resolver: &RegistryResolver,
     acc: &mut Accumulator,

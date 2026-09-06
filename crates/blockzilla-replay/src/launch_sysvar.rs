@@ -1105,11 +1105,7 @@ struct OwnedRecentBlockhashesWire(Vec<RecentBlockhashEntryWire>);
 mod tests {
     use std::collections::BTreeSet;
 
-    use blockzilla_format::{
-        WincodeArchiveV2GenesisEpochSchedule, WincodeArchiveV2GenesisFeeParams,
-        WincodeArchiveV2GenesisInflationParams, WincodeArchiveV2GenesisPohParams,
-        WincodeArchiveV2GenesisRentParams,
-    };
+    use blockzilla_archive_v2::{WincodeArchiveV2GenesisEpochSchedule, WincodeArchiveV2GenesisFeeParams, WincodeArchiveV2GenesisInflationParams, WincodeArchiveV2GenesisPohParams, WincodeArchiveV2GenesisRentParams};
     use sha2::Digest;
 
     use super::*;

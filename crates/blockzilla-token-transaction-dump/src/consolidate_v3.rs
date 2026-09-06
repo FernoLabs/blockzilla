@@ -22,21 +22,8 @@ use std::{
 };
 
 use anyhow::{Context, Result, bail, ensure};
-use blockzilla_format::{
-    ARCHIVE_V2_DECODE_PREALLOCATION_LIMIT_BYTES, ARCHIVE_V2_TX_FLAG_HAS_COMPACT_VOTE_IX,
-    ARCHIVE_V2_TX_FLAG_HAS_ERROR, ARCHIVE_V2_TX_FLAG_HAS_INNER_IX,
-    ARCHIVE_V2_TX_FLAG_HAS_LOADED_ADDRESSES, ARCHIVE_V2_TX_FLAG_HAS_LOGS,
-    ARCHIVE_V2_TX_FLAG_HAS_METADATA, ARCHIVE_V2_TX_FLAG_HAS_RETURN_DATA,
-    ARCHIVE_V2_TX_FLAG_HAS_TOKEN_BALANCES, ARCHIVE_V2_TX_FLAG_MESSAGE_V0,
-    ARCHIVE_V2_TX_FLAG_METADATA_RAW_FALLBACK, ARCHIVE_V2_TX_FLAG_TX_RAW_FALLBACK,
-    ArchiveV2WireFallbackReason, ArchiveV2WireIdentityVisitor, ArchiveV2WireMetadataErrorSchema,
-    ArchiveV2WireReferenceClass, ArchiveV2WireRewriteLimits, ArchiveV2WireRewriteVisitor,
-    CompactPubkey, WINCODE_LEB128_MAX_FRAME_BYTES, WincodeLeb128Config,
-    bounded_wincode_leb128_config, encode_with_scratch,
-    rewrite_archive_v2_metadata_wire_preserving_error_schema,
-    rewrite_archive_v2_metadata_wire_preserving_selected_error_schema,
-    validate_archive_v2_metadata_error_prefix_for_selected_schema, write_u32_varint,
-};
+use blockzilla_archive_v2::{ARCHIVE_V2_DECODE_PREALLOCATION_LIMIT_BYTES, ARCHIVE_V2_TX_FLAG_HAS_COMPACT_VOTE_IX, ARCHIVE_V2_TX_FLAG_HAS_ERROR, ARCHIVE_V2_TX_FLAG_HAS_INNER_IX, ARCHIVE_V2_TX_FLAG_HAS_LOADED_ADDRESSES, ARCHIVE_V2_TX_FLAG_HAS_LOGS, ARCHIVE_V2_TX_FLAG_HAS_METADATA, ARCHIVE_V2_TX_FLAG_HAS_RETURN_DATA, ARCHIVE_V2_TX_FLAG_HAS_TOKEN_BALANCES, ARCHIVE_V2_TX_FLAG_MESSAGE_V0, ARCHIVE_V2_TX_FLAG_METADATA_RAW_FALLBACK, ARCHIVE_V2_TX_FLAG_TX_RAW_FALLBACK, ArchiveV2WireFallbackReason, ArchiveV2WireIdentityVisitor, ArchiveV2WireMetadataErrorSchema, ArchiveV2WireReferenceClass, ArchiveV2WireRewriteLimits, ArchiveV2WireRewriteVisitor, rewrite_archive_v2_metadata_wire_preserving_error_schema, rewrite_archive_v2_metadata_wire_preserving_selected_error_schema, validate_archive_v2_metadata_error_prefix_for_selected_schema};
+use blockzilla_primitives::{CompactPubkey, WINCODE_LEB128_MAX_FRAME_BYTES, WincodeLeb128Config, bounded_wincode_leb128_config, encode_with_scratch, write_u32_varint};
 use blockzilla_read_sdk::{
     ArchiveReader, ArchiveV2LoadedAddressSide, ArchiveV2MessageProjector,
     ArchiveV2MetadataProjectionLimits, ArchiveV2MetadataWireProfile, ArchiveV2WireProfile,
@@ -1431,7 +1418,7 @@ fn selected_metadata_schema(
     }
 }
 
-fn is_metadata_schema_ambiguity(error: &blockzilla_format::ArchiveV2WireRewriteError) -> bool {
+fn is_metadata_schema_ambiguity(error: &blockzilla_archive_v2::ArchiveV2WireRewriteError) -> bool {
     error.fallback_reason() == Some(ArchiveV2WireFallbackReason::MetadataErrorSchemaAmbiguous)
 }
 
@@ -2137,8 +2124,8 @@ fn open_epoch_source(
                 },
                 &[SIGNATURES_FILE, REGISTRY_INDEX_FILE],
                 &[
-                    blockzilla_format::ARCHIVE_V2_BLOCKHASH_REGISTRY_FILE,
-                    blockzilla_format::ARCHIVE_V2_VOTE_HASH_REGISTRY_FILE,
+                    blockzilla_archive_v2::ARCHIVE_V2_BLOCKHASH_REGISTRY_FILE,
+                    blockzilla_archive_v2::ARCHIVE_V2_VOTE_HASH_REGISTRY_FILE,
                 ],
                 ArchiveV2MetadataWireProfile::UnmarkedHistoricalCompatibility,
                 OpenOptions {
@@ -9795,13 +9782,10 @@ pub fn validate_completed_consolidated_dump_v3(output: &Path) -> Result<()> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use blockzilla_format::{
-        ArchiveV2HotInstruction, ArchiveV2HotInstructionData, ArchiveV2HotLegacyMessage,
-        ArchiveV2HotMessagePayload, ArchiveV2HotV0Message, CompactInnerInstruction,
-        CompactInnerInstructions, CompactLogStream, CompactMessageHeader, CompactMetaV1,
-        CompactTransactionError, DataTable, LogEvent, OwnedCompactAddressTableLookup,
-        OwnedCompactRecentBlockhash, StringTable, program_logs::ProgramLog, wincode_leb128_config,
-    };
+    use blockzilla_archive_v2::{ArchiveV2HotInstruction, ArchiveV2HotInstructionData, ArchiveV2HotLegacyMessage, ArchiveV2HotMessagePayload, ArchiveV2HotV0Message};
+    use blockzilla_compact::{CompactInnerInstruction, CompactInnerInstructions, CompactLogStream, CompactMessageHeader, CompactMetaV1, CompactTransactionError, DataTable, LogEvent, OwnedCompactAddressTableLookup, OwnedCompactRecentBlockhash};
+    use blockzilla_primitives::{StringTable, wincode_leb128_config};
+    use blockzilla_program_logs::program_logs::ProgramLog;
     use tempfile::tempdir;
 
     fn key(byte: u8) -> [u8; KEY_BYTES] {

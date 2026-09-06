@@ -19,9 +19,8 @@ use blockzilla_dex_parser::{
     MalformedReason, PARSER_IMPLEMENTATION_FINGERPRINT, PARSER_SEMANTIC_VERSION, PROGRAM_SPECS,
     ProgramRole,
 };
-use blockzilla_format::{
-    ARCHIVE_V2_TX_FLAG_HAS_ERROR, ArchiveV2WireMetadataErrorSchema, CompactPubkey,
-};
+use blockzilla_archive_v2::{ARCHIVE_V2_TX_FLAG_HAS_ERROR, ArchiveV2WireMetadataErrorSchema};
+use blockzilla_primitives::CompactPubkey;
 use blockzilla_read_sdk::{
     ArchiveV2MessageProjector, ArchiveV2MetadataProjectionLimits, ArchiveV2WireProfile,
     BorrowedArchiveV2InnerTokenInstruction, BorrowedArchiveV2LogEventKind,

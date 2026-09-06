@@ -5,12 +5,9 @@
 //! Wincode message object graph. The selected generation schema is fixed for
 //! the full call. The decoder does not probe or retry another schema.
 
-use blockzilla_format::{
-    ArchiveV2ComputeBudgetInstructionData, ArchiveV2HotInstructionData,
-    ArchiveV2SystemInstructionData, ArchiveV2VoteHashRef, ArchiveV2VoteLockoutOffset,
-    ArchiveV2VoteStateUpdate, ArchiveV2VoteTowerSync, CompactMessageHeader, CompactPubkey,
-    CompactTransactionConfig, OwnedCompactRecentBlockhash, WincodeLeb128Config,
-};
+use blockzilla_archive_v2::{ArchiveV2ComputeBudgetInstructionData, ArchiveV2HotInstructionData, ArchiveV2SystemInstructionData, ArchiveV2VoteHashRef, ArchiveV2VoteLockoutOffset, ArchiveV2VoteStateUpdate, ArchiveV2VoteTowerSync};
+use blockzilla_compact::{CompactMessageHeader, CompactTransactionConfig, OwnedCompactRecentBlockhash};
+use blockzilla_primitives::{CompactPubkey, WincodeLeb128Config};
 use smallvec::{SmallVec, smallvec};
 use thiserror::Error;
 use wincode::{ReadResult, SchemaRead, error::invalid_tag_encoding, io::Reader};
@@ -1102,11 +1099,9 @@ fn read_vote_tower_sync(cursor: &mut &[u8]) -> ReadResult<ArchiveV2VoteTowerSync
 
 #[cfg(test)]
 mod tests {
-    use blockzilla_format::{
-        ArchiveV2HotInstruction, ArchiveV2HotLegacyMessage, ArchiveV2HotMessagePayload,
-        ArchiveV2HotV0Message, ArchiveV2HotV1Message, OwnedCompactAddressTableLookup,
-        wincode_leb128_config,
-    };
+    use blockzilla_archive_v2::{ArchiveV2HotInstruction, ArchiveV2HotLegacyMessage, ArchiveV2HotMessagePayload, ArchiveV2HotV0Message, ArchiveV2HotV1Message};
+    use blockzilla_compact::OwnedCompactAddressTableLookup;
+    use blockzilla_primitives::wincode_leb128_config;
     use smallvec::SmallVec;
     use wincode::SchemaWrite;
 

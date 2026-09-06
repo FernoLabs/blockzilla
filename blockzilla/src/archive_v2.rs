@@ -1,73 +1,11 @@
 use anyhow::{Context, Result, anyhow, bail};
 
-use blockzilla_format::{
-    ArchiveV2HotV1Message, CompactTransactionConfig, OwnedCompactV1Message,
-    WincodeArchiveV2NoRegistryV1Message,
-    ARCHIVE_V2_BLOCK_ACCESS_FILE, ARCHIVE_V2_BLOCK_ACCESS_INDEX_FILE,
-    ARCHIVE_V2_BLOCK_ACCESS_MAX_FRAME_BYTES, ARCHIVE_V2_BLOCK_INDEX_FILE,
-    ARCHIVE_V2_BLOCKHASH_INDEX_V3_FILE, ARCHIVE_V2_BLOCKHASH_INDEX_V3_HEADER_LEN,
-    ARCHIVE_V2_BLOCKHASH_INDEX_V3_MAGIC, ARCHIVE_V2_BLOCKHASH_INDEX_V3_ROW_LEN,
-    ARCHIVE_V2_BLOCKHASH_INDEX_V3_VERSION, ARCHIVE_V2_BLOCKHASH_REGISTRY_FILE,
-    ARCHIVE_V2_BLOCKS_FILE, ARCHIVE_V2_FIRST_SEEN_REGISTRY_MANIFEST_FILE,
-    ARCHIVE_V2_GET_BLOCK_INDEX_FILE, ARCHIVE_V2_HOT_INDEX_FLAG_RAW_BLOCKS, ARCHIVE_V2_META_FILE,
-    ARCHIVE_V2_POH_FILE, ARCHIVE_V2_PREV_BLOCKHASH_TAIL_FILE, ARCHIVE_V2_PUBKEY_HOT_SEED_FILE,
-    ARCHIVE_V2_PUBKEY_REGISTRY_COUNTS_FILE, ARCHIVE_V2_PUBKEY_REGISTRY_FILE,
-    ARCHIVE_V2_PUBKEY_REGISTRY_INDEX_FILE, ARCHIVE_V2_RAW_BLOCKS_FILE,
-    ARCHIVE_V2_RAW_BLOCKS_ZSTD_FILE, ARCHIVE_V2_SHREDDING_FILE, ARCHIVE_V2_SIGNATURES_FILE,
-    ARCHIVE_V2_TX_FLAG_HAS_COMPACT_VOTE_IX, ARCHIVE_V2_TX_FLAG_HAS_ERROR,
-    ARCHIVE_V2_TX_FLAG_HAS_INNER_IX, ARCHIVE_V2_TX_FLAG_HAS_LOADED_ADDRESSES,
-    ARCHIVE_V2_TX_FLAG_HAS_LOGS, ARCHIVE_V2_TX_FLAG_HAS_METADATA,
-    ARCHIVE_V2_TX_FLAG_HAS_RETURN_DATA, ARCHIVE_V2_TX_FLAG_HAS_TOKEN_BALANCES,
-    ARCHIVE_V2_TX_FLAG_MESSAGE_V0, ARCHIVE_V2_TX_FLAG_METADATA_RAW_FALLBACK,
-    ARCHIVE_V2_TX_FLAG_TX_RAW_FALLBACK, ARCHIVE_V2_VOTE_HASH_REGISTRY_FILE,
-    ArchiveV2BlockAccessBlob, ArchiveV2BlockAccessBlockhash, ArchiveV2BlockAccessIndexRow,
-    ArchiveV2BlockAccessPubkey, ArchiveV2BlockAccessVoteHash,
-    ArchiveV2ComputeBudgetInstructionData, ArchiveV2GetBlockIndexRow, ArchiveV2HotBlockBlob,
-    ArchiveV2HotBlockHeader, ArchiveV2HotBlockIndexRow, ArchiveV2HotInstruction,
-    ArchiveV2HotInstructionData, ArchiveV2HotLegacyMessage, ArchiveV2HotMessagePayload,
-    ArchiveV2HotMetaRecord, ArchiveV2HotRewards, ArchiveV2HotTxRow, ArchiveV2HotV0Message,
-    ArchiveV2SystemInstructionData, ArchiveV2VoteHashRef, ArchiveV2VoteLockoutOffset,
-    ArchiveV2VoteStateUpdate, ArchiveV2VoteTowerSync, BLOCK_TIME_GAP_FILE, CompactBlockHeader,
-    CompactInnerInstruction, CompactInnerInstructions, CompactLogStream, CompactMessageHeader,
-    CompactMetaV1, CompactPohEntry, CompactPubkey, CompactReturnData, CompactReward,
-    CompactShredding, CompactTokenBalance, CompactTransactionError, KeyIndex, KeyStore,
-    LIVE_PRE_HOT_BLOCK_VERSION, LIVE_PUBKEY_RUN_HOT_FILE, LIVE_PUBKEY_RUN_RECORD_LEN,
-    LIVE_PUBKEY_RUNS_DIR, LivePreHotBlock, LivePreHotRecord, LogEvent,
-    OwnedCompactAddressTableLookup, OwnedCompactInstruction, OwnedCompactLegacyMessage,
-    OwnedCompactMessage, OwnedCompactRecentBlockhash, OwnedCompactTransaction,
-    OwnedCompactV0Message, SplitCompactIndexRecord, WINCODE_ARCHIVE_V2_BLOCK_ACCESS_VERSION,
-    WINCODE_ARCHIVE_V2_FLAG_ALL_PUBKEY_REF_COUNTS, WINCODE_ARCHIVE_V2_FLAG_FIRST_SEEN_REGISTRY,
-    WINCODE_ARCHIVE_V2_FLAG_LEB128, WINCODE_ARCHIVE_V2_FLAG_NO_REGISTRY,
-    WINCODE_ARCHIVE_V2_HOT_BLOCK_VERSION, WINCODE_ARCHIVE_V2_VERSION, WincodeArchiveV2Block,
-    WincodeArchiveV2BlockHeader, WincodeArchiveV2Footer, WincodeArchiveV2Genesis,
-    WincodeArchiveV2GenesisAccount, WincodeArchiveV2GenesisBuiltin,
-    WincodeArchiveV2GenesisEpochSchedule, WincodeArchiveV2GenesisFeeParams,
-    WincodeArchiveV2GenesisInflationParams, WincodeArchiveV2GenesisPohParams,
-    WincodeArchiveV2GenesisRentParams, WincodeArchiveV2Header,
-    WincodeArchiveV2NoRegistryAddressTableLookup, WincodeArchiveV2NoRegistryBlock,
-    WincodeArchiveV2NoRegistryBlockHeader, WincodeArchiveV2NoRegistryGenesis,
-    WincodeArchiveV2NoRegistryGenesisAccount, WincodeArchiveV2NoRegistryGenesisBuiltin,
-    WincodeArchiveV2NoRegistryInstruction, WincodeArchiveV2NoRegistryLegacyMessage,
-    WincodeArchiveV2NoRegistryLogs, WincodeArchiveV2NoRegistryMessage,
-    WincodeArchiveV2NoRegistryMeta, WincodeArchiveV2NoRegistryRecord,
-    WincodeArchiveV2NoRegistryReturnData, WincodeArchiveV2NoRegistryReward,
-    WincodeArchiveV2NoRegistryRewards, WincodeArchiveV2NoRegistryTokenBalance,
-    WincodeArchiveV2NoRegistryTransaction, WincodeArchiveV2NoRegistryTx,
-    WincodeArchiveV2NoRegistryV0Message, WincodeArchiveV2Payload, WincodeArchiveV2PohRecord,
-    WincodeArchiveV2Record, WincodeArchiveV2Rewards, WincodeArchiveV2ShreddingRecord,
-    WincodeArchiveV2Transaction, WincodeLeb128FramedReader, WincodeLeb128FramedWriter,
-    archive_v2_get_block_index_path, archive_v2_hot_index_path,
-    deserialize_archive_v2_hot_block_blob, encode_with_scratch,
-    live_producer::LivePubkeyCountRecord,
-    program_logs::{
-        ProgramLog,
-        system_program::{PubkeyOrString, SystemAddress, SystemProgramLog},
-        token_2022::Token2022Log,
-    },
-    read_archive_v2_block_access_index, read_archive_v2_hot_block_index, wincode_leb128_config,
-    write_archive_v2_block_access_index, write_archive_v2_get_block_index,
-    write_archive_v2_hot_block_index, write_registry_iter, write_u32_varint,
-};
+use blockzilla_archive_v2::{ARCHIVE_V2_BLOCKHASH_INDEX_V3_FILE, ARCHIVE_V2_BLOCKHASH_INDEX_V3_HEADER_LEN, ARCHIVE_V2_BLOCKHASH_INDEX_V3_MAGIC, ARCHIVE_V2_BLOCKHASH_INDEX_V3_ROW_LEN, ARCHIVE_V2_BLOCKHASH_INDEX_V3_VERSION, ARCHIVE_V2_BLOCKHASH_REGISTRY_FILE, ARCHIVE_V2_BLOCKS_FILE, ARCHIVE_V2_BLOCK_ACCESS_FILE, ARCHIVE_V2_BLOCK_ACCESS_INDEX_FILE, ARCHIVE_V2_BLOCK_ACCESS_MAX_FRAME_BYTES, ARCHIVE_V2_BLOCK_INDEX_FILE, ARCHIVE_V2_FIRST_SEEN_REGISTRY_MANIFEST_FILE, ARCHIVE_V2_GET_BLOCK_INDEX_FILE, ARCHIVE_V2_HOT_INDEX_FLAG_RAW_BLOCKS, ARCHIVE_V2_META_FILE, ARCHIVE_V2_POH_FILE, ARCHIVE_V2_PREV_BLOCKHASH_TAIL_FILE, ARCHIVE_V2_PUBKEY_HOT_SEED_FILE, ARCHIVE_V2_PUBKEY_REGISTRY_COUNTS_FILE, ARCHIVE_V2_PUBKEY_REGISTRY_FILE, ARCHIVE_V2_PUBKEY_REGISTRY_INDEX_FILE, ARCHIVE_V2_RAW_BLOCKS_FILE, ARCHIVE_V2_RAW_BLOCKS_ZSTD_FILE, ARCHIVE_V2_SHREDDING_FILE, ARCHIVE_V2_SIGNATURES_FILE, ARCHIVE_V2_TX_FLAG_HAS_COMPACT_VOTE_IX, ARCHIVE_V2_TX_FLAG_HAS_ERROR, ARCHIVE_V2_TX_FLAG_HAS_INNER_IX, ARCHIVE_V2_TX_FLAG_HAS_LOADED_ADDRESSES, ARCHIVE_V2_TX_FLAG_HAS_LOGS, ARCHIVE_V2_TX_FLAG_HAS_METADATA, ARCHIVE_V2_TX_FLAG_HAS_RETURN_DATA, ARCHIVE_V2_TX_FLAG_HAS_TOKEN_BALANCES, ARCHIVE_V2_TX_FLAG_MESSAGE_V0, ARCHIVE_V2_TX_FLAG_METADATA_RAW_FALLBACK, ARCHIVE_V2_TX_FLAG_TX_RAW_FALLBACK, ARCHIVE_V2_VOTE_HASH_REGISTRY_FILE, ArchiveV2BlockAccessBlob, ArchiveV2BlockAccessBlockhash, ArchiveV2BlockAccessIndexRow, ArchiveV2BlockAccessPubkey, ArchiveV2BlockAccessVoteHash, ArchiveV2ComputeBudgetInstructionData, ArchiveV2GetBlockIndexRow, ArchiveV2HotBlockBlob, ArchiveV2HotBlockHeader, ArchiveV2HotBlockIndexRow, ArchiveV2HotInstruction, ArchiveV2HotInstructionData, ArchiveV2HotLegacyMessage, ArchiveV2HotMessagePayload, ArchiveV2HotMetaRecord, ArchiveV2HotRewards, ArchiveV2HotTxRow, ArchiveV2HotV0Message, ArchiveV2HotV1Message, ArchiveV2SystemInstructionData, ArchiveV2VoteHashRef, ArchiveV2VoteLockoutOffset, ArchiveV2VoteStateUpdate, ArchiveV2VoteTowerSync, BLOCK_TIME_GAP_FILE, WINCODE_ARCHIVE_V2_BLOCK_ACCESS_VERSION, WINCODE_ARCHIVE_V2_FLAG_ALL_PUBKEY_REF_COUNTS, WINCODE_ARCHIVE_V2_FLAG_FIRST_SEEN_REGISTRY, WINCODE_ARCHIVE_V2_FLAG_LEB128, WINCODE_ARCHIVE_V2_FLAG_NO_REGISTRY, WINCODE_ARCHIVE_V2_HOT_BLOCK_VERSION, WINCODE_ARCHIVE_V2_VERSION, WincodeArchiveV2Block, WincodeArchiveV2BlockHeader, WincodeArchiveV2Footer, WincodeArchiveV2Genesis, WincodeArchiveV2GenesisAccount, WincodeArchiveV2GenesisBuiltin, WincodeArchiveV2GenesisEpochSchedule, WincodeArchiveV2GenesisFeeParams, WincodeArchiveV2GenesisInflationParams, WincodeArchiveV2GenesisPohParams, WincodeArchiveV2GenesisRentParams, WincodeArchiveV2Header, WincodeArchiveV2NoRegistryAddressTableLookup, WincodeArchiveV2NoRegistryBlock, WincodeArchiveV2NoRegistryBlockHeader, WincodeArchiveV2NoRegistryGenesis, WincodeArchiveV2NoRegistryGenesisAccount, WincodeArchiveV2NoRegistryGenesisBuiltin, WincodeArchiveV2NoRegistryInstruction, WincodeArchiveV2NoRegistryLegacyMessage, WincodeArchiveV2NoRegistryLogs, WincodeArchiveV2NoRegistryMessage, WincodeArchiveV2NoRegistryMeta, WincodeArchiveV2NoRegistryRecord, WincodeArchiveV2NoRegistryReturnData, WincodeArchiveV2NoRegistryReward, WincodeArchiveV2NoRegistryRewards, WincodeArchiveV2NoRegistryTokenBalance, WincodeArchiveV2NoRegistryTransaction, WincodeArchiveV2NoRegistryTx, WincodeArchiveV2NoRegistryV0Message, WincodeArchiveV2NoRegistryV1Message, WincodeArchiveV2Payload, WincodeArchiveV2PohRecord, WincodeArchiveV2Record, WincodeArchiveV2Rewards, WincodeArchiveV2ShreddingRecord, WincodeArchiveV2Transaction, archive_v2_get_block_index_path, archive_v2_hot_index_path, deserialize_archive_v2_hot_block_blob, read_archive_v2_block_access_index, read_archive_v2_hot_block_index, write_archive_v2_block_access_index, write_archive_v2_get_block_index, write_archive_v2_hot_block_index};
+use blockzilla_compact::{CompactBlockHeader, CompactInnerInstruction, CompactInnerInstructions, CompactLogStream, CompactMessageHeader, CompactMetaV1, CompactPohEntry, CompactReturnData, CompactReward, CompactShredding, CompactTokenBalance, CompactTransactionConfig, CompactTransactionError, LogEvent, OwnedCompactAddressTableLookup, OwnedCompactInstruction, OwnedCompactLegacyMessage, OwnedCompactMessage, OwnedCompactRecentBlockhash, OwnedCompactTransaction, OwnedCompactV0Message, OwnedCompactV1Message, SplitCompactIndexRecord};
+use blockzilla_live_format::{LIVE_PRE_HOT_BLOCK_VERSION, LIVE_PUBKEY_RUNS_DIR, LIVE_PUBKEY_RUN_HOT_FILE, LIVE_PUBKEY_RUN_RECORD_LEN, LivePreHotBlock, LivePreHotRecord, live_producer::LivePubkeyCountRecord};
+use blockzilla_primitives::{CompactPubkey, WincodeLeb128FramedReader, WincodeLeb128FramedWriter, encode_with_scratch, wincode_leb128_config, write_u32_varint};
+use blockzilla_program_logs::{program_logs::ProgramLog, program_logs::system_program::PubkeyOrString, program_logs::system_program::SystemAddress, program_logs::system_program::SystemProgramLog, program_logs::token_2022::Token2022Log};
+use blockzilla_registry::{KeyIndex, KeyStore, write_registry_iter};
 use core::mem::MaybeUninit;
 use gxhash::{GxBuildHasher, HashMap as GxHashMap, gxhash128};
 use hashbrown::HashTable;
@@ -4755,12 +4693,12 @@ fn write_registry_from_frequency_runs(
 
     for builtin in missing_builtins {
         registry_writer.write_all(builtin)?;
-        blockzilla_format::framed::write_u32_varint(&mut counts_writer, 0)?;
+        blockzilla_primitives::framed::write_u32_varint(&mut counts_writer, 0)?;
     }
 
     while let Some(item) = heap.pop() {
         registry_writer.write_all(&item.key)?;
-        blockzilla_format::framed::write_u32_varint(&mut counts_writer, item.count)?;
+        blockzilla_primitives::framed::write_u32_varint(&mut counts_writer, item.count)?;
         let cursor = cursors
             .get_mut(item.run_index)
             .ok_or_else(|| anyhow!("invalid frequency-run cursor index {}", item.run_index))?;
@@ -4983,7 +4921,7 @@ mod live_touch_registry_tests {
         let mut counts_reader = BufReader::new(File::open(&counts_path).unwrap());
         let mut counts = Vec::new();
         while let Some(count) =
-            blockzilla_format::framed::read_u32_varint(&mut counts_reader).unwrap()
+            blockzilla_primitives::framed::read_u32_varint(&mut counts_reader).unwrap()
         {
             counts.push(count);
         }
@@ -5081,7 +5019,7 @@ mod live_touch_registry_tests {
         let mut counts_reader = BufReader::new(File::open(&counts_path).unwrap());
         let mut counts = Vec::new();
         while let Some(count) =
-            blockzilla_format::framed::read_u32_varint(&mut counts_reader).unwrap()
+            blockzilla_primitives::framed::read_u32_varint(&mut counts_reader).unwrap()
         {
             counts.push(count);
         }
@@ -5179,7 +5117,7 @@ mod live_touch_registry_tests {
         let mut counts_reader = BufReader::new(File::open(&counts_path).unwrap());
         let mut counts = Vec::new();
         while let Some(count) =
-            blockzilla_format::framed::read_u32_varint(&mut counts_reader).unwrap()
+            blockzilla_primitives::framed::read_u32_varint(&mut counts_reader).unwrap()
         {
             counts.push(count);
         }
@@ -5257,7 +5195,7 @@ where
     let file = File::create(path).with_context(|| format!("create {}", path.display()))?;
     let mut writer = BufWriter::with_capacity(LIVE_FINALIZER_IO_BUFFER_SIZE, file);
     for count in counts {
-        blockzilla_format::framed::write_u32_varint(&mut writer, count)?;
+        blockzilla_primitives::framed::write_u32_varint(&mut writer, count)?;
     }
     writer
         .flush()
@@ -5272,7 +5210,7 @@ where
     let file = File::create(path).with_context(|| format!("create {}", path.display()))?;
     let mut writer = BufWriter::with_capacity(ARCHIVE_PRE_HOT_IO_BUFFER, file);
     for count in counts {
-        blockzilla_format::framed::write_u32_varint(&mut writer, count)?;
+        blockzilla_primitives::framed::write_u32_varint(&mut writer, count)?;
     }
     writer
         .flush()
@@ -8308,12 +8246,12 @@ pub(crate) fn build_registries(
     let registry_path = output_dir.join(REGISTRY_FILE);
     let registry_counts_path = output_dir.join(REGISTRY_COUNTS_FILE);
     let blockhash_registry_path = output_dir.join(BLOCKHASH_REGISTRY_FILE);
-    let skipped_slot_map_path = output_dir.join(blockzilla_format::ARCHIVE_V2_SKIPPED_SLOTS_FILE);
+    let skipped_slot_map_path = output_dir.join(blockzilla_archive_v2::ARCHIVE_V2_SKIPPED_SLOTS_FILE);
     if !force
         && crate::file_nonempty(&registry_path)
         && crate::file_nonempty(&registry_counts_path)
         && crate::file_nonempty(&blockhash_registry_path)
-        && blockzilla_format::read_skipped_slot_map(&skipped_slot_map_path).is_ok()
+        && blockzilla_archive_v2::read_skipped_slot_map(&skipped_slot_map_path).is_ok()
     {
         info!(
             "Reusing existing Archive V2 registries: {}, {}, {}",
@@ -9011,9 +8949,9 @@ fn read_blockhash_tail_from_poh_sidecar(
     // frame in a given sidecar shares one schema, so `poh_schema` makes every frame after the
     // first a single-shot decode instead of probing the current schema on every one.
     const MAX_POH_FRAME_BYTES: usize = 64 << 20;
-    let mut poh_schema = blockzilla_format::PohRecordSchema::default();
+    let mut poh_schema = blockzilla_archive_v2::PohRecordSchema::default();
     while let Some((_len, record)) = reader.read_bytes_with_limit(MAX_POH_FRAME_BYTES, |bytes| {
-        blockzilla_format::deserialize_archive_v2_poh_record_with_schema(bytes, &mut poh_schema)
+        blockzilla_archive_v2::deserialize_archive_v2_poh_record_with_schema(bytes, &mut poh_schema)
             .map_err(anyhow::Error::from)
     })? {
         rows += 1;
@@ -9434,7 +9372,7 @@ fn optimize_no_registry_transaction(
     let metadata = tx
         .metadata
         .map(
-            |payload| -> Result<WincodeArchiveV2Payload<blockzilla_format::CompactMetaV1>> {
+            |payload| -> Result<WincodeArchiveV2Payload<blockzilla_compact::CompactMetaV1>> {
                 match payload {
                     WincodeArchiveV2Payload::Decoded { source_len, value } => {
                         Ok(WincodeArchiveV2Payload::Decoded {
@@ -9593,7 +9531,7 @@ fn optimize_no_registry_meta(
     meta: WincodeArchiveV2NoRegistryMeta,
     key_index: &KeyIndex,
     mut timings: Option<&mut ArchiveV2Timings>,
-) -> Result<blockzilla_format::CompactMetaV1> {
+) -> Result<blockzilla_compact::CompactMetaV1> {
     let logs_started = ArchiveV2Timings::optional_detail_timer(timings.as_deref());
     let logs = meta
         .logs
@@ -9646,7 +9584,7 @@ fn optimize_no_registry_meta(
         timings.metadata_pubkey_compact += pubkey_started.elapsed();
     }
 
-    Ok(blockzilla_format::CompactMetaV1 {
+    Ok(blockzilla_compact::CompactMetaV1 {
         err: meta.err,
         fee: meta.fee,
         pre_balances: meta.pre_balances,
@@ -9672,7 +9610,7 @@ fn decode_no_registry_logs(
 ) -> Result<CompactLogStream> {
     match logs {
         WincodeArchiveV2NoRegistryLogs::Raw(logs) => {
-            Ok(blockzilla_format::parse_logs(&logs, key_index))
+            Ok(blockzilla_compact::parse_logs(&logs, key_index))
         }
         WincodeArchiveV2NoRegistryLogs::WincodeZstd {
             uncompressed_len,
@@ -9688,7 +9626,7 @@ fn decode_no_registry_logs(
             }
             let logs: Vec<String> = wincode::config::deserialize(&decoded, wincode_leb128_config())
                 .with_context(|| format!("slot {slot} tx#{tx_index} live log strings"))?;
-            Ok(blockzilla_format::parse_logs(&logs, key_index))
+            Ok(blockzilla_compact::parse_logs(&logs, key_index))
         }
         WincodeArchiveV2NoRegistryLogs::Compact(logs) => Ok(rekey_compact_logs(logs, key_index)),
     }
@@ -14125,8 +14063,8 @@ pub(crate) fn reparse_logs(
                     }
                     before_log_bytes +=
                         wincode::config::serialized_size(&*logs, wincode_leb128_config())?;
-                    let rendered = blockzilla_format::render_logs(logs, &store);
-                    let reparsed = blockzilla_format::parse_logs(&rendered, &key_index);
+                    let rendered = blockzilla_compact::render_logs(logs, &store);
+                    let reparsed = blockzilla_compact::parse_logs(&rendered, &key_index);
                     after_log_bytes +=
                         wincode::config::serialized_size(&reparsed, wincode_leb128_config())?;
                     *logs = reparsed;
@@ -14398,8 +14336,8 @@ pub(crate) fn repack_hot_logs(
                     } else {
                         before_log_bytes +=
                             wincode::config::serialized_size(&*logs, wincode_leb128_config())?;
-                        let rendered = blockzilla_format::render_logs(logs, &store);
-                        let reparsed = blockzilla_format::parse_logs(&rendered, &key_index);
+                        let rendered = blockzilla_compact::render_logs(logs, &store);
+                        let reparsed = blockzilla_compact::parse_logs(&rendered, &key_index);
                         after_log_bytes +=
                             wincode::config::serialized_size(&reparsed, wincode_leb128_config())?;
                         *logs = reparsed;
@@ -14524,25 +14462,25 @@ pub(crate) fn repack_hot_logs(
     Ok(())
 }
 
-fn log_stream_needs_targeted_reparse(logs: &blockzilla_format::CompactLogStream) -> bool {
+fn log_stream_needs_targeted_reparse(logs: &blockzilla_compact::CompactLogStream) -> bool {
     logs.events.iter().any(log_event_needs_targeted_reparse)
 }
 
-fn log_event_needs_targeted_reparse(event: &blockzilla_format::LogEvent) -> bool {
+fn log_event_needs_targeted_reparse(event: &blockzilla_compact::LogEvent) -> bool {
     match event {
-        blockzilla_format::LogEvent::ProgramLog(log)
-        | blockzilla_format::LogEvent::ProgramPlainLog(log) => program_log_is_unknown(log),
-        blockzilla_format::LogEvent::ProgramIdLog { log, .. } => program_log_is_unknown(log),
-        blockzilla_format::LogEvent::UnknownProgram { .. }
-        | blockzilla_format::LogEvent::UnknownAccount { .. }
-        | blockzilla_format::LogEvent::Plain { .. }
-        | blockzilla_format::LogEvent::Unparsed { .. } => true,
+        blockzilla_compact::LogEvent::ProgramLog(log)
+        | blockzilla_compact::LogEvent::ProgramPlainLog(log) => program_log_is_unknown(log),
+        blockzilla_compact::LogEvent::ProgramIdLog { log, .. } => program_log_is_unknown(log),
+        blockzilla_compact::LogEvent::UnknownProgram { .. }
+        | blockzilla_compact::LogEvent::UnknownAccount { .. }
+        | blockzilla_compact::LogEvent::Plain { .. }
+        | blockzilla_compact::LogEvent::Unparsed { .. } => true,
         _ => false,
     }
 }
 
-fn program_log_is_unknown(log: &blockzilla_format::program_logs::ProgramLog) -> bool {
-    matches!(log, blockzilla_format::program_logs::ProgramLog::Unknown(_))
+fn program_log_is_unknown(log: &blockzilla_program_logs::program_logs::ProgramLog) -> bool {
+    matches!(log, blockzilla_program_logs::program_logs::ProgramLog::Unknown(_))
 }
 
 pub(crate) fn analyze_logs(
@@ -14620,7 +14558,7 @@ pub(crate) fn analyze_logs(
     );
     println!(
         "known_program_logs_enabled={}",
-        blockzilla_format::program_logs::KNOWN_PROGRAM_LOGS_ENABLED
+        blockzilla_program_logs::program_logs::KNOWN_PROGRAM_LOGS_ENABLED
     );
     println!(
         "log_pattern_summary metadata_decoded={} metadata_raw={} metadata_none={} metadata_with_logs={} metadata_without_logs={} log_streams={} log_events={} unknown_program_events={} unknown_account_events={} unparsed_events={} plain_events={} program_log_unknown_events={} program_plain_log_unknown_events={} program_id_log_unknown_events={} program_log_unknown_with_active_program={} program_log_unknown_without_active_program={}",
@@ -14734,7 +14672,7 @@ pub(crate) fn analyze_hot_logs(
     );
     println!(
         "known_program_logs_enabled={}",
-        blockzilla_format::program_logs::KNOWN_PROGRAM_LOGS_ENABLED
+        blockzilla_program_logs::program_logs::KNOWN_PROGRAM_LOGS_ENABLED
     );
     println!(
         "log_pattern_summary metadata_decoded={} metadata_raw={} metadata_none={} metadata_with_logs={} metadata_without_logs={} log_streams={} log_events={} unknown_program_events={} unknown_account_events={} unparsed_events={} plain_events={} program_log_unknown_events={} program_plain_log_unknown_events={} program_id_log_unknown_events={} program_log_unknown_with_active_program={} program_log_unknown_without_active_program={}",
@@ -14791,7 +14729,7 @@ fn load_archive_v2_analysis_registry(
 }
 
 fn analyze_log_stream_patterns(
-    logs: &blockzilla_format::CompactLogStream,
+    logs: &blockzilla_compact::CompactLogStream,
     store: Option<&KeyStore>,
     stats: &mut ArchiveV2LogPatternStats,
 ) -> Result<()> {
@@ -14802,7 +14740,7 @@ fn analyze_log_stream_patterns(
     for event in &logs.events {
         stats.log_events += 1;
         match event {
-            blockzilla_format::LogEvent::UnknownProgram { program } => {
+            blockzilla_compact::LogEvent::UnknownProgram { program } => {
                 let text = log_string(&strings, *program, "UnknownProgram.program")?;
                 stats.unknown_program_events += 1;
                 stats.unknown_program_exact.bump(text, text);
@@ -14810,7 +14748,7 @@ fn analyze_log_stream_patterns(
                     .unknown_program_pattern
                     .bump_owned(normalize_log_text_pattern(text), text);
             }
-            blockzilla_format::LogEvent::UnknownAccount { account } => {
+            blockzilla_compact::LogEvent::UnknownAccount { account } => {
                 let text = log_string(&strings, *account, "UnknownAccount.account")?;
                 stats.unknown_account_events += 1;
                 stats.unknown_account_exact.bump(text, text);
@@ -14818,7 +14756,7 @@ fn analyze_log_stream_patterns(
                     .unknown_account_pattern
                     .bump_owned(normalize_log_text_pattern(text), text);
             }
-            blockzilla_format::LogEvent::Unparsed { text } => {
+            blockzilla_compact::LogEvent::Unparsed { text } => {
                 let text = log_string(&strings, *text, "Unparsed.text")?;
                 stats.unparsed_events += 1;
                 stats.unparsed_exact.bump(text, text);
@@ -14826,7 +14764,7 @@ fn analyze_log_stream_patterns(
                     .unparsed_pattern
                     .bump_owned(normalize_log_text_pattern(text), text);
             }
-            blockzilla_format::LogEvent::Plain { text } => {
+            blockzilla_compact::LogEvent::Plain { text } => {
                 let text = log_string(&strings, *text, "Plain.text")?;
                 stats.plain_events += 1;
                 stats.plain_exact.bump(text, text);
@@ -14834,7 +14772,7 @@ fn analyze_log_stream_patterns(
                     .plain_pattern
                     .bump_owned(normalize_log_text_pattern(text), text);
             }
-            blockzilla_format::LogEvent::ProgramLog(log) => {
+            blockzilla_compact::LogEvent::ProgramLog(log) => {
                 if let Some(text) = unknown_program_log_text(log, &strings, "ProgramLog")? {
                     stats.program_log_unknown_events += 1;
                     stats.program_unknown_exact.bump(text, text);
@@ -14851,7 +14789,7 @@ fn analyze_log_stream_patterns(
                     stats.program_unknown_by_program.bump(&program, &program);
                 }
             }
-            blockzilla_format::LogEvent::ProgramPlainLog(log) => {
+            blockzilla_compact::LogEvent::ProgramPlainLog(log) => {
                 if let Some(text) = unknown_program_log_text(log, &strings, "ProgramPlainLog")? {
                     stats.program_plain_log_unknown_events += 1;
                     stats.program_unknown_exact.bump(text, text);
@@ -14868,7 +14806,7 @@ fn analyze_log_stream_patterns(
                     stats.program_unknown_by_program.bump(&program, &program);
                 }
             }
-            blockzilla_format::LogEvent::ProgramIdLog { program, log } => {
+            blockzilla_compact::LogEvent::ProgramIdLog { program, log } => {
                 if let Some(text) = unknown_program_log_text(log, &strings, "ProgramIdLog")? {
                     stats.program_id_log_unknown_events += 1;
                     stats.program_unknown_exact.bump(text, text);
@@ -14889,11 +14827,11 @@ fn analyze_log_stream_patterns(
 }
 
 fn unknown_program_log_text<'a>(
-    log: &blockzilla_format::program_logs::ProgramLog,
+    log: &blockzilla_program_logs::program_logs::ProgramLog,
     strings: &'a [&'a str],
     context: &'static str,
 ) -> Result<Option<&'a str>> {
-    if let blockzilla_format::program_logs::ProgramLog::Unknown(id) = log {
+    if let blockzilla_program_logs::program_logs::ProgramLog::Unknown(id) = log {
         return log_string(strings, *id, context).map(Some);
     }
     Ok(None)
@@ -14909,11 +14847,11 @@ fn log_string<'a>(strings: &'a [&'a str], id: u32, context: &'static str) -> Res
 }
 
 fn update_log_analysis_program_stack(
-    event: &blockzilla_format::LogEvent,
+    event: &blockzilla_compact::LogEvent,
     stack: &mut Vec<CompactPubkey>,
 ) {
     match event {
-        blockzilla_format::LogEvent::Invoke { program, depth } => {
+        blockzilla_compact::LogEvent::Invoke { program, depth } => {
             let depth = *depth as usize;
             if depth == 0 {
                 stack.clear();
@@ -14923,19 +14861,19 @@ fn update_log_analysis_program_stack(
             stack.truncate(depth.saturating_sub(1));
             stack.push(*program);
         }
-        blockzilla_format::LogEvent::BpfInvoke { program } => {
+        blockzilla_compact::LogEvent::BpfInvoke { program } => {
             stack.push(*program);
         }
-        blockzilla_format::LogEvent::Success { program }
-        | blockzilla_format::LogEvent::Failure { program, .. }
-        | blockzilla_format::LogEvent::FailureCustomProgramError { program, .. }
-        | blockzilla_format::LogEvent::FailureInvalidAccountData { program }
-        | blockzilla_format::LogEvent::FailureInvalidProgramArgument { program }
-        | blockzilla_format::LogEvent::BpfSuccess { program }
-        | blockzilla_format::LogEvent::BpfFailure { program, .. }
-        | blockzilla_format::LogEvent::BpfFailureCustomProgramError { program, .. }
-        | blockzilla_format::LogEvent::BpfFailureInvalidAccountData { program }
-        | blockzilla_format::LogEvent::BpfFailureInvalidProgramArgument { program } => {
+        blockzilla_compact::LogEvent::Success { program }
+        | blockzilla_compact::LogEvent::Failure { program, .. }
+        | blockzilla_compact::LogEvent::FailureCustomProgramError { program, .. }
+        | blockzilla_compact::LogEvent::FailureInvalidAccountData { program }
+        | blockzilla_compact::LogEvent::FailureInvalidProgramArgument { program }
+        | blockzilla_compact::LogEvent::BpfSuccess { program }
+        | blockzilla_compact::LogEvent::BpfFailure { program, .. }
+        | blockzilla_compact::LogEvent::BpfFailureCustomProgramError { program, .. }
+        | blockzilla_compact::LogEvent::BpfFailureInvalidAccountData { program }
+        | blockzilla_compact::LogEvent::BpfFailureInvalidProgramArgument { program } => {
             pop_log_analysis_program_stack(stack, *program);
         }
         _ => {}
@@ -16407,10 +16345,10 @@ pub(crate) fn inspect(input: &Path, max_blocks: Option<u64>, top: usize) -> Resu
         const MAX_POH_FRAME_BYTES: usize = 64 << 20;
         // Every frame in this sidecar shares one schema; probing per-frame would decode a
         // legacy (pre-`signature_count`) sidecar twice on every single block.
-        let mut poh_schema = blockzilla_format::PohRecordSchema::default();
+        let mut poh_schema = blockzilla_archive_v2::PohRecordSchema::default();
         while let Some((len, record)) =
             poh_reader.read_bytes_with_limit(MAX_POH_FRAME_BYTES, |bytes| {
-                blockzilla_format::deserialize_archive_v2_poh_record_with_schema(
+                blockzilla_archive_v2::deserialize_archive_v2_poh_record_with_schema(
                     bytes,
                     &mut poh_schema,
                 )
@@ -16533,7 +16471,7 @@ pub(crate) fn inspect(input: &Path, max_blocks: Option<u64>, top: usize) -> Resu
     );
     println!(
         "known_program_logs_enabled={}",
-        blockzilla_format::program_logs::KNOWN_PROGRAM_LOGS_ENABLED
+        blockzilla_program_logs::program_logs::KNOWN_PROGRAM_LOGS_ENABLED
     );
     println!(
         "sidecars poh_path={} poh_records={} blockhash_registry_path={} blockhash_entries={} blockhash_bytes={}",
@@ -16751,7 +16689,7 @@ fn analyze_owned_instructions(
 }
 
 fn analyze_meta_payload_space(
-    payload: &WincodeArchiveV2Payload<blockzilla_format::CompactMetaV1>,
+    payload: &WincodeArchiveV2Payload<blockzilla_compact::CompactMetaV1>,
     stats: &mut ArchiveV2SpaceStats,
 ) -> Result<()> {
     match payload {
@@ -16768,7 +16706,7 @@ fn analyze_meta_payload_space(
 }
 
 fn analyze_meta_space(
-    meta: &blockzilla_format::CompactMetaV1,
+    meta: &blockzilla_compact::CompactMetaV1,
     stats: &mut ArchiveV2SpaceStats,
 ) -> Result<()> {
     add_wincode_size!(stats, "meta/err", &meta.err);
@@ -16852,7 +16790,7 @@ fn analyze_meta_space(
 }
 
 fn analyze_log_stream_space(
-    logs: &blockzilla_format::CompactLogStream,
+    logs: &blockzilla_compact::CompactLogStream,
     stats: &mut ArchiveV2SpaceStats,
 ) -> Result<()> {
     stats.log_streams += 1;
@@ -16868,67 +16806,67 @@ fn analyze_log_stream_space(
     for event in &logs.events {
         stats.bump_log_event(log_event_kind(event));
         match event {
-            blockzilla_format::LogEvent::System(_)
-            | blockzilla_format::LogEvent::ProgramAccountNotWritable
-            | blockzilla_format::LogEvent::ProgramIdMismatch
-            | blockzilla_format::LogEvent::ProgramNotUpgradeable
-            | blockzilla_format::LogEvent::ProgramAndProgramDataAccountMismatch
-            | blockzilla_format::LogEvent::ProgramWasExtendedInThisBlockAlready
-            | blockzilla_format::LogEvent::LogTruncated
-            | blockzilla_format::LogEvent::StakeMergingAccounts
-            | blockzilla_format::LogEvent::VerifyEd25519
-            | blockzilla_format::LogEvent::VerifySecp256k1
-            | blockzilla_format::LogEvent::CloseContextState => {}
-            blockzilla_format::LogEvent::ProgramLog(log)
-            | blockzilla_format::LogEvent::ProgramPlainLog(log) => {
+            blockzilla_compact::LogEvent::System(_)
+            | blockzilla_compact::LogEvent::ProgramAccountNotWritable
+            | blockzilla_compact::LogEvent::ProgramIdMismatch
+            | blockzilla_compact::LogEvent::ProgramNotUpgradeable
+            | blockzilla_compact::LogEvent::ProgramAndProgramDataAccountMismatch
+            | blockzilla_compact::LogEvent::ProgramWasExtendedInThisBlockAlready
+            | blockzilla_compact::LogEvent::LogTruncated
+            | blockzilla_compact::LogEvent::StakeMergingAccounts
+            | blockzilla_compact::LogEvent::VerifyEd25519
+            | blockzilla_compact::LogEvent::VerifySecp256k1
+            | blockzilla_compact::LogEvent::CloseContextState => {}
+            blockzilla_compact::LogEvent::ProgramLog(log)
+            | blockzilla_compact::LogEvent::ProgramPlainLog(log) => {
                 stats.bump_program_log(program_log_kind(log));
             }
-            blockzilla_format::LogEvent::ProgramIdLog { program, log } => {
+            blockzilla_compact::LogEvent::ProgramIdLog { program, log } => {
                 count_compact_pubkey(*program, stats);
                 stats.bump_program_log(program_log_kind(log));
             }
-            blockzilla_format::LogEvent::LoaderUpgradedProgram { program }
-            | blockzilla_format::LogEvent::LoaderFinalizedAccount { account: program }
-            | blockzilla_format::LogEvent::Invoke { program, .. }
-            | blockzilla_format::LogEvent::BpfInvoke { program }
-            | blockzilla_format::LogEvent::Consumed { program, .. }
-            | blockzilla_format::LogEvent::Success { program }
-            | blockzilla_format::LogEvent::BpfSuccess { program }
-            | blockzilla_format::LogEvent::Failure { program, .. }
-            | blockzilla_format::LogEvent::BpfFailure { program, .. }
-            | blockzilla_format::LogEvent::FailureCustomProgramError { program, .. }
-            | blockzilla_format::LogEvent::BpfFailureCustomProgramError { program, .. }
-            | blockzilla_format::LogEvent::FailureInvalidAccountData { program }
-            | blockzilla_format::LogEvent::BpfFailureInvalidAccountData { program }
-            | blockzilla_format::LogEvent::FailureInvalidProgramArgument { program }
-            | blockzilla_format::LogEvent::BpfFailureInvalidProgramArgument { program }
-            | blockzilla_format::LogEvent::RuntimeWritablePrivilegeEscalated { account: program }
-            | blockzilla_format::LogEvent::RuntimeSignerPrivilegeEscalated { account: program }
-            | blockzilla_format::LogEvent::RuntimeAccountOwnerBalanceVerificationFailed {
+            blockzilla_compact::LogEvent::LoaderUpgradedProgram { program }
+            | blockzilla_compact::LogEvent::LoaderFinalizedAccount { account: program }
+            | blockzilla_compact::LogEvent::Invoke { program, .. }
+            | blockzilla_compact::LogEvent::BpfInvoke { program }
+            | blockzilla_compact::LogEvent::Consumed { program, .. }
+            | blockzilla_compact::LogEvent::Success { program }
+            | blockzilla_compact::LogEvent::BpfSuccess { program }
+            | blockzilla_compact::LogEvent::Failure { program, .. }
+            | blockzilla_compact::LogEvent::BpfFailure { program, .. }
+            | blockzilla_compact::LogEvent::FailureCustomProgramError { program, .. }
+            | blockzilla_compact::LogEvent::BpfFailureCustomProgramError { program, .. }
+            | blockzilla_compact::LogEvent::FailureInvalidAccountData { program }
+            | blockzilla_compact::LogEvent::BpfFailureInvalidAccountData { program }
+            | blockzilla_compact::LogEvent::FailureInvalidProgramArgument { program }
+            | blockzilla_compact::LogEvent::BpfFailureInvalidProgramArgument { program }
+            | blockzilla_compact::LogEvent::RuntimeWritablePrivilegeEscalated { account: program }
+            | blockzilla_compact::LogEvent::RuntimeSignerPrivilegeEscalated { account: program }
+            | blockzilla_compact::LogEvent::RuntimeAccountOwnerBalanceVerificationFailed {
                 account: program,
             } => {
                 count_compact_pubkey(*program, stats);
             }
-            blockzilla_format::LogEvent::Return { program, .. } => {
+            blockzilla_compact::LogEvent::Return { program, .. } => {
                 count_compact_pubkey(*program, stats);
             }
-            blockzilla_format::LogEvent::ProgramNotDeployed { program }
-            | blockzilla_format::LogEvent::ProgramNotCached { program } => {
+            blockzilla_compact::LogEvent::ProgramNotDeployed { program }
+            | blockzilla_compact::LogEvent::ProgramNotCached { program } => {
                 if let Some(program) = program {
                     count_compact_pubkey(*program, stats);
                 }
             }
-            blockzilla_format::LogEvent::ProgramLogError { .. }
-            | blockzilla_format::LogEvent::FailedToComplete { .. }
-            | blockzilla_format::LogEvent::CustomProgramError { .. }
-            | blockzilla_format::LogEvent::Data { .. }
-            | blockzilla_format::LogEvent::Consumption { .. }
-            | blockzilla_format::LogEvent::CbRequestUnits { .. }
-            | blockzilla_format::LogEvent::UnknownProgram { .. }
-            | blockzilla_format::LogEvent::UnknownAccount { .. }
-            | blockzilla_format::LogEvent::Plain { .. }
-            | blockzilla_format::LogEvent::Unparsed { .. }
-            | blockzilla_format::LogEvent::BpfConsumed { .. } => {}
+            blockzilla_compact::LogEvent::ProgramLogError { .. }
+            | blockzilla_compact::LogEvent::FailedToComplete { .. }
+            | blockzilla_compact::LogEvent::CustomProgramError { .. }
+            | blockzilla_compact::LogEvent::Data { .. }
+            | blockzilla_compact::LogEvent::Consumption { .. }
+            | blockzilla_compact::LogEvent::CbRequestUnits { .. }
+            | blockzilla_compact::LogEvent::UnknownProgram { .. }
+            | blockzilla_compact::LogEvent::UnknownAccount { .. }
+            | blockzilla_compact::LogEvent::Plain { .. }
+            | blockzilla_compact::LogEvent::Unparsed { .. }
+            | blockzilla_compact::LogEvent::BpfConsumed { .. } => {}
         }
     }
 
@@ -16949,126 +16887,126 @@ fn count_recent_blockhash(hash: &OwnedCompactRecentBlockhash, stats: &mut Archiv
     }
 }
 
-fn log_event_kind(event: &blockzilla_format::LogEvent) -> &'static str {
+fn log_event_kind(event: &blockzilla_compact::LogEvent) -> &'static str {
     match event {
-        blockzilla_format::LogEvent::System(_) => "System",
-        blockzilla_format::LogEvent::LogTruncated => "LogTruncated",
-        blockzilla_format::LogEvent::StakeMergingAccounts => "StakeMergingAccounts",
-        blockzilla_format::LogEvent::LoaderUpgradedProgram { .. } => "LoaderUpgradedProgram",
-        blockzilla_format::LogEvent::LoaderFinalizedAccount { .. } => "LoaderFinalizedAccount",
-        blockzilla_format::LogEvent::ProgramLog(_) => "ProgramLog",
-        blockzilla_format::LogEvent::ProgramLogError { .. } => "ProgramLogError",
-        blockzilla_format::LogEvent::ProgramIdLog { .. } => "ProgramIdLog",
-        blockzilla_format::LogEvent::ProgramPlainLog(_) => "ProgramPlainLog",
-        blockzilla_format::LogEvent::ProgramAccountNotWritable => "ProgramAccountNotWritable",
-        blockzilla_format::LogEvent::ProgramIdMismatch => "ProgramIdMismatch",
-        blockzilla_format::LogEvent::ProgramNotUpgradeable => "ProgramNotUpgradeable",
-        blockzilla_format::LogEvent::ProgramAndProgramDataAccountMismatch => {
+        blockzilla_compact::LogEvent::System(_) => "System",
+        blockzilla_compact::LogEvent::LogTruncated => "LogTruncated",
+        blockzilla_compact::LogEvent::StakeMergingAccounts => "StakeMergingAccounts",
+        blockzilla_compact::LogEvent::LoaderUpgradedProgram { .. } => "LoaderUpgradedProgram",
+        blockzilla_compact::LogEvent::LoaderFinalizedAccount { .. } => "LoaderFinalizedAccount",
+        blockzilla_compact::LogEvent::ProgramLog(_) => "ProgramLog",
+        blockzilla_compact::LogEvent::ProgramLogError { .. } => "ProgramLogError",
+        blockzilla_compact::LogEvent::ProgramIdLog { .. } => "ProgramIdLog",
+        blockzilla_compact::LogEvent::ProgramPlainLog(_) => "ProgramPlainLog",
+        blockzilla_compact::LogEvent::ProgramAccountNotWritable => "ProgramAccountNotWritable",
+        blockzilla_compact::LogEvent::ProgramIdMismatch => "ProgramIdMismatch",
+        blockzilla_compact::LogEvent::ProgramNotUpgradeable => "ProgramNotUpgradeable",
+        blockzilla_compact::LogEvent::ProgramAndProgramDataAccountMismatch => {
             "ProgramAndProgramDataAccountMismatch"
         }
-        blockzilla_format::LogEvent::ProgramWasExtendedInThisBlockAlready => {
+        blockzilla_compact::LogEvent::ProgramWasExtendedInThisBlockAlready => {
             "ProgramWasExtendedInThisBlockAlready"
         }
-        blockzilla_format::LogEvent::Invoke { .. } => "Invoke",
-        blockzilla_format::LogEvent::BpfInvoke { .. } => "BpfInvoke",
-        blockzilla_format::LogEvent::Consumed { .. } => "Consumed",
-        blockzilla_format::LogEvent::BpfConsumed { .. } => "BpfConsumed",
-        blockzilla_format::LogEvent::Success { .. } => "Success",
-        blockzilla_format::LogEvent::BpfSuccess { .. } => "BpfSuccess",
-        blockzilla_format::LogEvent::Failure { .. } => "Failure",
-        blockzilla_format::LogEvent::BpfFailure { .. } => "BpfFailure",
-        blockzilla_format::LogEvent::FailureCustomProgramError { .. } => {
+        blockzilla_compact::LogEvent::Invoke { .. } => "Invoke",
+        blockzilla_compact::LogEvent::BpfInvoke { .. } => "BpfInvoke",
+        blockzilla_compact::LogEvent::Consumed { .. } => "Consumed",
+        blockzilla_compact::LogEvent::BpfConsumed { .. } => "BpfConsumed",
+        blockzilla_compact::LogEvent::Success { .. } => "Success",
+        blockzilla_compact::LogEvent::BpfSuccess { .. } => "BpfSuccess",
+        blockzilla_compact::LogEvent::Failure { .. } => "Failure",
+        blockzilla_compact::LogEvent::BpfFailure { .. } => "BpfFailure",
+        blockzilla_compact::LogEvent::FailureCustomProgramError { .. } => {
             "FailureCustomProgramError"
         }
-        blockzilla_format::LogEvent::BpfFailureCustomProgramError { .. } => {
+        blockzilla_compact::LogEvent::BpfFailureCustomProgramError { .. } => {
             "BpfFailureCustomProgramError"
         }
-        blockzilla_format::LogEvent::FailureInvalidAccountData { .. } => {
+        blockzilla_compact::LogEvent::FailureInvalidAccountData { .. } => {
             "FailureInvalidAccountData"
         }
-        blockzilla_format::LogEvent::BpfFailureInvalidAccountData { .. } => {
+        blockzilla_compact::LogEvent::BpfFailureInvalidAccountData { .. } => {
             "BpfFailureInvalidAccountData"
         }
-        blockzilla_format::LogEvent::FailureInvalidProgramArgument { .. } => {
+        blockzilla_compact::LogEvent::FailureInvalidProgramArgument { .. } => {
             "FailureInvalidProgramArgument"
         }
-        blockzilla_format::LogEvent::BpfFailureInvalidProgramArgument { .. } => {
+        blockzilla_compact::LogEvent::BpfFailureInvalidProgramArgument { .. } => {
             "BpfFailureInvalidProgramArgument"
         }
-        blockzilla_format::LogEvent::FailedToComplete { .. } => "FailedToComplete",
-        blockzilla_format::LogEvent::CustomProgramError { .. } => "CustomProgramError",
-        blockzilla_format::LogEvent::Return { .. } => "Return",
-        blockzilla_format::LogEvent::Data { .. } => "Data",
-        blockzilla_format::LogEvent::Consumption { .. } => "Consumption",
-        blockzilla_format::LogEvent::CbRequestUnits { .. } => "CbRequestUnits",
-        blockzilla_format::LogEvent::ProgramNotDeployed { .. } => "ProgramNotDeployed",
-        blockzilla_format::LogEvent::ProgramNotCached { .. } => "ProgramNotCached",
-        blockzilla_format::LogEvent::UnknownProgram { .. } => "UnknownProgram",
-        blockzilla_format::LogEvent::UnknownAccount { .. } => "UnknownAccount",
-        blockzilla_format::LogEvent::VerifyEd25519 => "VerifyEd25519",
-        blockzilla_format::LogEvent::VerifySecp256k1 => "VerifySecp256k1",
-        blockzilla_format::LogEvent::RuntimeWritablePrivilegeEscalated { .. } => {
+        blockzilla_compact::LogEvent::FailedToComplete { .. } => "FailedToComplete",
+        blockzilla_compact::LogEvent::CustomProgramError { .. } => "CustomProgramError",
+        blockzilla_compact::LogEvent::Return { .. } => "Return",
+        blockzilla_compact::LogEvent::Data { .. } => "Data",
+        blockzilla_compact::LogEvent::Consumption { .. } => "Consumption",
+        blockzilla_compact::LogEvent::CbRequestUnits { .. } => "CbRequestUnits",
+        blockzilla_compact::LogEvent::ProgramNotDeployed { .. } => "ProgramNotDeployed",
+        blockzilla_compact::LogEvent::ProgramNotCached { .. } => "ProgramNotCached",
+        blockzilla_compact::LogEvent::UnknownProgram { .. } => "UnknownProgram",
+        blockzilla_compact::LogEvent::UnknownAccount { .. } => "UnknownAccount",
+        blockzilla_compact::LogEvent::VerifyEd25519 => "VerifyEd25519",
+        blockzilla_compact::LogEvent::VerifySecp256k1 => "VerifySecp256k1",
+        blockzilla_compact::LogEvent::RuntimeWritablePrivilegeEscalated { .. } => {
             "RuntimeWritablePrivilegeEscalated"
         }
-        blockzilla_format::LogEvent::RuntimeSignerPrivilegeEscalated { .. } => {
+        blockzilla_compact::LogEvent::RuntimeSignerPrivilegeEscalated { .. } => {
             "RuntimeSignerPrivilegeEscalated"
         }
-        blockzilla_format::LogEvent::RuntimeAccountOwnerBalanceVerificationFailed { .. } => {
+        blockzilla_compact::LogEvent::RuntimeAccountOwnerBalanceVerificationFailed { .. } => {
             "RuntimeAccountOwnerBalanceVerificationFailed"
         }
-        blockzilla_format::LogEvent::CloseContextState => "CloseContextState",
-        blockzilla_format::LogEvent::Plain { .. } => "Plain",
-        blockzilla_format::LogEvent::Unparsed { .. } => "Unparsed",
+        blockzilla_compact::LogEvent::CloseContextState => "CloseContextState",
+        blockzilla_compact::LogEvent::Plain { .. } => "Plain",
+        blockzilla_compact::LogEvent::Unparsed { .. } => "Unparsed",
     }
 }
 
-fn program_log_kind(log: &blockzilla_format::program_logs::ProgramLog) -> &'static str {
+fn program_log_kind(log: &blockzilla_program_logs::program_logs::ProgramLog) -> &'static str {
     match log {
-        blockzilla_format::program_logs::ProgramLog::Empty => "Empty",
-        blockzilla_format::program_logs::ProgramLog::Token(_) => "Token",
-        blockzilla_format::program_logs::ProgramLog::Token2022(_) => "Token2022",
-        blockzilla_format::program_logs::ProgramLog::Ata(_) => "Ata",
-        blockzilla_format::program_logs::ProgramLog::AddressLookupTable(_) => "AddressLookupTable",
-        blockzilla_format::program_logs::ProgramLog::LoaderV3(_) => "LoaderV3",
-        blockzilla_format::program_logs::ProgramLog::LoaderV4(_) => "LoaderV4",
-        blockzilla_format::program_logs::ProgramLog::Memo(_) => "Memo",
-        blockzilla_format::program_logs::ProgramLog::Record(_) => "Record",
-        blockzilla_format::program_logs::ProgramLog::TransferHook(_) => "TransferHook",
-        blockzilla_format::program_logs::ProgramLog::AccountCompression(_) => "AccountCompression",
-        blockzilla_format::program_logs::ProgramLog::Stake(_) => "Stake",
-        blockzilla_format::program_logs::ProgramLog::ZkElgamalProof(_) => "ZkElgamalProof",
-        blockzilla_format::program_logs::ProgramLog::AnchorInstruction { .. } => {
+        blockzilla_program_logs::program_logs::ProgramLog::Empty => "Empty",
+        blockzilla_program_logs::program_logs::ProgramLog::Token(_) => "Token",
+        blockzilla_program_logs::program_logs::ProgramLog::Token2022(_) => "Token2022",
+        blockzilla_program_logs::program_logs::ProgramLog::Ata(_) => "Ata",
+        blockzilla_program_logs::program_logs::ProgramLog::AddressLookupTable(_) => "AddressLookupTable",
+        blockzilla_program_logs::program_logs::ProgramLog::LoaderV3(_) => "LoaderV3",
+        blockzilla_program_logs::program_logs::ProgramLog::LoaderV4(_) => "LoaderV4",
+        blockzilla_program_logs::program_logs::ProgramLog::Memo(_) => "Memo",
+        blockzilla_program_logs::program_logs::ProgramLog::Record(_) => "Record",
+        blockzilla_program_logs::program_logs::ProgramLog::TransferHook(_) => "TransferHook",
+        blockzilla_program_logs::program_logs::ProgramLog::AccountCompression(_) => "AccountCompression",
+        blockzilla_program_logs::program_logs::ProgramLog::Stake(_) => "Stake",
+        blockzilla_program_logs::program_logs::ProgramLog::ZkElgamalProof(_) => "ZkElgamalProof",
+        blockzilla_program_logs::program_logs::ProgramLog::AnchorInstruction { .. } => {
             "AnchorInstruction"
         }
-        blockzilla_format::program_logs::ProgramLog::AnchorErrorOccurred { .. } => {
+        blockzilla_program_logs::program_logs::ProgramLog::AnchorErrorOccurred { .. } => {
             "AnchorErrorOccurred"
         }
-        blockzilla_format::program_logs::ProgramLog::AnchorErrorThrown { .. } => {
+        blockzilla_program_logs::program_logs::ProgramLog::AnchorErrorThrown { .. } => {
             "AnchorErrorThrown"
         }
-        blockzilla_format::program_logs::ProgramLog::Unknown(_) => "Unknown",
-        blockzilla_format::program_logs::ProgramLog::Known(known) => known_program_log_kind(known),
+        blockzilla_program_logs::program_logs::ProgramLog::Unknown(_) => "Unknown",
+        blockzilla_program_logs::program_logs::ProgramLog::Known(known) => known_program_log_kind(known),
     }
 }
 
 fn known_program_log_kind(
-    log: &blockzilla_format::program_logs::known_programs::KnownProgramLog,
+    log: &blockzilla_program_logs::program_logs::known_programs::KnownProgramLog,
 ) -> &'static str {
     match log {
-        blockzilla_format::program_logs::known_programs::KnownProgramLog::Drift(_) => "Known/Drift",
-        blockzilla_format::program_logs::known_programs::KnownProgramLog::OkxRouter(_) => {
+        blockzilla_program_logs::program_logs::known_programs::KnownProgramLog::Drift(_) => "Known/Drift",
+        blockzilla_program_logs::program_logs::known_programs::KnownProgramLog::OkxRouter(_) => {
             "Known/OkxRouter"
         }
-        blockzilla_format::program_logs::known_programs::KnownProgramLog::PhoenixPerps(_) => {
+        blockzilla_program_logs::program_logs::known_programs::KnownProgramLog::PhoenixPerps(_) => {
             "Known/PhoenixPerps"
         }
-        blockzilla_format::program_logs::known_programs::KnownProgramLog::PhoenixV1(_) => {
+        blockzilla_program_logs::program_logs::known_programs::KnownProgramLog::PhoenixV1(_) => {
             "Known/PhoenixV1"
         }
-        blockzilla_format::program_logs::known_programs::KnownProgramLog::RaydiumAmm(_) => {
+        blockzilla_program_logs::program_logs::known_programs::KnownProgramLog::RaydiumAmm(_) => {
             "Known/RaydiumAmm"
         }
-        blockzilla_format::program_logs::known_programs::KnownProgramLog::Static(_) => {
+        blockzilla_program_logs::program_logs::known_programs::KnownProgramLog::Static(_) => {
             "Known/Static"
         }
     }
@@ -18160,7 +18098,7 @@ fn decode_metadata_payload(
     key_index: &KeyIndex,
     zstd: &mut ZstdReusableDecoder,
     timings: &mut ArchiveV2Timings,
-) -> Result<WincodeArchiveV2Payload<blockzilla_format::CompactMetaV1>> {
+) -> Result<WincodeArchiveV2Payload<blockzilla_compact::CompactMetaV1>> {
     let mut meta = TransactionStatusMeta::default();
     let decoded = if slot_uses_protobuf_metadata(slot) {
         timings.metadata_protobuf_visit += 1;
@@ -18172,12 +18110,12 @@ fn decode_metadata_payload(
         } else {
             metadata_bytes
         };
-        blockzilla_format::compact_meta_from_protobuf_visit(protobuf_bytes, key_index)
+        blockzilla_compact::compact_meta_from_protobuf_visit(protobuf_bytes, key_index)
     } else {
         timings.metadata_owned_fallback += 1;
         decode_transaction_status_meta_from_frame(slot, metadata_bytes, &mut meta, zstd)
             .map_err(|err| anyhow!("{err}"))
-            .and_then(|()| blockzilla_format::compact_meta_from_proto(&meta, key_index))
+            .and_then(|()| blockzilla_compact::compact_meta_from_proto(&meta, key_index))
     };
 
     let value = decoded.with_context(|| format!("slot {slot} tx#{tx_index} metadata"))?;
@@ -21199,15 +21137,15 @@ mod tests {
                     },
                 }),
                 LogEvent::System(SystemProgramLog::NonceAccountMustBeSigner {
-                    action: blockzilla_format::program_logs::system_program::NonceAction::Advance,
+                    action: blockzilla_program_logs::program_logs::system_program::NonceAction::Advance,
                     account: PubkeyOrString::Pubkey(CompactPubkey::id(5)),
                 }),
                 LogEvent::System(SystemProgramLog::TransferFromMustSign {
                     from: CompactPubkey::id(6),
                 }),
             ],
-            strings: blockzilla_format::StringTable::default(),
-            data: blockzilla_format::DataTable::default(),
+            strings: blockzilla_primitives::StringTable::default(),
+            data: blockzilla_compact::DataTable::default(),
         };
         let mut ids = Vec::new();
         collect_access_log_refs(&logs, &mut ids);
@@ -22917,7 +22855,7 @@ mod tests {
         publisher.push(base + 3, &[2; 32], Some(103)).unwrap();
         publisher.publish(2).unwrap();
 
-        let sidecar = blockzilla_format::read_block_time_gap_sidecar(
+        let sidecar = blockzilla_archive_v2::read_block_time_gap_sidecar(
             File::open(root.join(BLOCK_TIME_GAP_FILE)).unwrap(),
         )
         .unwrap();

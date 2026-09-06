@@ -1,8 +1,6 @@
 use anyhow::{Context, Result, bail};
-use blockzilla_format::{
-    ARCHIVE_V2_BLOCKS_FILE, ARCHIVE_V2_GET_BLOCK_INDEX_FILE, ARCHIVE_V2_GET_BLOCK_INDEX_ROW_LEN,
-    CompactPubkey, deserialize_archive_v2_hot_block_blob,
-};
+use blockzilla_archive_v2::{ARCHIVE_V2_BLOCKS_FILE, ARCHIVE_V2_GET_BLOCK_INDEX_FILE, ARCHIVE_V2_GET_BLOCK_INDEX_ROW_LEN, deserialize_archive_v2_hot_block_blob};
+use blockzilla_primitives::CompactPubkey;
 use std::collections::BTreeMap;
 use std::{
     fs::File,
@@ -157,7 +155,7 @@ fn sample_indexes(len: usize) -> Vec<usize> {
     indexes
 }
 
-fn sample_label(index: usize, reward: &blockzilla_format::CompactReward) -> String {
+fn sample_label(index: usize, reward: &blockzilla_compact::CompactReward) -> String {
     format!(
         "#{index}:{}:{}:{}:{}:{:?}",
         compact_pubkey_label(reward.pubkey),

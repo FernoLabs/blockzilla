@@ -1379,7 +1379,7 @@ fn sync_parent(_parent: &Path) -> Result<()> {
 
 #[cfg(test)]
 mod tests {
-    use blockzilla_format::CompactMessageHeader;
+    use blockzilla_compact::CompactMessageHeader;
     use smallvec::smallvec;
 
     use super::*;

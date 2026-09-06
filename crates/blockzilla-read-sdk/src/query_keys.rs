@@ -3,11 +3,9 @@ use std::cell::Cell;
 
 use crate::RangeSource;
 use anyhow::{Result, ensure};
-use blockzilla_format::{
-    ARCHIVE_V2_PUBKEY_REGISTRY_FILE as REGISTRY, ARCHIVE_V2_PUBKEY_REGISTRY_INDEX_FILE as INDEX,
-    CompactPubkey,
-    registry::{KeyIndexRangeSource, RangeBackedKeyIndex},
-};
+use blockzilla_archive_v2::{ARCHIVE_V2_PUBKEY_REGISTRY_FILE as REGISTRY, ARCHIVE_V2_PUBKEY_REGISTRY_INDEX_FILE as INDEX};
+use blockzilla_primitives::CompactPubkey;
+use blockzilla_registry::{registry::KeyIndexRangeSource, registry::RangeBackedKeyIndex};
 use blockzilla_query_sdk::{InstructionDataRequirement, ScanRequest, TokenBalanceRequirement};
 
 #[derive(Debug, Default)]

@@ -26,13 +26,9 @@ use std::{
 };
 
 use anyhow::{Context, Result};
-use blockzilla_format::{
-    ARCHIVE_V2_PUBKEY_REGISTRY_FILE, ARCHIVE_V2_PUBKEY_REGISTRY_INDEX_FILE,
-    ARCHIVE_V2_TX_FLAG_HAS_ERROR, ARCHIVE_V2_TX_FLAG_HAS_INNER_IX,
-    ARCHIVE_V2_TX_FLAG_HAS_LOADED_ADDRESSES, ARCHIVE_V2_TX_FLAG_HAS_METADATA,
-    ARCHIVE_V2_TX_FLAG_MESSAGE_V0, ARCHIVE_V2_TX_FLAG_METADATA_RAW_FALLBACK,
-    ARCHIVE_V2_TX_FLAG_TX_RAW_FALLBACK, ArchiveV2HotTxRow, CompactPubkey, FileBackedKeyIndex,
-};
+use blockzilla_archive_v2::{ARCHIVE_V2_PUBKEY_REGISTRY_FILE, ARCHIVE_V2_PUBKEY_REGISTRY_INDEX_FILE, ARCHIVE_V2_TX_FLAG_HAS_ERROR, ARCHIVE_V2_TX_FLAG_HAS_INNER_IX, ARCHIVE_V2_TX_FLAG_HAS_LOADED_ADDRESSES, ARCHIVE_V2_TX_FLAG_HAS_METADATA, ARCHIVE_V2_TX_FLAG_MESSAGE_V0, ARCHIVE_V2_TX_FLAG_METADATA_RAW_FALLBACK, ARCHIVE_V2_TX_FLAG_TX_RAW_FALLBACK, ArchiveV2HotTxRow};
+use blockzilla_primitives::CompactPubkey;
+use blockzilla_registry::FileBackedKeyIndex;
 use blockzilla_compact_v2_reader::{
     ArchiveReader, HashVerification, OpenOptions, PinnedLocalRangeSource,
     manifest::TrustedGenerationIdentity,
@@ -1982,12 +1978,9 @@ fn slice_range<'a>(
 mod tests {
     use super::*;
     use crate::format::IndexReader;
-    use blockzilla_format::{
-        ArchiveV2HotInstruction, ArchiveV2HotInstructionData, ArchiveV2HotLegacyMessage,
-        ArchiveV2HotMessagePayload, ArchiveV2HotV0Message, CompactInnerInstruction,
-        CompactInnerInstructions, CompactMessageHeader, CompactMetaV1,
-        OwnedCompactAddressTableLookup, OwnedCompactRecentBlockhash, wincode_leb128_config,
-    };
+    use blockzilla_archive_v2::{ArchiveV2HotInstruction, ArchiveV2HotInstructionData, ArchiveV2HotLegacyMessage, ArchiveV2HotMessagePayload, ArchiveV2HotV0Message};
+    use blockzilla_compact::{CompactInnerInstruction, CompactInnerInstructions, CompactMessageHeader, CompactMetaV1, OwnedCompactAddressTableLookup, OwnedCompactRecentBlockhash};
+    use blockzilla_primitives::wincode_leb128_config;
 
     #[test]
     fn published_builds_hash_every_archive_object() {
@@ -2034,7 +2027,7 @@ mod tests {
         let stale_keys = [[4u8; 32], [5u8; 32], [6u8; 32]];
         let registry_bytes: Vec<u8> = registry_keys.into_iter().flatten().collect();
         fs::write(&registry_path, registry_bytes).unwrap();
-        blockzilla_format::KeyIndex::build(stale_keys.to_vec())
+        blockzilla_registry::KeyIndex::build(stale_keys.to_vec())
             .write(&registry_index_path)
             .unwrap();
 

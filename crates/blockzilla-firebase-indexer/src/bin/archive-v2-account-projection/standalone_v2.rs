@@ -17,11 +17,7 @@ use std::{
 };
 
 use anyhow::{Context, Result, bail, ensure};
-use blockzilla_format::{
-    ARCHIVE_V2_TX_FLAG_HAS_METADATA, ARCHIVE_V2_TX_FLAG_MESSAGE_V0,
-    ARCHIVE_V2_TX_FLAG_METADATA_RAW_FALLBACK, ARCHIVE_V2_TX_FLAG_TX_RAW_FALLBACK,
-    ArchiveV2HotBlockIndexRow, ArchiveV2HotMessagePayload,
-};
+use blockzilla_archive_v2::{ARCHIVE_V2_TX_FLAG_HAS_METADATA, ARCHIVE_V2_TX_FLAG_MESSAGE_V0, ARCHIVE_V2_TX_FLAG_METADATA_RAW_FALLBACK, ARCHIVE_V2_TX_FLAG_TX_RAW_FALLBACK, ArchiveV2HotBlockIndexRow, ArchiveV2HotMessagePayload};
 use blockzilla_compact_v2_reader::{
     CompactV2MessageSchema, CompactV2MetadataSchema, PinnedLocalRangeSource, RangeSource,
     decode_compact_v2_message,
@@ -4049,7 +4045,8 @@ fn slice_owned(bytes: &[u8], start: u32, end: u32, label: &str) -> Result<Vec<u8
 #[cfg(test)]
 mod tests {
     use super::*;
-    use blockzilla_format::{CompactMetaV1, CompactPubkey, CompactReward, wincode_leb128_config};
+    use blockzilla_compact::{CompactMetaV1, CompactReward};
+    use blockzilla_primitives::{CompactPubkey, wincode_leb128_config};
     use blockzilla_compact_v2_reader::{HttpRangeSource, HttpRangeSourceOptions, SourceError};
     use std::{
         collections::HashMap,

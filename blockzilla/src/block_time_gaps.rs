@@ -1,18 +1,5 @@
 use anyhow::{Context, Result, bail};
-use blockzilla_format::{
-    ARCHIVE_V2_BLOCK_INDEX_FILE, ARCHIVE_V2_BLOCKHASH_INDEX_V3_FILE,
-    ARCHIVE_V2_BLOCKHASH_INDEX_V3_HEADER_LEN, ARCHIVE_V2_BLOCKHASH_INDEX_V3_MAGIC,
-    ARCHIVE_V2_BLOCKHASH_INDEX_V3_ROW_LEN, ARCHIVE_V2_BLOCKHASH_INDEX_V3_VERSION,
-    ARCHIVE_V2_BLOCKS_FILE, ARCHIVE_V2_HOT_INDEX_FLAG_DICTIONARY,
-    ARCHIVE_V2_HOT_INDEX_FLAG_RAW_BLOCKS, ARCHIVE_V2_HOT_INDEX_HEADER_LEN,
-    ARCHIVE_V2_HOT_INDEX_ROW_LEN, ARCHIVE_V2_RAW_BLOCKS_FILE, BLOCK_TIME_GAP_FILE,
-    BLOCK_TIME_GAP_FLAG_NEXT_TIME_MISSING, BLOCK_TIME_GAP_FLAG_PREVIOUS_TIME_MISSING,
-    BLOCK_TIME_GAP_FLAG_TIME_DECREASING, BLOCK_TIME_GAP_HEADER_LEN, BLOCK_TIME_GAP_MAGIC,
-    BLOCK_TIME_GAP_MISSING_TIME, BLOCK_TIME_GAP_ROW_LEN, BLOCK_TIME_GAP_TIME_THRESHOLD_SECS,
-    BLOCK_TIME_GAP_VERSION, BlockTimeGapHeader, BlockTimeGapRow, BlockTimeGapSidecar,
-    BlockTimeGapSourceKind, deserialize_archive_v2_hot_block_slot_time,
-    read_archive_v2_hot_block_index, read_block_time_gap_sidecar, write_block_time_gap_sidecar,
-};
+use blockzilla_archive_v2::{ARCHIVE_V2_BLOCKHASH_INDEX_V3_FILE, ARCHIVE_V2_BLOCKHASH_INDEX_V3_HEADER_LEN, ARCHIVE_V2_BLOCKHASH_INDEX_V3_MAGIC, ARCHIVE_V2_BLOCKHASH_INDEX_V3_ROW_LEN, ARCHIVE_V2_BLOCKHASH_INDEX_V3_VERSION, ARCHIVE_V2_BLOCKS_FILE, ARCHIVE_V2_BLOCK_INDEX_FILE, ARCHIVE_V2_HOT_INDEX_FLAG_DICTIONARY, ARCHIVE_V2_HOT_INDEX_FLAG_RAW_BLOCKS, ARCHIVE_V2_HOT_INDEX_HEADER_LEN, ARCHIVE_V2_HOT_INDEX_ROW_LEN, ARCHIVE_V2_RAW_BLOCKS_FILE, BLOCK_TIME_GAP_FILE, BLOCK_TIME_GAP_FLAG_NEXT_TIME_MISSING, BLOCK_TIME_GAP_FLAG_PREVIOUS_TIME_MISSING, BLOCK_TIME_GAP_FLAG_TIME_DECREASING, BLOCK_TIME_GAP_HEADER_LEN, BLOCK_TIME_GAP_MAGIC, BLOCK_TIME_GAP_MISSING_TIME, BLOCK_TIME_GAP_ROW_LEN, BLOCK_TIME_GAP_TIME_THRESHOLD_SECS, BLOCK_TIME_GAP_VERSION, BlockTimeGapHeader, BlockTimeGapRow, BlockTimeGapSidecar, BlockTimeGapSourceKind, deserialize_archive_v2_hot_block_slot_time, read_archive_v2_hot_block_index, read_block_time_gap_sidecar, write_block_time_gap_sidecar};
 use serde::Serialize;
 use sha2::{Digest, Sha256};
 #[cfg(unix)]
@@ -1243,10 +1230,8 @@ mod tests {
     }
 
     fn write_hot_archive(path: &Path, rows: &[(u64, Option<i64>)]) {
-        use blockzilla_format::{
-            ArchiveV2HotBlockBlob, ArchiveV2HotBlockHeader, ArchiveV2HotBlockIndexRow,
-            wincode_leb128_config, write_archive_v2_hot_block_index,
-        };
+        use blockzilla_archive_v2::{ArchiveV2HotBlockBlob, ArchiveV2HotBlockHeader, ArchiveV2HotBlockIndexRow, write_archive_v2_hot_block_index};
+        use blockzilla_primitives::wincode_leb128_config;
 
         let mut blob = Vec::new();
         let mut index_rows = Vec::new();

@@ -1307,17 +1307,10 @@ fn open_regular_nofollow_io(path: &Path) -> io::Result<File> {
 mod tests {
     use super::*;
     use axum::body::Body;
-    use blockzilla_format::{
-        ARCHIVE_V2_TX_FLAG_HAS_ERROR, ARCHIVE_V2_TX_FLAG_HAS_METADATA, ArchiveV2HotBlockBlob,
-        ArchiveV2HotBlockHeader, ArchiveV2HotBlockIndexRow, ArchiveV2HotInstruction,
-        ArchiveV2HotInstructionData, ArchiveV2HotLegacyMessage, ArchiveV2HotMessagePayload,
-        ArchiveV2HotMetaRecord, ArchiveV2HotTxRow, ArchiveV2HotV0Message,
-        ArchiveV2SystemInstructionData, CompactMessageHeader, CompactMetaV1, CompactPubkey,
-        CompactTransactionError, KeyIndex, OwnedCompactRecentBlockhash,
-        WINCODE_ARCHIVE_V2_FLAG_LEB128, WINCODE_ARCHIVE_V2_HOT_BLOCK_VERSION,
-        WincodeArchiveV2Footer, WincodeArchiveV2Header, WincodeLeb128FramedWriter,
-        wincode_leb128_config, write_archive_v2_hot_block_index,
-    };
+    use blockzilla_archive_v2::{ARCHIVE_V2_TX_FLAG_HAS_ERROR, ARCHIVE_V2_TX_FLAG_HAS_METADATA, ArchiveV2HotBlockBlob, ArchiveV2HotBlockHeader, ArchiveV2HotBlockIndexRow, ArchiveV2HotInstruction, ArchiveV2HotInstructionData, ArchiveV2HotLegacyMessage, ArchiveV2HotMessagePayload, ArchiveV2HotMetaRecord, ArchiveV2HotTxRow, ArchiveV2HotV0Message, ArchiveV2SystemInstructionData, WINCODE_ARCHIVE_V2_FLAG_LEB128, WINCODE_ARCHIVE_V2_HOT_BLOCK_VERSION, WincodeArchiveV2Footer, WincodeArchiveV2Header, write_archive_v2_hot_block_index};
+    use blockzilla_compact::{CompactMessageHeader, CompactMetaV1, CompactTransactionError, OwnedCompactRecentBlockhash};
+    use blockzilla_primitives::{CompactPubkey, WincodeLeb128FramedWriter, wincode_leb128_config};
+    use blockzilla_registry::KeyIndex;
     use blockzilla_read_sdk::manifest::{BLOCK_INDEX_FILE, BLOCKS_FILE, META_FILE};
     use http_body_util::BodyExt;
     use std::fs;

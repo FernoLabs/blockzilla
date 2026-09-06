@@ -18,11 +18,7 @@ use std::{
 };
 
 use anyhow::{Context, Result, bail, ensure};
-use blockzilla_format::{
-    ARCHIVE_V2_BLOCK_INDEX_FILE, ARCHIVE_V2_BLOCKS_FILE, ARCHIVE_V2_META_FILE,
-    ARCHIVE_V2_PUBKEY_REGISTRY_FILE, ARCHIVE_V2_PUBKEY_REGISTRY_INDEX_FILE,
-    ARCHIVE_V2_SIGNATURES_FILE,
-};
+use blockzilla_archive_v2::{ARCHIVE_V2_BLOCKS_FILE, ARCHIVE_V2_BLOCK_INDEX_FILE, ARCHIVE_V2_META_FILE, ARCHIVE_V2_PUBKEY_REGISTRY_FILE, ARCHIVE_V2_PUBKEY_REGISTRY_INDEX_FILE, ARCHIVE_V2_SIGNATURES_FILE};
 use blockzilla_read_sdk_legacy::{
     ArchiveReader, ArchiveV2MetadataWireProfile, ArchiveV2PublicationLock, ArchiveV2WireProfile,
     FullGenerationWireProfileAudit, HashVerification, OpenOptions as ReaderOpenOptions,
@@ -1484,14 +1480,10 @@ mod tests {
     use crate::firewatch_wire_profile_attestation::{
         FullGenerationAuditDecisionV3, encode_full_generation_audit_evidence_v3,
     };
-    use blockzilla_format::{
-        ArchiveV2HotBlockBlob, ArchiveV2HotBlockHeader, ArchiveV2HotBlockIndexRow,
-        ArchiveV2HotLegacyMessage, ArchiveV2HotMessagePayload, ArchiveV2HotMetaRecord,
-        ArchiveV2HotTxRow, CompactMessageHeader, CompactPubkey, KeyIndex,
-        OwnedCompactRecentBlockhash, WINCODE_ARCHIVE_V2_FLAG_LEB128,
-        WINCODE_ARCHIVE_V2_HOT_BLOCK_VERSION, WincodeArchiveV2Footer, WincodeArchiveV2Header,
-        wincode_leb128_config, write_archive_v2_hot_block_index,
-    };
+    use blockzilla_archive_v2::{ArchiveV2HotBlockBlob, ArchiveV2HotBlockHeader, ArchiveV2HotBlockIndexRow, ArchiveV2HotLegacyMessage, ArchiveV2HotMessagePayload, ArchiveV2HotMetaRecord, ArchiveV2HotTxRow, WINCODE_ARCHIVE_V2_FLAG_LEB128, WINCODE_ARCHIVE_V2_HOT_BLOCK_VERSION, WincodeArchiveV2Footer, WincodeArchiveV2Header, write_archive_v2_hot_block_index};
+    use blockzilla_compact::{CompactMessageHeader, OwnedCompactRecentBlockhash};
+    use blockzilla_primitives::{CompactPubkey, wincode_leb128_config};
+    use blockzilla_registry::KeyIndex;
 
     fn identity(size: u64, seed: u64) -> RegistryFileIdentity {
         RegistryFileIdentity {

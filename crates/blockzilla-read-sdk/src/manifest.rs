@@ -9,12 +9,12 @@ pub const GENERATION_MANIFEST_FILE: &str = "archive-v2-generation.json";
 pub const GENERATION_MANIFEST_SCHEMA_VERSION: u32 = 1;
 pub const GENERATION_DIGEST_DOMAIN: &[u8] = b"blockzilla/archive-v2-generation\0";
 
-pub const BLOCKS_FILE: &str = blockzilla_format::ARCHIVE_V2_BLOCKS_FILE;
-pub const BLOCK_INDEX_FILE: &str = blockzilla_format::ARCHIVE_V2_BLOCK_INDEX_FILE;
-pub const META_FILE: &str = blockzilla_format::ARCHIVE_V2_META_FILE;
-pub const GENESIS_BIN_FILE: &str = blockzilla_format::ARCHIVE_V2_GENESIS_BIN_FILE;
-pub const REGISTRY_FILE: &str = blockzilla_format::ARCHIVE_V2_PUBKEY_REGISTRY_FILE;
-pub const SIGNATURES_FILE: &str = blockzilla_format::ARCHIVE_V2_SIGNATURES_FILE;
+pub const BLOCKS_FILE: &str = blockzilla_archive_v2::ARCHIVE_V2_BLOCKS_FILE;
+pub const BLOCK_INDEX_FILE: &str = blockzilla_archive_v2::ARCHIVE_V2_BLOCK_INDEX_FILE;
+pub const META_FILE: &str = blockzilla_archive_v2::ARCHIVE_V2_META_FILE;
+pub const GENESIS_BIN_FILE: &str = blockzilla_archive_v2::ARCHIVE_V2_GENESIS_BIN_FILE;
+pub const REGISTRY_FILE: &str = blockzilla_archive_v2::ARCHIVE_V2_PUBKEY_REGISTRY_FILE;
+pub const SIGNATURES_FILE: &str = blockzilla_archive_v2::ARCHIVE_V2_SIGNATURES_FILE;
 
 pub const REQUIRED_GENERATION_FILES: [&str; 4] =
     [BLOCKS_FILE, BLOCK_INDEX_FILE, META_FILE, REGISTRY_FILE];

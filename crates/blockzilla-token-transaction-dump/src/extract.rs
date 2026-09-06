@@ -15,17 +15,9 @@ use std::os::unix::fs::FileExt as _;
 use std::os::windows::fs::FileExt as _;
 
 use anyhow::{Context, Result, anyhow, ensure};
-use blockzilla_format::{
-    ARCHIVE_V2_BLOCKHASH_REGISTRY_FILE, ARCHIVE_V2_DECODE_PREALLOCATION_LIMIT_BYTES,
-    ARCHIVE_V2_TX_FLAG_HAS_COMPACT_VOTE_IX, ARCHIVE_V2_TX_FLAG_HAS_ERROR,
-    ARCHIVE_V2_TX_FLAG_HAS_INNER_IX, ARCHIVE_V2_TX_FLAG_HAS_LOADED_ADDRESSES,
-    ARCHIVE_V2_TX_FLAG_HAS_LOGS, ARCHIVE_V2_TX_FLAG_HAS_METADATA,
-    ARCHIVE_V2_TX_FLAG_HAS_RETURN_DATA, ARCHIVE_V2_TX_FLAG_HAS_TOKEN_BALANCES,
-    ARCHIVE_V2_TX_FLAG_MESSAGE_V0, ARCHIVE_V2_TX_FLAG_METADATA_RAW_FALLBACK,
-    ARCHIVE_V2_TX_FLAG_TX_RAW_FALLBACK, ARCHIVE_V2_VOTE_HASH_REGISTRY_FILE, CompactPubkey,
-    FileBackedKeyIndex, WincodeLeb128FramedWriter, bounded_wincode_leb128_config,
-    encode_with_scratch,
-};
+use blockzilla_archive_v2::{ARCHIVE_V2_BLOCKHASH_REGISTRY_FILE, ARCHIVE_V2_DECODE_PREALLOCATION_LIMIT_BYTES, ARCHIVE_V2_TX_FLAG_HAS_COMPACT_VOTE_IX, ARCHIVE_V2_TX_FLAG_HAS_ERROR, ARCHIVE_V2_TX_FLAG_HAS_INNER_IX, ARCHIVE_V2_TX_FLAG_HAS_LOADED_ADDRESSES, ARCHIVE_V2_TX_FLAG_HAS_LOGS, ARCHIVE_V2_TX_FLAG_HAS_METADATA, ARCHIVE_V2_TX_FLAG_HAS_RETURN_DATA, ARCHIVE_V2_TX_FLAG_HAS_TOKEN_BALANCES, ARCHIVE_V2_TX_FLAG_MESSAGE_V0, ARCHIVE_V2_TX_FLAG_METADATA_RAW_FALLBACK, ARCHIVE_V2_TX_FLAG_TX_RAW_FALLBACK, ARCHIVE_V2_VOTE_HASH_REGISTRY_FILE};
+use blockzilla_primitives::{CompactPubkey, WincodeLeb128FramedWriter, bounded_wincode_leb128_config, encode_with_scratch};
+use blockzilla_registry::FileBackedKeyIndex;
 use blockzilla_read_sdk::{
     ArchiveReader, ArchiveV2LoadedAddressSide, ArchiveV2MessageProjector,
     ArchiveV2MetadataProfileAdmission, ArchiveV2MetadataProjectionLimits,
@@ -4311,7 +4303,7 @@ fn project_transaction_creations_and_match(
             let mut canonical_metadata = std::mem::take(&mut scratch.canonical_metadata);
             let result = (|| {
                 canonical_metadata =
-                    blockzilla_format::canonicalize_archive_v2_metadata_owned(source_bytes)?.0;
+                    blockzilla_archive_v2::canonicalize_archive_v2_metadata_owned(source_bytes)?.0;
                 parse_discovery_metadata(
                     scratch,
                     &message,
@@ -5911,7 +5903,7 @@ fn transaction_account_list_matches(
         used_metadata_owned_fallback = source_bytes.first() != Some(&0);
         let exact = if used_metadata_owned_fallback {
             scratch.canonical_metadata =
-                blockzilla_format::canonicalize_archive_v2_metadata_owned(source_bytes)?.0;
+                blockzilla_archive_v2::canonicalize_archive_v2_metadata_owned(source_bytes)?.0;
             visit_loaded_accounts_exact(
                 &scratch.canonical_metadata,
                 total_accounts,
@@ -6478,7 +6470,7 @@ fn decode_owned_metadata(bytes: &[u8]) -> Result<CompactMetaV1> {
     let bytes = if bytes.first() == Some(&0) {
         bytes
     } else {
-        canonical = blockzilla_format::canonicalize_archive_v2_metadata_owned(bytes)?.0;
+        canonical = blockzilla_archive_v2::canonicalize_archive_v2_metadata_owned(bytes)?.0;
         &canonical
     };
     wincode::config::deserialize_exact(
@@ -6936,7 +6928,7 @@ fn epoch_row_range(
 }
 
 fn exact_probe_row_range(
-    rows: &[blockzilla_format::ArchiveV2HotBlockIndexRow],
+    rows: &[blockzilla_archive_v2::ArchiveV2HotBlockIndexRow],
     start_slot: u64,
     expected_start_row: Option<usize>,
     max_blocks: usize,
@@ -7812,19 +7804,10 @@ fn invalid_block_error(slot: u64, message: String) -> ReadError {
 
 #[cfg(test)]
 mod tests {
-    use blockzilla_format::{
-        ARCHIVE_V2_BLOCK_INDEX_FILE, ARCHIVE_V2_BLOCKS_FILE, ARCHIVE_V2_META_FILE,
-        ARCHIVE_V2_PUBKEY_REGISTRY_FILE, ARCHIVE_V2_PUBKEY_REGISTRY_INDEX_FILE,
-        ARCHIVE_V2_SIGNATURES_FILE, ArchiveV2HotBlockBlob, ArchiveV2HotBlockHeader,
-        ArchiveV2HotBlockIndexRow, ArchiveV2HotInstruction, ArchiveV2HotInstructionData,
-        ArchiveV2HotLegacyMessage, ArchiveV2HotMessagePayload, ArchiveV2HotMetaRecord,
-        ArchiveV2HotTxRow, ArchiveV2HotV0Message, CompactInnerInstruction,
-        CompactInnerInstructions, CompactMessageHeader, CompactMetaV1, CompactTransactionError,
-        KeyIndex, OwnedCompactAddressTableLookup, OwnedCompactRecentBlockhash,
-        WINCODE_ARCHIVE_V2_FLAG_LEB128, WINCODE_ARCHIVE_V2_HOT_BLOCK_VERSION,
-        WincodeArchiveV2Footer, WincodeArchiveV2Header, WincodeLeb128FramedReader,
-        wincode_leb128_config, write_archive_v2_hot_block_index, write_registry,
-    };
+    use blockzilla_archive_v2::{ARCHIVE_V2_BLOCKS_FILE, ARCHIVE_V2_BLOCK_INDEX_FILE, ARCHIVE_V2_META_FILE, ARCHIVE_V2_PUBKEY_REGISTRY_FILE, ARCHIVE_V2_PUBKEY_REGISTRY_INDEX_FILE, ARCHIVE_V2_SIGNATURES_FILE, ArchiveV2HotBlockBlob, ArchiveV2HotBlockHeader, ArchiveV2HotBlockIndexRow, ArchiveV2HotInstruction, ArchiveV2HotInstructionData, ArchiveV2HotLegacyMessage, ArchiveV2HotMessagePayload, ArchiveV2HotMetaRecord, ArchiveV2HotTxRow, ArchiveV2HotV0Message, WINCODE_ARCHIVE_V2_FLAG_LEB128, WINCODE_ARCHIVE_V2_HOT_BLOCK_VERSION, WincodeArchiveV2Footer, WincodeArchiveV2Header, write_archive_v2_hot_block_index};
+    use blockzilla_compact::{CompactInnerInstruction, CompactInnerInstructions, CompactMessageHeader, CompactMetaV1, CompactTransactionError, OwnedCompactAddressTableLookup, OwnedCompactRecentBlockhash};
+    use blockzilla_primitives::{WincodeLeb128FramedReader, wincode_leb128_config};
+    use blockzilla_registry::{KeyIndex, write_registry};
     use blockzilla_read_sdk::manifest::{
         GENERATION_MANIFEST_SCHEMA_VERSION, GenerationFile, compute_generation_digest,
     };
@@ -7928,8 +7911,8 @@ mod tests {
         assert_eq!(borrowed_bytes, owned_bytes);
     }
 
-    fn index_row(block_id: u32, slot: u64) -> blockzilla_format::ArchiveV2HotBlockIndexRow {
-        blockzilla_format::ArchiveV2HotBlockIndexRow {
+    fn index_row(block_id: u32, slot: u64) -> blockzilla_archive_v2::ArchiveV2HotBlockIndexRow {
+        blockzilla_archive_v2::ArchiveV2HotBlockIndexRow {
             block_id,
             slot,
             compressed_offset: u64::from(block_id) * 100,
@@ -9556,7 +9539,7 @@ mod tests {
             let record: TokenTransactionDumpRecord = wincode::config::deserialize_exact(
                 &frame,
                 bounded_wincode_leb128_config::<
-                    { blockzilla_format::WINCODE_LEB128_MAX_FRAME_BYTES },
+                    { blockzilla_primitives::WINCODE_LEB128_MAX_FRAME_BYTES },
                 >(),
             )
             .unwrap();

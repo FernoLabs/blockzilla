@@ -601,7 +601,7 @@ pub enum RecordOutcome {
 ///
 /// Every account and program id the archive can produce is already a dense,
 /// 1-based integer bounded by the epoch's registry size (`CompactPubkey::Id`,
-/// resolved with no hashing at all — see `blockzilla_format::KeyIndex`). So
+/// resolved with no hashing at all — see `blockzilla_registry::KeyIndex`). So
 /// rather than a hash map keyed by wallet id, this is a flat `Vec` indexed
 /// directly by (chunk-relative) id: no hash computation, no probing, and
 /// wallet ids come out of `write()` in ascending order for free (no sort

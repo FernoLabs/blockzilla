@@ -57,11 +57,15 @@ shred-reconstruction-backend-own = ["dep:solana-ledger-compat"]
 ignored = ["tonic-prost"]
 
 [dependencies]
+blockzilla-archive-v2 = { path = "../../crates/blockzilla-archive-v2", default-features = false }
+blockzilla-compact = { path = "../../crates/blockzilla-compact", default-features = false }
+blockzilla-live-format = { path = "../../crates/blockzilla-live-format", default-features = false }
+blockzilla-primitives = { path = "../../crates/blockzilla-primitives", default-features = false }
+blockzilla-registry = { path = "../../crates/blockzilla-registry", default-features = false }
 anyhow = "1.0.102"
 ahash = "0.8.12"
 axum = "0.8"
 base64 = "0.22.1"
-blockzilla-format = { path = "../../crates/blockzilla-format" }
 clap = { version = "4.6.1", features = ["derive"] }
 ed25519-dalek = { version = "3.0.0", features = ["pem"] }
 five8 = "1.0.0"

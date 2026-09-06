@@ -4045,7 +4045,7 @@ fn is_archived_fee_only_system_transfer(
     }
     let instruction = &transaction.instructions[0];
     let CompactInstructionData::System(
-        blockzilla_format::ArchiveV2SystemInstructionData::Transfer { lamports },
+        blockzilla_archive_v2::ArchiveV2SystemInstructionData::Transfer { lamports },
     ) = &instruction.data
     else {
         return false;
@@ -4101,7 +4101,7 @@ fn is_archived_system_transfer_with_canonical_prebalance(
         return false;
     };
     let CompactInstructionData::System(
-        blockzilla_format::ArchiveV2SystemInstructionData::Transfer { lamports },
+        blockzilla_archive_v2::ArchiveV2SystemInstructionData::Transfer { lamports },
     ) = &instruction.data
     else {
         return false;
@@ -4162,7 +4162,7 @@ fn is_archived_fee_only_prefunded_create(
     }
     let instruction = &transaction.instructions[0];
     let CompactInstructionData::System(
-        blockzilla_format::ArchiveV2SystemInstructionData::CreateAccount { lamports, .. },
+        blockzilla_archive_v2::ArchiveV2SystemInstructionData::CreateAccount { lamports, .. },
     ) = &instruction.data
     else {
         return false;
@@ -4487,11 +4487,8 @@ fn replay_error_position(error: &LaunchReplayError) -> (Option<u32>, Option<u32>
 mod tests {
     use std::{collections::VecDeque, path::PathBuf};
 
-    use blockzilla_format::{
-        ArchiveV2SystemInstructionData, CompactMessageHeader, WincodeArchiveV2GenesisEpochSchedule,
-        WincodeArchiveV2GenesisFeeParams, WincodeArchiveV2GenesisInflationParams,
-        WincodeArchiveV2GenesisPohParams, WincodeArchiveV2GenesisRentParams,
-    };
+    use blockzilla_archive_v2::{ArchiveV2SystemInstructionData, WincodeArchiveV2GenesisEpochSchedule, WincodeArchiveV2GenesisFeeParams, WincodeArchiveV2GenesisInflationParams, WincodeArchiveV2GenesisPohParams, WincodeArchiveV2GenesisRentParams};
+    use blockzilla_compact::CompactMessageHeader;
     use blockzilla_read_sdk::{ArchiveV2WireProfile, GenerationBinding};
     use serde::Serialize;
 

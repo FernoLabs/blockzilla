@@ -18,13 +18,8 @@ use std::{
 };
 
 use anyhow::{Context, Result, bail, ensure};
-use blockzilla_format::{
-    ARCHIVE_V2_BLOCK_INDEX_FILE, ARCHIVE_V2_BLOCKHASH_REGISTRY_FILE, ARCHIVE_V2_BLOCKS_FILE,
-    ARCHIVE_V2_POH_FILE, ARCHIVE_V2_SHREDDING_FILE, ARCHIVE_V2_SIGNATURES_FILE,
-    ArchiveV2HotBlockIndexRow, WincodeArchiveV2PohRecord, WincodeArchiveV2ShreddingRecord,
-    deserialize_archive_v2_hot_block_blob, deserialize_archive_v2_poh_record,
-    read_archive_v2_hot_block_index, wincode_leb128_config, write_archive_v2_hot_block_index,
-};
+use blockzilla_archive_v2::{ARCHIVE_V2_BLOCKHASH_REGISTRY_FILE, ARCHIVE_V2_BLOCKS_FILE, ARCHIVE_V2_BLOCK_INDEX_FILE, ARCHIVE_V2_POH_FILE, ARCHIVE_V2_SHREDDING_FILE, ARCHIVE_V2_SIGNATURES_FILE, ArchiveV2HotBlockIndexRow, WincodeArchiveV2PohRecord, WincodeArchiveV2ShreddingRecord, deserialize_archive_v2_hot_block_blob, deserialize_archive_v2_poh_record, read_archive_v2_hot_block_index, write_archive_v2_hot_block_index};
+use blockzilla_primitives::wincode_leb128_config;
 use blockzilla_index_archive_format::sidecars::framing;
 
 const SIGNATURE_LEN: u64 = 64;
@@ -252,7 +247,7 @@ fn main() -> Result<()> {
     tail.extend_from_slice(&stamped_hash([0x5a; 32], u32::MAX));
     tail.extend_from_slice(&(epoch_start - 1).to_le_bytes());
     fs::write(
-        dest.join(blockzilla_format::ARCHIVE_V2_PREV_BLOCKHASH_TAIL_FILE),
+        dest.join(blockzilla_archive_v2::ARCHIVE_V2_PREV_BLOCKHASH_TAIL_FILE),
         &tail,
     )
     .context("write previous blockhash tail")?;

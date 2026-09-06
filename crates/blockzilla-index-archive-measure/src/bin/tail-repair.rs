@@ -22,10 +22,7 @@
 use std::{env, fs, path::Path};
 
 use anyhow::{Context, Result, bail, ensure};
-use blockzilla_format::{
-    ARCHIVE_V2_BLOCK_INDEX_FILE, ARCHIVE_V2_BLOCKHASH_REGISTRY_FILE,
-    read_archive_v2_hot_block_index,
-};
+use blockzilla_archive_v2::{ARCHIVE_V2_BLOCKHASH_REGISTRY_FILE, ARCHIVE_V2_BLOCK_INDEX_FILE, read_archive_v2_hot_block_index};
 
 const TAIL_FILE: &str = "prev_blockhash_tail.bin";
 const TAIL_RECORDS: usize = 300;

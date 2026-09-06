@@ -4,13 +4,9 @@
 //! fallback variants were added. Manifest-bound marker objects select the
 //! exact enum order. Readers must never infer this choice from message data.
 
-use blockzilla_format::{
-    ArchiveV2ComputeBudgetInstructionData, ArchiveV2HotInstruction, ArchiveV2HotInstructionData,
-    ArchiveV2HotLegacyMessage, ArchiveV2HotMessagePayload, ArchiveV2HotV0Message,
-    ArchiveV2SystemInstructionData, ArchiveV2VoteHashRef, ArchiveV2VoteStateUpdate,
-    ArchiveV2VoteTowerSync, CompactMessageHeader, CompactPubkey, OwnedCompactAddressTableLookup,
-    OwnedCompactRecentBlockhash, wincode_leb128_config,
-};
+use blockzilla_archive_v2::{ArchiveV2ComputeBudgetInstructionData, ArchiveV2HotInstruction, ArchiveV2HotInstructionData, ArchiveV2HotLegacyMessage, ArchiveV2HotMessagePayload, ArchiveV2HotV0Message, ArchiveV2SystemInstructionData, ArchiveV2VoteHashRef, ArchiveV2VoteStateUpdate, ArchiveV2VoteTowerSync};
+use blockzilla_compact::{CompactMessageHeader, OwnedCompactAddressTableLookup, OwnedCompactRecentBlockhash};
+use blockzilla_primitives::{CompactPubkey, wincode_leb128_config};
 use sha2::{Digest as _, Sha256};
 use smallvec::SmallVec;
 use thiserror::Error;
@@ -509,7 +505,7 @@ impl From<May24ArchiveV2HotInstructionData> for ArchiveV2HotInstructionData {
 mod tests {
     use std::path::Path;
 
-    use blockzilla_format::{ArchiveV2HotInstructionData, ArchiveV2HotMessagePayload};
+    use blockzilla_archive_v2::{ArchiveV2HotInstructionData, ArchiveV2HotMessagePayload};
     use tempfile::TempDir;
 
     use super::*;

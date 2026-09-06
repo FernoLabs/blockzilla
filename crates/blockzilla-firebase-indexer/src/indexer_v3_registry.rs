@@ -6,10 +6,8 @@
 use std::sync::Arc;
 
 use anyhow::{Context, Result, ensure};
-use blockzilla_format::{
-    ARCHIVE_V2_PUBKEY_REGISTRY_FILE, ARCHIVE_V2_PUBKEY_REGISTRY_INDEX_FILE,
-    registry::{KeyIndexRangeSource, RangeBackedKeyIndex},
-};
+use blockzilla_archive_v2::{ARCHIVE_V2_PUBKEY_REGISTRY_FILE, ARCHIVE_V2_PUBKEY_REGISTRY_INDEX_FILE};
+use blockzilla_registry::{registry::KeyIndexRangeSource, registry::RangeBackedKeyIndex};
 use blockzilla_compact_v2_reader::RangeSource;
 
 const REGISTRY_KEY_BYTES: u64 = 32;
@@ -112,7 +110,7 @@ impl IndexerV3RegistryIndex {
 mod tests {
     use std::collections::HashMap;
 
-    use blockzilla_format::registry::KeyIndex;
+    use blockzilla_registry::registry::KeyIndex;
     use blockzilla_compact_v2_reader::{SourceError, SourceResult};
     use tempfile::TempDir;
 

@@ -38,11 +38,7 @@ use blockzilla_firebase_indexer::{
     },
     format::RegistryFileIdentity,
 };
-use blockzilla_format::{
-    ARCHIVE_V2_BLOCK_INDEX_FILE, ARCHIVE_V2_BLOCKS_FILE, ARCHIVE_V2_META_FILE, ARCHIVE_V2_POH_FILE,
-    ARCHIVE_V2_PUBKEY_REGISTRY_FILE, ARCHIVE_V2_PUBKEY_REGISTRY_INDEX_FILE,
-    ARCHIVE_V2_SIGNATURES_FILE,
-};
+use blockzilla_archive_v2::{ARCHIVE_V2_BLOCKS_FILE, ARCHIVE_V2_BLOCK_INDEX_FILE, ARCHIVE_V2_META_FILE, ARCHIVE_V2_POH_FILE, ARCHIVE_V2_PUBKEY_REGISTRY_FILE, ARCHIVE_V2_PUBKEY_REGISTRY_INDEX_FILE, ARCHIVE_V2_SIGNATURES_FILE};
 use blockzilla_read_sdk_legacy::{ArchiveV2WireProfile, wire_profile_marker, wire_profile_marker_bytes};
 use clap::Parser;
 use reqwest::blocking::Client;

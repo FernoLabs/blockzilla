@@ -10,9 +10,7 @@ use std::{
 };
 
 use anyhow::{Context, Result};
-use blockzilla_format::program_logs::{
-    official_program_log_has_known_binary_form, program_log_has_known_binary_form, system_program,
-};
+use blockzilla_program_logs::{program_logs::official_program_log_has_known_binary_form, program_logs::program_log_has_known_binary_form, program_logs::system_program};
 use blockzilla_log_parser::{
     ParsedLogLine, parse_custom_program_error_reason, parse_line, parse_program_log_error_payload,
 };

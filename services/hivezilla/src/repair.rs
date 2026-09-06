@@ -10,11 +10,10 @@ use std::os::unix::fs::MetadataExt;
 
 use anyhow::{Context, Result, anyhow, bail};
 use base64::{Engine as _, engine::general_purpose::STANDARD as BASE64_STANDARD};
-use blockzilla_format::{
-    LIVE_PUBKEY_RUN_RECORD_LEN, SplitCompactIndexHeader, SplitCompactIndexRecord,
-    WincodeArchiveV2PohRecord, WincodeLeb128FramedReader, WincodeLeb128FramedWriter,
-    live_producer::LiveBlockMissingField,
-};
+use blockzilla_archive_v2::WincodeArchiveV2PohRecord;
+use blockzilla_compact::{SplitCompactIndexHeader, SplitCompactIndexRecord};
+use blockzilla_live_format::{LIVE_PUBKEY_RUN_RECORD_LEN, live_producer::LiveBlockMissingField};
+use blockzilla_primitives::{WincodeLeb128FramedReader, WincodeLeb128FramedWriter};
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use sha2::{Digest, Sha256};
@@ -314,7 +313,7 @@ struct SourceRow {
     block_len: u32,
     tx_count: u32,
     blockhash: [u8; 32],
-    poh_entries: Vec<blockzilla_format::CompactPohEntry>,
+    poh_entries: Vec<blockzilla_compact::CompactPohEntry>,
 }
 
 struct CaptureCursor {
@@ -1453,8 +1452,8 @@ fn read_capture_journal_row(reader: &mut impl BufRead) -> Result<Option<CaptureJ
 }
 
 fn poh_entries_equal(
-    left: &[blockzilla_format::CompactPohEntry],
-    right: &[blockzilla_format::CompactPohEntry],
+    left: &[blockzilla_compact::CompactPohEntry],
+    right: &[blockzilla_compact::CompactPohEntry],
 ) -> bool {
     left.len() == right.len()
         && left.iter().zip(right).all(|(left, right)| {
@@ -1774,11 +1773,9 @@ pub fn read_live_repair_plan_header(path: &Path) -> Result<(u16, u64, u64)> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use blockzilla_format::{
-        CompactBlockHeader, CompactPohEntry, WincodeArchiveV2NoRegistryBlock,
-        WincodeArchiveV2NoRegistryBlockHeader, WincodeArchiveV2NoRegistryRewards,
-        WincodeLeb128FramedWriter, wincode_leb128_config, write_u32_varint,
-    };
+    use blockzilla_archive_v2::{WincodeArchiveV2NoRegistryBlock, WincodeArchiveV2NoRegistryBlockHeader, WincodeArchiveV2NoRegistryRewards};
+    use blockzilla_compact::{CompactBlockHeader, CompactPohEntry};
+    use blockzilla_primitives::{WincodeLeb128FramedWriter, wincode_leb128_config, write_u32_varint};
     use std::time::{SystemTime, UNIX_EPOCH};
 
     fn temp_dir(label: &str) -> PathBuf {

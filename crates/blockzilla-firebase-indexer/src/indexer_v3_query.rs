@@ -20,15 +20,9 @@ use std::{
     thread,
 };
 
-use blockzilla_format::{
-    ARCHIVE_V2_BLOCKHASH_REGISTRY_FILE, ARCHIVE_V2_PREV_BLOCKHASH_TAIL_FILE,
-    ARCHIVE_V2_PUBKEY_REGISTRY_FILE, ARCHIVE_V2_SIGNATURES_FILE, ARCHIVE_V2_TX_FLAG_HAS_ERROR,
-    ARCHIVE_V2_TX_FLAG_HAS_INNER_IX, ARCHIVE_V2_TX_FLAG_HAS_LOADED_ADDRESSES,
-    ARCHIVE_V2_TX_FLAG_HAS_METADATA, ARCHIVE_V2_TX_FLAG_MESSAGE_V0,
-    ARCHIVE_V2_TX_FLAG_METADATA_RAW_FALLBACK, ARCHIVE_V2_TX_FLAG_TX_RAW_FALLBACK,
-    ARCHIVE_V2_VOTE_HASH_REGISTRY_FILE, CompactPubkey, CompactTokenBalance,
-    OwnedCompactRecentBlockhash,
-};
+use blockzilla_archive_v2::{ARCHIVE_V2_BLOCKHASH_REGISTRY_FILE, ARCHIVE_V2_PREV_BLOCKHASH_TAIL_FILE, ARCHIVE_V2_PUBKEY_REGISTRY_FILE, ARCHIVE_V2_SIGNATURES_FILE, ARCHIVE_V2_TX_FLAG_HAS_ERROR, ARCHIVE_V2_TX_FLAG_HAS_INNER_IX, ARCHIVE_V2_TX_FLAG_HAS_LOADED_ADDRESSES, ARCHIVE_V2_TX_FLAG_HAS_METADATA, ARCHIVE_V2_TX_FLAG_MESSAGE_V0, ARCHIVE_V2_TX_FLAG_METADATA_RAW_FALLBACK, ARCHIVE_V2_TX_FLAG_TX_RAW_FALLBACK, ARCHIVE_V2_VOTE_HASH_REGISTRY_FILE};
+use blockzilla_compact::{CompactTokenBalance, OwnedCompactRecentBlockhash};
+use blockzilla_primitives::CompactPubkey;
 use blockzilla_query_sdk::{
     ArchiveFormat, ArchiveInstructionSource, BlockHeader, BlockSink, CanonicalBlock,
     CanonicalTransaction, CoverageReason, CpiCoverage, Error as QueryError, ExecutionStatus,
@@ -4149,7 +4143,7 @@ fn local_source_objects() -> Vec<&'static str> {
     objects.extend(indexer_v3_required_ledger_objects());
     objects.extend(INDEXER_V3_REQUIRED_RETAINED_SIDECARS);
     objects.extend(INDEXER_V3_OPTIONAL_RETAINED_SIDECARS);
-    objects.push(blockzilla_format::ARCHIVE_V2_PUBKEY_REGISTRY_INDEX_FILE);
+    objects.push(blockzilla_archive_v2::ARCHIVE_V2_PUBKEY_REGISTRY_INDEX_FILE);
     objects
 }
 
@@ -5763,18 +5757,9 @@ mod tests {
         },
     };
 
-    use blockzilla_format::{
-        ARCHIVE_V2_TX_FLAG_HAS_ERROR, ARCHIVE_V2_TX_FLAG_HAS_INNER_IX,
-        ARCHIVE_V2_TX_FLAG_HAS_LOADED_ADDRESSES, ARCHIVE_V2_TX_FLAG_HAS_METADATA,
-        ARCHIVE_V2_TX_FLAG_MESSAGE_V0, ARCHIVE_V2_TX_FLAG_METADATA_RAW_FALLBACK,
-        ARCHIVE_V2_TX_FLAG_TX_RAW_FALLBACK, ArchiveV2HotBlockIndexRow, ArchiveV2HotInstruction,
-        ArchiveV2HotInstructionData, ArchiveV2HotLegacyMessage, ArchiveV2HotMessagePayload,
-        ArchiveV2HotV0Message, ArchiveV2VoteHashRef, ArchiveV2VoteStateUpdate,
-        ArchiveV2VoteTowerSync, CompactInnerInstruction, CompactInnerInstructions,
-        CompactInstructionError, CompactLogStream, CompactMessageHeader, CompactMetaV1,
-        CompactReward, CompactTokenBalance, CompactTransactionError,
-        OwnedCompactAddressTableLookup, WincodeLeb128Config, wincode_leb128_config,
-    };
+    use blockzilla_archive_v2::{ARCHIVE_V2_TX_FLAG_HAS_ERROR, ARCHIVE_V2_TX_FLAG_HAS_INNER_IX, ARCHIVE_V2_TX_FLAG_HAS_LOADED_ADDRESSES, ARCHIVE_V2_TX_FLAG_HAS_METADATA, ARCHIVE_V2_TX_FLAG_MESSAGE_V0, ARCHIVE_V2_TX_FLAG_METADATA_RAW_FALLBACK, ARCHIVE_V2_TX_FLAG_TX_RAW_FALLBACK, ArchiveV2HotBlockIndexRow, ArchiveV2HotInstruction, ArchiveV2HotInstructionData, ArchiveV2HotLegacyMessage, ArchiveV2HotMessagePayload, ArchiveV2HotV0Message, ArchiveV2VoteHashRef, ArchiveV2VoteStateUpdate, ArchiveV2VoteTowerSync};
+    use blockzilla_compact::{CompactInnerInstruction, CompactInnerInstructions, CompactInstructionError, CompactLogStream, CompactMessageHeader, CompactMetaV1, CompactReward, CompactTokenBalance, CompactTransactionError, OwnedCompactAddressTableLookup};
+    use blockzilla_primitives::{WincodeLeb128Config, wincode_leb128_config};
     use blockzilla_query_sdk::{
         ArchiveInstructionSourceExt, BlockView, CpiCoverage, Error as QueryError, ExecutionStatus,
         InstructionCoverage, InstructionDataCoverage, ScanRange,

@@ -54,21 +54,10 @@ use blockzilla_index_archive_convert::{
 
 /// zstd level for page payloads. Provisional -- §7 measurement.
 const ZSTD_LEVEL: i32 = 3;
-use blockzilla_format::{
-    ARCHIVE_V2_BLOCK_INDEX_FILE, ARCHIVE_V2_BLOCKHASH_REGISTRY_FILE, ARCHIVE_V2_BLOCKS_FILE,
-    ARCHIVE_V2_GENESIS_BIN_FILE, ARCHIVE_V2_POH_FILE, ARCHIVE_V2_PREV_BLOCKHASH_TAIL_FILE,
-    ARCHIVE_V2_PUBKEY_REGISTRY_FILE, ARCHIVE_V2_PUBKEY_REGISTRY_INDEX_FILE,
-    ARCHIVE_V2_SHREDDING_FILE, ARCHIVE_V2_SIGNATURES_FILE, ARCHIVE_V2_TX_FLAG_HAS_COMPACT_VOTE_IX,
-    ARCHIVE_V2_TX_FLAG_HAS_ERROR, ARCHIVE_V2_TX_FLAG_HAS_INNER_IX,
-    ARCHIVE_V2_TX_FLAG_HAS_LOADED_ADDRESSES, ARCHIVE_V2_TX_FLAG_HAS_LOGS,
-    ARCHIVE_V2_TX_FLAG_HAS_METADATA, ARCHIVE_V2_TX_FLAG_HAS_RETURN_DATA,
-    ARCHIVE_V2_TX_FLAG_HAS_TOKEN_BALANCES, ARCHIVE_V2_TX_FLAG_MESSAGE_V0,
-    ARCHIVE_V2_TX_FLAG_TX_RAW_FALLBACK, ARCHIVE_V2_VOTE_HASH_REGISTRY_FILE,
-    ArchiveV2HotInstruction, ArchiveV2HotInstructionData, ArchiveV2HotMessagePayload,
-    CompactLogStream, CompactPubkey, CompactTokenBalance, FileBackedKeyIndex, KeyIndex,
-    OwnedCompactRecentBlockhash, PubkeyResolver, read_archive_v2_hot_block_index_file, render_logs,
-    wincode_leb128_config,
-};
+use blockzilla_archive_v2::{ARCHIVE_V2_BLOCKHASH_REGISTRY_FILE, ARCHIVE_V2_BLOCKS_FILE, ARCHIVE_V2_BLOCK_INDEX_FILE, ARCHIVE_V2_GENESIS_BIN_FILE, ARCHIVE_V2_POH_FILE, ARCHIVE_V2_PREV_BLOCKHASH_TAIL_FILE, ARCHIVE_V2_PUBKEY_REGISTRY_FILE, ARCHIVE_V2_PUBKEY_REGISTRY_INDEX_FILE, ARCHIVE_V2_SHREDDING_FILE, ARCHIVE_V2_SIGNATURES_FILE, ARCHIVE_V2_TX_FLAG_HAS_COMPACT_VOTE_IX, ARCHIVE_V2_TX_FLAG_HAS_ERROR, ARCHIVE_V2_TX_FLAG_HAS_INNER_IX, ARCHIVE_V2_TX_FLAG_HAS_LOADED_ADDRESSES, ARCHIVE_V2_TX_FLAG_HAS_LOGS, ARCHIVE_V2_TX_FLAG_HAS_METADATA, ARCHIVE_V2_TX_FLAG_HAS_RETURN_DATA, ARCHIVE_V2_TX_FLAG_HAS_TOKEN_BALANCES, ARCHIVE_V2_TX_FLAG_MESSAGE_V0, ARCHIVE_V2_TX_FLAG_TX_RAW_FALLBACK, ARCHIVE_V2_VOTE_HASH_REGISTRY_FILE, ArchiveV2HotInstruction, ArchiveV2HotInstructionData, ArchiveV2HotMessagePayload, read_archive_v2_hot_block_index_file};
+use blockzilla_compact::{CompactLogStream, CompactTokenBalance, OwnedCompactRecentBlockhash, render_logs};
+use blockzilla_primitives::{CompactPubkey, PubkeyResolver, wincode_leb128_config};
+use blockzilla_registry::{FileBackedKeyIndex, KeyIndex};
 
 const KNOWN_SOURCE_TX_FLAGS: u32 = (1 << 11) - 1;
 
@@ -536,7 +525,7 @@ struct SourceContext {
     published: bool,
     source: PinnedLocalRangeSource,
     reader: Arc<ArchiveReader<PinnedLocalRangeSource>>,
-    index: Option<blockzilla_format::ArchiveV2HotBlockIndex>,
+    index: Option<blockzilla_archive_v2::ArchiveV2HotBlockIndex>,
     message_schema: CompactV2MessageSchema,
     metadata_schema: CompactV2MetadataSchema,
 }
@@ -735,7 +724,7 @@ fn staging_path(output: &Path) -> Result<PathBuf> {
     Ok(parent.join(format!(".{name}.building-{}", std::process::id())))
 }
 
-fn task_reservation_bytes(row: blockzilla_format::ArchiveV2HotBlockIndexRow) -> Result<usize> {
+fn task_reservation_bytes(row: blockzilla_archive_v2::ArchiveV2HotBlockIndexRow) -> Result<usize> {
     // A worker holds the compressed frame, the decoded frame, the owned
     // decoded value, reconstructed instruction bytes, and target page inputs
     // at the same time. Ordered commit can also compress several target pages
@@ -750,8 +739,8 @@ fn task_reservation_bytes(row: blockzilla_format::ArchiveV2HotBlockIndexRow) -> 
 }
 
 fn same_source_index_row(
-    left: blockzilla_format::ArchiveV2HotBlockIndexRow,
-    right: blockzilla_format::ArchiveV2HotBlockIndexRow,
+    left: blockzilla_archive_v2::ArchiveV2HotBlockIndexRow,
+    right: blockzilla_archive_v2::ArchiveV2HotBlockIndexRow,
 ) -> bool {
     left.block_id == right.block_id
         && left.slot == right.slot
@@ -765,8 +754,8 @@ fn same_source_index_row(
 }
 
 struct DecodedSourceBlock {
-    row: blockzilla_format::ArchiveV2HotBlockIndexRow,
-    block: blockzilla_format::ArchiveV2HotBlockBlob,
+    row: blockzilla_archive_v2::ArchiveV2HotBlockIndexRow,
+    block: blockzilla_archive_v2::ArchiveV2HotBlockBlob,
     transactions: Vec<ProjectedSourceTransaction>,
     borrowed_to_owned_time: Duration,
     message_decode_time: Duration,
@@ -788,7 +777,7 @@ struct ValidatedTransactionShape {
 /// before the block-wide ordered validation pass.
 struct ReconstructedSourceTransaction {
     payload: ArchiveV2HotMessagePayload,
-    metadata: Option<blockzilla_format::CompactMetaV1>,
+    metadata: Option<blockzilla_compact::CompactMetaV1>,
     exact_instruction_data: Vec<Vec<u8>>,
     message_decode_time: Duration,
     signed_message_proof_time: Duration,
@@ -802,7 +791,7 @@ struct ReconstructedSourceTransaction {
 #[derive(Debug)]
 struct ProjectedSourceTransaction {
     payload: ArchiveV2HotMessagePayload,
-    metadata: Option<blockzilla_format::CompactMetaV1>,
+    metadata: Option<blockzilla_compact::CompactMetaV1>,
     exact_instruction_data: Vec<Vec<u8>>,
     message_decode_time: Duration,
     signed_message_proof_time: Duration,
@@ -815,7 +804,7 @@ struct ProjectedSourceTransaction {
 /// deterministic source order. All remaining work is offset-independent.
 struct ResolvedSourceTransaction {
     payload: ArchiveV2HotMessagePayload,
-    metadata: Option<blockzilla_format::CompactMetaV1>,
+    metadata: Option<blockzilla_compact::CompactMetaV1>,
     exact_instruction_data: Vec<Vec<u8>>,
     recent_blockhash: transactions_codec::HashRef,
     inline_log_pubkeys: Vec<[u8; 32]>,
@@ -826,8 +815,8 @@ struct ResolvedSourceTransaction {
 /// conversion. The source block remains owned until its prepared target bytes
 /// are committed, and its full reservation remains charged for that lifetime.
 struct ResolvedBlockInput {
-    row: blockzilla_format::ArchiveV2HotBlockIndexRow,
-    block: blockzilla_format::ArchiveV2HotBlockBlob,
+    row: blockzilla_archive_v2::ArchiveV2HotBlockIndexRow,
+    block: blockzilla_archive_v2::ArchiveV2HotBlockBlob,
     transactions: Vec<ResolvedSourceTransaction>,
     pubkeys: ResolvedPubkeyTable,
     blockhash: transactions_codec::HashRef,
@@ -849,7 +838,7 @@ struct ConvertedResolvedBlock {
 /// rows without touching target files or changing deterministic IDs.
 /// Values retained until the final ordered effect and catalog write.
 struct TransactionCommitInput {
-    row: blockzilla_format::ArchiveV2HotBlockIndexRow,
+    row: blockzilla_archive_v2::ArchiveV2HotBlockIndexRow,
     slot: u64,
     parent_slot: u64,
     block_time: Option<i64>,
@@ -867,7 +856,7 @@ struct TransactionCommitInput {
 
 /// Offset-bearing block data after all effect bytes are worker-prepared.
 struct TransactionFinalCommitInput {
-    row: blockzilla_format::ArchiveV2HotBlockIndexRow,
+    row: blockzilla_archive_v2::ArchiveV2HotBlockIndexRow,
     slot: u64,
     parent_slot: u64,
     block_time: Option<i64>,
@@ -1053,8 +1042,8 @@ impl SourceWorker {
 
     fn reconstruct_transaction(
         &self,
-        block: &blockzilla_format::ArchiveV2HotBlockBlob,
-        transaction: &blockzilla_format::ArchiveV2HotTxRow,
+        block: &blockzilla_archive_v2::ArchiveV2HotBlockBlob,
+        transaction: &blockzilla_archive_v2::ArchiveV2HotTxRow,
         signature_ordinal: u64,
     ) -> Result<ReconstructedSourceTransaction> {
         ensure!(
@@ -1260,7 +1249,7 @@ impl SourceWorker {
 
 fn decode_source_block(
     blocks: &File,
-    row: blockzilla_format::ArchiveV2HotBlockIndexRow,
+    row: blockzilla_archive_v2::ArchiveV2HotBlockIndexRow,
 ) -> Result<DecodedSourceBlock> {
     let mut frame = vec![0; usize::try_from(row.compressed_len).context("frame length overflow")?];
     blocks
@@ -1283,7 +1272,7 @@ fn decode_source_block(
         row.slot,
         row.uncompressed_len
     );
-    let block: blockzilla_format::ArchiveV2HotBlockBlob =
+    let block: blockzilla_archive_v2::ArchiveV2HotBlockBlob =
         wincode::config::deserialize_exact(&raw, wincode_leb128_config()).with_context(|| {
             format!(
                 "decode exact current-hot-v1 block schema at slot {}; legacy trial decoding is disabled",
@@ -1347,7 +1336,7 @@ fn decode_source_block(
             .message_offset
             .checked_add(transaction.message_len)
             .context("message offset overflow")?;
-        if transaction.flags & blockzilla_format::ARCHIVE_V2_TX_FLAG_HAS_METADATA == 0 {
+        if transaction.flags & blockzilla_archive_v2::ARCHIVE_V2_TX_FLAG_HAS_METADATA == 0 {
             ensure!(
                 transaction.metadata_len == 0,
                 "slot {} transaction {} has metadata bytes without HAS_METADATA",
@@ -1413,7 +1402,7 @@ fn decode_source_block(
 
 fn validate_source_shape(
     source: &PinnedLocalRangeSource,
-    index: &blockzilla_format::ArchiveV2HotBlockIndex,
+    index: &blockzilla_archive_v2::ArchiveV2HotBlockIndex,
     pipeline_memory_limit: usize,
 ) -> Result<()> {
     ensure!(
@@ -1791,9 +1780,9 @@ fn variant_name(data: &ArchiveV2HotInstructionData) -> (&'static str, bool) {
 }
 
 fn validate_source_transaction_flags(
-    row: &blockzilla_format::ArchiveV2HotTxRow,
+    row: &blockzilla_archive_v2::ArchiveV2HotTxRow,
     message: &ArchiveV2HotMessagePayload,
-    metadata: Option<&blockzilla_format::CompactMetaV1>,
+    metadata: Option<&blockzilla_compact::CompactMetaV1>,
 ) -> Result<()> {
     let instructions = match message {
         ArchiveV2HotMessagePayload::Legacy(message) => message.instructions.as_slice(),
@@ -1965,7 +1954,7 @@ fn validate_token_balance_visits(
 
 fn validate_and_project_source_transaction(
     slot: u64,
-    transaction: &blockzilla_format::ArchiveV2HotTxRow,
+    transaction: &blockzilla_archive_v2::ArchiveV2HotTxRow,
     reconstructed: ReconstructedSourceTransaction,
     registry_entries: u32,
     raw_visits: &mut Vec<[u8; 32]>,
@@ -2186,8 +2175,8 @@ fn validate_and_project_source_transaction(
 }
 
 fn validate_source_block_tail(
-    row: blockzilla_format::ArchiveV2HotBlockIndexRow,
-    header: &blockzilla_format::ArchiveV2HotBlockHeader,
+    row: blockzilla_archive_v2::ArchiveV2HotBlockIndexRow,
+    header: &blockzilla_archive_v2::ArchiveV2HotBlockHeader,
     blockhash_registry_offset: u32,
     registry_entries: u32,
     raw_visits: &mut Vec<[u8; 32]>,
@@ -2212,7 +2201,7 @@ fn validate_source_block_tail(
 
 fn validate_reconstructed_transactions(
     slot: u64,
-    rows: &[blockzilla_format::ArchiveV2HotTxRow],
+    rows: &[blockzilla_archive_v2::ArchiveV2HotTxRow],
     reconstructed: Vec<ReconstructedSourceTransaction>,
     registry_entries: u32,
 ) -> Result<(Vec<ProjectedSourceTransaction>, Vec<[u8; 32]>, Duration)> {
@@ -2650,7 +2639,7 @@ struct SignedMessageProofContext<'a> {
 
 fn reconstruct_signed_instruction_data(
     payload: &ArchiveV2HotMessagePayload,
-    header: blockzilla_format::CompactMessageHeader,
+    header: blockzilla_compact::CompactMessageHeader,
     account_keys: &[CompactPubkey],
     recent_blockhash: &OwnedCompactRecentBlockhash,
     hot_instructions: &[ArchiveV2HotInstruction],
@@ -2836,7 +2825,7 @@ fn pair_token_balances<R: TargetPubkeyIdLookup>(
 }
 
 fn compact_reward<R: TargetPubkeyIdLookup>(
-    reward: &blockzilla_format::CompactReward,
+    reward: &blockzilla_compact::CompactReward,
     pubkeys: &mut R,
 ) -> Result<rewards_codec::Reward> {
     Ok(rewards_codec::Reward {
@@ -3059,7 +3048,7 @@ fn convert_log_stream_with_inline_pubkeys<R: TargetPubkeyIdLookup>(
 fn convert_message(
     payload: &ArchiveV2HotMessagePayload,
 ) -> (
-    &blockzilla_format::CompactMessageHeader,
+    &blockzilla_compact::CompactMessageHeader,
     &[CompactPubkey],
     &OwnedCompactRecentBlockhash,
     &[ArchiveV2HotInstruction],
@@ -5354,16 +5343,10 @@ fn main() -> Result<()> {
 
 #[cfg(test)]
 mod tests {
-    use blockzilla_format::{
-        DataTable, KeyIndex, LogEvent, RawPubkeyCompactor, StringTable, parse_logs_with_compactor,
-        program_logs::{
-            ProgramLog,
-            system_program::{
-                NonceAction, PubkeyOrString, SystemAddress, SystemInstructionLog, SystemProgramLog,
-            },
-            token_2022::Token2022Log,
-        },
-    };
+    use blockzilla_compact::{DataTable, LogEvent, parse_logs_with_compactor};
+    use blockzilla_primitives::StringTable;
+    use blockzilla_program_logs::{program_logs::ProgramLog, program_logs::system_program::NonceAction, program_logs::system_program::PubkeyOrString, program_logs::system_program::SystemAddress, program_logs::system_program::SystemInstructionLog, program_logs::system_program::SystemProgramLog, program_logs::token_2022::Token2022Log};
+    use blockzilla_registry::{KeyIndex, RawPubkeyCompactor};
     use tempfile::tempdir;
 
     use super::*;
@@ -5443,8 +5426,8 @@ mod tests {
         assert_eq!(predecessor.slot, Some(799));
     }
 
-    fn empty_test_metadata(account_count: usize) -> blockzilla_format::CompactMetaV1 {
-        blockzilla_format::CompactMetaV1 {
+    fn empty_test_metadata(account_count: usize) -> blockzilla_compact::CompactMetaV1 {
+        blockzilla_compact::CompactMetaV1 {
             err: None,
             fee: 0,
             pre_balances: vec![0; account_count],
@@ -5463,9 +5446,9 @@ mod tests {
     }
 
     fn legacy_projection_fixture(
-        metadata: blockzilla_format::CompactMetaV1,
+        metadata: blockzilla_compact::CompactMetaV1,
     ) -> (
-        blockzilla_format::ArchiveV2HotTxRow,
+        blockzilla_archive_v2::ArchiveV2HotTxRow,
         ReconstructedSourceTransaction,
     ) {
         let mut flags = ARCHIVE_V2_TX_FLAG_HAS_METADATA;
@@ -5490,16 +5473,16 @@ mod tests {
             flags |= ARCHIVE_V2_TX_FLAG_HAS_LOADED_ADDRESSES;
         }
         (
-            blockzilla_format::ArchiveV2HotTxRow {
+            blockzilla_archive_v2::ArchiveV2HotTxRow {
                 tx_index: 0,
                 flags,
                 signature_count: 1,
-                ..blockzilla_format::ArchiveV2HotTxRow::default()
+                ..blockzilla_archive_v2::ArchiveV2HotTxRow::default()
             },
             ReconstructedSourceTransaction {
                 payload: ArchiveV2HotMessagePayload::Legacy(
-                    blockzilla_format::ArchiveV2HotLegacyMessage {
-                        header: blockzilla_format::CompactMessageHeader {
+                    blockzilla_archive_v2::ArchiveV2HotLegacyMessage {
+                        header: blockzilla_compact::CompactMessageHeader {
                             num_required_signatures: 1,
                             num_readonly_signed_accounts: 0,
                             num_readonly_unsigned_accounts: 0,
@@ -5853,11 +5836,11 @@ mod tests {
                     [(2_u8, 3_u8), (3, 4)].into_iter().enumerate()
                 {
                     let mut metadata = empty_test_metadata(1);
-                    metadata.return_data = Some(blockzilla_format::CompactReturnData {
+                    metadata.return_data = Some(blockzilla_compact::CompactReturnData {
                         program_id: CompactPubkey::Raw([return_key; 32]),
                         data: Vec::new(),
                     });
-                    metadata.rewards.push(blockzilla_format::CompactReward {
+                    metadata.rewards.push(blockzilla_compact::CompactReward {
                         pubkey: CompactPubkey::Raw([reward_key; 32]),
                         lamports: 1,
                         post_balance: 1,
@@ -5961,7 +5944,7 @@ mod tests {
 
     struct IdTwoCompactor;
 
-    impl blockzilla_format::PubkeyCompactor for IdTwoCompactor {
+    impl blockzilla_primitives::PubkeyCompactor for IdTwoCompactor {
         fn compact_str(&self, _: &str) -> Option<CompactPubkey> {
             Some(CompactPubkey::Id(2))
         }
@@ -5973,7 +5956,7 @@ mod tests {
             let mut metadata = empty_test_metadata(1);
             match lane {
                 "return" => {
-                    metadata.return_data = Some(blockzilla_format::CompactReturnData {
+                    metadata.return_data = Some(blockzilla_compact::CompactReturnData {
                         program_id: CompactPubkey::Id(2),
                         data: Vec::new(),
                     });
@@ -5989,7 +5972,7 @@ mod tests {
                     });
                 }
                 "transaction reward" => {
-                    metadata.rewards.push(blockzilla_format::CompactReward {
+                    metadata.rewards.push(blockzilla_compact::CompactReward {
                         pubkey: CompactPubkey::Id(2),
                         lamports: 1,
                         post_balance: 1,
@@ -6078,8 +6061,8 @@ mod tests {
     fn b3_source_projection_rejects_loaded_and_block_reward_ids() {
         let mut metadata = empty_test_metadata(2);
         metadata.loaded_writable_addresses = vec![CompactPubkey::Id(2)];
-        let payload = ArchiveV2HotMessagePayload::V0(blockzilla_format::ArchiveV2HotV0Message {
-            header: blockzilla_format::CompactMessageHeader {
+        let payload = ArchiveV2HotMessagePayload::V0(blockzilla_archive_v2::ArchiveV2HotV0Message {
+            header: blockzilla_compact::CompactMessageHeader {
                 num_required_signatures: 1,
                 num_readonly_signed_accounts: 0,
                 num_readonly_unsigned_accounts: 0,
@@ -6087,19 +6070,19 @@ mod tests {
             account_keys: vec![CompactPubkey::Id(1)],
             recent_blockhash: OwnedCompactRecentBlockhash::Id(1),
             instructions: Vec::new(),
-            address_table_lookups: vec![blockzilla_format::OwnedCompactAddressTableLookup {
+            address_table_lookups: vec![blockzilla_compact::OwnedCompactAddressTableLookup {
                 account_key: CompactPubkey::Id(1),
                 writable_indexes: vec![0],
                 readonly_indexes: Vec::new(),
             }],
         });
-        let tx = blockzilla_format::ArchiveV2HotTxRow {
+        let tx = blockzilla_archive_v2::ArchiveV2HotTxRow {
             tx_index: 0,
             flags: ARCHIVE_V2_TX_FLAG_HAS_METADATA
                 | ARCHIVE_V2_TX_FLAG_MESSAGE_V0
                 | ARCHIVE_V2_TX_FLAG_HAS_LOADED_ADDRESSES,
             signature_count: 1,
-            ..blockzilla_format::ArchiveV2HotTxRow::default()
+            ..blockzilla_archive_v2::ArchiveV2HotTxRow::default()
         };
         let error = validate_and_project_source_transaction(
             1,
@@ -6118,7 +6101,7 @@ mod tests {
         .unwrap_err();
         assert!(error.to_string().contains("outside the valid 1..=1 range"));
 
-        let row = blockzilla_format::ArchiveV2HotBlockIndexRow {
+        let row = blockzilla_archive_v2::ArchiveV2HotBlockIndexRow {
             block_id: 0,
             slot: 1,
             compressed_offset: 0,
@@ -6129,16 +6112,16 @@ mod tests {
             first_signature_ordinal: 0,
             signature_count: 0,
         };
-        let mut header = blockzilla_format::ArchiveV2HotBlockHeader {
+        let mut header = blockzilla_archive_v2::ArchiveV2HotBlockHeader {
             slot: 1,
             parent_slot: 0,
             blockhash_id: 9,
             previous_blockhash_id: 8,
             block_time: None,
             block_height: None,
-            rewards: Some(blockzilla_format::ArchiveV2HotRewards {
+            rewards: Some(blockzilla_archive_v2::ArchiveV2HotRewards {
                 num_partitions: None,
-                decoded: vec![blockzilla_format::CompactReward {
+                decoded: vec![blockzilla_compact::CompactReward {
                     pubkey: CompactPubkey::Id(2),
                     lamports: 1,
                     post_balance: 1,
@@ -6200,15 +6183,15 @@ mod tests {
         let log_pubkeys = PinnedPubkeyResolver::open(&source, ARCHIVE_V2_PUBKEY_REGISTRY_FILE)
             .unwrap()
             .unwrap();
-        let tx = blockzilla_format::ArchiveV2HotTxRow {
+        let tx = blockzilla_archive_v2::ArchiveV2HotTxRow {
             tx_index: 0,
             flags: ARCHIVE_V2_TX_FLAG_HAS_METADATA | ARCHIVE_V2_TX_FLAG_HAS_INNER_IX,
             signature_count: 1,
-            ..blockzilla_format::ArchiveV2HotTxRow::default()
+            ..blockzilla_archive_v2::ArchiveV2HotTxRow::default()
         };
         let payload =
-            ArchiveV2HotMessagePayload::Legacy(blockzilla_format::ArchiveV2HotLegacyMessage {
-                header: blockzilla_format::CompactMessageHeader {
+            ArchiveV2HotMessagePayload::Legacy(blockzilla_archive_v2::ArchiveV2HotLegacyMessage {
+                header: blockzilla_compact::CompactMessageHeader {
                     num_required_signatures: 1,
                     num_readonly_signed_accounts: 0,
                     num_readonly_unsigned_accounts: 0,
@@ -6222,16 +6205,16 @@ mod tests {
                 }],
             });
         let mut metadata = empty_test_metadata(1);
-        metadata.inner_instructions = Some(vec![blockzilla_format::CompactInnerInstructions {
+        metadata.inner_instructions = Some(vec![blockzilla_compact::CompactInnerInstructions {
             index: 0,
-            instructions: vec![blockzilla_format::CompactInnerInstruction {
+            instructions: vec![blockzilla_compact::CompactInnerInstruction {
                 program_id_index: 9,
                 accounts: Vec::new(),
                 data: Vec::new(),
                 stack_height: None,
             }],
         }]);
-        let row = blockzilla_format::ArchiveV2HotBlockIndexRow {
+        let row = blockzilla_archive_v2::ArchiveV2HotBlockIndexRow {
             block_id: 0,
             slot: 1,
             compressed_offset: 0,
@@ -6244,8 +6227,8 @@ mod tests {
         };
         let input = ResolvedBlockInput {
             row,
-            block: blockzilla_format::ArchiveV2HotBlockBlob {
-                header: blockzilla_format::ArchiveV2HotBlockHeader {
+            block: blockzilla_archive_v2::ArchiveV2HotBlockBlob {
+                header: blockzilla_archive_v2::ArchiveV2HotBlockHeader {
                     slot: 1,
                     parent_slot: 0,
                     blockhash_id: 0,
@@ -6318,7 +6301,7 @@ mod tests {
             &RawPubkeyCompactor,
         );
         let token =
-            |account_index, mint, owner, program_id| blockzilla_format::CompactTokenBalance {
+            |account_index, mint, owner, program_id| blockzilla_compact::CompactTokenBalance {
                 account_index,
                 mint: Some(CompactPubkey::Raw([mint; 32])),
                 owner: Some(CompactPubkey::Raw([owner; 32])),
@@ -6326,7 +6309,7 @@ mod tests {
                 amount: 1,
                 decimals: 0,
             };
-        let metadata = blockzilla_format::CompactMetaV1 {
+        let metadata = blockzilla_compact::CompactMetaV1 {
             err: None,
             fee: 0,
             pre_balances: vec![0; 4],
@@ -6335,7 +6318,7 @@ mod tests {
             logs: Some(logs),
             pre_token_balances: vec![token(0, 3, 4, 5)],
             post_token_balances: vec![token(0, 6, 7, 8)],
-            rewards: vec![blockzilla_format::CompactReward {
+            rewards: vec![blockzilla_compact::CompactReward {
                 pubkey: CompactPubkey::Raw([11; 32]),
                 lamports: 1,
                 post_balance: 1,
@@ -6344,15 +6327,15 @@ mod tests {
             }],
             loaded_writable_addresses: vec![CompactPubkey::Raw([14; 32])],
             loaded_readonly_addresses: Vec::new(),
-            return_data: Some(blockzilla_format::CompactReturnData {
+            return_data: Some(blockzilla_compact::CompactReturnData {
                 program_id: CompactPubkey::Raw([2; 32]),
                 data: Vec::new(),
             }),
             compute_units_consumed: None,
             cost_units: None,
         };
-        let payload = ArchiveV2HotMessagePayload::V0(blockzilla_format::ArchiveV2HotV0Message {
-            header: blockzilla_format::CompactMessageHeader {
+        let payload = ArchiveV2HotMessagePayload::V0(blockzilla_archive_v2::ArchiveV2HotV0Message {
+            header: blockzilla_compact::CompactMessageHeader {
                 num_required_signatures: 1,
                 num_readonly_signed_accounts: 0,
                 num_readonly_unsigned_accounts: 0,
@@ -6364,13 +6347,13 @@ mod tests {
             ],
             recent_blockhash: OwnedCompactRecentBlockhash::Id(1),
             instructions: Vec::new(),
-            address_table_lookups: vec![blockzilla_format::OwnedCompactAddressTableLookup {
+            address_table_lookups: vec![blockzilla_compact::OwnedCompactAddressTableLookup {
                 account_key: CompactPubkey::Raw([2; 32]),
                 writable_indexes: vec![0],
                 readonly_indexes: Vec::new(),
             }],
         });
-        let tx = blockzilla_format::ArchiveV2HotTxRow {
+        let tx = blockzilla_archive_v2::ArchiveV2HotTxRow {
             tx_index: 0,
             flags: ARCHIVE_V2_TX_FLAG_HAS_METADATA
                 | ARCHIVE_V2_TX_FLAG_MESSAGE_V0
@@ -6379,7 +6362,7 @@ mod tests {
                 | ARCHIVE_V2_TX_FLAG_HAS_TOKEN_BALANCES
                 | ARCHIVE_V2_TX_FLAG_HAS_LOADED_ADDRESSES,
             signature_count: 1,
-            ..blockzilla_format::ArchiveV2HotTxRow::default()
+            ..blockzilla_archive_v2::ArchiveV2HotTxRow::default()
         };
         let reconstructed = ReconstructedSourceTransaction {
             payload,
@@ -6399,7 +6382,7 @@ mod tests {
         assert_eq!(projected.shape.loaded_address_counts.readonly, 0);
         assert_eq!(projected.shape.resolved_account_count, 4);
 
-        let row = blockzilla_format::ArchiveV2HotBlockIndexRow {
+        let row = blockzilla_archive_v2::ArchiveV2HotBlockIndexRow {
             block_id: 2,
             slot: 50,
             compressed_offset: 0,
@@ -6410,16 +6393,16 @@ mod tests {
             first_signature_ordinal: 0,
             signature_count: 1,
         };
-        let header = blockzilla_format::ArchiveV2HotBlockHeader {
+        let header = blockzilla_archive_v2::ArchiveV2HotBlockHeader {
             slot: 50,
             parent_slot: 49,
             blockhash_id: 102,
             previous_blockhash_id: 101,
             block_time: None,
             block_height: None,
-            rewards: Some(blockzilla_format::ArchiveV2HotRewards {
+            rewards: Some(blockzilla_archive_v2::ArchiveV2HotRewards {
                 num_partitions: None,
-                decoded: vec![blockzilla_format::CompactReward {
+                decoded: vec![blockzilla_compact::CompactReward {
                     pubkey: CompactPubkey::Raw([15; 32]),
                     lamports: 1,
                     post_balance: 1,

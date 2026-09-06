@@ -4618,7 +4618,7 @@ fn decode_adaptive_v3_coverage_records(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use blockzilla_format::{ARCHIVE_V2_TX_FLAG_TX_RAW_FALLBACK, ArchiveV2HotBlockIndexRow};
+    use blockzilla_archive_v2::{ARCHIVE_V2_TX_FLAG_TX_RAW_FALLBACK, ArchiveV2HotBlockIndexRow};
     use blockzilla_compact_v2_reader::{LocalRangeSource, SourceResult};
     use std::sync::atomic::{AtomicU64, Ordering};
     use tempfile::tempdir;

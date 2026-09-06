@@ -38,7 +38,7 @@ pub use blockhash::{
     PreviousBlockhashTailSchema, detect_previous_blockhash_tail, parse_blockhash_registry,
     parse_previous_blockhash_tail,
 };
-pub use blockzilla_format::CompactPubkey;
+pub use blockzilla_primitives::CompactPubkey;
 pub use compact_query::{
     COMPACT_V2_PARALLEL_COMPRESSED_BUFFERS, COMPACT_V2_PARALLEL_MAX_BLOCKS_PER_BATCH,
     COMPACT_V2_PARALLEL_UNCOMPRESSED_BATCH_BYTES,

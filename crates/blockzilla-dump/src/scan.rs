@@ -10,12 +10,9 @@ use std::{
 };
 
 use anyhow::{Context, Result, anyhow, bail, ensure};
-use blockzilla_format::{
-    ARCHIVE_V2_PUBKEY_REGISTRY_INDEX_FILE, ARCHIVE_V2_TX_FLAG_HAS_METADATA,
-    ARCHIVE_V2_TX_FLAG_HAS_TOKEN_BALANCES, ARCHIVE_V2_TX_FLAG_METADATA_RAW_FALLBACK,
-    ARCHIVE_V2_TX_FLAG_TX_RAW_FALLBACK, ArchiveV2HotMessagePayload, ArchiveV2HotTxRow,
-    CompactMessageHeader, CompactMetaV1, CompactPubkey,
-};
+use blockzilla_archive_v2::{ARCHIVE_V2_PUBKEY_REGISTRY_INDEX_FILE, ARCHIVE_V2_TX_FLAG_HAS_METADATA, ARCHIVE_V2_TX_FLAG_HAS_TOKEN_BALANCES, ARCHIVE_V2_TX_FLAG_METADATA_RAW_FALLBACK, ARCHIVE_V2_TX_FLAG_TX_RAW_FALLBACK, ArchiveV2HotMessagePayload, ArchiveV2HotTxRow};
+use blockzilla_compact::{CompactMessageHeader, CompactMetaV1};
+use blockzilla_primitives::CompactPubkey;
 use blockzilla_compact_v2_reader::{
     ArchiveIdentity, ArchiveReader, ArchiveSourceBinding, BorrowedDecodedBlock,
     COMPACT_V2_OPTIONAL_OBJECTS, COMPACT_V2_REQUIRED_OBJECTS, CompactV2MessageSchema,
@@ -38,25 +35,25 @@ const REGISTRY_RESOLVER_ENTRIES: usize = 16_384;
 const MAX_THREADS: usize = blockzilla_compact_v2_reader::MAX_ORDERED_PARALLEL_DECODE_WORKERS;
 const OBJECT_SET_ID_DOMAIN: &[u8] = b"blockzilla/dump/compact-v2-etag-set/v1\0";
 pub(crate) const LOCAL_OBJECT_SET: [&str; 19] = [
-    blockzilla_format::ARCHIVE_V2_BLOCKS_FILE,
-    blockzilla_format::ARCHIVE_V2_BLOCK_INDEX_FILE,
-    blockzilla_format::ARCHIVE_V2_META_FILE,
-    blockzilla_format::ARCHIVE_V2_PUBKEY_REGISTRY_FILE,
-    blockzilla_format::ARCHIVE_V2_SIGNATURES_FILE,
-    blockzilla_format::ARCHIVE_V2_GENESIS_BIN_FILE,
-    blockzilla_format::ARCHIVE_V2_BLOCKHASH_REGISTRY_FILE,
-    blockzilla_format::ARCHIVE_V2_BLOCKHASH_INDEX_V3_FILE,
-    blockzilla_format::ARCHIVE_V2_PREV_BLOCKHASH_TAIL_FILE,
-    blockzilla_format::ARCHIVE_V2_VOTE_HASH_REGISTRY_FILE,
-    blockzilla_format::ARCHIVE_V2_POH_FILE,
-    blockzilla_format::ARCHIVE_V2_SHREDDING_FILE,
-    blockzilla_format::ARCHIVE_V2_PUBKEY_REGISTRY_COUNTS_FILE,
-    blockzilla_format::ARCHIVE_V2_PUBKEY_REGISTRY_INDEX_FILE,
-    blockzilla_format::ARCHIVE_V2_FIRST_SEEN_REGISTRY_MANIFEST_FILE,
-    blockzilla_format::ARCHIVE_V2_PUBKEY_HOT_SEED_FILE,
-    blockzilla_format::ARCHIVE_V2_BLOCK_ACCESS_FILE,
-    blockzilla_format::ARCHIVE_V2_BLOCK_ACCESS_INDEX_FILE,
-    blockzilla_format::ARCHIVE_V2_GET_BLOCK_INDEX_FILE,
+    blockzilla_archive_v2::ARCHIVE_V2_BLOCKS_FILE,
+    blockzilla_archive_v2::ARCHIVE_V2_BLOCK_INDEX_FILE,
+    blockzilla_archive_v2::ARCHIVE_V2_META_FILE,
+    blockzilla_archive_v2::ARCHIVE_V2_PUBKEY_REGISTRY_FILE,
+    blockzilla_archive_v2::ARCHIVE_V2_SIGNATURES_FILE,
+    blockzilla_archive_v2::ARCHIVE_V2_GENESIS_BIN_FILE,
+    blockzilla_archive_v2::ARCHIVE_V2_BLOCKHASH_REGISTRY_FILE,
+    blockzilla_archive_v2::ARCHIVE_V2_BLOCKHASH_INDEX_V3_FILE,
+    blockzilla_archive_v2::ARCHIVE_V2_PREV_BLOCKHASH_TAIL_FILE,
+    blockzilla_archive_v2::ARCHIVE_V2_VOTE_HASH_REGISTRY_FILE,
+    blockzilla_archive_v2::ARCHIVE_V2_POH_FILE,
+    blockzilla_archive_v2::ARCHIVE_V2_SHREDDING_FILE,
+    blockzilla_archive_v2::ARCHIVE_V2_PUBKEY_REGISTRY_COUNTS_FILE,
+    blockzilla_archive_v2::ARCHIVE_V2_PUBKEY_REGISTRY_INDEX_FILE,
+    blockzilla_archive_v2::ARCHIVE_V2_FIRST_SEEN_REGISTRY_MANIFEST_FILE,
+    blockzilla_archive_v2::ARCHIVE_V2_PUBKEY_HOT_SEED_FILE,
+    blockzilla_archive_v2::ARCHIVE_V2_BLOCK_ACCESS_FILE,
+    blockzilla_archive_v2::ARCHIVE_V2_BLOCK_ACCESS_INDEX_FILE,
+    blockzilla_archive_v2::ARCHIVE_V2_GET_BLOCK_INDEX_FILE,
 ];
 static CACHE_TEMP_SEQUENCE: AtomicU64 = AtomicU64::new(0);
 
@@ -393,9 +390,9 @@ pub fn prepare_epoch(source_options: &SourceOptions, epoch: u64) -> Result<Prepa
         .with_context(|| format!("create object-set cache {}", cache_root.display()))?;
 
     for name in [
-        blockzilla_format::ARCHIVE_V2_BLOCK_INDEX_FILE,
-        blockzilla_format::ARCHIVE_V2_META_FILE,
-        blockzilla_format::ARCHIVE_V2_PUBKEY_REGISTRY_FILE,
+        blockzilla_archive_v2::ARCHIVE_V2_BLOCK_INDEX_FILE,
+        blockzilla_archive_v2::ARCHIVE_V2_META_FILE,
+        blockzilla_archive_v2::ARCHIVE_V2_PUBKEY_REGISTRY_FILE,
         ARCHIVE_V2_PUBKEY_REGISTRY_INDEX_FILE,
     ] {
         if let Some(binding) = objects.get(name) {
@@ -442,7 +439,7 @@ fn compact_v2_object_names(epoch: u64) -> Vec<&'static str> {
     names.extend(COMPACT_V2_REQUIRED_OBJECTS);
     names.extend(COMPACT_V2_OPTIONAL_OBJECTS);
     if epoch == 0 {
-        names.push(blockzilla_format::ARCHIVE_V2_GENESIS_BIN_FILE);
+        names.push(blockzilla_archive_v2::ARCHIVE_V2_GENESIS_BIN_FILE);
     }
     names
 }
@@ -551,7 +548,7 @@ fn source_descriptor_json(
 }
 
 fn resolve_local_epoch_root(root: &Path, epoch: u64) -> Result<PathBuf> {
-    let direct_index = root.join(blockzilla_format::ARCHIVE_V2_BLOCK_INDEX_FILE);
+    let direct_index = root.join(blockzilla_archive_v2::ARCHIVE_V2_BLOCK_INDEX_FILE);
     let candidate = if direct_index.is_file() {
         root.to_path_buf()
     } else {

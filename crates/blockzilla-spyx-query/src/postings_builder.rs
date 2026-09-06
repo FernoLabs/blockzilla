@@ -8,9 +8,8 @@ use std::{
 };
 
 use anyhow::{Context, Result, bail, ensure};
-use blockzilla_format::{
-    ARCHIVE_V2_DECODE_PREALLOCATION_LIMIT_BYTES, bounded_wincode_leb128_config,
-};
+use blockzilla_archive_v2::ARCHIVE_V2_DECODE_PREALLOCATION_LIMIT_BYTES;
+use blockzilla_primitives::bounded_wincode_leb128_config;
 use blockzilla_token_transaction_dump::{
     DUMP_SCHEMA_VERSION, DiscoveredAccountList, DumpSourceBinding,
     consolidated_posting_projection::{
@@ -2759,15 +2758,9 @@ mod tests {
     use std::{fs, sync::Arc};
 
     use axum::{body::to_bytes, http::Request};
-    use blockzilla_format::{
-        ARCHIVE_V2_TX_FLAG_HAS_ERROR, ARCHIVE_V2_TX_FLAG_HAS_INNER_IX,
-        ARCHIVE_V2_TX_FLAG_HAS_LOADED_ADDRESSES, ARCHIVE_V2_TX_FLAG_HAS_METADATA,
-        ARCHIVE_V2_TX_FLAG_MESSAGE_V0, ArchiveV2HotInstruction, ArchiveV2HotInstructionData,
-        ArchiveV2HotLegacyMessage, ArchiveV2HotMessagePayload, ArchiveV2HotV0Message,
-        CompactInnerInstruction, CompactInnerInstructions, CompactMessageHeader, CompactMetaV1,
-        CompactPubkey, CompactTransactionError, OwnedCompactAddressTableLookup,
-        OwnedCompactRecentBlockhash, WincodeLeb128FramedWriter, wincode_leb128_config,
-    };
+    use blockzilla_archive_v2::{ARCHIVE_V2_TX_FLAG_HAS_ERROR, ARCHIVE_V2_TX_FLAG_HAS_INNER_IX, ARCHIVE_V2_TX_FLAG_HAS_LOADED_ADDRESSES, ARCHIVE_V2_TX_FLAG_HAS_METADATA, ARCHIVE_V2_TX_FLAG_MESSAGE_V0, ArchiveV2HotInstruction, ArchiveV2HotInstructionData, ArchiveV2HotLegacyMessage, ArchiveV2HotMessagePayload, ArchiveV2HotV0Message};
+    use blockzilla_compact::{CompactInnerInstruction, CompactInnerInstructions, CompactMessageHeader, CompactMetaV1, CompactTransactionError, OwnedCompactAddressTableLookup, OwnedCompactRecentBlockhash};
+    use blockzilla_primitives::{CompactPubkey, WincodeLeb128FramedWriter, wincode_leb128_config};
     use blockzilla_token_transaction_dump::{
         ACCOUNTS_FILE, DUMP_MANIFEST_FILE, DumpArtifactKind, DumpManifest, DumpStreamKind,
         PUBKEY_REGISTRY_FILE, PUBKEY_REGISTRY_ID_BASE, SIGNATURES_FILE,

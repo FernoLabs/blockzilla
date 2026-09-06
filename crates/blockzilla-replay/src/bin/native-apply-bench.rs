@@ -20,7 +20,7 @@ use std::{
     time::{Duration, Instant},
 };
 
-use blockzilla_format::ArchiveV2SystemInstructionData;
+use blockzilla_archive_v2::ArchiveV2SystemInstructionData;
 use blockzilla_replay::{
     AccountMap, AccountSnapshot, LaunchAccountMeta, SYSTEM_PROGRAM_ID,
     apply_launch_system_instruction_for_epoch, apply_launch_system_instruction_for_epoch_in_place,

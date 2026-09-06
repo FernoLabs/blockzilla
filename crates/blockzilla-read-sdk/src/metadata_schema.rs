@@ -6,10 +6,8 @@
 //! decoder must not infer the grammar from an individual metadata record:
 //! records with `err == None` have the same bytes in both grammars.
 
-use blockzilla_format::{
-    CompactInnerInstructions, CompactLogStream, CompactMetaV1, CompactPubkey, CompactReturnData,
-    CompactReward, CompactTokenBalance, CompactTransactionError, wincode_leb128_config,
-};
+use blockzilla_compact::{CompactInnerInstructions, CompactLogStream, CompactMetaV1, CompactReturnData, CompactReward, CompactTokenBalance, CompactTransactionError};
+use blockzilla_primitives::{CompactPubkey, wincode_leb128_config};
 use sha2::{Digest as _, Sha256};
 use thiserror::Error;
 use wincode::{SchemaRead, SchemaWrite};
@@ -286,7 +284,7 @@ mod tests {
     use std::path::Path;
 
     use super::*;
-    use blockzilla_format::{CompactInstructionError, CompactTransactionError};
+    use blockzilla_compact::{CompactInstructionError, CompactTransactionError};
     use tempfile::TempDir;
 
     use crate::{

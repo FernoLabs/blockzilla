@@ -12,7 +12,6 @@ members = [
     "crates/blockzilla-dump",
     "crates/blockzilla-example-workloads",
     "crates/blockzilla-firebase-indexer",
-    "crates/blockzilla-format",
     "crates/blockzilla-primitives",
     "crates/blockzilla-registry",
     "crates/blockzilla-program-logs",

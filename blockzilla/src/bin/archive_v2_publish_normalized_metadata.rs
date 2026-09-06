@@ -11,9 +11,7 @@ use anyhow::{Context, Result, anyhow, bail, ensure};
 use archive_v2_source_authority_common::{
     AuthorityDisposition, SourceAuthorityInventory, looks_like_archive_or_control,
 };
-use blockzilla_format::{
-    ARCHIVE_V2_BLOCKHASH_REGISTRY_FILE, ARCHIVE_V2_POH_FILE, ARCHIVE_V2_VOTE_HASH_REGISTRY_FILE,
-};
+use blockzilla_archive_v2::{ARCHIVE_V2_BLOCKHASH_REGISTRY_FILE, ARCHIVE_V2_POH_FILE, ARCHIVE_V2_VOTE_HASH_REGISTRY_FILE};
 use blockzilla_read_sdk::{
     ARCHIVE_V2_PUBLICATION_LOCK_FILE, ArchiveReader, ArchiveV2MetadataSchemaCounts,
     ArchiveV2MetadataWireProfile, ArchiveV2WireProfile, CURRENT_TYPED_ERRORS_MARKER_BYTES,

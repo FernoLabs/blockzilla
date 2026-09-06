@@ -6,11 +6,12 @@
 //! builtin row (Compute Budget with a zero count) may lead the file.
 //!
 //! Skipped-slot map structure is validated by
-//! [`blockzilla_format::read_skipped_slot_map`], so this binary only adds the
+//! [`blockzilla_archive_v2::read_skipped_slot_map`], so this binary only adds the
 //! cross-file agreement between that map and `blockhash_registry.bin`.
 
 use anyhow::{Context, Result, bail, ensure};
-use blockzilla_format::{framed::read_u32_varint, read_skipped_slot_map};
+use blockzilla_archive_v2::read_skipped_slot_map;
+use blockzilla_primitives::framed::read_u32_varint;
 use clap::Parser;
 use serde::Serialize;
 use std::{

@@ -15,11 +15,7 @@ use std::{
     collections::{BTreeMap, BTreeSet, VecDeque},
 };
 
-use blockzilla_format::{
-    WincodeArchiveV2GenesisEpochSchedule, WincodeArchiveV2GenesisFeeParams,
-    WincodeArchiveV2GenesisInflationParams, WincodeArchiveV2GenesisPohParams,
-    WincodeArchiveV2GenesisRentParams,
-};
+use blockzilla_archive_v2::{WincodeArchiveV2GenesisEpochSchedule, WincodeArchiveV2GenesisFeeParams, WincodeArchiveV2GenesisInflationParams, WincodeArchiveV2GenesisPohParams, WincodeArchiveV2GenesisRentParams};
 use blockzilla_read_sdk::ArchiveV2WireProfile;
 use sha2::{Digest, Sha256};
 use thiserror::Error;

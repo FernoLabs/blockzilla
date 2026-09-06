@@ -6,12 +6,9 @@ use std::{
     time::{Duration, Instant},
 };
 
-use blockzilla_format::{
-    ARCHIVE_V2_BLOCKHASH_REGISTRY_FILE, ARCHIVE_V2_PREV_BLOCKHASH_TAIL_FILE,
-    ARCHIVE_V2_TX_FLAG_TX_RAW_FALLBACK, ARCHIVE_V2_VOTE_HASH_REGISTRY_FILE,
-    ArchiveV2HotInstruction, ArchiveV2HotMessagePayload, CompactMessageHeader, CompactPubkey,
-    OwnedCompactRecentBlockhash,
-};
+use blockzilla_archive_v2::{ARCHIVE_V2_BLOCKHASH_REGISTRY_FILE, ARCHIVE_V2_PREV_BLOCKHASH_TAIL_FILE, ARCHIVE_V2_TX_FLAG_TX_RAW_FALLBACK, ARCHIVE_V2_VOTE_HASH_REGISTRY_FILE, ArchiveV2HotInstruction, ArchiveV2HotMessagePayload};
+use blockzilla_compact::{CompactMessageHeader, OwnedCompactRecentBlockhash};
+use blockzilla_primitives::CompactPubkey;
 use serde::Serialize;
 use thiserror::Error;
 
@@ -601,14 +598,8 @@ mod tests {
 
     use super::*;
 
-    use blockzilla_format::{
-        ARCHIVE_V2_BLOCK_INDEX_FILE, ARCHIVE_V2_BLOCKS_FILE, ARCHIVE_V2_META_FILE,
-        ARCHIVE_V2_PUBKEY_REGISTRY_FILE, ARCHIVE_V2_SIGNATURES_FILE, ArchiveV2HotBlockBlob,
-        ArchiveV2HotBlockHeader, ArchiveV2HotBlockIndexRow, ArchiveV2HotInstructionData,
-        ArchiveV2HotLegacyMessage, ArchiveV2HotMetaRecord, WINCODE_ARCHIVE_V2_FLAG_LEB128,
-        WINCODE_ARCHIVE_V2_HOT_BLOCK_VERSION, WincodeArchiveV2Footer, WincodeArchiveV2Header,
-        wincode_leb128_config, write_archive_v2_hot_block_index, write_u32_varint,
-    };
+    use blockzilla_archive_v2::{ARCHIVE_V2_BLOCKS_FILE, ARCHIVE_V2_BLOCK_INDEX_FILE, ARCHIVE_V2_META_FILE, ARCHIVE_V2_PUBKEY_REGISTRY_FILE, ARCHIVE_V2_SIGNATURES_FILE, ArchiveV2HotBlockBlob, ArchiveV2HotBlockHeader, ArchiveV2HotBlockIndexRow, ArchiveV2HotInstructionData, ArchiveV2HotLegacyMessage, ArchiveV2HotMetaRecord, WINCODE_ARCHIVE_V2_FLAG_LEB128, WINCODE_ARCHIVE_V2_HOT_BLOCK_VERSION, WincodeArchiveV2Footer, WincodeArchiveV2Header, write_archive_v2_hot_block_index};
+    use blockzilla_primitives::{wincode_leb128_config, write_u32_varint};
     use ed25519_dalek::{Signer, SigningKey};
     use tempfile::TempDir;
 
@@ -697,7 +688,7 @@ mod tests {
                 rewards: None,
             },
             tx_count: 1,
-            tx_rows: vec![blockzilla_format::ArchiveV2HotTxRow {
+            tx_rows: vec![blockzilla_archive_v2::ArchiveV2HotTxRow {
                 tx_index: 0,
                 flags: 0,
                 message_offset: 0,

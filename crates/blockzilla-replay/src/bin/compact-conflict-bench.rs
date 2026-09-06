@@ -15,7 +15,8 @@ use std::{
 };
 
 use anyhow::{Context, Result, anyhow, ensure};
-use blockzilla_format::{ARCHIVE_V2_PUBKEY_REGISTRY_FILE, KeyIndex, KeyStore};
+use blockzilla_archive_v2::ARCHIVE_V2_PUBKEY_REGISTRY_FILE;
+use blockzilla_registry::{KeyIndex, KeyStore};
 use blockzilla_read_sdk::{ArchiveReader, HashVerification, LocalRangeSource, OpenOptions};
 use blockzilla_replay::{
     BPF_LOADER_PROGRAM_ID, CONFIG_PROGRAM_ID, CompactArchivedTransactionOutcome,

@@ -16,6 +16,11 @@ default = []
 http = ["dep:blockzilla-source-http", "dep:blockzilla-source-cache", "dep:url"]
 
 [dependencies]
+blockzilla-archive-v2 = { path = "../../crates/blockzilla-archive-v2", default-features = false }
+blockzilla-compact = { path = "../../crates/blockzilla-compact", default-features = false }
+blockzilla-primitives = { path = "../../crates/blockzilla-primitives", default-features = false }
+blockzilla-program-logs = { path = "../../crates/blockzilla-program-logs", default-features = false }
+blockzilla-registry = { path = "../../crates/blockzilla-registry", default-features = false }
 blockzilla-replay-format = { path = "../blockzilla-replay-format" }
 url = { version = "2.5.8", optional = true }
 blockzilla-source = { version = "0.2.0", path = "../source/blockzilla-source" }
@@ -23,7 +28,6 @@ blockzilla-source-local = { version = "0.2.0", path = "../source/blockzilla-sour
 blockzilla-source-http = { version = "0.2.0", path = "../source/blockzilla-source-http", optional = true }
 blockzilla-source-cache = { version = "0.2.0", path = "../source/blockzilla-source-cache", optional = true }
 anyhow = "1.0.100"
-blockzilla-format = { version = "0.2.0", path = "../blockzilla-format" }
 blockzilla-index-archive-format = { version = "0.2.0", path = "../blockzilla-index-archive-format" }
 blockzilla-query-sdk = { version = "0.2.0", path = "../blockzilla-query-sdk" }
 rayon = "1.11.0"

@@ -13,7 +13,7 @@ use blockzilla_dex_parser::{
     PARSER_IMPLEMENTATION_FINGERPRINT, PARSER_SEMANTIC_VERSION, PROGRAM_SPECS, Program,
     ProgramRole,
 };
-use blockzilla_format::ARCHIVE_V2_TX_FLAG_HAS_ERROR;
+use blockzilla_archive_v2::ARCHIVE_V2_TX_FLAG_HAS_ERROR;
 use blockzilla_read_sdk::{
     ArchiveV2MetadataProjectionLimits, BorrowedArchiveV2InnerTokenInstruction,
     LogPayloadValidation, MAX_MESSAGE_ACCOUNTS,

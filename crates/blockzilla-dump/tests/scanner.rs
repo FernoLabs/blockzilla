@@ -16,19 +16,10 @@ use blockzilla_dump::{
     DumpDatabase, DumpKind, DumpState, OnIndeterminate,
     scan::{DumpRunConfig, SourceOptions, prepare_epoch, run_dump},
 };
-use blockzilla_format::{
-    ARCHIVE_V2_BLOCK_INDEX_FILE, ARCHIVE_V2_BLOCKS_FILE, ARCHIVE_V2_META_FILE,
-    ARCHIVE_V2_PUBKEY_REGISTRY_FILE, ARCHIVE_V2_PUBKEY_REGISTRY_INDEX_FILE,
-    ARCHIVE_V2_SIGNATURES_FILE, ARCHIVE_V2_TX_FLAG_HAS_INNER_IX, ARCHIVE_V2_TX_FLAG_HAS_METADATA,
-    ARCHIVE_V2_TX_FLAG_HAS_TOKEN_BALANCES, ARCHIVE_V2_TX_FLAG_METADATA_RAW_FALLBACK,
-    ArchiveV2HotBlockBlob, ArchiveV2HotBlockHeader, ArchiveV2HotBlockIndexRow,
-    ArchiveV2HotInstruction, ArchiveV2HotInstructionData, ArchiveV2HotLegacyMessage,
-    ArchiveV2HotMessagePayload, ArchiveV2HotMetaRecord, ArchiveV2HotTxRow, CompactInnerInstruction,
-    CompactInnerInstructions, CompactMessageHeader, CompactMetaV1, CompactPubkey,
-    CompactTokenBalance, KeyIndex, OwnedCompactRecentBlockhash, WINCODE_ARCHIVE_V2_FLAG_LEB128,
-    WINCODE_ARCHIVE_V2_HOT_BLOCK_VERSION, WincodeArchiveV2Footer, WincodeArchiveV2Header,
-    wincode_leb128_config, write_archive_v2_hot_block_index, write_registry,
-};
+use blockzilla_archive_v2::{ARCHIVE_V2_BLOCKS_FILE, ARCHIVE_V2_BLOCK_INDEX_FILE, ARCHIVE_V2_META_FILE, ARCHIVE_V2_PUBKEY_REGISTRY_FILE, ARCHIVE_V2_PUBKEY_REGISTRY_INDEX_FILE, ARCHIVE_V2_SIGNATURES_FILE, ARCHIVE_V2_TX_FLAG_HAS_INNER_IX, ARCHIVE_V2_TX_FLAG_HAS_METADATA, ARCHIVE_V2_TX_FLAG_HAS_TOKEN_BALANCES, ARCHIVE_V2_TX_FLAG_METADATA_RAW_FALLBACK, ArchiveV2HotBlockBlob, ArchiveV2HotBlockHeader, ArchiveV2HotBlockIndexRow, ArchiveV2HotInstruction, ArchiveV2HotInstructionData, ArchiveV2HotLegacyMessage, ArchiveV2HotMessagePayload, ArchiveV2HotMetaRecord, ArchiveV2HotTxRow, WINCODE_ARCHIVE_V2_FLAG_LEB128, WINCODE_ARCHIVE_V2_HOT_BLOCK_VERSION, WincodeArchiveV2Footer, WincodeArchiveV2Header, write_archive_v2_hot_block_index};
+use blockzilla_compact::{CompactInnerInstruction, CompactInnerInstructions, CompactMessageHeader, CompactMetaV1, CompactTokenBalance, OwnedCompactRecentBlockhash};
+use blockzilla_primitives::{CompactPubkey, wincode_leb128_config};
+use blockzilla_registry::{KeyIndex, write_registry};
 use blockzilla_compact_v2_reader::{
     COMPACT_V2_CURRENT_MESSAGE_SCHEMA_MARKER_BYTES, COMPACT_V2_CURRENT_MESSAGE_SCHEMA_MARKER_FILE,
     manifest::{

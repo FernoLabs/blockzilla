@@ -20,16 +20,8 @@ use std::{
 
 use anyhow::{Context, Result, bail, ensure};
 use blockzilla_firebase_indexer::decode::{self, MAX_MESSAGE_ACCOUNTS, MetadataDecodeLimits};
-use blockzilla_format::{
-    ARCHIVE_V2_BLOCK_INDEX_FILE, ARCHIVE_V2_BLOCKHASH_REGISTRY_FILE, ARCHIVE_V2_BLOCKS_FILE,
-    ARCHIVE_V2_GENESIS_BIN_FILE, ARCHIVE_V2_META_FILE, ARCHIVE_V2_POH_FILE,
-    ARCHIVE_V2_PREV_BLOCKHASH_TAIL_FILE, ARCHIVE_V2_PUBKEY_REGISTRY_FILE,
-    ARCHIVE_V2_SIGNATURES_FILE, ARCHIVE_V2_TX_FLAG_HAS_ERROR, ARCHIVE_V2_TX_FLAG_HAS_INNER_IX,
-    ARCHIVE_V2_TX_FLAG_HAS_LOADED_ADDRESSES, ARCHIVE_V2_TX_FLAG_HAS_METADATA,
-    ARCHIVE_V2_TX_FLAG_MESSAGE_V0, ARCHIVE_V2_TX_FLAG_METADATA_RAW_FALLBACK,
-    ARCHIVE_V2_TX_FLAG_TX_RAW_FALLBACK, ArchiveV2HotBlockIndexRow, ArchiveV2HotTxRow,
-    CompactPubkey,
-};
+use blockzilla_archive_v2::{ARCHIVE_V2_BLOCKHASH_REGISTRY_FILE, ARCHIVE_V2_BLOCKS_FILE, ARCHIVE_V2_BLOCK_INDEX_FILE, ARCHIVE_V2_GENESIS_BIN_FILE, ARCHIVE_V2_META_FILE, ARCHIVE_V2_POH_FILE, ARCHIVE_V2_PREV_BLOCKHASH_TAIL_FILE, ARCHIVE_V2_PUBKEY_REGISTRY_FILE, ARCHIVE_V2_SIGNATURES_FILE, ARCHIVE_V2_TX_FLAG_HAS_ERROR, ARCHIVE_V2_TX_FLAG_HAS_INNER_IX, ARCHIVE_V2_TX_FLAG_HAS_LOADED_ADDRESSES, ARCHIVE_V2_TX_FLAG_HAS_METADATA, ARCHIVE_V2_TX_FLAG_MESSAGE_V0, ARCHIVE_V2_TX_FLAG_METADATA_RAW_FALLBACK, ARCHIVE_V2_TX_FLAG_TX_RAW_FALLBACK, ArchiveV2HotBlockIndexRow, ArchiveV2HotTxRow};
+use blockzilla_primitives::CompactPubkey;
 use blockzilla_compact_v2_reader::archive_integrity::{
     ArchiveIntegrityConfig, ArchiveIntegrityReport, PohProtocolBounds, PohSidecarSchema,
     verify_archive_v2_integrity,
@@ -7849,20 +7841,9 @@ fn read_u64(cursor: &mut &[u8]) -> Result<u64> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use blockzilla_format::{
-        ARCHIVE_V2_BLOCK_INDEX_FILE, ARCHIVE_V2_BLOCKHASH_INDEX_V3_FILE, ARCHIVE_V2_META_FILE,
-        ARCHIVE_V2_POH_FILE, ARCHIVE_V2_PUBKEY_REGISTRY_FILE,
-        ArchiveV2ComputeBudgetInstructionData, ArchiveV2HotBlockBlob, ArchiveV2HotBlockHeader,
-        ArchiveV2HotInstruction, ArchiveV2HotInstructionData, ArchiveV2HotLegacyMessage,
-        ArchiveV2HotMessagePayload, ArchiveV2HotMetaRecord, ArchiveV2HotRewards,
-        ArchiveV2HotV0Message, ArchiveV2HotV1Message, CompactInnerInstruction,
-        CompactInnerInstructions, CompactLogStream, CompactMessageHeader, CompactMetaV1,
-        CompactReturnData, CompactReward, CompactTokenBalance, CompactTransactionConfig,
-        CompactTransactionError, DataTable, LogEvent, OwnedCompactAddressTableLookup,
-        OwnedCompactRecentBlockhash, StringTable, WINCODE_ARCHIVE_V2_FLAG_LEB128,
-        WINCODE_ARCHIVE_V2_HOT_BLOCK_VERSION, WincodeArchiveV2Footer, WincodeArchiveV2Header,
-        WincodeLeb128Config, wincode_leb128_config, write_archive_v2_hot_block_index,
-    };
+    use blockzilla_archive_v2::{ARCHIVE_V2_BLOCKHASH_INDEX_V3_FILE, ARCHIVE_V2_BLOCK_INDEX_FILE, ARCHIVE_V2_META_FILE, ARCHIVE_V2_POH_FILE, ARCHIVE_V2_PUBKEY_REGISTRY_FILE, ArchiveV2ComputeBudgetInstructionData, ArchiveV2HotBlockBlob, ArchiveV2HotBlockHeader, ArchiveV2HotInstruction, ArchiveV2HotInstructionData, ArchiveV2HotLegacyMessage, ArchiveV2HotMessagePayload, ArchiveV2HotMetaRecord, ArchiveV2HotRewards, ArchiveV2HotV0Message, ArchiveV2HotV1Message, WINCODE_ARCHIVE_V2_FLAG_LEB128, WINCODE_ARCHIVE_V2_HOT_BLOCK_VERSION, WincodeArchiveV2Footer, WincodeArchiveV2Header, write_archive_v2_hot_block_index};
+    use blockzilla_compact::{CompactInnerInstruction, CompactInnerInstructions, CompactLogStream, CompactMessageHeader, CompactMetaV1, CompactReturnData, CompactReward, CompactTokenBalance, CompactTransactionConfig, CompactTransactionError, DataTable, LogEvent, OwnedCompactAddressTableLookup, OwnedCompactRecentBlockhash};
+    use blockzilla_primitives::{StringTable, WincodeLeb128Config, wincode_leb128_config};
     use smallvec::SmallVec;
     use wincode::SchemaWrite;
 

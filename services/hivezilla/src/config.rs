@@ -1,6 +1,6 @@
 use std::path::PathBuf;
 
-use blockzilla_format::LiveArchiveSource;
+use blockzilla_live_format::LiveArchiveSource;
 use clap::{Args, ValueEnum};
 use serde::{Deserialize, Serialize};
 

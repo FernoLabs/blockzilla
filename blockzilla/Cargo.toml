@@ -11,7 +11,11 @@ default-run = "blockzilla"
 
 [features]
 default = ["known-program-logs"]
-known-program-logs = ["blockzilla-format/known-program-logs"]
+known-program-logs = [
+    "blockzilla-program-logs/known-program-logs",
+    "blockzilla-compact/known-program-logs",
+    "blockzilla-archive-v2/known-program-logs",
+]
 # Opt-in binaries for archive investigation and fixture extraction.
 diagnostic-tools = []
 # Opt-in experimental performance probes; these are not stable user commands.
@@ -120,11 +124,16 @@ name = "validate-ordered-compact-observer"
 path = "src/bin/validate_ordered_compact_observer.rs"
 
 [dependencies]
+blockzilla-archive-v2 = { path = "../crates/blockzilla-archive-v2", default-features = false }
+blockzilla-compact = { path = "../crates/blockzilla-compact", default-features = false }
+blockzilla-live-format = { path = "../crates/blockzilla-live-format", default-features = false }
+blockzilla-primitives = { path = "../crates/blockzilla-primitives", default-features = false }
+blockzilla-program-logs = { path = "../crates/blockzilla-program-logs", default-features = false }
+blockzilla-registry = { path = "../crates/blockzilla-registry", default-features = false }
 bincode = "1.3.3"
 clap = { version = "4.6.1", features = ["derive", "env"] }
 tracing = "0.1.44"
 tracing-subscriber = "0.3.23"
-blockzilla-format = { path = "../crates/blockzilla-format" }
 blockzilla-read-sdk = { package = "blockzilla-read-sdk-legacy", path = "../crates/blockzilla-read-sdk-legacy" }
 blockzilla-archive-gateway = { path = "../services/blockzilla-archive-gateway", optional = true }
 blockzilla-token-transaction-dump = { path = "../crates/blockzilla-token-transaction-dump", optional = true }

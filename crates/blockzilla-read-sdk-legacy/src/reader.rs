@@ -11,24 +11,9 @@ use std::{
     time::{Duration, Instant},
 };
 
-use blockzilla_format::{
-    ARCHIVE_V2_DECODE_PREALLOCATION_LIMIT_BYTES, ARCHIVE_V2_HOT_INDEX_FLAG_DICTIONARY,
-    ARCHIVE_V2_HOT_INDEX_FLAG_RAW_BLOCKS, ARCHIVE_V2_HOT_INDEX_HEADER_LEN,
-    ARCHIVE_V2_HOT_INDEX_MAGIC, ARCHIVE_V2_HOT_INDEX_ROW_LEN, ARCHIVE_V2_HOT_INDEX_VERSION,
-    ARCHIVE_V2_TX_FLAG_HAS_LOADED_ADDRESSES, ARCHIVE_V2_TX_FLAG_HAS_METADATA,
-    ARCHIVE_V2_TX_FLAG_MESSAGE_V0, ARCHIVE_V2_TX_FLAG_METADATA_RAW_FALLBACK,
-    ARCHIVE_V2_TX_FLAG_TX_RAW_FALLBACK, ArchiveV2HotBlockBlob, ArchiveV2HotBlockHeader,
-    ArchiveV2HotBlockIndex, ArchiveV2HotBlockIndexRow, ArchiveV2HotMessagePayload,
-    ArchiveV2HotMetaRecord, ArchiveV2HotTxRow, ArchiveV2HotTxRowIter,
-    BorrowedArchiveV2HotBlockBlob, BorrowedArchiveV2HotBlockBlobWithoutRewards, CompactMetaV1,
-    CompactPubkey, WINCODE_ARCHIVE_V2_FLAG_ALL_PUBKEY_REF_COUNTS,
-    WINCODE_ARCHIVE_V2_FLAG_FIRST_SEEN_REGISTRY, WINCODE_ARCHIVE_V2_FLAG_LEB128,
-    WINCODE_ARCHIVE_V2_FLAG_NO_REGISTRY, WINCODE_ARCHIVE_V2_HOT_BLOCK_VERSION,
-    WincodeArchiveV2Footer, WincodeArchiveV2Genesis, bounded_wincode_leb128_config,
-    canonicalize_archive_v2_metadata_owned, deserialize_archive_v2_hot_block_blob,
-    deserialize_archive_v2_hot_block_blob_borrowed_current,
-    deserialize_archive_v2_hot_block_blob_borrowed_current_without_rewards,
-};
+use blockzilla_archive_v2::{ARCHIVE_V2_DECODE_PREALLOCATION_LIMIT_BYTES, ARCHIVE_V2_HOT_INDEX_FLAG_DICTIONARY, ARCHIVE_V2_HOT_INDEX_FLAG_RAW_BLOCKS, ARCHIVE_V2_HOT_INDEX_HEADER_LEN, ARCHIVE_V2_HOT_INDEX_MAGIC, ARCHIVE_V2_HOT_INDEX_ROW_LEN, ARCHIVE_V2_HOT_INDEX_VERSION, ARCHIVE_V2_TX_FLAG_HAS_LOADED_ADDRESSES, ARCHIVE_V2_TX_FLAG_HAS_METADATA, ARCHIVE_V2_TX_FLAG_MESSAGE_V0, ARCHIVE_V2_TX_FLAG_METADATA_RAW_FALLBACK, ARCHIVE_V2_TX_FLAG_TX_RAW_FALLBACK, ArchiveV2HotBlockBlob, ArchiveV2HotBlockHeader, ArchiveV2HotBlockIndex, ArchiveV2HotBlockIndexRow, ArchiveV2HotMessagePayload, ArchiveV2HotMetaRecord, ArchiveV2HotTxRow, ArchiveV2HotTxRowIter, BorrowedArchiveV2HotBlockBlob, BorrowedArchiveV2HotBlockBlobWithoutRewards, WINCODE_ARCHIVE_V2_FLAG_ALL_PUBKEY_REF_COUNTS, WINCODE_ARCHIVE_V2_FLAG_FIRST_SEEN_REGISTRY, WINCODE_ARCHIVE_V2_FLAG_LEB128, WINCODE_ARCHIVE_V2_FLAG_NO_REGISTRY, WINCODE_ARCHIVE_V2_HOT_BLOCK_VERSION, WincodeArchiveV2Footer, WincodeArchiveV2Genesis, canonicalize_archive_v2_metadata_owned, deserialize_archive_v2_hot_block_blob, deserialize_archive_v2_hot_block_blob_borrowed_current, deserialize_archive_v2_hot_block_blob_borrowed_current_without_rewards};
+use blockzilla_compact::CompactMetaV1;
+use blockzilla_primitives::{CompactPubkey, bounded_wincode_leb128_config};
 use rayon::prelude::*;
 use sha2::{Digest, Sha256};
 
@@ -4413,15 +4398,9 @@ mod tests {
         sync::{Arc, Barrier, Mutex},
     };
 
-    use blockzilla_format::{
-        ARCHIVE_V2_TX_FLAG_HAS_LOADED_ADDRESSES, ARCHIVE_V2_TX_FLAG_HAS_METADATA,
-        ARCHIVE_V2_TX_FLAG_MESSAGE_V0, ArchiveV2ComputeBudgetInstructionData,
-        ArchiveV2HotBlockHeader, ArchiveV2HotInstructionData, ArchiveV2HotLegacyMessage,
-        ArchiveV2HotRewards, ArchiveV2HotV0Message, ArchiveV2SystemInstructionData,
-        CompactMessageHeader, CompactReward, CompactShredding, CompactTransactionError,
-        OwnedCompactRecentBlockhash, WincodeArchiveV2Header, wincode_leb128_config,
-        write_archive_v2_hot_block_index,
-    };
+    use blockzilla_archive_v2::{ARCHIVE_V2_TX_FLAG_HAS_LOADED_ADDRESSES, ARCHIVE_V2_TX_FLAG_HAS_METADATA, ARCHIVE_V2_TX_FLAG_MESSAGE_V0, ArchiveV2ComputeBudgetInstructionData, ArchiveV2HotBlockHeader, ArchiveV2HotInstructionData, ArchiveV2HotLegacyMessage, ArchiveV2HotRewards, ArchiveV2HotV0Message, ArchiveV2SystemInstructionData, WincodeArchiveV2Header, write_archive_v2_hot_block_index};
+    use blockzilla_compact::{CompactMessageHeader, CompactReward, CompactShredding, CompactTransactionError, OwnedCompactRecentBlockhash};
+    use blockzilla_primitives::wincode_leb128_config;
     use tempfile::TempDir;
 
     use super::*;
@@ -6979,25 +6958,25 @@ mod tests {
             creation_time_unix: 0,
             cluster_id: 0,
             ticks_per_slot: 64,
-            poh_params: blockzilla_format::WincodeArchiveV2GenesisPohParams {
+            poh_params: blockzilla_archive_v2::WincodeArchiveV2GenesisPohParams {
                 tick_duration_secs: 0,
                 tick_duration_nanos: 400_000_000,
                 tick_count: None,
                 hashes_per_tick: Some(12_500),
             },
-            fees: blockzilla_format::WincodeArchiveV2GenesisFeeParams {
+            fees: blockzilla_archive_v2::WincodeArchiveV2GenesisFeeParams {
                 target_lamports_per_sig: 10_000,
                 target_sigs_per_slot: 20_000,
                 min_lamports_per_sig: 5_000,
                 max_lamports_per_sig: 100_000,
                 burn_percent: 100,
             },
-            rent: blockzilla_format::WincodeArchiveV2GenesisRentParams {
+            rent: blockzilla_archive_v2::WincodeArchiveV2GenesisRentParams {
                 lamports_per_byte_year: 3_480,
                 exemption_threshold: 2.0,
                 burn_percent: 100,
             },
-            inflation: blockzilla_format::WincodeArchiveV2GenesisInflationParams {
+            inflation: blockzilla_archive_v2::WincodeArchiveV2GenesisInflationParams {
                 initial: 0.0,
                 terminal: 0.0,
                 taper: 0.0,
@@ -7005,7 +6984,7 @@ mod tests {
                 foundation_term: 0.0,
                 padding: 0.0f64.to_le_bytes(),
             },
-            epoch_schedule: blockzilla_format::WincodeArchiveV2GenesisEpochSchedule {
+            epoch_schedule: blockzilla_archive_v2::WincodeArchiveV2GenesisEpochSchedule {
                 slots_per_epoch: 432_000,
                 leader_schedule_slot_offset: 432_000,
                 warmup: false,
@@ -7060,25 +7039,25 @@ mod tests {
             creation_time_unix: 1,
             cluster_id: 2,
             ticks_per_slot: 64,
-            poh_params: blockzilla_format::WincodeArchiveV2GenesisPohParams {
+            poh_params: blockzilla_archive_v2::WincodeArchiveV2GenesisPohParams {
                 tick_duration_secs: 0,
                 tick_duration_nanos: 400_000_000,
                 tick_count: None,
                 hashes_per_tick: Some(12_500),
             },
-            fees: blockzilla_format::WincodeArchiveV2GenesisFeeParams {
+            fees: blockzilla_archive_v2::WincodeArchiveV2GenesisFeeParams {
                 target_lamports_per_sig: 10_000,
                 target_sigs_per_slot: 20_000,
                 min_lamports_per_sig: 5_000,
                 max_lamports_per_sig: 100_000,
                 burn_percent: 100,
             },
-            rent: blockzilla_format::WincodeArchiveV2GenesisRentParams {
+            rent: blockzilla_archive_v2::WincodeArchiveV2GenesisRentParams {
                 lamports_per_byte_year: 3_480,
                 exemption_threshold: 2.0,
                 burn_percent: 100,
             },
-            inflation: blockzilla_format::WincodeArchiveV2GenesisInflationParams {
+            inflation: blockzilla_archive_v2::WincodeArchiveV2GenesisInflationParams {
                 initial: 0.0,
                 terminal: 0.0,
                 taper: 0.0,
@@ -7086,7 +7065,7 @@ mod tests {
                 foundation_term: 0.0,
                 padding: [0; 8],
             },
-            epoch_schedule: blockzilla_format::WincodeArchiveV2GenesisEpochSchedule {
+            epoch_schedule: blockzilla_archive_v2::WincodeArchiveV2GenesisEpochSchedule {
                 slots_per_epoch: 432_000,
                 leader_schedule_slot_offset: 432_000,
                 warmup: false,

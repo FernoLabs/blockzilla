@@ -607,9 +607,14 @@ dependencies = [
  "base64 0.22.1",
  "bincode",
  "blockzilla-archive-gateway",
- "blockzilla-format",
+ "blockzilla-archive-v2",
+ "blockzilla-compact",
+ "blockzilla-live-format",
  "blockzilla-log-parser",
+ "blockzilla-primitives",
+ "blockzilla-program-logs",
  "blockzilla-read-sdk-legacy",
+ "blockzilla-registry",
  "blockzilla-token-transaction-dump",
  "bs58",
  "clap 4.6.5",
@@ -648,8 +653,11 @@ dependencies = [
  "anyhow",
  "async-stream",
  "axum",
- "blockzilla-format",
+ "blockzilla-archive-v2",
+ "blockzilla-compact",
+ "blockzilla-primitives",
  "blockzilla-read-sdk-legacy",
+ "blockzilla-registry",
  "bytes",
  "clap 4.6.5",
  "futures-core",
@@ -721,9 +729,13 @@ name = "blockzilla-compact-v2-reader"
 version = "0.2.0"
 dependencies = [
  "anyhow",
- "blockzilla-format",
+ "blockzilla-archive-v2",
+ "blockzilla-compact",
  "blockzilla-index-archive-format",
+ "blockzilla-primitives",
+ "blockzilla-program-logs",
  "blockzilla-query-sdk",
+ "blockzilla-registry",
  "blockzilla-replay-format",
  "blockzilla-source",
  "blockzilla-source-cache",
@@ -752,9 +764,12 @@ name = "blockzilla-dump"
 version = "0.2.0"
 dependencies = [
  "anyhow",
+ "blockzilla-archive-v2",
+ "blockzilla-compact",
  "blockzilla-compact-v2-reader",
- "blockzilla-format",
+ "blockzilla-primitives",
  "blockzilla-query-sdk",
+ "blockzilla-registry",
  "blockzilla-replay-format",
  "blockzilla-user-program-index",
  "bs58",
@@ -785,11 +800,15 @@ name = "blockzilla-firebase-indexer"
 version = "0.2.0"
 dependencies = [
  "anyhow",
+ "blockzilla-archive-v2",
+ "blockzilla-compact",
  "blockzilla-compact-v2-reader",
- "blockzilla-format",
  "blockzilla-index-archive-format",
+ "blockzilla-primitives",
+ "blockzilla-program-logs",
  "blockzilla-query-sdk",
  "blockzilla-read-sdk-legacy",
+ "blockzilla-registry",
  "blockzilla-user-program-index",
  "bs58",
  "clap 4.6.5",
@@ -812,24 +831,16 @@ dependencies = [
 ]
 
 [[package]]
-name = "blockzilla-format"
-version = "0.2.0"
-dependencies = [
- "blockzilla-archive-v2",
- "blockzilla-compact",
- "blockzilla-live-format",
- "blockzilla-primitives",
- "blockzilla-program-logs",
- "blockzilla-registry",
-]
-
-[[package]]
 name = "blockzilla-get-block"
 version = "0.2.0"
 dependencies = [
  "anyhow",
  "base64 0.22.1",
- "blockzilla-format",
+ "blockzilla-archive-v2",
+ "blockzilla-compact",
+ "blockzilla-primitives",
+ "blockzilla-program-logs",
+ "blockzilla-registry",
  "bs58",
  "clap 4.6.5",
  "five8",
@@ -857,9 +868,13 @@ name = "blockzilla-index-archive-convert"
 version = "0.2.0"
 dependencies = [
  "anyhow",
+ "blockzilla-archive-v2",
+ "blockzilla-compact",
  "blockzilla-compact-v2-reader",
- "blockzilla-format",
  "blockzilla-index-archive-format",
+ "blockzilla-primitives",
+ "blockzilla-program-logs",
+ "blockzilla-registry",
  "serde",
  "serde_json",
  "sha2 0.11.0",
@@ -885,9 +900,10 @@ name = "blockzilla-index-archive-measure"
 version = "0.2.0"
 dependencies = [
  "anyhow",
+ "blockzilla-archive-v2",
  "blockzilla-compact-v2-reader",
- "blockzilla-format",
  "blockzilla-index-archive-format",
+ "blockzilla-primitives",
  "of-car-reader 0.2.0",
  "serde",
  "serde_json",
@@ -1018,7 +1034,11 @@ dependencies = [
 name = "blockzilla-read-sdk-legacy"
 version = "0.2.0"
 dependencies = [
- "blockzilla-format",
+ "blockzilla-archive-v2",
+ "blockzilla-compact",
+ "blockzilla-primitives",
+ "blockzilla-program-logs",
+ "blockzilla-registry",
  "rayon",
  "reqwest 0.13.4",
  "rustix",
@@ -1068,8 +1088,11 @@ version = "0.2.0"
 dependencies = [
  "anyhow",
  "base64 0.22.1",
- "blockzilla-format",
+ "blockzilla-archive-v2",
+ "blockzilla-compact",
+ "blockzilla-primitives",
  "blockzilla-read-sdk-legacy",
+ "blockzilla-registry",
  "bs58",
  "bzip2 0.5.2",
  "clap 4.6.5",
@@ -1153,8 +1176,10 @@ dependencies = [
  "anyhow",
  "axum",
  "base64 0.22.1",
+ "blockzilla-archive-v2",
+ "blockzilla-compact",
  "blockzilla-dex-parser",
- "blockzilla-format",
+ "blockzilla-primitives",
  "blockzilla-read-sdk-legacy",
  "blockzilla-token-balance-audit",
  "blockzilla-token-transaction-dump",
@@ -1183,7 +1208,10 @@ version = "0.2.0"
 dependencies = [
  "anyhow",
  "axum",
- "blockzilla-format",
+ "blockzilla-archive-v2",
+ "blockzilla-compact",
+ "blockzilla-primitives",
+ "blockzilla-registry",
  "bs58",
  "clap 4.6.5",
  "serde",
@@ -1209,9 +1237,13 @@ name = "blockzilla-token-transaction-dump"
 version = "0.2.0"
 dependencies = [
  "anyhow",
+ "blockzilla-archive-v2",
+ "blockzilla-compact",
  "blockzilla-dex-parser",
- "blockzilla-format",
+ "blockzilla-primitives",
+ "blockzilla-program-logs",
  "blockzilla-read-sdk-legacy",
+ "blockzilla-registry",
  "blockzilla-token-balance-audit",
  "bs58",
  "clap 4.6.5",
@@ -1231,8 +1263,12 @@ name = "blockzilla-user-program-index"
 version = "0.2.0"
 dependencies = [
  "anyhow",
+ "blockzilla-archive-v2",
+ "blockzilla-compact",
  "blockzilla-compact-v2-reader",
- "blockzilla-format",
+ "blockzilla-primitives",
+ "blockzilla-program-logs",
+ "blockzilla-registry",
  "bs58",
  "rustix",
  "serde",
@@ -3005,7 +3041,11 @@ dependencies = [
  "anyhow",
  "axum",
  "base64 0.22.1",
- "blockzilla-format",
+ "blockzilla-archive-v2",
+ "blockzilla-compact",
+ "blockzilla-live-format",
+ "blockzilla-primitives",
+ "blockzilla-registry",
  "blockzilla-shred-codec",
  "clap 4.6.5",
  "ed25519-dalek 3.0.0",

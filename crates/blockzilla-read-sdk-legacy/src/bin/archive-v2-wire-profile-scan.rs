@@ -17,7 +17,8 @@ use std::{
     time::{Instant, SystemTime, UNIX_EPOCH},
 };
 
-use blockzilla_format::{ARCHIVE_V2_TX_FLAG_TX_RAW_FALLBACK, CompactPubkey};
+use blockzilla_archive_v2::ARCHIVE_V2_TX_FLAG_TX_RAW_FALLBACK;
+use blockzilla_primitives::CompactPubkey;
 use blockzilla_read_sdk_legacy::{
     ArchiveReader, ArchiveV2InstructionProgramSemantics, ArchiveV2MessageProjector,
     ArchiveV2MetadataWireProfile, ArchiveV2WireProfile, BorrowedDecodedBlock, CompiledPubkeyFilter,
@@ -1080,12 +1081,8 @@ fn usage() -> &'static str {
 mod tests {
     use std::fs;
 
-    use blockzilla_format::{
-        ArchiveV2HotBlockBlob, ArchiveV2HotBlockHeader, ArchiveV2HotBlockIndexRow,
-        ArchiveV2HotMetaRecord, ArchiveV2HotTxRow, WINCODE_ARCHIVE_V2_FLAG_LEB128,
-        WINCODE_ARCHIVE_V2_HOT_BLOCK_VERSION, WincodeArchiveV2Footer, WincodeArchiveV2Header,
-        wincode_leb128_config, write_archive_v2_hot_block_index,
-    };
+    use blockzilla_archive_v2::{ArchiveV2HotBlockBlob, ArchiveV2HotBlockHeader, ArchiveV2HotBlockIndexRow, ArchiveV2HotMetaRecord, ArchiveV2HotTxRow, WINCODE_ARCHIVE_V2_FLAG_LEB128, WINCODE_ARCHIVE_V2_HOT_BLOCK_VERSION, WincodeArchiveV2Footer, WincodeArchiveV2Header, write_archive_v2_hot_block_index};
+    use blockzilla_primitives::wincode_leb128_config;
     use blockzilla_read_sdk_legacy::manifest::{BLOCK_INDEX_FILE, BLOCKS_FILE, META_FILE, REGISTRY_FILE};
     use tempfile::TempDir;
 

@@ -1,16 +1,8 @@
 use anyhow::{Context, Result, anyhow};
-use blockzilla_format::{
-    ARCHIVE_V2_HOT_INDEX_FLAG_DICTIONARY, ARCHIVE_V2_HOT_INDEX_FLAG_RAW_BLOCKS,
-    ARCHIVE_V2_PUBKEY_REGISTRY_FILE, ARCHIVE_V2_RAW_BLOCKS_FILE, ARCHIVE_V2_RAW_BLOCKS_ZSTD_FILE,
-    ARCHIVE_V2_SIGNATURES_FILE, ARCHIVE_V2_TX_FLAG_HAS_ERROR, ARCHIVE_V2_TX_FLAG_HAS_INNER_IX,
-    ARCHIVE_V2_TX_FLAG_HAS_LOADED_ADDRESSES, ARCHIVE_V2_TX_FLAG_HAS_METADATA,
-    ARCHIVE_V2_TX_FLAG_METADATA_RAW_FALLBACK, ARCHIVE_V2_TX_FLAG_TX_RAW_FALLBACK,
-    ArchiveV2HotBlockBlob, ArchiveV2HotInstruction, ArchiveV2HotInstructionData,
-    ArchiveV2HotMessagePayload, ArchiveV2HotTxRow, CompactInnerInstruction,
-    CompactInnerInstructions, CompactLogStream, CompactMetaV1, CompactPubkey,
-    CompactTransactionError, KeyIndex, KeyStore, archive_v2_hot_index_path,
-    read_archive_v2_hot_block_index, wincode_leb128_config,
-};
+use blockzilla_archive_v2::{ARCHIVE_V2_HOT_INDEX_FLAG_DICTIONARY, ARCHIVE_V2_HOT_INDEX_FLAG_RAW_BLOCKS, ARCHIVE_V2_PUBKEY_REGISTRY_FILE, ARCHIVE_V2_RAW_BLOCKS_FILE, ARCHIVE_V2_RAW_BLOCKS_ZSTD_FILE, ARCHIVE_V2_SIGNATURES_FILE, ARCHIVE_V2_TX_FLAG_HAS_ERROR, ARCHIVE_V2_TX_FLAG_HAS_INNER_IX, ARCHIVE_V2_TX_FLAG_HAS_LOADED_ADDRESSES, ARCHIVE_V2_TX_FLAG_HAS_METADATA, ARCHIVE_V2_TX_FLAG_METADATA_RAW_FALLBACK, ARCHIVE_V2_TX_FLAG_TX_RAW_FALLBACK, ArchiveV2HotBlockBlob, ArchiveV2HotInstruction, ArchiveV2HotInstructionData, ArchiveV2HotMessagePayload, ArchiveV2HotTxRow, archive_v2_hot_index_path, read_archive_v2_hot_block_index};
+use blockzilla_compact::{CompactInnerInstruction, CompactInnerInstructions, CompactLogStream, CompactMetaV1, CompactTransactionError};
+use blockzilla_primitives::{CompactPubkey, wincode_leb128_config};
+use blockzilla_registry::{KeyIndex, KeyStore};
 use core::mem::MaybeUninit;
 use of_car_reader::{
     CarBlockReader,
@@ -3331,7 +3323,7 @@ fn scan_hot_program_transactions_parallel(
 
 fn read_hot_row_bytes(
     file: &File,
-    row: &blockzilla_format::ArchiveV2HotBlockIndexRow,
+    row: &blockzilla_archive_v2::ArchiveV2HotBlockIndexRow,
     raw_blocks: bool,
     compressed: &mut Vec<u8>,
     block_bytes: &mut Vec<u8>,
@@ -3950,7 +3942,7 @@ fn read_exact_at(_file: &File, _buf: &mut [u8], _offset: u64) -> Result<()> {
 fn discover_hot_accounts(
     input: &Path,
     raw_blocks: bool,
-    rows: &[blockzilla_format::ArchiveV2HotBlockIndexRow],
+    rows: &[blockzilla_archive_v2::ArchiveV2HotBlockIndexRow],
     known: HotKnownKeys,
     account_id_mode: &AccountIdMode,
     stats: &mut DumpStats,
@@ -5447,7 +5439,7 @@ fn mib_rate(bytes: u64, elapsed: f64) -> f64 {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use blockzilla_format::CompactInstructionError;
+    use blockzilla_compact::CompactInstructionError;
 
     #[test]
     fn partial_metadata_views_keep_alignment_after_transaction_error() {

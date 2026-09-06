@@ -22,9 +22,12 @@ default = ["genesis"]
 genesis = []
 
 [dependencies]
+blockzilla-archive-v2 = { path = "../../crates/blockzilla-archive-v2", default-features = false }
+blockzilla-compact = { path = "../../crates/blockzilla-compact", default-features = false }
+blockzilla-primitives = { path = "../../crates/blockzilla-primitives", default-features = false }
+blockzilla-registry = { path = "../../crates/blockzilla-registry", default-features = false }
 anyhow = "1.0.102"
 base64 = "0.22.1"
-blockzilla-format = { path = "../blockzilla-format" }
 blockzilla-read-sdk = { package = "blockzilla-read-sdk-legacy", path = "../blockzilla-read-sdk-legacy" }
 bzip2 = "0.5.2"
 bs58 = "0.5.1"

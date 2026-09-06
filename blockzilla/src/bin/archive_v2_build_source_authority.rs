@@ -16,10 +16,7 @@ use std::{
 };
 
 use anyhow::{Context, Result, anyhow, bail, ensure};
-use blockzilla_format::{
-    ARCHIVE_V2_BLOCK_INDEX_FILE, ARCHIVE_V2_BLOCKS_FILE, ARCHIVE_V2_META_FILE,
-    ARCHIVE_V2_PUBKEY_REGISTRY_FILE,
-};
+use blockzilla_archive_v2::{ARCHIVE_V2_BLOCKS_FILE, ARCHIVE_V2_BLOCK_INDEX_FILE, ARCHIVE_V2_META_FILE, ARCHIVE_V2_PUBKEY_REGISTRY_FILE};
 use blockzilla_read_sdk::{
     ArchiveV2MetadataWireProfile, ArchiveV2WireProfile, PinnedLocalEntryKind,
     PinnedLocalInventoryEntry, PinnedLocalRangeSource,
@@ -900,7 +897,7 @@ mod tests {
         let source = root.join("source");
         write_source(&source);
         fs::write(
-            source.join(blockzilla_format::ARCHIVE_V2_SIGNATURES_FILE),
+            source.join(blockzilla_archive_v2::ARCHIVE_V2_SIGNATURES_FILE),
             b"signatures",
         )
         .unwrap();
@@ -909,7 +906,7 @@ mod tests {
         let mut options = options(&source, &output);
         options
             .includes
-            .push(blockzilla_format::ARCHIVE_V2_SIGNATURES_FILE.to_owned());
+            .push(blockzilla_archive_v2::ARCHIVE_V2_SIGNATURES_FILE.to_owned());
 
         publish_authority(prepare_authority(&options).unwrap()).unwrap();
         let inventory: SourceAuthorityInventory =
@@ -918,7 +915,7 @@ mod tests {
             inventory
                 .files
                 .iter()
-                .any(|file| file.name == blockzilla_format::ARCHIVE_V2_SIGNATURES_FILE)
+                .any(|file| file.name == blockzilla_archive_v2::ARCHIVE_V2_SIGNATURES_FILE)
         );
         assert!(!inventory.files.iter().any(|file| file.name == "notes.txt"));
     }

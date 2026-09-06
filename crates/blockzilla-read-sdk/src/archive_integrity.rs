@@ -12,7 +12,8 @@ use std::{
     time::{Duration, Instant},
 };
 
-use blockzilla_format::{ARCHIVE_V2_BLOCKHASH_REGISTRY_FILE, ARCHIVE_V2_POH_FILE, ARCHIVE_V2_PREV_BLOCKHASH_TAIL_FILE, ARCHIVE_V2_SIGNATURES_FILE, ArchiveV2HotBlockIndexRow, CompactPohEntry, WincodeArchiveV2PohRecord};
+use blockzilla_archive_v2::{ARCHIVE_V2_BLOCKHASH_REGISTRY_FILE, ARCHIVE_V2_POH_FILE, ARCHIVE_V2_PREV_BLOCKHASH_TAIL_FILE, ARCHIVE_V2_SIGNATURES_FILE, ArchiveV2HotBlockIndexRow, WincodeArchiveV2PohRecord};
+use blockzilla_compact::CompactPohEntry;
 use blockzilla_replay_format::{MAX_REPLAY_NUM_HASHES_PER_ENTRY, ReplaySignatureMixinBuilder};
 use blockzilla_index_archive_format::sidecars::poh::{
     DecodedPohFrame, PohWireProfile, decode_payload as decode_retained_poh_payload,
@@ -2698,7 +2699,8 @@ fn duration_millis(duration: Duration) -> u64 {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use blockzilla_format::{ARCHIVE_V2_BLOCK_INDEX_FILE, ARCHIVE_V2_BLOCKS_FILE, ARCHIVE_V2_GENESIS_BIN_FILE, ARCHIVE_V2_META_FILE, ARCHIVE_V2_PUBKEY_REGISTRY_FILE, ArchiveV2HotBlockBlob, ArchiveV2HotBlockHeader, ArchiveV2HotMetaRecord, ArchiveV2HotTxRow, WINCODE_ARCHIVE_V2_FLAG_LEB128, WINCODE_ARCHIVE_V2_HOT_BLOCK_VERSION, WincodeArchiveV2Footer, WincodeArchiveV2Genesis, WincodeArchiveV2GenesisEpochSchedule, WincodeArchiveV2GenesisFeeParams, WincodeArchiveV2GenesisInflationParams, WincodeArchiveV2GenesisPohParams, WincodeArchiveV2GenesisRentParams, WincodeArchiveV2Header, framed::write_u32_varint, wincode_leb128_config, write_archive_v2_hot_block_index};
+    use blockzilla_archive_v2::{ARCHIVE_V2_BLOCKS_FILE, ARCHIVE_V2_BLOCK_INDEX_FILE, ARCHIVE_V2_GENESIS_BIN_FILE, ARCHIVE_V2_META_FILE, ARCHIVE_V2_PUBKEY_REGISTRY_FILE, ArchiveV2HotBlockBlob, ArchiveV2HotBlockHeader, ArchiveV2HotMetaRecord, ArchiveV2HotTxRow, WINCODE_ARCHIVE_V2_FLAG_LEB128, WINCODE_ARCHIVE_V2_HOT_BLOCK_VERSION, WincodeArchiveV2Footer, WincodeArchiveV2Genesis, WincodeArchiveV2GenesisEpochSchedule, WincodeArchiveV2GenesisFeeParams, WincodeArchiveV2GenesisInflationParams, WincodeArchiveV2GenesisPohParams, WincodeArchiveV2GenesisRentParams, WincodeArchiveV2Header, write_archive_v2_hot_block_index};
+    use blockzilla_primitives::{framed::write_u32_varint, wincode_leb128_config};
 use blockzilla_replay_format::{ReplaySignatureMixinBuilder, derive_replay_entry_hash};
     use blockzilla_index_archive_format::{
         sidecars::poh::{CurrentPohEntry, CurrentPohRecord, LegacyPohEntry, LegacyPohRecord},
@@ -2973,7 +2975,7 @@ use blockzilla_replay_format::{ReplaySignatureMixinBuilder, derive_replay_entry_
                 (
                     vec![ArchiveV2HotTxRow {
                         tx_index: 0,
-                        flags: blockzilla_format::ARCHIVE_V2_TX_FLAG_TX_RAW_FALLBACK,
+                        flags: blockzilla_archive_v2::ARCHIVE_V2_TX_FLAG_TX_RAW_FALLBACK,
                         message_offset: 0,
                         message_len: 1,
                         metadata_offset: 0,

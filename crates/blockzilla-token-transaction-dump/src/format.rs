@@ -1,4 +1,4 @@
-use blockzilla_format::CompactPubkey;
+use blockzilla_primitives::CompactPubkey;
 use wincode::{SchemaRead, SchemaWrite};
 
 pub const SPYX_MINT: &str = "XsoCS1TfEyfFhfvj8EtZ528L3CaKBDBRqRapnBbDF2W";

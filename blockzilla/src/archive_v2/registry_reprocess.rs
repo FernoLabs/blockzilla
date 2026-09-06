@@ -6,47 +6,14 @@
 //! otherwise.
 
 use anyhow::{Context, Result, anyhow, bail, ensure};
-use blockzilla_format::{
-    ARCHIVE_V2_BLOCK_ACCESS_FILE, ARCHIVE_V2_BLOCK_ACCESS_INDEX_FILE,
-    ARCHIVE_V2_BLOCK_ACCESS_INDEX_HEADER_LEN, ARCHIVE_V2_BLOCK_ACCESS_INDEX_MAGIC,
-    ARCHIVE_V2_BLOCK_ACCESS_INDEX_ROW_LEN, ARCHIVE_V2_BLOCK_ACCESS_MAX_FRAME_BYTES,
-    ARCHIVE_V2_BLOCK_INDEX_FILE, ARCHIVE_V2_BLOCKHASH_INDEX_V3_FILE,
-    ARCHIVE_V2_BLOCKHASH_REGISTRY_FILE, ARCHIVE_V2_BLOCKS_FILE,
-    ARCHIVE_V2_FIRST_SEEN_REGISTRY_MANIFEST_FILE, ARCHIVE_V2_GET_BLOCK_INDEX_FILE,
-    ARCHIVE_V2_HOT_INDEX_FLAG_RAW_BLOCKS, ARCHIVE_V2_HOT_TX_ROW_LEN, ARCHIVE_V2_META_FILE,
-    ARCHIVE_V2_POH_FILE, ARCHIVE_V2_PREV_BLOCKHASH_TAIL_FILE, ARCHIVE_V2_PUBKEY_HOT_SEED_FILE,
-    ARCHIVE_V2_PUBKEY_REGISTRY_COUNTS_FILE, ARCHIVE_V2_PUBKEY_REGISTRY_FILE,
-    ARCHIVE_V2_PUBKEY_REGISTRY_INDEX_FILE, ARCHIVE_V2_SHREDDING_FILE, ARCHIVE_V2_SIGNATURES_FILE,
-    ARCHIVE_V2_TX_FLAG_HAS_METADATA, ARCHIVE_V2_TX_FLAG_METADATA_RAW_FALLBACK,
-    ARCHIVE_V2_TX_FLAG_TX_RAW_FALLBACK, ARCHIVE_V2_VOTE_HASH_REGISTRY_FILE,
-    ArchiveV2BlockAccessBlob, ArchiveV2BlockAccessBlockhash, ArchiveV2BlockAccessIndexRow,
-    ArchiveV2BlockAccessPubkey, ArchiveV2BlockAccessVoteHash, ArchiveV2GetBlockIndexRow,
-    ArchiveV2HotBlockBlob, ArchiveV2HotBlockHeader, ArchiveV2HotMetaRecord, ArchiveV2HotRewards,
-    ArchiveV2HotTxRow, ArchiveV2WireFallbackReason, ArchiveV2WireMetadataErrorSchema,
-    ArchiveV2WireReferenceClass, ArchiveV2WireRewriteErrorKind, ArchiveV2WireRewriteLimits,
-    ArchiveV2WireRewriteStats, ArchiveV2WireRewriteVisitor, BLOCK_TIME_GAP_FILE,
-    CompactInnerInstructions, CompactLogStream, CompactMetaV1, CompactPubkey, CompactReturnData,
-    CompactReward, CompactShredding, CompactTokenBalance, CompactTransactionError, KeyIndex,
-    Leb128, LogEvent, WINCODE_ARCHIVE_V2_BLOCK_ACCESS_VERSION,
-    WINCODE_ARCHIVE_V2_FLAG_ALL_PUBKEY_REF_COUNTS, WINCODE_ARCHIVE_V2_FLAG_FIRST_SEEN_REGISTRY,
-    WINCODE_ARCHIVE_V2_FLAG_LEB128, WINCODE_ARCHIVE_V2_HOT_BLOCK_VERSION, WincodeArchiveV2Footer,
-    WincodeArchiveV2Header, WincodeLeb128Config, WincodeLeb128FramedWriter,
-    program_logs::{
-        ProgramLog,
-        system_program::{PubkeyOrString, SystemAddress, SystemProgramLog},
-        token_2022::Token2022Log,
-    },
-    read_archive_v2_block_access_index, read_archive_v2_get_block_index,
-    read_archive_v2_hot_block_index, rewrite_archive_v2_metadata_wire, wincode_leb128_config,
-    write_archive_v2_block_access_index, write_archive_v2_get_block_index,
-    write_archive_v2_hot_block_index,
-};
+use blockzilla_archive_v2::{ARCHIVE_V2_BLOCKHASH_INDEX_V3_FILE, ARCHIVE_V2_BLOCKHASH_REGISTRY_FILE, ARCHIVE_V2_BLOCKS_FILE, ARCHIVE_V2_BLOCK_ACCESS_FILE, ARCHIVE_V2_BLOCK_ACCESS_INDEX_FILE, ARCHIVE_V2_BLOCK_ACCESS_INDEX_HEADER_LEN, ARCHIVE_V2_BLOCK_ACCESS_INDEX_MAGIC, ARCHIVE_V2_BLOCK_ACCESS_INDEX_ROW_LEN, ARCHIVE_V2_BLOCK_ACCESS_MAX_FRAME_BYTES, ARCHIVE_V2_BLOCK_INDEX_FILE, ARCHIVE_V2_FIRST_SEEN_REGISTRY_MANIFEST_FILE, ARCHIVE_V2_GET_BLOCK_INDEX_FILE, ARCHIVE_V2_HOT_INDEX_FLAG_RAW_BLOCKS, ARCHIVE_V2_HOT_TX_ROW_LEN, ARCHIVE_V2_META_FILE, ARCHIVE_V2_POH_FILE, ARCHIVE_V2_PREV_BLOCKHASH_TAIL_FILE, ARCHIVE_V2_PUBKEY_HOT_SEED_FILE, ARCHIVE_V2_PUBKEY_REGISTRY_COUNTS_FILE, ARCHIVE_V2_PUBKEY_REGISTRY_FILE, ARCHIVE_V2_PUBKEY_REGISTRY_INDEX_FILE, ARCHIVE_V2_SHREDDING_FILE, ARCHIVE_V2_SIGNATURES_FILE, ARCHIVE_V2_TX_FLAG_HAS_METADATA, ARCHIVE_V2_TX_FLAG_METADATA_RAW_FALLBACK, ARCHIVE_V2_TX_FLAG_TX_RAW_FALLBACK, ARCHIVE_V2_VOTE_HASH_REGISTRY_FILE, ArchiveV2BlockAccessBlob, ArchiveV2BlockAccessBlockhash, ArchiveV2BlockAccessIndexRow, ArchiveV2BlockAccessPubkey, ArchiveV2BlockAccessVoteHash, ArchiveV2GetBlockIndexRow, ArchiveV2HotBlockBlob, ArchiveV2HotBlockHeader, ArchiveV2HotMetaRecord, ArchiveV2HotRewards, ArchiveV2HotTxRow, ArchiveV2WireFallbackReason, ArchiveV2WireMetadataErrorSchema, ArchiveV2WireReferenceClass, ArchiveV2WireRewriteErrorKind, ArchiveV2WireRewriteLimits, ArchiveV2WireRewriteStats, ArchiveV2WireRewriteVisitor, BLOCK_TIME_GAP_FILE, WINCODE_ARCHIVE_V2_BLOCK_ACCESS_VERSION, WINCODE_ARCHIVE_V2_FLAG_ALL_PUBKEY_REF_COUNTS, WINCODE_ARCHIVE_V2_FLAG_FIRST_SEEN_REGISTRY, WINCODE_ARCHIVE_V2_FLAG_LEB128, WINCODE_ARCHIVE_V2_HOT_BLOCK_VERSION, WincodeArchiveV2Footer, WincodeArchiveV2Header, read_archive_v2_block_access_index, read_archive_v2_get_block_index, read_archive_v2_hot_block_index, rewrite_archive_v2_metadata_wire, write_archive_v2_block_access_index, write_archive_v2_get_block_index, write_archive_v2_hot_block_index};
+use blockzilla_compact::{CompactInnerInstructions, CompactLogStream, CompactMetaV1, CompactReturnData, CompactReward, CompactShredding, CompactTokenBalance, CompactTransactionError, LogEvent};
+use blockzilla_primitives::{CompactPubkey, Leb128, WincodeLeb128Config, WincodeLeb128FramedWriter, wincode_leb128_config};
+use blockzilla_program_logs::{program_logs::ProgramLog, program_logs::system_program::PubkeyOrString, program_logs::system_program::SystemAddress, program_logs::system_program::SystemProgramLog, program_logs::token_2022::Token2022Log};
+use blockzilla_registry::KeyIndex;
 #[cfg(test)]
-use blockzilla_format::{
-    ArchiveV2ComputeBudgetInstructionData, ArchiveV2SystemInstructionData, ArchiveV2VoteHashRef,
-    ArchiveV2VoteStateUpdate, ArchiveV2VoteTowerSync, CompactMessageHeader,
-    OwnedCompactRecentBlockhash,
-};
+use blockzilla_archive_v2::{ArchiveV2ComputeBudgetInstructionData, ArchiveV2SystemInstructionData, ArchiveV2VoteHashRef, ArchiveV2VoteStateUpdate, ArchiveV2VoteTowerSync};
+use blockzilla_compact::{CompactMessageHeader, OwnedCompactRecentBlockhash};
 use blockzilla_read_sdk::{
     ArchiveReader, ArchiveV2MessageProjector, ArchiveV2MetadataProfileAdmission,
     ArchiveV2MetadataWireProfile, ArchiveV2WireProfile, HashVerification,
@@ -1347,7 +1314,7 @@ impl Pass2PhaseTiming {
 
 #[derive(Debug)]
 struct CompressedBlockInput {
-    row: blockzilla_format::ArchiveV2HotBlockIndexRow,
+    row: blockzilla_archive_v2::ArchiveV2HotBlockIndexRow,
     bytes: Vec<u8>,
     signatures: Option<Vec<u8>>,
 }
@@ -1379,7 +1346,7 @@ struct DecodedHotBlock {
 
 #[derive(Debug)]
 struct RewrittenBlock {
-    row: blockzilla_format::ArchiveV2HotBlockIndexRow,
+    row: blockzilla_archive_v2::ArchiveV2HotBlockIndexRow,
     compressed: Vec<u8>,
     uncompressed_len: u32,
     stats: BlockRewriteStats,
@@ -1542,8 +1509,8 @@ struct SelectiveStringTable {
 
 #[derive(Debug, SchemaRead)]
 struct SelectiveDataTable {
-    #[wincode(with = "DiscardSeq<blockzilla_format::DataArray, wincode::len::BincodeLen>")]
-    arrays: Vec<blockzilla_format::DataArray>,
+    #[wincode(with = "DiscardSeq<blockzilla_compact::DataArray, wincode::len::BincodeLen>")]
+    arrays: Vec<blockzilla_compact::DataArray>,
     #[wincode(with = "DiscardSeq<u32, wincode::len::BincodeLen>")]
     chunk_lengths: Vec<u32>,
     #[wincode(with = "DiscardBytes<wincode::len::BincodeLen>")]
@@ -1726,7 +1693,7 @@ impl From<Pass1LegacyHotBlockHeaderWithRewardsVec> for ArchiveV2HotBlockHeader {
 struct LegacyHotBlockWithShredding {
     header: LegacyHotBlockHeaderWithShredding,
     tx_count: u32,
-    tx_rows: Vec<blockzilla_format::ArchiveV2HotTxRow>,
+    tx_rows: Vec<blockzilla_archive_v2::ArchiveV2HotTxRow>,
     message_bytes: Vec<u8>,
     metadata_bytes: Vec<u8>,
 }
@@ -1747,7 +1714,7 @@ struct LegacyHotBlockHeaderWithShredding {
 struct LegacyHotBlockWithRewardsVec {
     header: LegacyHotBlockHeaderWithRewardsVec,
     tx_count: u32,
-    tx_rows: Vec<blockzilla_format::ArchiveV2HotTxRow>,
+    tx_rows: Vec<blockzilla_archive_v2::ArchiveV2HotTxRow>,
     message_bytes: Vec<u8>,
     metadata_bytes: Vec<u8>,
 }
@@ -2798,8 +2765,8 @@ fn insert_unique_binding(
 }
 
 fn validate_hot_index_geometry_for_access(
-    source: &[blockzilla_format::ArchiveV2HotBlockIndexRow],
-    target: &[blockzilla_format::ArchiveV2HotBlockIndexRow],
+    source: &[blockzilla_archive_v2::ArchiveV2HotBlockIndexRow],
+    target: &[blockzilla_archive_v2::ArchiveV2HotBlockIndexRow],
 ) -> Result<()> {
     ensure!(
         source.len() == target.len(),
@@ -5663,7 +5630,7 @@ fn read_bounded_frame(reader: &mut impl Read, max_bytes: usize) -> Result<Option
 
 fn validate_hot_index(
     blocks_path: &Path,
-    index: &blockzilla_format::ArchiveV2HotBlockIndex,
+    index: &blockzilla_archive_v2::ArchiveV2HotBlockIndex,
     epoch: u64,
 ) -> Result<()> {
     ensure!(
@@ -5752,7 +5719,7 @@ fn validate_hot_index(
 
 fn read_compressed_block_batch(
     file: &mut File,
-    rows: &[blockzilla_format::ArchiveV2HotBlockIndexRow],
+    rows: &[blockzilla_archive_v2::ArchiveV2HotBlockIndexRow],
     mut hasher: Option<&mut Sha256>,
 ) -> Result<Vec<CompressedBlockInput>> {
     let mut output = Vec::with_capacity(rows.len());
@@ -5764,7 +5731,7 @@ fn read_compressed_block_batch(
 
 fn read_compressed_block(
     file: &mut File,
-    row: blockzilla_format::ArchiveV2HotBlockIndexRow,
+    row: blockzilla_archive_v2::ArchiveV2HotBlockIndexRow,
     hasher: Option<&mut Sha256>,
 ) -> Result<CompressedBlockInput> {
     file.seek(SeekFrom::Start(row.compressed_offset))
@@ -5805,7 +5772,7 @@ fn registry_rewrite_pipeline_memory_budget(threads: usize) -> Result<u64> {
 }
 
 fn hot_batch_end(
-    rows: &[blockzilla_format::ArchiveV2HotBlockIndexRow],
+    rows: &[blockzilla_archive_v2::ArchiveV2HotBlockIndexRow],
     start: usize,
     max_rows: usize,
     include_access: bool,
@@ -5820,7 +5787,7 @@ fn hot_batch_end(
 }
 
 fn hot_batch_end_with_budget(
-    rows: &[blockzilla_format::ArchiveV2HotBlockIndexRow],
+    rows: &[blockzilla_archive_v2::ArchiveV2HotBlockIndexRow],
     start: usize,
     max_rows: usize,
     include_access: bool,
@@ -5858,7 +5825,7 @@ fn hot_batch_end_with_budget(
 }
 
 fn hot_worker_reservation_bytes(
-    row: &blockzilla_format::ArchiveV2HotBlockIndexRow,
+    row: &blockzilla_archive_v2::ArchiveV2HotBlockIndexRow,
     include_access: bool,
 ) -> Result<u64> {
     let signature_bytes = u64::from(row.signature_count)
@@ -6206,7 +6173,7 @@ fn decode_hot_block(input: &CompressedBlockInput) -> Result<ArchiveV2HotBlockBlo
 
 fn decode_hot_block_bytes(
     decoded: &[u8],
-    row: blockzilla_format::ArchiveV2HotBlockIndexRow,
+    row: blockzilla_archive_v2::ArchiveV2HotBlockIndexRow,
 ) -> Result<ArchiveV2HotBlockBlob> {
     decode_hot_block_bytes_with_schema(decoded, row).map(|decoded| decoded.block)
 }
@@ -6232,7 +6199,7 @@ fn validate_hot_block_header_and_rows(
     header: &ArchiveV2HotBlockHeader,
     tx_count: u32,
     rows: &[ArchiveV2HotTxRow],
-    index_row: blockzilla_format::ArchiveV2HotBlockIndexRow,
+    index_row: blockzilla_archive_v2::ArchiveV2HotBlockIndexRow,
 ) -> Result<()> {
     ensure!(
         header.slot == index_row.slot,
@@ -6265,7 +6232,7 @@ fn validate_hot_block_header_and_rows(
 
 fn decode_legacy_hot_block_bytes(
     decoded: &[u8],
-    row: blockzilla_format::ArchiveV2HotBlockIndexRow,
+    row: blockzilla_archive_v2::ArchiveV2HotBlockIndexRow,
     current_error: &str,
 ) -> Result<DecodedHotBlock> {
     let (block, outer_schema): (ArchiveV2HotBlockBlob, HotBlockOuterSchema) =
@@ -6297,7 +6264,7 @@ fn decode_legacy_hot_block_bytes(
 
 fn decode_hot_block_bytes_with_schema(
     decoded: &[u8],
-    row: blockzilla_format::ArchiveV2HotBlockIndexRow,
+    row: blockzilla_archive_v2::ArchiveV2HotBlockIndexRow,
 ) -> Result<DecodedHotBlock> {
     let (block, outer_schema) = match wincode::config::deserialize_exact::<ArchiveV2HotBlockBlob, _>(
         decoded,
@@ -6521,7 +6488,7 @@ where
 }
 
 fn analyze_source_exclusion_regions(
-    row: blockzilla_format::ArchiveV2HotBlockIndexRow,
+    row: blockzilla_archive_v2::ArchiveV2HotBlockIndexRow,
     header: &mut ArchiveV2HotBlockHeader,
     tx_count: u32,
     tx_rows_len: usize,
@@ -7539,7 +7506,7 @@ struct BorrowedStringTable<'a> {
 
 #[derive(Debug, SchemaRead, SchemaWrite)]
 struct BorrowedDataTable<'a> {
-    arrays: Vec<blockzilla_format::DataArray>,
+    arrays: Vec<blockzilla_compact::DataArray>,
     chunk_lengths: Vec<u32>,
     bytes: &'a [u8],
 }
@@ -9132,7 +9099,7 @@ fn access_rows_equal(left: &ArchiveV2GetBlockIndexRow, right: &ArchiveV2GetBlock
 
 fn validate_get_block_index_geometry(
     path: &Path,
-    hot_rows: &[blockzilla_format::ArchiveV2HotBlockIndexRow],
+    hot_rows: &[blockzilla_archive_v2::ArchiveV2HotBlockIndexRow],
     access_rows: &[ArchiveV2BlockAccessIndexRow],
 ) -> Result<()> {
     let actual = read_archive_v2_get_block_index(&path)?;
@@ -9301,8 +9268,8 @@ fn collect_epoch_301_access_boundary_evidence(
     source_file: &mut File,
     source_metadata: &fs::Metadata,
     source_index_binding: &FileBinding,
-    source_index: &blockzilla_format::ArchiveV2BlockAccessIndex,
-    source_hot_rows: &[blockzilla_format::ArchiveV2HotBlockIndexRow],
+    source_index: &blockzilla_archive_v2::ArchiveV2BlockAccessIndex,
+    source_hot_rows: &[blockzilla_archive_v2::ArchiveV2HotBlockIndexRow],
     access_context: &AccessBuildContext,
     row_0_bytes: &[u8],
     row_0_blob: &ArchiveV2BlockAccessBlob,
@@ -9391,8 +9358,8 @@ fn remap_source_access(
     epoch: u64,
     source_registry: &MappedRegistry,
     remap: &MappedRegistryRemap,
-    source_hot_rows: &[blockzilla_format::ArchiveV2HotBlockIndexRow],
-    target_hot_rows: &[blockzilla_format::ArchiveV2HotBlockIndexRow],
+    source_hot_rows: &[blockzilla_archive_v2::ArchiveV2HotBlockIndexRow],
+    target_hot_rows: &[blockzilla_archive_v2::ArchiveV2HotBlockIndexRow],
     target_registry: &MappedRegistry,
     access_context: &AccessBuildContext,
 ) -> Result<AccessRemapBindings> {
@@ -10139,7 +10106,7 @@ fn preflight_access_index(path: &Path, expected_rows: usize) -> Result<()> {
 }
 
 fn build_get_block_rows(
-    hot_rows: &[blockzilla_format::ArchiveV2HotBlockIndexRow],
+    hot_rows: &[blockzilla_archive_v2::ArchiveV2HotBlockIndexRow],
     access_rows: &[ArchiveV2BlockAccessIndexRow],
 ) -> Result<Vec<ArchiveV2GetBlockIndexRow>> {
     ensure!(hot_rows.len() == access_rows.len());
@@ -11519,15 +11486,10 @@ fn copy_file_with_hash(source: &Path, target: &Path) -> Result<FileBinding> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use blockzilla_format::{
-        ArchiveV2ComputeBudgetInstructionData, ArchiveV2HotInstruction,
-        ArchiveV2HotInstructionData, ArchiveV2HotLegacyMessage, ArchiveV2HotMessagePayload,
-        ArchiveV2HotV0Message, ArchiveV2SystemInstructionData, ArchiveV2VoteHashRef,
-        ArchiveV2VoteLockoutOffset, ArchiveV2VoteStateUpdate, ArchiveV2VoteTowerSync,
-        CompactInnerInstruction, CompactInstructionError, CompactMessageHeader, DataArray,
-        DataTable, OwnedCompactAddressTableLookup, OwnedCompactRecentBlockhash, StringTable,
-        program_logs::system_program::NonceAction, rewrite_archive_v2_hot_message_wire,
-    };
+    use blockzilla_archive_v2::{ArchiveV2ComputeBudgetInstructionData, ArchiveV2HotInstruction, ArchiveV2HotInstructionData, ArchiveV2HotLegacyMessage, ArchiveV2HotMessagePayload, ArchiveV2HotV0Message, ArchiveV2SystemInstructionData, ArchiveV2VoteHashRef, ArchiveV2VoteLockoutOffset, ArchiveV2VoteStateUpdate, ArchiveV2VoteTowerSync, rewrite_archive_v2_hot_message_wire};
+    use blockzilla_compact::{CompactInnerInstruction, CompactInstructionError, CompactMessageHeader, DataArray, DataTable, OwnedCompactAddressTableLookup, OwnedCompactRecentBlockhash};
+    use blockzilla_primitives::StringTable;
+    use blockzilla_program_logs::program_logs::system_program::NonceAction;
     use blockzilla_read_sdk::manifest::{
         GENERATION_MANIFEST_SCHEMA_VERSION, GenerationFile, compute_generation_digest,
     };
@@ -12493,7 +12455,7 @@ mod tests {
     ) -> CompressedBlockInput {
         let compressed = zstd::bulk::compress(&encoded, 1).unwrap();
         CompressedBlockInput {
-            row: blockzilla_format::ArchiveV2HotBlockIndexRow {
+            row: blockzilla_archive_v2::ArchiveV2HotBlockIndexRow {
                 block_id: 0,
                 slot: crate::SLOTS_PER_EPOCH,
                 compressed_offset: 0,
@@ -12643,7 +12605,7 @@ mod tests {
             compressed.len() as u64,
             1,
             0,
-            &[blockzilla_format::ArchiveV2HotBlockIndexRow {
+            &[blockzilla_archive_v2::ArchiveV2HotBlockIndexRow {
                 block_id: 0,
                 slot,
                 compressed_offset: 0,
@@ -14567,7 +14529,7 @@ mod tests {
 
     #[test]
     fn hot_batch_rejects_single_row_over_memory_budget() {
-        let rows = [blockzilla_format::ArchiveV2HotBlockIndexRow {
+        let rows = [blockzilla_archive_v2::ArchiveV2HotBlockIndexRow {
             block_id: 0,
             slot: crate::SLOTS_PER_EPOCH,
             compressed_offset: 0,

@@ -5,7 +5,7 @@
 use std::{collections::BTreeMap, env, path::PathBuf};
 
 use anyhow::{Context, Result, bail};
-use blockzilla_format::{ArchiveV2ComputeBudgetInstructionData, ArchiveV2SystemInstructionData};
+use blockzilla_archive_v2::{ArchiveV2ComputeBudgetInstructionData, ArchiveV2SystemInstructionData};
 use blockzilla_replay::{
     CONFIG_PROGRAM_ID, CompactArchivedTransactionOutcome, CompactInstructionData,
     CompactVisitConfig, CompactVisitControl, CompactVisitEvent, STAKE_PROGRAM_ID,

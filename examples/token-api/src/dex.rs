@@ -2,7 +2,7 @@ use crate::format::{
     NO_ID, SWAP_FLAG_KNOWN_DEX, SWAP_FLAG_QUOTE_IN, SWAP_FLAG_QUOTE_OUT, SWAP_FLAG_TX_ERROR,
     SwapRecord, TokenBalanceChangeRecord, price_micros,
 };
-use blockzilla_format::{ArchiveV2HotInstruction, ArchiveV2HotMessagePayload};
+use blockzilla_archive_v2::{ArchiveV2HotInstruction, ArchiveV2HotMessagePayload};
 use std::collections::{BTreeMap, BTreeSet};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]

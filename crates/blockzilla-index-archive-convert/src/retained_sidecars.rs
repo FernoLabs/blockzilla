@@ -8,7 +8,7 @@ use std::{
 };
 
 use anyhow::{Context, Result, bail, ensure};
-use blockzilla_format::ArchiveV2HotBlockIndexRow;
+use blockzilla_archive_v2::ArchiveV2HotBlockIndexRow;
 use blockzilla_index_archive_convert::{
     container::{FinishedObject, HeaderedWriter},
     source_v2_sidecars::{
@@ -503,11 +503,9 @@ fn read_frame(reader: &mut impl Read, frame: usize) -> Result<Option<Vec<u8>>> {
 mod tests {
     use std::fs;
 
-    use blockzilla_format::{
-        CompactPohEntry, CompactPohEntryLegacyNoSignatureCount, CompactShredding,
-        WincodeArchiveV2PohRecord, WincodeArchiveV2PohRecordLegacyNoSignatureCount,
-        WincodeArchiveV2ShreddingRecord, WincodeLeb128FramedWriter,
-    };
+    use blockzilla_archive_v2::{WincodeArchiveV2PohRecord, WincodeArchiveV2PohRecordLegacyNoSignatureCount, WincodeArchiveV2ShreddingRecord};
+    use blockzilla_compact::{CompactPohEntry, CompactPohEntryLegacyNoSignatureCount, CompactShredding};
+    use blockzilla_primitives::WincodeLeb128FramedWriter;
     use blockzilla_index_archive_format::sidecars::{framing, poh::DecodedPohFrame};
     use tempfile::tempdir;
 
@@ -529,7 +527,7 @@ mod tests {
 
     fn source_frame<T>(record: &T) -> Vec<u8>
     where
-        T: wincode::SchemaWrite<blockzilla_format::WincodeLeb128Config, Src = T>,
+        T: wincode::SchemaWrite<blockzilla_primitives::WincodeLeb128Config, Src = T>,
     {
         let mut writer = WincodeLeb128FramedWriter::new(Vec::new());
         writer.write(record).unwrap();

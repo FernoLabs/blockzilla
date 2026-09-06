@@ -60,11 +60,9 @@
 //! and why the tests below check exact decoded values, not just "did it
 //! return without erroring."
 
-use blockzilla_format::{
-    ArchiveV2ComputeBudgetInstructionData, ArchiveV2VoteHashRef, CompactInnerInstruction,
-    CompactMessageHeader, CompactPubkey, CompactReward, CompactTokenBalance,
-    CompactTransactionConfig, DataArray, OwnedCompactRecentBlockhash, WincodeLeb128Config,
-};
+use blockzilla_archive_v2::{ArchiveV2ComputeBudgetInstructionData, ArchiveV2VoteHashRef};
+use blockzilla_compact::{CompactInnerInstruction, CompactMessageHeader, CompactReward, CompactTokenBalance, CompactTransactionConfig, DataArray, OwnedCompactRecentBlockhash};
+use blockzilla_primitives::{CompactPubkey, WincodeLeb128Config};
 use blockzilla_compact_v2_reader::{CompactV2MessageSchema, CompactV2MetadataSchema};
 use wincode::{ReadResult, SchemaRead, error::invalid_tag_encoding, io::Reader};
 
@@ -672,44 +670,44 @@ fn skip_program_log(cursor: &mut &[u8]) -> ReadResult<()> {
     match tag {
         0 => {}
         1 => {
-            get::<blockzilla_format::program_logs::token::TokenLog>(cursor)?;
+            get::<blockzilla_program_logs::program_logs::token::TokenLog>(cursor)?;
         }
         2 => {
-            get::<blockzilla_format::program_logs::token_2022::Token2022Log>(cursor)?;
+            get::<blockzilla_program_logs::program_logs::token_2022::Token2022Log>(cursor)?;
         }
         3 => {
-            get::<blockzilla_format::program_logs::associated_token_account::TokenLog>(cursor)?;
+            get::<blockzilla_program_logs::program_logs::associated_token_account::TokenLog>(cursor)?;
         }
         4 => {
-            get::<blockzilla_format::program_logs::address_lookup_table::AddressLookupTableLog>(
+            get::<blockzilla_program_logs::program_logs::address_lookup_table::AddressLookupTableLog>(
                 cursor,
             )?;
         }
         5 => {
-            get::<blockzilla_format::program_logs::loader_v3::LoaderV3Log>(cursor)?;
+            get::<blockzilla_program_logs::program_logs::loader_v3::LoaderV3Log>(cursor)?;
         }
         6 => {
-            get::<blockzilla_format::program_logs::loader_v4::LoaderV4Log>(cursor)?;
+            get::<blockzilla_program_logs::program_logs::loader_v4::LoaderV4Log>(cursor)?;
         }
         7 => {
-            get::<blockzilla_format::program_logs::memo::MemoLog>(cursor)?;
+            get::<blockzilla_program_logs::program_logs::memo::MemoLog>(cursor)?;
         }
         8 => {
-            get::<blockzilla_format::program_logs::record::RecordLog>(cursor)?;
+            get::<blockzilla_program_logs::program_logs::record::RecordLog>(cursor)?;
         }
         9 => {
-            get::<blockzilla_format::program_logs::transfer_hook::TransferHookLog>(cursor)?;
+            get::<blockzilla_program_logs::program_logs::transfer_hook::TransferHookLog>(cursor)?;
         }
         10 => {
-            get::<blockzilla_format::program_logs::account_compression::AccountCompressionLog>(
+            get::<blockzilla_program_logs::program_logs::account_compression::AccountCompressionLog>(
                 cursor,
             )?;
         }
         11 => {
-            get::<blockzilla_format::program_logs::stake::StakeProgramLog>(cursor)?;
+            get::<blockzilla_program_logs::program_logs::stake::StakeProgramLog>(cursor)?;
         }
         12 => {
-            get::<blockzilla_format::program_logs::zk_elgamal_proof::ZkElgamalProofLog>(cursor)?;
+            get::<blockzilla_program_logs::program_logs::zk_elgamal_proof::ZkElgamalProofLog>(cursor)?;
         }
         13 | 16 => {
             get::<u32>(cursor)?;
@@ -738,13 +736,13 @@ fn skip_known_program_log(cursor: &mut &[u8]) -> ReadResult<()> {
         2 => skip_phoenix_perps_log(cursor)?,
         3 => skip_phoenix_v1_log(cursor)?,
         4 => {
-            get::<blockzilla_format::program_logs::known_programs::raydium_amm::RaydiumAmmLog>(
+            get::<blockzilla_program_logs::program_logs::known_programs::raydium_amm::RaydiumAmmLog>(
                 cursor,
             )?;
         }
         5 => {
             get::<
-                blockzilla_format::program_logs::known_programs::static_programs::StaticProgramLog,
+                blockzilla_program_logs::program_logs::known_programs::static_programs::StaticProgramLog,
             >(cursor)?;
         }
         other => return Err(invalid_tag_encoding(other as usize)),
@@ -776,7 +774,7 @@ fn skip_okx_router_log(cursor: &mut &[u8]) -> ReadResult<()> {
             skip_string(cursor)?;
             get::<u64>(cursor)?;
             get::<u64>(cursor)?;
-            get::<blockzilla_format::program_logs::known_programs::okx_router::AmountInSpelling>(
+            get::<blockzilla_program_logs::program_logs::known_programs::okx_router::AmountInSpelling>(
                 cursor,
             )?;
         }
@@ -800,12 +798,12 @@ fn skip_okx_router_log(cursor: &mut &[u8]) -> ReadResult<()> {
             get::<u64>(cursor)?;
         }
         10 => {
-            get::<blockzilla_format::program_logs::known_programs::okx_router::OkxRouteLabel>(
+            get::<blockzilla_program_logs::program_logs::known_programs::okx_router::OkxRouteLabel>(
                 cursor,
             )?;
         }
         12 => {
-            get::<blockzilla_format::program_logs::known_programs::okx_router::OkxMarker>(cursor)?;
+            get::<blockzilla_program_logs::program_logs::known_programs::okx_router::OkxMarker>(cursor)?;
         }
         other => return Err(invalid_tag_encoding(other as usize)),
     }
@@ -816,7 +814,7 @@ fn skip_phoenix_perps_log(cursor: &mut &[u8]) -> ReadResult<()> {
     match get::<u32>(cursor)? {
         0 => skip_bytes(cursor),
         1 => {
-            get::<blockzilla_format::program_logs::known_programs::phoenix_perps::PhoenixPerpsStaticLog>(cursor)?;
+            get::<blockzilla_program_logs::program_logs::known_programs::phoenix_perps::PhoenixPerpsStaticLog>(cursor)?;
             Ok(())
         }
         2 => {
@@ -831,7 +829,7 @@ fn skip_phoenix_v1_log(cursor: &mut &[u8]) -> ReadResult<()> {
     match get::<u32>(cursor)? {
         0 => {
             get::<
-                blockzilla_format::program_logs::known_programs::phoenix_v1::PhoenixInstructionLog,
+                blockzilla_program_logs::program_logs::known_programs::phoenix_v1::PhoenixInstructionLog,
             >(cursor)?;
         }
         1 => {
@@ -844,7 +842,7 @@ fn skip_phoenix_v1_log(cursor: &mut &[u8]) -> ReadResult<()> {
             get::<u64>(cursor)?;
         }
         3 => {
-            get::<blockzilla_format::program_logs::known_programs::phoenix_v1::PhoenixStaticLog>(
+            get::<blockzilla_program_logs::program_logs::known_programs::phoenix_v1::PhoenixStaticLog>(
                 cursor,
             )?;
         }
@@ -857,7 +855,7 @@ fn skip_log_event(cursor: &mut &[u8]) -> ReadResult<()> {
     let tag = get::<u32>(cursor)?;
     match tag {
         0 => {
-            get::<blockzilla_format::program_logs::system_program::SystemProgramLog>(cursor)?;
+            get::<blockzilla_program_logs::program_logs::system_program::SystemProgramLog>(cursor)?;
         }
         1 | 2 | 9..=13 | 38 | 39 | 43 => {}
         3 | 4 | 15 | 18 | 19 | 24..=27 | 40..=42 => {
@@ -1471,25 +1469,10 @@ fn _assert_inner_instruction_shape(value: CompactInnerInstruction) {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use blockzilla_format::program_logs::{
-        ProgramLog,
-        known_programs::{
-            KnownProgramLog,
-            drift::DriftLog,
-            okx_router::{AmountInSpelling, OkxRouterLog},
-            phoenix_perps::PhoenixPerpsLog,
-            phoenix_v1::PhoenixLog,
-        },
-    };
-    use blockzilla_format::{
-        ArchiveV2HotInstruction, ArchiveV2HotInstructionData, ArchiveV2HotLegacyMessage,
-        ArchiveV2HotMessagePayload, ArchiveV2HotV0Message, ArchiveV2HotV1Message,
-        ArchiveV2SystemInstructionData, ArchiveV2VoteLockoutOffset, ArchiveV2VoteStateUpdate,
-        CompactInnerInstructions, CompactInstructionError, CompactLogStream, CompactMessageHeader,
-        CompactMetaV1, CompactReturnData, CompactTransactionError, DataTable, LogEvent,
-        OwnedCompactAddressTableLookup, OwnedCompactRecentBlockhash, StringTable,
-        wincode_leb128_config,
-    };
+    use blockzilla_program_logs::{program_logs::ProgramLog, program_logs::known_programs::KnownProgramLog, program_logs::known_programs::drift::DriftLog, program_logs::known_programs::okx_router::AmountInSpelling, program_logs::known_programs::okx_router::OkxRouterLog, program_logs::known_programs::phoenix_perps::PhoenixPerpsLog, program_logs::known_programs::phoenix_v1::PhoenixLog};
+    use blockzilla_archive_v2::{ArchiveV2HotInstruction, ArchiveV2HotInstructionData, ArchiveV2HotLegacyMessage, ArchiveV2HotMessagePayload, ArchiveV2HotV0Message, ArchiveV2HotV1Message, ArchiveV2SystemInstructionData, ArchiveV2VoteLockoutOffset, ArchiveV2VoteStateUpdate};
+    use blockzilla_compact::{CompactInnerInstructions, CompactInstructionError, CompactLogStream, CompactMessageHeader, CompactMetaV1, CompactReturnData, CompactTransactionError, DataTable, LogEvent, OwnedCompactAddressTableLookup, OwnedCompactRecentBlockhash};
+    use blockzilla_primitives::{StringTable, wincode_leb128_config};
 
     fn serialize<T: wincode::SchemaWrite<Cfg, Src = T>>(value: &T) -> Vec<u8> {
         wincode::config::serialize(value, wincode_leb128_config()).unwrap()
@@ -2071,7 +2054,7 @@ mod tests {
         append(&mut bytes, &loaded_readonly_addresses);
         append(
             &mut bytes,
-            &Option::<blockzilla_format::CompactReturnData>::None,
+            &Option::<blockzilla_compact::CompactReturnData>::None,
         );
         append(&mut bytes, &Option::<u64>::None);
         append(&mut bytes, &Option::<u64>::None);
@@ -2532,7 +2515,7 @@ mod tests {
                     program_id_index: 2,
                     accounts: vec![1, 0],
                     data: ArchiveV2HotInstructionData::ComputeBudget(
-                        blockzilla_format::ArchiveV2ComputeBudgetInstructionData::SetComputeUnitLimit(1_000),
+                        blockzilla_archive_v2::ArchiveV2ComputeBudgetInstructionData::SetComputeUnitLimit(1_000),
                     ),
                 },
             ],

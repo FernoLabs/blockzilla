@@ -11,16 +11,9 @@
 //! from an admitted [`crate::ArchiveReader`] and use it for the whole
 //! generation. There is no message-level fallback or format probing.
 
-use blockzilla_format::{
-    ArchiveV2ComputeBudgetInstructionData, ArchiveV2HotInstruction, ArchiveV2HotInstructionData,
-    ArchiveV2HotLegacyMessage, ArchiveV2HotMessagePayload, ArchiveV2HotV0Message,
-    ArchiveV2SystemInstructionData, ArchiveV2VoteHashRef, ArchiveV2VoteStateUpdate,
-    ArchiveV2VoteTowerSync, ArchiveV2WireRewriteLimits, ArchiveV2WireRewriteResult,
-    ArchiveV2WireRewriteStats, ArchiveV2WireRewriteVisitor, CompactMessageHeader, CompactPubkey,
-    OwnedCompactAddressTableLookup, OwnedCompactRecentBlockhash, WincodeLeb128Config,
-    rewrite_archive_v2_hot_message_wire, rewrite_archive_v2_hot_message_wire_pre_unknown_fallbacks,
-    wincode_leb128_config,
-};
+use blockzilla_archive_v2::{ArchiveV2ComputeBudgetInstructionData, ArchiveV2HotInstruction, ArchiveV2HotInstructionData, ArchiveV2HotLegacyMessage, ArchiveV2HotMessagePayload, ArchiveV2HotV0Message, ArchiveV2SystemInstructionData, ArchiveV2VoteHashRef, ArchiveV2VoteStateUpdate, ArchiveV2VoteTowerSync, ArchiveV2WireRewriteLimits, ArchiveV2WireRewriteResult, ArchiveV2WireRewriteStats, ArchiveV2WireRewriteVisitor, rewrite_archive_v2_hot_message_wire, rewrite_archive_v2_hot_message_wire_pre_unknown_fallbacks};
+use blockzilla_compact::{CompactMessageHeader, OwnedCompactAddressTableLookup, OwnedCompactRecentBlockhash};
+use blockzilla_primitives::{CompactPubkey, WincodeLeb128Config, wincode_leb128_config};
 use smallvec::SmallVec;
 use thiserror::Error;
 use wincode::{ReadResult, SchemaRead, error::invalid_tag_encoding, io::Reader};
@@ -1359,13 +1352,9 @@ const fn normalized_instruction_semantic_tag<const PRE_UNKNOWN_FALLBACKS: bool>(
 
 #[cfg(test)]
 mod tests {
-    use blockzilla_format::{
-        ArchiveV2HotInstruction, ArchiveV2HotInstructionData, ArchiveV2HotLegacyMessage,
-        ArchiveV2HotMessagePayload, ArchiveV2HotV0Message, ArchiveV2SystemInstructionData,
-        ArchiveV2VoteStateUpdate, ArchiveV2VoteTowerSync, ArchiveV2WireIdentityVisitor,
-        ArchiveV2WireRewriteLimits, OwnedCompactAddressTableLookup,
-        transcode_archive_v2_hot_message_wire_pre_to_post, wincode_leb128_config,
-    };
+    use blockzilla_archive_v2::{ArchiveV2HotInstruction, ArchiveV2HotInstructionData, ArchiveV2HotLegacyMessage, ArchiveV2HotMessagePayload, ArchiveV2HotV0Message, ArchiveV2SystemInstructionData, ArchiveV2VoteStateUpdate, ArchiveV2VoteTowerSync, ArchiveV2WireIdentityVisitor, ArchiveV2WireRewriteLimits, transcode_archive_v2_hot_message_wire_pre_to_post};
+    use blockzilla_compact::OwnedCompactAddressTableLookup;
+    use blockzilla_primitives::wincode_leb128_config;
     use wincode::SchemaWrite;
 
     use super::*;

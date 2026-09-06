@@ -9,11 +9,10 @@ use std::{
 };
 
 use anyhow::{Context, Result};
-use blockzilla_format::{
-    LivePubkeyCountRecord, SplitCompactIndexHeader, SplitCompactIndexRecord,
-    WincodeArchiveV2NoRegistryBlock, WincodeArchiveV2Payload, WincodeArchiveV2PohRecord,
-    WincodeLeb128FramedWriter, encode_with_scratch, read_u32_varint, wincode_leb128_config,
-};
+use blockzilla_archive_v2::{WincodeArchiveV2NoRegistryBlock, WincodeArchiveV2Payload, WincodeArchiveV2PohRecord};
+use blockzilla_compact::{SplitCompactIndexHeader, SplitCompactIndexRecord};
+use blockzilla_live_format::LivePubkeyCountRecord;
+use blockzilla_primitives::{WincodeLeb128FramedWriter, encode_with_scratch, read_u32_varint, wincode_leb128_config};
 use gxhash::{GxBuildHasher, HashMap as GxHashMap};
 use prost::Message;
 use serde::{Deserialize, Serialize};

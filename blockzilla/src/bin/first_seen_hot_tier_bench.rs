@@ -5,7 +5,8 @@ use std::{
 };
 
 use anyhow::{Context, Result, anyhow, ensure};
-use blockzilla_format::{KeyStore, framed::read_u32_varint};
+use blockzilla_primitives::framed::read_u32_varint;
+use blockzilla_registry::KeyStore;
 use clap::Parser;
 use gxhash::gxhash64;
 use hashbrown::HashTable;

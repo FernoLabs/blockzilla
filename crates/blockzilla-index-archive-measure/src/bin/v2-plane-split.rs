@@ -2,10 +2,7 @@
 use std::{env, fs, path::PathBuf};
 
 use anyhow::{Context, Result};
-use blockzilla_format::{
-    ARCHIVE_V2_BLOCK_INDEX_FILE, ARCHIVE_V2_BLOCKS_FILE, deserialize_archive_v2_hot_block_blob,
-    read_archive_v2_hot_block_index,
-};
+use blockzilla_archive_v2::{ARCHIVE_V2_BLOCKS_FILE, ARCHIVE_V2_BLOCK_INDEX_FILE, deserialize_archive_v2_hot_block_blob, read_archive_v2_hot_block_index};
 
 fn main() -> Result<()> {
     let dir = PathBuf::from(

@@ -1,13 +1,9 @@
 use anyhow::{Result, bail};
-use blockzilla_format::{
-    CompactLogStream, CompactMetaV1, CompactPubkey, KeyIndex, LogEvent, OwnedCompactMessage,
-    WincodeArchiveV2Block, WincodeArchiveV2Payload,
-    program_logs::{
-        ProgramLog,
-        system_program::{PubkeyOrString, SystemAddress, SystemProgramLog},
-        token_2022::Token2022Log,
-    },
-};
+use blockzilla_archive_v2::{WincodeArchiveV2Block, WincodeArchiveV2Payload};
+use blockzilla_compact::{CompactLogStream, CompactMetaV1, LogEvent, OwnedCompactMessage};
+use blockzilla_primitives::CompactPubkey;
+use blockzilla_program_logs::{program_logs::ProgramLog, program_logs::system_program::PubkeyOrString, program_logs::system_program::SystemAddress, program_logs::system_program::SystemProgramLog, program_logs::token_2022::Token2022Log};
+use blockzilla_registry::KeyIndex;
 
 /// Result of rewriting the raw pubkey references in a pre-hot block.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
@@ -266,7 +262,7 @@ fn rewrite_block_pubkeys(
     Ok(stats)
 }
 
-fn ensure_decoded_rewards(rewards: &blockzilla_format::WincodeArchiveV2Rewards) -> Result<()> {
+fn ensure_decoded_rewards(rewards: &blockzilla_archive_v2::WincodeArchiveV2Rewards) -> Result<()> {
     if rewards.raw_fallback.is_some() || rewards.decode_error.is_some() {
         bail!("pre-hot block contains a raw rewards fallback");
     }
@@ -737,12 +733,9 @@ fn rekey_pubkey(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use blockzilla_format::{
-        CompactBlockHeader, CompactMessageHeader, CompactReturnData, CompactReward,
-        CompactTokenBalance, DataTable, OwnedCompactAddressTableLookup,
-        OwnedCompactRecentBlockhash, OwnedCompactTransaction, OwnedCompactV0Message, StringTable,
-        WincodeArchiveV2BlockHeader, WincodeArchiveV2Rewards, WincodeArchiveV2Transaction,
-    };
+    use blockzilla_archive_v2::{WincodeArchiveV2BlockHeader, WincodeArchiveV2Rewards, WincodeArchiveV2Transaction};
+    use blockzilla_compact::{CompactBlockHeader, CompactMessageHeader, CompactReturnData, CompactReward, CompactTokenBalance, DataTable, OwnedCompactAddressTableLookup, OwnedCompactRecentBlockhash, OwnedCompactTransaction, OwnedCompactV0Message};
+    use blockzilla_primitives::StringTable;
 
     fn raw(value: u8) -> CompactPubkey {
         CompactPubkey::raw([value; 32])

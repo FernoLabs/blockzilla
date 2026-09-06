@@ -11,23 +11,8 @@ use archive_v2_source_authority_common::{
     AuthorityDisposition as SourceDisposition, SourceAuthorityInventory, known_disposition,
     looks_like_archive_or_control,
 };
-use blockzilla_format::{
-    ARCHIVE_V2_BLOCK_ACCESS_FILE, ARCHIVE_V2_BLOCK_ACCESS_INDEX_FILE,
-    ARCHIVE_V2_BLOCK_ACCESS_INDEX_HEADER_LEN, ARCHIVE_V2_BLOCK_ACCESS_INDEX_MAGIC,
-    ARCHIVE_V2_BLOCK_ACCESS_INDEX_ROW_LEN, ARCHIVE_V2_BLOCK_ACCESS_INDEX_VERSION,
-    ARCHIVE_V2_BLOCK_ACCESS_MAX_FRAME_BYTES, ARCHIVE_V2_BLOCK_INDEX_FILE, ARCHIVE_V2_BLOCKS_FILE,
-    ARCHIVE_V2_GET_BLOCK_INDEX_FILE, ARCHIVE_V2_GET_BLOCK_INDEX_ROW_LEN,
-    ARCHIVE_V2_HOT_INDEX_FLAG_DICTIONARY, ARCHIVE_V2_HOT_INDEX_FLAG_RAW_BLOCKS,
-    ARCHIVE_V2_HOT_INDEX_HEADER_LEN, ARCHIVE_V2_HOT_INDEX_MAGIC, ARCHIVE_V2_HOT_INDEX_ROW_LEN,
-    ARCHIVE_V2_HOT_INDEX_VERSION, ARCHIVE_V2_TX_FLAG_HAS_ERROR, ARCHIVE_V2_TX_FLAG_HAS_METADATA,
-    ARCHIVE_V2_TX_FLAG_METADATA_RAW_FALLBACK, ARCHIVE_V2_TX_FLAG_TX_RAW_FALLBACK,
-    ArchiveV2BlockAccessIndex, ArchiveV2BlockAccessIndexRow, ArchiveV2GetBlockIndexRow,
-    ArchiveV2HotBlockHeader, ArchiveV2HotBlockIndex, ArchiveV2HotBlockIndexRow, ArchiveV2HotTxRow,
-    ArchiveV2WireFallbackReason, ArchiveV2WireIdentityVisitor, ArchiveV2WireMetadataErrorSchema,
-    ArchiveV2WireRewriteErrorKind, ArchiveV2WireRewriteLimits,
-    canonicalize_archive_v2_metadata_owned, deserialize_archive_v2_hot_block_blob_borrowed_current,
-    rewrite_archive_v2_metadata_wire, wincode_leb128_config,
-};
+use blockzilla_archive_v2::{ARCHIVE_V2_BLOCKS_FILE, ARCHIVE_V2_BLOCK_ACCESS_FILE, ARCHIVE_V2_BLOCK_ACCESS_INDEX_FILE, ARCHIVE_V2_BLOCK_ACCESS_INDEX_HEADER_LEN, ARCHIVE_V2_BLOCK_ACCESS_INDEX_MAGIC, ARCHIVE_V2_BLOCK_ACCESS_INDEX_ROW_LEN, ARCHIVE_V2_BLOCK_ACCESS_INDEX_VERSION, ARCHIVE_V2_BLOCK_ACCESS_MAX_FRAME_BYTES, ARCHIVE_V2_BLOCK_INDEX_FILE, ARCHIVE_V2_GET_BLOCK_INDEX_FILE, ARCHIVE_V2_GET_BLOCK_INDEX_ROW_LEN, ARCHIVE_V2_HOT_INDEX_FLAG_DICTIONARY, ARCHIVE_V2_HOT_INDEX_FLAG_RAW_BLOCKS, ARCHIVE_V2_HOT_INDEX_HEADER_LEN, ARCHIVE_V2_HOT_INDEX_MAGIC, ARCHIVE_V2_HOT_INDEX_ROW_LEN, ARCHIVE_V2_HOT_INDEX_VERSION, ARCHIVE_V2_TX_FLAG_HAS_ERROR, ARCHIVE_V2_TX_FLAG_HAS_METADATA, ARCHIVE_V2_TX_FLAG_METADATA_RAW_FALLBACK, ARCHIVE_V2_TX_FLAG_TX_RAW_FALLBACK, ArchiveV2BlockAccessIndex, ArchiveV2BlockAccessIndexRow, ArchiveV2GetBlockIndexRow, ArchiveV2HotBlockHeader, ArchiveV2HotBlockIndex, ArchiveV2HotBlockIndexRow, ArchiveV2HotTxRow, ArchiveV2WireFallbackReason, ArchiveV2WireIdentityVisitor, ArchiveV2WireMetadataErrorSchema, ArchiveV2WireRewriteErrorKind, ArchiveV2WireRewriteLimits, canonicalize_archive_v2_metadata_owned, deserialize_archive_v2_hot_block_blob_borrowed_current, rewrite_archive_v2_metadata_wire};
+use blockzilla_primitives::wincode_leb128_config;
 use blockzilla_read_sdk::{
     ArchiveReader, ArchiveV2MetadataProfileAdmission, ArchiveV2MetadataSchemaClassification,
     ArchiveV2MetadataSchemaClassifier, ArchiveV2MetadataSchemaCounts, ArchiveV2MetadataWireProfile,
@@ -3415,18 +3400,10 @@ mod tests {
         SOURCE_AUTHORITY_KIND, SOURCE_AUTHORITY_SCHEMA_VERSION, SourceAuthorityFile,
         compute_authority_digest,
     };
-    use blockzilla_format::{
-        ARCHIVE_V2_META_FILE, ARCHIVE_V2_PUBKEY_REGISTRY_FILE,
-        ARCHIVE_V2_PUBKEY_REGISTRY_INDEX_FILE, ARCHIVE_V2_SIGNATURES_FILE,
-        ARCHIVE_V2_TX_FLAG_HAS_ERROR, ArchiveV2HotBlockBlob, ArchiveV2HotInstruction,
-        ArchiveV2HotInstructionData, ArchiveV2HotLegacyMessage, ArchiveV2HotMessagePayload,
-        ArchiveV2HotMetaRecord, ArchiveV2HotRewards, CompactMessageHeader, CompactMetaV1,
-        CompactPubkey, CompactReward, CompactTransactionError, KeyIndex,
-        OwnedCompactRecentBlockhash, WINCODE_ARCHIVE_V2_FLAG_LEB128,
-        WINCODE_ARCHIVE_V2_HOT_BLOCK_VERSION, WincodeArchiveV2Footer, WincodeArchiveV2Header,
-        WincodeLeb128FramedWriter, write_archive_v2_block_access_index,
-        write_archive_v2_get_block_index, write_archive_v2_hot_block_index,
-    };
+    use blockzilla_archive_v2::{ARCHIVE_V2_META_FILE, ARCHIVE_V2_PUBKEY_REGISTRY_FILE, ARCHIVE_V2_PUBKEY_REGISTRY_INDEX_FILE, ARCHIVE_V2_SIGNATURES_FILE, ARCHIVE_V2_TX_FLAG_HAS_ERROR, ArchiveV2HotBlockBlob, ArchiveV2HotInstruction, ArchiveV2HotInstructionData, ArchiveV2HotLegacyMessage, ArchiveV2HotMessagePayload, ArchiveV2HotMetaRecord, ArchiveV2HotRewards, WINCODE_ARCHIVE_V2_FLAG_LEB128, WINCODE_ARCHIVE_V2_HOT_BLOCK_VERSION, WincodeArchiveV2Footer, WincodeArchiveV2Header, write_archive_v2_block_access_index, write_archive_v2_get_block_index, write_archive_v2_hot_block_index};
+    use blockzilla_compact::{CompactMessageHeader, CompactMetaV1, CompactReward, CompactTransactionError, OwnedCompactRecentBlockhash};
+    use blockzilla_primitives::{CompactPubkey, WincodeLeb128FramedWriter};
+    use blockzilla_registry::KeyIndex;
     use blockzilla_read_sdk::{
         ArchiveV2WireProfile,
         manifest::{GENERATION_MANIFEST_SCHEMA_VERSION, GenerationFile, compute_generation_digest},
@@ -3469,7 +3446,7 @@ mod tests {
         let message = "x".repeat(96);
         let current_error = CompactTransactionError::InstructionError(
             instruction_index,
-            blockzilla_format::CompactInstructionError::BorshIoError(message.clone()),
+            blockzilla_compact::CompactInstructionError::BorshIoError(message.clone()),
         );
         let current_error_bytes =
             wincode::config::serialize(&current_error, wincode_leb128_config()).unwrap();
@@ -3830,14 +3807,14 @@ mod tests {
         let second_end = second_start + rows[1].metadata_len as usize;
         let decoded: CompactMetaV1 = wincode::config::deserialize_exact(
             &target[second_start..second_end],
-            blockzilla_format::bounded_wincode_leb128_config::<DEFAULT_MAX_METADATA_BYTES>(),
+            blockzilla_primitives::bounded_wincode_leb128_config::<DEFAULT_MAX_METADATA_BYTES>(),
         )
         .unwrap();
         assert!(matches!(
             decoded.err,
             Some(CompactTransactionError::InstructionError(
                 7,
-                blockzilla_format::CompactInstructionError::BorshIoError(ref message)
+                blockzilla_compact::CompactInstructionError::BorshIoError(ref message)
             )) if message.len() == 96
         ));
     }

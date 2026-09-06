@@ -1,6 +1,6 @@
 //! Local admission proof for the canonical Archive V2 pubkey registry.
 
-use blockzilla_format::FileBackedKeyIndex;
+use blockzilla_registry::FileBackedKeyIndex;
 
 use crate::{
     Error, PinnedLocalRangeSource, RangeSource, Result,

@@ -16,7 +16,7 @@ pub(crate) const GENESIS_FILE: &str = "genesis.tar.bz2";
 /// the authoritative, backwards-compatible runtime input.
 pub(crate) fn write_compact_sidecar(dir: &Path, archive: &GenesisArchive) -> Result<PathBuf> {
     std::fs::create_dir_all(dir).with_context(|| format!("create {}", dir.display()))?;
-    let path = dir.join(blockzilla_format::ARCHIVE_V2_GENESIS_BIN_FILE);
+    let path = dir.join(blockzilla_archive_v2::ARCHIVE_V2_GENESIS_BIN_FILE);
     if path.exists() {
         let existing = std::fs::read(&path).with_context(|| format!("read {}", path.display()))?;
         anyhow::ensure!(
@@ -29,7 +29,7 @@ pub(crate) fn write_compact_sidecar(dir: &Path, archive: &GenesisArchive) -> Res
 
     let tmp = dir.join(format!(
         "{}.tmp",
-        blockzilla_format::ARCHIVE_V2_GENESIS_BIN_FILE
+        blockzilla_archive_v2::ARCHIVE_V2_GENESIS_BIN_FILE
     ));
     {
         let mut file = File::create(&tmp).with_context(|| format!("create {}", tmp.display()))?;

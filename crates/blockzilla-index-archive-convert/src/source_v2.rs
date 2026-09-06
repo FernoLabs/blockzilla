@@ -6,15 +6,9 @@
 
 use std::{collections::BTreeMap, error::Error, fmt, fs::File, os::unix::fs::FileExt};
 
-use blockzilla_format::{
-    ARCHIVE_V2_TX_FLAG_HAS_METADATA, ARCHIVE_V2_TX_FLAG_MESSAGE_V0,
-    ARCHIVE_V2_TX_FLAG_METADATA_RAW_FALLBACK, ARCHIVE_V2_TX_FLAG_TX_RAW_FALLBACK,
-    ArchiveV2ComputeBudgetInstructionData, ArchiveV2HotBlockBlob, ArchiveV2HotInstructionData,
-    ArchiveV2HotMessagePayload, ArchiveV2HotTxRow, ArchiveV2HotV0Message,
-    ArchiveV2SystemInstructionData, ArchiveV2VoteHashRef, ArchiveV2VoteStateUpdate,
-    ArchiveV2VoteTowerSync, CompactMetaV1, CompactPubkey, OwnedCompactAddressTableLookup,
-    PubkeyResolver,
-};
+use blockzilla_archive_v2::{ARCHIVE_V2_TX_FLAG_HAS_METADATA, ARCHIVE_V2_TX_FLAG_MESSAGE_V0, ARCHIVE_V2_TX_FLAG_METADATA_RAW_FALLBACK, ARCHIVE_V2_TX_FLAG_TX_RAW_FALLBACK, ArchiveV2ComputeBudgetInstructionData, ArchiveV2HotBlockBlob, ArchiveV2HotInstructionData, ArchiveV2HotMessagePayload, ArchiveV2HotTxRow, ArchiveV2HotV0Message, ArchiveV2SystemInstructionData, ArchiveV2VoteHashRef, ArchiveV2VoteStateUpdate, ArchiveV2VoteTowerSync};
+use blockzilla_compact::{CompactMetaV1, OwnedCompactAddressTableLookup};
+use blockzilla_primitives::{CompactPubkey, PubkeyResolver};
 pub use blockzilla_compact_v2_reader::{CompactV2MessageSchema, CompactV2MetadataSchema};
 use blockzilla_compact_v2_reader::{
     PinnedLocalRangeSource, SourceError, SourceResult, decode_compact_v2_message,
@@ -993,7 +987,7 @@ pub struct SignedInstruction<'a> {
 #[derive(Debug, Clone, Copy)]
 pub struct SignedMessage<'a> {
     pub version: SignedMessageVersion<'a>,
-    pub header: blockzilla_format::CompactMessageHeader,
+    pub header: blockzilla_compact::CompactMessageHeader,
     pub static_account_keys: &'a [[u8; 32]],
     pub recent_blockhash: [u8; 32],
     pub instructions: &'a [SignedInstruction<'a>],
@@ -1011,7 +1005,7 @@ pub struct SignedInstructionCandidates<'a> {
 #[derive(Debug, Clone, Copy)]
 pub struct SignedMessageCandidates<'a> {
     pub version: SignedMessageVersion<'a>,
-    pub header: blockzilla_format::CompactMessageHeader,
+    pub header: blockzilla_compact::CompactMessageHeader,
     pub static_account_keys: &'a [[u8; 32]],
     pub recent_blockhash: [u8; 32],
     pub instructions: &'a [SignedInstructionCandidates<'a>],
@@ -1890,12 +1884,11 @@ fn push_system_seed(out: &mut Vec<u8>, seed: &str) -> Result<(), SourceV2Error> 
 #[cfg(test)]
 mod tests {
     use super::*;
-    use blockzilla_format::program_logs::ProgramLog;
-    use blockzilla_format::{
-        ArchiveV2HotBlockHeader, ArchiveV2HotLegacyMessage, ArchiveV2VoteLockoutOffset,
-        CompactLogStream, CompactMessageHeader, DataTable, KeyStore, LogEvent,
-        OwnedCompactRecentBlockhash, StringTable, render_logs, wincode_leb128_config,
-    };
+    use blockzilla_program_logs::program_logs::ProgramLog;
+    use blockzilla_archive_v2::{ArchiveV2HotBlockHeader, ArchiveV2HotLegacyMessage, ArchiveV2VoteLockoutOffset};
+    use blockzilla_compact::{CompactLogStream, CompactMessageHeader, DataTable, LogEvent, OwnedCompactRecentBlockhash, render_logs};
+    use blockzilla_primitives::{StringTable, wincode_leb128_config};
+    use blockzilla_registry::KeyStore;
     use std::io::Write;
 
     /// Freeze the v1 canonical message bytes against a hand-built vector.
@@ -2086,12 +2079,12 @@ mod tests {
                     depth: 1,
                 },
                 LogEvent::System(
-                    blockzilla_format::program_logs::system_program::SystemProgramLog::TransferFromMustSign {
+                    blockzilla_program_logs::program_logs::system_program::SystemProgramLog::TransferFromMustSign {
                         from: CompactPubkey::Id(2),
                     },
                 ),
                 LogEvent::ProgramLog(ProgramLog::Token2022(
-                    blockzilla_format::program_logs::token_2022::Token2022Log::ErrorHarvestingFrom {
+                    blockzilla_program_logs::program_logs::token_2022::Token2022Log::ErrorHarvestingFrom {
                         account_key: CompactPubkey::Id(2),
                         error,
                     },

@@ -1,12 +1,6 @@
 use anyhow::{Context, Result, anyhow};
-use blockzilla_format::{
-    ARCHIVE_V2_BLOCK_ACCESS_FILE, ARCHIVE_V2_BLOCK_ACCESS_INDEX_FILE, ARCHIVE_V2_BLOCKS_FILE,
-    ARCHIVE_V2_HOT_INDEX_FLAG_RAW_BLOCKS, ARCHIVE_V2_VOTE_HASH_REGISTRY_FILE,
-    ArchiveV2BlockAccessBlob, ArchiveV2BlockAccessBlockhash, ArchiveV2BlockAccessPubkey,
-    ArchiveV2HotBlockBlob, ArchiveV2HotInstructionData, ArchiveV2HotMessagePayload,
-    ArchiveV2VoteHashRef, archive_v2_hot_index_path, deserialize_archive_v2_hot_block_blob,
-    read_archive_v2_block_access_index, read_archive_v2_hot_block_index, wincode_leb128_config,
-};
+use blockzilla_archive_v2::{ARCHIVE_V2_BLOCKS_FILE, ARCHIVE_V2_BLOCK_ACCESS_FILE, ARCHIVE_V2_BLOCK_ACCESS_INDEX_FILE, ARCHIVE_V2_HOT_INDEX_FLAG_RAW_BLOCKS, ARCHIVE_V2_VOTE_HASH_REGISTRY_FILE, ArchiveV2BlockAccessBlob, ArchiveV2BlockAccessBlockhash, ArchiveV2BlockAccessPubkey, ArchiveV2HotBlockBlob, ArchiveV2HotInstructionData, ArchiveV2HotMessagePayload, ArchiveV2VoteHashRef, archive_v2_hot_index_path, deserialize_archive_v2_hot_block_blob, read_archive_v2_block_access_index, read_archive_v2_hot_block_index};
+use blockzilla_primitives::wincode_leb128_config;
 use clap::Parser;
 use serde::{Deserialize, Serialize};
 use std::{
@@ -134,7 +128,7 @@ fn main() -> Result<()> {
 fn read_hot_block(
     file: &mut File,
     raw_blocks: bool,
-    row: &blockzilla_format::ArchiveV2HotBlockIndexRow,
+    row: &blockzilla_archive_v2::ArchiveV2HotBlockIndexRow,
 ) -> Result<Vec<u8>> {
     file.seek(SeekFrom::Start(row.compressed_offset))?;
     if raw_blocks {
@@ -152,7 +146,7 @@ fn read_hot_block(
 
 fn read_access_blob(
     file: &mut File,
-    row: &blockzilla_format::ArchiveV2BlockAccessIndexRow,
+    row: &blockzilla_archive_v2::ArchiveV2BlockAccessIndexRow,
 ) -> Result<ArchiveV2BlockAccessBlob> {
     file.seek(SeekFrom::Start(row.access_offset))?;
     let mut bytes = vec![0; row.access_len as usize];

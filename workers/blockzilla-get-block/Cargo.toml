@@ -47,9 +47,13 @@ worker = [
 ]
 
 [dependencies]
+blockzilla-archive-v2 = { path = "../../crates/blockzilla-archive-v2", default-features = false }
+blockzilla-compact = { path = "../../crates/blockzilla-compact", default-features = false }
+blockzilla-primitives = { path = "../../crates/blockzilla-primitives", default-features = false }
+blockzilla-program-logs = { path = "../../crates/blockzilla-program-logs", default-features = false }
+blockzilla-registry = { path = "../../crates/blockzilla-registry", default-features = false }
 anyhow = { version = "1.0.102", optional = true }
 base64 = "0.22.1"
-blockzilla-format = { path = "../../crates/blockzilla-format" }
 bs58 = "0.5.1"
 clap = { version = "4.6.1", features = ["derive", "env"], optional = true }
 five8 = "1.0.0"

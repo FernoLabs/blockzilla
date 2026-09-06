@@ -5,13 +5,9 @@ use std::{
 };
 
 use axum::{body::to_bytes, http::Request};
-use blockzilla_format::{
-    ARCHIVE_V2_TX_FLAG_HAS_LOADED_ADDRESSES, ARCHIVE_V2_TX_FLAG_HAS_METADATA,
-    ARCHIVE_V2_TX_FLAG_MESSAGE_V0, ArchiveV2HotInstruction, ArchiveV2HotInstructionData,
-    ArchiveV2HotLegacyMessage, ArchiveV2HotMessagePayload, ArchiveV2HotV0Message,
-    CompactMessageHeader, CompactMetaV1, CompactPubkey, OwnedCompactAddressTableLookup,
-    OwnedCompactRecentBlockhash, WincodeLeb128FramedWriter, wincode_leb128_config,
-};
+use blockzilla_archive_v2::{ARCHIVE_V2_TX_FLAG_HAS_LOADED_ADDRESSES, ARCHIVE_V2_TX_FLAG_HAS_METADATA, ARCHIVE_V2_TX_FLAG_MESSAGE_V0, ArchiveV2HotInstruction, ArchiveV2HotInstructionData, ArchiveV2HotLegacyMessage, ArchiveV2HotMessagePayload, ArchiveV2HotV0Message};
+use blockzilla_compact::{CompactMessageHeader, CompactMetaV1, OwnedCompactAddressTableLookup, OwnedCompactRecentBlockhash};
+use blockzilla_primitives::{CompactPubkey, WincodeLeb128FramedWriter, wincode_leb128_config};
 use blockzilla_spyx_query::index_format::{
     INDEX_HEADER_BYTES, INDEX_MANIFEST_FILE, IndexManifest, SIGNATURE_LOOKUP_FILE,
     SIGNATURE_RECORD_BYTES,

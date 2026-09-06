@@ -1,22 +1,6 @@
 use anyhow::{Context, Result};
-use blockzilla_format::{
-    ARCHIVE_V2_BLOCK_ACCESS_FILE, ARCHIVE_V2_BLOCK_ACCESS_INDEX_FILE, ARCHIVE_V2_BLOCK_INDEX_FILE,
-    ARCHIVE_V2_BLOCKHASH_INDEX_V3_FILE, ARCHIVE_V2_BLOCKHASH_INDEX_V3_HEADER_LEN,
-    ARCHIVE_V2_BLOCKHASH_INDEX_V3_MAGIC, ARCHIVE_V2_BLOCKHASH_INDEX_V3_ROW_LEN,
-    ARCHIVE_V2_BLOCKHASH_INDEX_V3_VERSION, ARCHIVE_V2_BLOCKHASH_REGISTRY_FILE,
-    ARCHIVE_V2_BLOCKS_FILE, ARCHIVE_V2_FIRST_SEEN_REGISTRY_MANIFEST_FILE,
-    ARCHIVE_V2_GET_BLOCK_INDEX_FILE, ARCHIVE_V2_HOT_INDEX_FLAG_DICTIONARY,
-    ARCHIVE_V2_HOT_INDEX_FLAG_RAW_BLOCKS, ARCHIVE_V2_META_FILE, ARCHIVE_V2_POH_FILE,
-    ARCHIVE_V2_PREV_BLOCKHASH_TAIL_FILE, ARCHIVE_V2_SHREDDING_FILE, ARCHIVE_V2_SIGNATURES_FILE,
-    ArchiveV2HotBlockIndexRow, ArchiveV2HotMetaRecord, ArchiveV2HotTxRow, BLOCK_TIME_GAP_FILE,
-    BlockTimeGapSourceKind, PohRecordSchema, WINCODE_ARCHIVE_V2_FLAG_LEB128,
-    WINCODE_ARCHIVE_V2_HOT_BLOCK_VERSION, WincodeArchiveV2PohRecord,
-    WincodeArchiveV2PohRecordLegacyNoSignatureCount, WincodeArchiveV2ShreddingRecord,
-    WincodeLeb128FramedReader, WincodeLeb128FramedWriter,
-    deserialize_archive_v2_hot_block_blob_borrowed_current_without_rewards,
-    read_archive_v2_block_access_index, read_archive_v2_get_block_index,
-    read_archive_v2_hot_block_index, read_block_time_gap_sidecar,
-};
+use blockzilla_archive_v2::{ARCHIVE_V2_BLOCKHASH_INDEX_V3_FILE, ARCHIVE_V2_BLOCKHASH_INDEX_V3_HEADER_LEN, ARCHIVE_V2_BLOCKHASH_INDEX_V3_MAGIC, ARCHIVE_V2_BLOCKHASH_INDEX_V3_ROW_LEN, ARCHIVE_V2_BLOCKHASH_INDEX_V3_VERSION, ARCHIVE_V2_BLOCKHASH_REGISTRY_FILE, ARCHIVE_V2_BLOCKS_FILE, ARCHIVE_V2_BLOCK_ACCESS_FILE, ARCHIVE_V2_BLOCK_ACCESS_INDEX_FILE, ARCHIVE_V2_BLOCK_INDEX_FILE, ARCHIVE_V2_FIRST_SEEN_REGISTRY_MANIFEST_FILE, ARCHIVE_V2_GET_BLOCK_INDEX_FILE, ARCHIVE_V2_HOT_INDEX_FLAG_DICTIONARY, ARCHIVE_V2_HOT_INDEX_FLAG_RAW_BLOCKS, ARCHIVE_V2_META_FILE, ARCHIVE_V2_POH_FILE, ARCHIVE_V2_PREV_BLOCKHASH_TAIL_FILE, ARCHIVE_V2_SHREDDING_FILE, ARCHIVE_V2_SIGNATURES_FILE, ArchiveV2HotBlockIndexRow, ArchiveV2HotMetaRecord, ArchiveV2HotTxRow, BLOCK_TIME_GAP_FILE, BlockTimeGapSourceKind, PohRecordSchema, WINCODE_ARCHIVE_V2_FLAG_LEB128, WINCODE_ARCHIVE_V2_HOT_BLOCK_VERSION, WincodeArchiveV2PohRecord, WincodeArchiveV2PohRecordLegacyNoSignatureCount, WincodeArchiveV2ShreddingRecord, deserialize_archive_v2_hot_block_blob_borrowed_current_without_rewards, read_archive_v2_block_access_index, read_archive_v2_get_block_index, read_archive_v2_hot_block_index, read_block_time_gap_sidecar};
+use blockzilla_primitives::{WincodeLeb128FramedReader, WincodeLeb128FramedWriter};
 use memmap2::Mmap;
 use rayon::prelude::*;
 use serde::{Deserialize, Serialize, de::DeserializeOwned};
@@ -902,7 +886,7 @@ pub(crate) fn migrate_poh_signature_counts(
     let mut blocks_already_current = 0u64;
     // Every frame in this sidecar shares one schema; probing per-frame would decode a legacy
     // (pre-`signature_count`) sidecar twice on every single block.
-    let mut poh_schema = blockzilla_format::PohRecordSchema::default();
+    let mut poh_schema = blockzilla_archive_v2::PohRecordSchema::default();
 
     let bench_phases = std::env::var("BENCH_PHASE_TIMING").is_ok();
     let mut t_poh_read = std::time::Duration::ZERO;
@@ -922,7 +906,7 @@ pub(crate) fn migrate_poh_signature_counts(
             );
             let (_, poh) = poh_reader
                 .read_bytes_with_limit(MAX_POH_FRAME_BYTES, |bytes| {
-                    blockzilla_format::deserialize_archive_v2_poh_record_with_schema(
+                    blockzilla_archive_v2::deserialize_archive_v2_poh_record_with_schema(
                         bytes,
                         &mut poh_schema,
                     )
@@ -1022,7 +1006,7 @@ pub(crate) fn migrate_poh_signature_counts(
     anyhow::ensure!(
         poh_reader
             .read_bytes_with_limit(MAX_POH_FRAME_BYTES, |bytes| {
-                blockzilla_format::deserialize_archive_v2_poh_record(bytes)
+                blockzilla_archive_v2::deserialize_archive_v2_poh_record(bytes)
                     .map_err(anyhow::Error::from)
             })?
             .is_none(),
@@ -1431,7 +1415,7 @@ fn validate_expected_predecessor_before_writes(options: &PohOrphanTailRepairOpti
 }
 
 fn decode_meta_record(bytes: &[u8]) -> Result<ArchiveV2HotMetaRecord> {
-    wincode::config::deserialize_exact(bytes, blockzilla_format::wincode_leb128_config())
+    wincode::config::deserialize_exact(bytes, blockzilla_primitives::wincode_leb128_config())
         .map_err(anyhow::Error::from)
 }
 
@@ -1442,7 +1426,7 @@ struct ExactPohRecordDecoder {
 
 impl ExactPohRecordDecoder {
     fn decode(&mut self, bytes: &[u8]) -> Result<WincodeArchiveV2PohRecord> {
-        let config = blockzilla_format::wincode_leb128_config();
+        let config = blockzilla_primitives::wincode_leb128_config();
         match self.schema {
             Some(PohRecordSchema::Current) => {
                 wincode::config::deserialize_exact(bytes, config).map_err(anyhow::Error::from)
@@ -1566,7 +1550,7 @@ fn validate_repair_shredding(
             .read_bytes_with_limit(MAX_SHREDDING_FRAME_BYTES, |bytes| {
                 wincode::config::deserialize_exact(
                     bytes,
-                    blockzilla_format::wincode_leb128_config(),
+                    blockzilla_primitives::wincode_leb128_config(),
                 )
                 .map_err(anyhow::Error::from)
             })?
@@ -1584,7 +1568,7 @@ fn validate_repair_shredding(
             .read_bytes_with_limit(MAX_SHREDDING_FRAME_BYTES, |bytes| {
                 wincode::config::deserialize_exact::<WincodeArchiveV2ShreddingRecord, _>(
                     bytes,
-                    blockzilla_format::wincode_leb128_config(),
+                    blockzilla_primitives::wincode_leb128_config(),
                 )
                 .map_err(anyhow::Error::from)
             })?
@@ -4177,14 +4161,14 @@ fn poh_migration_file_verified(archive_dir: &Path, poh_path: &Path) -> Result<bo
         WincodeLeb128FramedReader::new(BufReader::with_capacity(POH_READER_BUFFER_BYTES, poh_file));
     // Every frame in this sidecar shares one schema; probing per-frame would decode a legacy
     // (pre-`signature_count`) sidecar twice on every single block.
-    let mut poh_schema = blockzilla_format::PohRecordSchema::default();
+    let mut poh_schema = blockzilla_archive_v2::PohRecordSchema::default();
 
     for (position, row) in index.rows.iter().enumerate() {
         if row.block_id as usize != position {
             return Ok(false);
         }
         let Some((_, poh)) = poh_reader.read_bytes_with_limit(MAX_POH_FRAME_BYTES, |bytes| {
-            blockzilla_format::deserialize_archive_v2_poh_record_with_schema(bytes, &mut poh_schema)
+            blockzilla_archive_v2::deserialize_archive_v2_poh_record_with_schema(bytes, &mut poh_schema)
                 .map_err(anyhow::Error::from)
         })?
         else {
@@ -4204,7 +4188,7 @@ fn poh_migration_file_verified(archive_dir: &Path, poh_path: &Path) -> Result<bo
     }
 
     let trailing = poh_reader.read_bytes_with_limit(MAX_POH_FRAME_BYTES, |bytes| {
-        blockzilla_format::deserialize_archive_v2_poh_record(bytes).map_err(anyhow::Error::from)
+        blockzilla_archive_v2::deserialize_archive_v2_poh_record(bytes).map_err(anyhow::Error::from)
     })?;
     Ok(trailing.is_none())
 }
@@ -4833,11 +4817,8 @@ mod tests {
         parent_slot: u64,
         previous_indexed_slot: u64,
     ) -> PathBuf {
-        use blockzilla_format::{
-            ArchiveV2HotBlockBlob, ArchiveV2HotBlockHeader, ArchiveV2HotBlockIndexRow,
-            ArchiveV2HotTxRow, CompactPohEntry, WincodeArchiveV2PohRecord,
-            write_archive_v2_hot_block_index,
-        };
+        use blockzilla_archive_v2::{ArchiveV2HotBlockBlob, ArchiveV2HotBlockHeader, ArchiveV2HotBlockIndexRow, ArchiveV2HotTxRow, WincodeArchiveV2PohRecord, write_archive_v2_hot_block_index};
+        use blockzilla_compact::CompactPohEntry;
 
         let decode_hex = |value: &str| {
             value
@@ -4921,7 +4902,7 @@ mod tests {
         let mut offset = 0u64;
         for (block_id, block) in blocks.iter().enumerate() {
             let uncompressed =
-                wincode::config::serialize(block, blockzilla_format::wincode_leb128_config())
+                wincode::config::serialize(block, blockzilla_primitives::wincode_leb128_config())
                     .unwrap();
             let compressed = zstd::bulk::compress(&uncompressed, 1).unwrap();
             rows.push(ArchiveV2HotBlockIndexRow {
@@ -5021,7 +5002,8 @@ mod tests {
 
     #[test]
     fn canonical_poh_signature_order_maps_storage_slices_by_tx_index() {
-        use blockzilla_format::{ArchiveV2HotTxRow, CompactPohEntry};
+        use blockzilla_archive_v2::ArchiveV2HotTxRow;
+        use blockzilla_compact::CompactPohEntry;
 
         let row = |tx_index, signature_count| ArchiveV2HotTxRow {
             tx_index,
@@ -5173,11 +5155,8 @@ mod tests {
 
     #[test]
     fn deep_poh_verifier_hashes_permuted_hot_rows_in_canonical_tx_order() {
-        use blockzilla_format::{
-            ArchiveV2HotBlockBlob, ArchiveV2HotBlockHeader, ArchiveV2HotBlockIndexRow,
-            ArchiveV2HotTxRow, CompactPohEntry, WincodeArchiveV2PohRecord,
-            write_archive_v2_hot_block_index,
-        };
+        use blockzilla_archive_v2::{ArchiveV2HotBlockBlob, ArchiveV2HotBlockHeader, ArchiveV2HotBlockIndexRow, ArchiveV2HotTxRow, WincodeArchiveV2PohRecord, write_archive_v2_hot_block_index};
+        use blockzilla_compact::CompactPohEntry;
 
         let root = poh_migration_verify_fixture_root("poh-canonical-tx-order");
         let slot = 431_163_662;
@@ -5209,7 +5188,7 @@ mod tests {
             metadata_bytes: Vec::new(),
         };
         let uncompressed =
-            wincode::config::serialize(&hot_block, blockzilla_format::wincode_leb128_config())
+            wincode::config::serialize(&hot_block, blockzilla_primitives::wincode_leb128_config())
                 .unwrap();
         let compressed = zstd::bulk::compress(&uncompressed, 1).unwrap();
         std::fs::write(root.join(ARCHIVE_V2_BLOCKS_FILE), &compressed).unwrap();
@@ -5521,16 +5500,8 @@ mod tests {
     }
 
     fn poh_orphan_repair_fixture(label: &str) -> PohOrphanRepairFixture {
-        use blockzilla_format::{
-            ArchiveV2HotBlockBlob, ArchiveV2HotBlockHeader, ArchiveV2HotBlockIndexRow,
-            ArchiveV2HotMetaRecord, ArchiveV2HotTxRow, BLOCK_TIME_GAP_HEADER_LEN,
-            BLOCK_TIME_GAP_MAGIC, BLOCK_TIME_GAP_MISSING_TIME, BLOCK_TIME_GAP_ROW_LEN,
-            BLOCK_TIME_GAP_TIME_THRESHOLD_SECS, BLOCK_TIME_GAP_VERSION, BlockTimeGapHeader,
-            BlockTimeGapSidecar, BlockTimeGapSourceKind, CompactPohEntry,
-            WINCODE_ARCHIVE_V2_FLAG_LEB128, WINCODE_ARCHIVE_V2_HOT_BLOCK_VERSION,
-            WincodeArchiveV2Footer, WincodeArchiveV2Header, WincodeArchiveV2ShreddingRecord,
-            write_archive_v2_hot_block_index, write_block_time_gap_sidecar,
-        };
+        use blockzilla_archive_v2::{ArchiveV2HotBlockBlob, ArchiveV2HotBlockHeader, ArchiveV2HotBlockIndexRow, ArchiveV2HotMetaRecord, ArchiveV2HotTxRow, BLOCK_TIME_GAP_HEADER_LEN, BLOCK_TIME_GAP_MAGIC, BLOCK_TIME_GAP_MISSING_TIME, BLOCK_TIME_GAP_ROW_LEN, BLOCK_TIME_GAP_TIME_THRESHOLD_SECS, BLOCK_TIME_GAP_VERSION, BlockTimeGapHeader, BlockTimeGapSidecar, BlockTimeGapSourceKind, WINCODE_ARCHIVE_V2_FLAG_LEB128, WINCODE_ARCHIVE_V2_HOT_BLOCK_VERSION, WincodeArchiveV2Footer, WincodeArchiveV2Header, WincodeArchiveV2ShreddingRecord, write_archive_v2_hot_block_index, write_block_time_gap_sidecar};
+        use blockzilla_compact::CompactPohEntry;
 
         let parent = poh_migration_verify_fixture_root(label);
         let root = parent.join("epoch-998");
@@ -5565,7 +5536,7 @@ mod tests {
                 metadata_bytes: Vec::new(),
             };
             let uncompressed =
-                wincode::config::serialize(&hot_block, blockzilla_format::wincode_leb128_config())
+                wincode::config::serialize(&hot_block, blockzilla_primitives::wincode_leb128_config())
                     .unwrap();
             let compressed = zstd::bulk::compress(&uncompressed, 1).unwrap();
             rows.push(ArchiveV2HotBlockIndexRow {
@@ -5785,10 +5756,7 @@ mod tests {
     }
 
     fn add_poh_repair_lookup_planes(fixture: &PohOrphanRepairFixture) {
-        use blockzilla_format::{
-            ArchiveV2BlockAccessIndexRow, ArchiveV2GetBlockIndexRow,
-            write_archive_v2_block_access_index, write_archive_v2_get_block_index,
-        };
+        use blockzilla_archive_v2::{ArchiveV2BlockAccessIndexRow, ArchiveV2GetBlockIndexRow, write_archive_v2_block_access_index, write_archive_v2_get_block_index};
         let first_slot = 431_559_123;
         let last_slot = 431_559_124;
         let hot_index =
@@ -6732,7 +6700,7 @@ mod tests {
 
     #[test]
     fn poh_orphan_tail_repair_rejects_an_extra_shredding_plane_record() {
-        use blockzilla_format::WincodeArchiveV2ShreddingRecord;
+        use blockzilla_archive_v2::WincodeArchiveV2ShreddingRecord;
         let fixture = poh_orphan_repair_fixture("poh-orphan-extra-shredding");
         let options = fixture.options();
         let shredding_path = fixture.root.join(ARCHIVE_V2_SHREDDING_FILE);
@@ -6772,7 +6740,7 @@ mod tests {
             read_block_time_gap_sidecar(BufReader::new(File::open(&gap_path).unwrap())).unwrap();
         gap.header.source_sha256[0] ^= 1;
         let mut gap_file = File::create(&gap_path).unwrap();
-        blockzilla_format::write_block_time_gap_sidecar(&mut gap_file, &gap).unwrap();
+        blockzilla_archive_v2::write_block_time_gap_sidecar(&mut gap_file, &gap).unwrap();
         gap_file.sync_all().unwrap();
         let canonical = std::fs::read(fixture.root.join(ARCHIVE_V2_POH_FILE)).unwrap();
         let error = repair_poh_orphan_tail(&options).unwrap_err();
@@ -6798,7 +6766,7 @@ mod tests {
         let get_block_path = fixture.root.join(ARCHIVE_V2_GET_BLOCK_INDEX_FILE);
         let mut get_block = std::fs::read(&get_block_path).unwrap();
         let terminal_offset = (431_559_124 % crate::SLOTS_PER_EPOCH) as usize
-            * blockzilla_format::ARCHIVE_V2_GET_BLOCK_INDEX_ROW_LEN;
+            * blockzilla_archive_v2::ARCHIVE_V2_GET_BLOCK_INDEX_ROW_LEN;
         get_block[terminal_offset..terminal_offset + 8].copy_from_slice(&9u64.to_le_bytes());
         std::fs::write(&get_block_path, get_block).unwrap();
         let error = repair_poh_orphan_tail(&fixture.options()).unwrap_err();
@@ -7013,9 +6981,8 @@ mod tests {
 
     #[test]
     fn poh_migration_epoch_verified_detects_matching_and_mismatched_signature_sums() {
-        use blockzilla_format::{
-            ArchiveV2HotBlockIndexRow, CompactPohEntry, write_archive_v2_hot_block_index,
-        };
+        use blockzilla_archive_v2::{ArchiveV2HotBlockIndexRow, write_archive_v2_hot_block_index};
+        use blockzilla_compact::CompactPohEntry;
 
         let root = poh_migration_verify_fixture_root("poh-migration-verify");
 
@@ -7113,10 +7080,8 @@ mod tests {
 
     #[test]
     fn migrate_poh_signature_counts_patches_batched_blocks_across_worker_threads() {
-        use blockzilla_format::{
-            ArchiveV2HotBlockBlob, ArchiveV2HotBlockHeader, ArchiveV2HotBlockIndexRow,
-            ArchiveV2HotTxRow, CompactPohEntry, write_archive_v2_hot_block_index,
-        };
+        use blockzilla_archive_v2::{ArchiveV2HotBlockBlob, ArchiveV2HotBlockHeader, ArchiveV2HotBlockIndexRow, ArchiveV2HotTxRow, write_archive_v2_hot_block_index};
+        use blockzilla_compact::CompactPohEntry;
 
         let root = poh_migration_verify_fixture_root("poh-migration-migrate");
 
@@ -7160,7 +7125,7 @@ mod tests {
             metadata_bytes: vec![20, 21, 22],
         };
         let uncompressed =
-            wincode::config::serialize(&hot_block, blockzilla_format::wincode_leb128_config())
+            wincode::config::serialize(&hot_block, blockzilla_primitives::wincode_leb128_config())
                 .unwrap();
         let compressed = zstd::bulk::compress(&uncompressed, 3).unwrap();
         let empty_hot_block = ArchiveV2HotBlockBlob {
@@ -7180,7 +7145,7 @@ mod tests {
         };
         let empty_uncompressed = wincode::config::serialize(
             &empty_hot_block,
-            blockzilla_format::wincode_leb128_config(),
+            blockzilla_primitives::wincode_leb128_config(),
         )
         .unwrap();
         let empty_compressed = zstd::bulk::compress(&empty_uncompressed, 3).unwrap();
@@ -7268,7 +7233,7 @@ mod tests {
             WincodeLeb128FramedReader::new(File::open(root.join(ARCHIVE_V2_POH_FILE)).unwrap());
         let (_, migrated_block_0) = reader
             .read_bytes_with_limit(MAX_POH_FRAME_BYTES, |bytes| {
-                blockzilla_format::deserialize_archive_v2_poh_record(bytes)
+                blockzilla_archive_v2::deserialize_archive_v2_poh_record(bytes)
                     .map_err(anyhow::Error::from)
             })
             .unwrap()
@@ -7279,7 +7244,7 @@ mod tests {
 
         let (_, migrated_block_1) = reader
             .read_bytes_with_limit(MAX_POH_FRAME_BYTES, |bytes| {
-                blockzilla_format::deserialize_archive_v2_poh_record(bytes)
+                blockzilla_archive_v2::deserialize_archive_v2_poh_record(bytes)
                     .map_err(anyhow::Error::from)
             })
             .unwrap()
@@ -7294,10 +7259,8 @@ mod tests {
 
     #[test]
     fn poh_migration_lock_rejects_contender_without_touching_published_sidecar() {
-        use blockzilla_format::{
-            ArchiveV2HotBlockBlob, ArchiveV2HotBlockHeader, ArchiveV2HotBlockIndexRow,
-            CompactPohEntry, write_archive_v2_hot_block_index,
-        };
+        use blockzilla_archive_v2::{ArchiveV2HotBlockBlob, ArchiveV2HotBlockHeader, ArchiveV2HotBlockIndexRow, write_archive_v2_hot_block_index};
+        use blockzilla_compact::CompactPohEntry;
 
         const CHILD_ARCHIVE_ENV: &str = "BLOCKZILLA_TEST_POH_MIGRATION_LOCK_ARCHIVE";
         const CHILD_SENTINEL: &str = "poh-migration-lock-contention-observed";
@@ -7331,7 +7294,7 @@ mod tests {
             metadata_bytes: Vec::new(),
         };
         let uncompressed =
-            wincode::config::serialize(&hot_block, blockzilla_format::wincode_leb128_config())
+            wincode::config::serialize(&hot_block, blockzilla_primitives::wincode_leb128_config())
                 .unwrap();
         let compressed = zstd::bulk::compress(&uncompressed, 1).unwrap();
         std::fs::write(root.join(ARCHIVE_V2_BLOCKS_FILE), &compressed).unwrap();

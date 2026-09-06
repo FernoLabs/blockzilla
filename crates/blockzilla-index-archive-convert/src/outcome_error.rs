@@ -1,6 +1,6 @@
 //! Mechanical mapping from Compact V2 errors to the archive-owned schema.
 
-use blockzilla_format::{CompactInstructionError, CompactTransactionError};
+use blockzilla_compact::{CompactInstructionError, CompactTransactionError};
 use blockzilla_index_archive_format::runtime::outcomes::{InstructionFailure, TransactionFailure};
 
 pub(crate) fn transaction(value: &CompactTransactionError) -> TransactionFailure {

@@ -8,7 +8,7 @@
 
 use std::collections::BTreeSet;
 
-use blockzilla_format::ArchiveV2SystemInstructionData;
+use blockzilla_archive_v2::ArchiveV2SystemInstructionData;
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 use thiserror::Error;

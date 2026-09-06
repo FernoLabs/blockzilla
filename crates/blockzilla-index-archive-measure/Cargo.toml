@@ -8,8 +8,9 @@ repository.workspace = true
 publish = false
 
 [dependencies]
+blockzilla-archive-v2 = { path = "../../crates/blockzilla-archive-v2", default-features = false }
+blockzilla-primitives = { path = "../../crates/blockzilla-primitives", default-features = false }
 anyhow = "1.0.104"
-blockzilla-format = { path = "../blockzilla-format" }
 blockzilla-index-archive-format = { path = "../blockzilla-index-archive-format" }
 blockzilla-compact-v2-reader = { path = "../blockzilla-read-sdk" }
 of-car-reader = { path = "../old-faithful/car-reader", version = "0.2.0", default-features = false, features = ["zstd-native"] }

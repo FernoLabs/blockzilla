@@ -1,5 +1,5 @@
 use anyhow::Result;
-use blockzilla_format::{LiveArchiveSource, LiveBlockDraft};
+use blockzilla_live_format::{LiveArchiveSource, LiveBlockDraft};
 
 pub trait LiveBlockSource {
     fn source(&self) -> LiveArchiveSource;

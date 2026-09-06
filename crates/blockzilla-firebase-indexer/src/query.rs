@@ -8,9 +8,8 @@ use std::{
 };
 
 use anyhow::{Context, Result};
-use blockzilla_format::{
-    ARCHIVE_V2_PUBKEY_REGISTRY_FILE, ARCHIVE_V2_PUBKEY_REGISTRY_INDEX_FILE, FileBackedKeyIndex,
-};
+use blockzilla_archive_v2::{ARCHIVE_V2_PUBKEY_REGISTRY_FILE, ARCHIVE_V2_PUBKEY_REGISTRY_INDEX_FILE};
+use blockzilla_registry::FileBackedKeyIndex;
 use blockzilla_compact_v2_reader::manifest::{GENERATION_MANIFEST_FILE, GenerationManifest};
 use serde::Serialize;
 use sha2::{Digest, Sha256};
@@ -354,10 +353,8 @@ mod tests {
     use super::*;
     use std::path::PathBuf;
 
-    use blockzilla_format::{
-        ARCHIVE_V2_PUBKEY_REGISTRY_FILE, ARCHIVE_V2_PUBKEY_REGISTRY_INDEX_FILE, KeyIndex,
-        write_registry,
-    };
+    use blockzilla_archive_v2::{ARCHIVE_V2_PUBKEY_REGISTRY_FILE, ARCHIVE_V2_PUBKEY_REGISTRY_INDEX_FILE};
+    use blockzilla_registry::{KeyIndex, write_registry};
     use blockzilla_compact_v2_reader::manifest::{
         GENERATION_MANIFEST_SCHEMA_VERSION, GenerationFile, compute_generation_digest,
     };

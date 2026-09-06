@@ -10,21 +10,8 @@
 
 use anyhow::{Context, Result, anyhow, ensure};
 use blockzilla_archive_gateway::{GenerateManifestOptions, generate_manifest};
-use blockzilla_format::{
-    ARCHIVE_V2_BLOCK_ACCESS_FILE, ARCHIVE_V2_BLOCK_ACCESS_INDEX_FILE, ARCHIVE_V2_BLOCK_INDEX_FILE,
-    ARCHIVE_V2_BLOCKHASH_INDEX_V3_FILE, ARCHIVE_V2_BLOCKHASH_REGISTRY_FILE, ARCHIVE_V2_BLOCKS_FILE,
-    ARCHIVE_V2_FIRST_SEEN_REGISTRY_MANIFEST_FILE, ARCHIVE_V2_GENESIS_BIN_FILE,
-    ARCHIVE_V2_GET_BLOCK_INDEX_FILE, ARCHIVE_V2_META_FILE, ARCHIVE_V2_POH_FILE,
-    ARCHIVE_V2_PREV_BLOCKHASH_TAIL_FILE, ARCHIVE_V2_PUBKEY_HOT_SEED_FILE,
-    ARCHIVE_V2_PUBKEY_REGISTRY_COUNTS_FILE, ARCHIVE_V2_PUBKEY_REGISTRY_FILE,
-    ARCHIVE_V2_PUBKEY_REGISTRY_INDEX_FILE, ARCHIVE_V2_RAW_BLOCKS_FILE,
-    ARCHIVE_V2_RAW_BLOCKS_ZSTD_FILE, ARCHIVE_V2_SHREDDING_FILE, ARCHIVE_V2_SIGNATURES_FILE,
-    ARCHIVE_V2_TX_FLAG_TX_RAW_FALLBACK, ARCHIVE_V2_VOTE_HASH_REGISTRY_FILE,
-    ArchiveV2HotBlockHeader, ArchiveV2HotTxRow, ArchiveV2WireIdentityVisitor,
-    ArchiveV2WireRewriteLimits, BLOCK_TIME_GAP_FILE,
-    transcode_archive_v2_hot_message_wire_pre_to_post, wincode_leb128_config,
-    write_archive_v2_hot_block_index,
-};
+use blockzilla_archive_v2::{ARCHIVE_V2_BLOCKHASH_INDEX_V3_FILE, ARCHIVE_V2_BLOCKHASH_REGISTRY_FILE, ARCHIVE_V2_BLOCKS_FILE, ARCHIVE_V2_BLOCK_ACCESS_FILE, ARCHIVE_V2_BLOCK_ACCESS_INDEX_FILE, ARCHIVE_V2_BLOCK_INDEX_FILE, ARCHIVE_V2_FIRST_SEEN_REGISTRY_MANIFEST_FILE, ARCHIVE_V2_GENESIS_BIN_FILE, ARCHIVE_V2_GET_BLOCK_INDEX_FILE, ARCHIVE_V2_META_FILE, ARCHIVE_V2_POH_FILE, ARCHIVE_V2_PREV_BLOCKHASH_TAIL_FILE, ARCHIVE_V2_PUBKEY_HOT_SEED_FILE, ARCHIVE_V2_PUBKEY_REGISTRY_COUNTS_FILE, ARCHIVE_V2_PUBKEY_REGISTRY_FILE, ARCHIVE_V2_PUBKEY_REGISTRY_INDEX_FILE, ARCHIVE_V2_RAW_BLOCKS_FILE, ARCHIVE_V2_RAW_BLOCKS_ZSTD_FILE, ARCHIVE_V2_SHREDDING_FILE, ARCHIVE_V2_SIGNATURES_FILE, ARCHIVE_V2_TX_FLAG_TX_RAW_FALLBACK, ARCHIVE_V2_VOTE_HASH_REGISTRY_FILE, ArchiveV2HotBlockHeader, ArchiveV2HotTxRow, ArchiveV2WireIdentityVisitor, ArchiveV2WireRewriteLimits, BLOCK_TIME_GAP_FILE, transcode_archive_v2_hot_message_wire_pre_to_post, write_archive_v2_hot_block_index};
+use blockzilla_primitives::wincode_leb128_config;
 use blockzilla_read_sdk::{
     ARCHIVE_V2_PUBLICATION_LOCK_FILE, ArchiveReader, ArchiveV2MetadataWireProfile,
     ArchiveV2WireProfile, BorrowedDecodedBlock, Error as ReaderError,
@@ -2572,7 +2559,7 @@ impl FastRewriteWorker {
 }
 
 struct FastRewriteOutput {
-    source_row: blockzilla_format::ArchiveV2HotBlockIndexRow,
+    source_row: blockzilla_archive_v2::ArchiveV2HotBlockIndexRow,
     metadata_bytes: u64,
     message_stats: MessageRegionStats,
     compressed: FastOutputToken,
@@ -2853,7 +2840,7 @@ fn rewrite_blocks_fast_parallel<S: RangeSource>(
 
 fn accumulate_rewrite_report(
     report: &mut RewriteReport,
-    source_row: blockzilla_format::ArchiveV2HotBlockIndexRow,
+    source_row: blockzilla_archive_v2::ArchiveV2HotBlockIndexRow,
     compressed_len: u32,
     metadata_bytes: u64,
     message_stats: MessageRegionStats,
@@ -4492,13 +4479,10 @@ fn publish_directory_no_replace(_source: &Path, _target: &Path) -> Result<()> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use blockzilla_format::{
-        ArchiveV2ComputeBudgetInstructionData, ArchiveV2HotBlockBlob, ArchiveV2HotBlockIndexRow,
-        ArchiveV2HotMetaRecord, CompactMessageHeader, CompactPubkey, KeyIndex,
-        OwnedCompactRecentBlockhash, WINCODE_ARCHIVE_V2_FLAG_LEB128,
-        WINCODE_ARCHIVE_V2_HOT_BLOCK_VERSION, WincodeArchiveV2Footer, WincodeArchiveV2Header,
-        WincodeLeb128FramedWriter, read_archive_v2_hot_block_index,
-    };
+    use blockzilla_archive_v2::{ArchiveV2ComputeBudgetInstructionData, ArchiveV2HotBlockBlob, ArchiveV2HotBlockIndexRow, ArchiveV2HotMetaRecord, WINCODE_ARCHIVE_V2_FLAG_LEB128, WINCODE_ARCHIVE_V2_HOT_BLOCK_VERSION, WincodeArchiveV2Footer, WincodeArchiveV2Header, read_archive_v2_hot_block_index};
+    use blockzilla_compact::{CompactMessageHeader, OwnedCompactRecentBlockhash};
+    use blockzilla_primitives::{CompactPubkey, WincodeLeb128FramedWriter};
+    use blockzilla_registry::KeyIndex;
     use serde_json::Value;
     use tempfile::tempdir;
     use wincode::SchemaWrite;

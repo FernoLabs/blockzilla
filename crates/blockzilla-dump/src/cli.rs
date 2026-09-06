@@ -1,7 +1,7 @@
 use std::{env, fmt, path::PathBuf, str::FromStr};
 
 use anyhow::{Context, Result, bail};
-use blockzilla_format::{ARCHIVE_V2_PUBKEY_REGISTRY_FILE, ARCHIVE_V2_PUBKEY_REGISTRY_INDEX_FILE};
+use blockzilla_archive_v2::{ARCHIVE_V2_PUBKEY_REGISTRY_FILE, ARCHIVE_V2_PUBKEY_REGISTRY_INDEX_FILE};
 use blockzilla_user_program_index::{
     build::{
         DEFAULT_MAX_ACCOUNTS_PER_CHUNK, DEFAULT_QUEUED_RELATION_BATCHES,

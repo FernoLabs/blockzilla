@@ -1,12 +1,7 @@
 use anyhow::{Context, Result, anyhow};
-use blockzilla_format::{
-    ARCHIVE_V2_BLOCK_ACCESS_FILE, ARCHIVE_V2_BLOCK_ACCESS_INDEX_FILE, ARCHIVE_V2_BLOCKS_FILE,
-    ARCHIVE_V2_HOT_INDEX_FLAG_RAW_BLOCKS, ArchiveV2BlockAccessBlob, ArchiveV2HotBlockBlob,
-    ArchiveV2HotTxRow, CompactInnerInstructions, CompactLogStream, CompactMetaV1, CompactPubkey,
-    CompactReturnData, CompactReward, CompactTokenBalance, CompactTransactionError, LogEvent,
-    deserialize_archive_v2_hot_block_blob, read_archive_v2_block_access_index,
-    read_archive_v2_hot_block_index, wincode_leb128_config,
-};
+use blockzilla_archive_v2::{ARCHIVE_V2_BLOCKS_FILE, ARCHIVE_V2_BLOCK_ACCESS_FILE, ARCHIVE_V2_BLOCK_ACCESS_INDEX_FILE, ARCHIVE_V2_HOT_INDEX_FLAG_RAW_BLOCKS, ArchiveV2BlockAccessBlob, ArchiveV2HotBlockBlob, ArchiveV2HotTxRow, deserialize_archive_v2_hot_block_blob, read_archive_v2_block_access_index, read_archive_v2_hot_block_index};
+use blockzilla_compact::{CompactInnerInstructions, CompactLogStream, CompactMetaV1, CompactReturnData, CompactReward, CompactTokenBalance, CompactTransactionError, LogEvent};
+use blockzilla_primitives::{CompactPubkey, wincode_leb128_config};
 use clap::Parser;
 use serde::Deserialize;
 use std::{
@@ -76,7 +71,7 @@ impl TryFrom<LegacyCompactMetaV1> for CompactMetaV1 {
 fn main() -> Result<()> {
     let args = Args::parse();
     let blocks_path = args.epoch_dir.join(ARCHIVE_V2_BLOCKS_FILE);
-    let index = read_archive_v2_hot_block_index(&blockzilla_format::archive_v2_hot_index_path(
+    let index = read_archive_v2_hot_block_index(&blockzilla_archive_v2::archive_v2_hot_index_path(
         &blocks_path,
     ))?;
     let row = index
@@ -236,7 +231,7 @@ fn read_access_blob(access_dir: &PathBuf, slot: u64) -> Result<ArchiveV2BlockAcc
 fn read_hot_block(
     file: &mut File,
     raw_blocks: bool,
-    row: &blockzilla_format::ArchiveV2HotBlockIndexRow,
+    row: &blockzilla_archive_v2::ArchiveV2HotBlockIndexRow,
 ) -> Result<Vec<u8>> {
     file.seek(SeekFrom::Start(row.compressed_offset))?;
     if raw_blocks {
