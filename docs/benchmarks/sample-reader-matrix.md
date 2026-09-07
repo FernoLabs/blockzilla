@@ -56,6 +56,21 @@ The preflight checks the fixed object names, disk lengths, public HTTP HEAD
 lengths, and executable files. It does not read archive payloads. Length equality
 is not proof of content equality: the full readers and output comparison follow.
 
+For the current prepared archive at `/volume2/blockzilla-bench/archive`, use that
+directory directly as `--archive-root`; do not run the older mirror recipe again.
+Local CAR selection matches the SDK: prefer `epoch-N.car`, then
+`epoch-N.car.zst`. Epoch 300 has the raw form; the other samples use compressed
+CAR. The reader streams zstd during the timed scan. Preflight does not decompress
+or warm those files. Public network CAR still uses `epoch-N.car` and the raw slot
+index. The runner records `source_object` and `source_encoding` for each CAR job.
+Local compressed and public raw CAR lengths are not compared. Their slot-index
+lengths and application results are still compared. Keep these different input
+encodings visible in any timing or stored-size chart.
+
+The resolved results directory must be outside the archive and binary
+directories, including paths reached through a symbolic link. Keep enough space
+for all output files and attempt caches before starting the full matrix.
+
 V3 epochs 200–800 use the September 1 rebuilt reader sets under
 `archive-samples-v1-v3-current-rebuild-20260901`, not the earlier V3 gate folder.
 The older folder has different transaction-directory and outcome-plane sizes.
@@ -80,8 +95,17 @@ visited candidate blocks are not a reliable measure of full-epoch progress.
 Run the same command to resume. Successful jobs are skipped. Failed attempts,
 partial output, and logs remain in their attempt folders. Retries get a new cache
 and output file. A different source inventory, binary, or configuration requires
-a new results directory. An interrupted process is stopped with its process
+a new results directory. Resume also rechecks the saved reader metrics and a
+streamed SHA-256 of each completed application output, including single-source
+jobs with no parity peer. These output checks occur outside reader timings and
+do not hash archive payloads. An interrupted process is stopped with its process
 group, so it cannot keep writing after the runner exits.
+
+Preflight records local resolved paths, file sizes, inode/device identifiers,
+and change/modification times. HTTP admission requires the exact requested URL,
+a successful HEAD response, its length, and a strong ETag. The inventory is
+checked again after the matrix; changed source evidence fails the run. These
+checks are metadata and transport identity checks, not a full archive content hash.
 
 ## Metrics and comparison rules
 
@@ -92,11 +116,18 @@ manifest or an archive seal. `parity.tsv` gives the final cross-format and
 disk/network comparison status per epoch and workload.
 `archive-sizes.tsv` is ready after preflight. If sizes differ,
 `size-mismatches.json` lists every difference and the combined run does not start.
+The local-compressed/public-raw CAR exception above applies only to payload
+lengths. A missing slot index or unequal local/public index length still fails
+preflight. A successful
+group with only one scheduled job is marked `NO_PEER` in `parity.tsv`; it does
+not claim cross-format parity. `PREFLIGHT_FAILED` and `INTERRUPTED` remain
+distinct from a completed matrix result.
 
 | Metric | Meaning |
 | --- | --- |
 | `stored_archive_bytes` | Sum of the fixed publication files present for this epoch and format, including optional listed files. |
 | `bound_source_size_bytes` | Files bound by this reader. This can be smaller than the stored archive. |
+| `source_object`, `source_encoding` | The selected CAR filename and its raw or zstd encoding. |
 | `setup_s`, `scan_s`, `total_s`, `wall_s` | Reader setup, scan, total, and external process elapsed time. Output comparison is outside these times. |
 | `total_tps` | Epoch transactions covered divided by total reader time. V3 targeted queries can cover transactions without decoding them. |
 | `decoded_scan_tps` | V3 transactions actually decoded per scan second. Keep this separate from coverage TPS. |
@@ -111,6 +142,11 @@ disk/network comparison status per epoch and workload.
 MB is decimal: 1,000,000 bytes. Missing fields stay missing; they are not set to
 zero. Final SDK HTTP metrics are the reader-specific download metrics. Live
 resource metrics are diagnostic and do not replace them.
+
+For local compressed CAR, logical source bytes count the decoded CAR stream.
+The wrapper does not expose compressed file-read counts, so
+`scan_local_read_bytes` and `scan_local_read_mb_s` are unavailable for those
+jobs. Stored compressed size is not substituted for measured reads.
 
 Each network attempt starts with a separate empty application cache. Within a
 job, the SDK can cache and reuse sidecars. The runner does not flush the OS page

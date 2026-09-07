@@ -5,6 +5,7 @@ import json
 from pathlib import Path
 import sys
 import tempfile
+import time
 from types import SimpleNamespace
 import unittest
 from unittest.mock import patch
@@ -29,12 +30,176 @@ else:
     output = pathlib.Path(args['--output'])
     with output.open('xb') as f: f.write(b'canonical')
     coverage = 'coverage_indeterminate_transactions=0' if fmt == 'car' else 'indeterminate_transactions=0'
-    print(base + f' output_schema=example output_rows=1 output_bytes=9 output_complete=true {coverage} coverage_sha256=abc')
+    print(base + f' output_schema=example output_rows=1 output_bytes=9 output_complete=true {coverage} coverage_sha256=e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855')
 print('progress=scan blocks=10 transactions=20 tps=10 blocks_s=5 eta_s=0', file=sys.stderr)
 '''
 
 
 class RunnerTests(unittest.TestCase):
+    def test_local_car_inventory_selects_raw_then_streamed_zstd(self):
+        with tempfile.TemporaryDirectory() as folder:
+            archive = Path(folder)
+            for epoch in (100, 300):
+                root = archive / "car" / str(epoch)
+                root.mkdir(parents=True)
+                (root / "epoch-{}.car.zst".format(epoch)).write_bytes(b"compressed")
+                (root / "epoch-{}-slot-ranges.raw".format(epoch)).write_bytes(b"index")
+            (archive / "car/300/epoch-300.car").write_bytes(b"raw")
+            args = SimpleNamespace(archive_root=archive, mode="local", formats=["car"], epochs=[100, 300])
+            rows = matrix.inventory(args)
+            self.assertEqual([r["object"] for r in rows], ["epoch-100.car.zst", "epoch-100-slot-ranges.raw",
+                                                           "epoch-300.car", "epoch-300-slot-ranges.raw"])
+            self.assertTrue(all(r["inode"] and r["resolved_path"] for r in rows))
+            with self.assertRaisesRegex(ValueError, "missing raw or zstd CAR"):
+                matrix.local_object_names(archive, "car", 200)
+
+    def test_mixed_car_encodings_keep_index_and_same_object_size_checks(self):
+        rows = [dict(format="car", epoch=100, object="epoch-100.car.zst", source="local", size_bytes=10),
+                dict(format="car", epoch=100, object="epoch-100.car", source="network", size_bytes=100),
+                dict(format="car", epoch=100, object="epoch-100-slot-ranges.raw", source="local", size_bytes=20),
+                dict(format="car", epoch=100, object="epoch-100-slot-ranges.raw", source="network", size_bytes=20)]
+        self.assertEqual(matrix.size_mismatches(rows), [])
+        rows[-1]["size_bytes"] = 21
+        self.assertEqual([r["object"] for r in matrix.size_mismatches(rows)], ["epoch-100-slot-ranges.raw"])
+        rows[0].update(object="epoch-100.car")
+        self.assertEqual(len(matrix.size_mismatches(rows)), 2)
+
+    def test_network_car_preflight_keeps_raw_route_and_rejects_weak_identity(self):
+        seen = []
+        class Response:
+            status = 200
+            headers = {"Content-Length": "123", "ETag": '"identity"'}
+            def __init__(self, url): self.url = url
+            def geturl(self): return self.url
+            def __enter__(self): return self
+            def __exit__(self, *_): pass
+        def reply(request, timeout):
+            seen.append(request.full_url)
+            return Response(request.full_url)
+        args = SimpleNamespace(archive_root=None, mode="network", origin="https://example.invalid",
+                               formats=["car"], epochs=[100])
+        with patch.object(matrix.urllib.request, "urlopen", side_effect=reply):
+            rows = matrix.inventory(args)
+            self.assertEqual({r["object"] for r in rows}, {"epoch-100.car", "epoch-100-slot-ranges.raw"})
+            self.assertTrue(all(not url.endswith(".zst") for url in seen))
+            Response.headers = {"Content-Length": "123", "ETag": 'W/"identity"'}
+            with self.assertRaisesRegex(ValueError, "strong ETag"):
+                matrix.inventory(args)
+
+    def test_results_cannot_be_inside_archive_or_binary_tree_even_through_symlink(self):
+        with tempfile.TemporaryDirectory() as folder:
+            root = Path(folder)
+            archive, bins = root / "archive", root / "bin"
+            archive.mkdir()
+            bins.mkdir()
+            alias = root / "alias"
+            alias.symlink_to(archive, target_is_directory=True)
+            for results in (archive, archive / "results", bins / "results", alias / "results"):
+                command = ["runner", "--mode", "local", "--archive-root", str(archive),
+                           "--bin-dir", str(bins), "--results-root", str(results)]
+                with patch.object(sys, "argv", command), patch.object(matrix, "inventory") as inventory, \
+                        contextlib.redirect_stderr(io.StringIO()):
+                    with self.assertRaises(SystemExit):
+                        matrix.main()
+                    inventory.assert_not_called()
+            self.assertFalse((archive / "results").exists())
+
+    def test_resume_rejects_same_size_output_damage_before_reader_restart(self):
+        with tempfile.TemporaryDirectory() as folder, contextlib.redirect_stdout(io.StringIO()):
+            root = Path(folder)
+            bins = root / "bin"
+            bins.mkdir()
+            job = dict(format="compact-v2", mode="network", epoch=0, workload="usdc", binary="read-compact-v2-usdc")
+            reader = bins / job["binary"]
+            reader.write_text(STUB)
+            reader.chmod(0o755)
+            args = SimpleNamespace(bin_dir=bins, results_root=root / "results", archive_root=None,
+                                   origin=matrix.ORIGIN, threads=12, interval=1, wallet=matrix.WALLET)
+            result = matrix.run_one(args, job, {("network", "compact-v2", 0): 100}, [])
+            Path(result["output_path"]).write_bytes(b"corrupted")
+            with self.assertRaisesRegex(ValueError, "missing or changed"):
+                matrix.run_one(args, job, {("network", "compact-v2", 0): 100}, [])
+            self.assertEqual(len(list((root / "results").glob("jobs/**/attempt-*"))), 1)
+
+    def test_interrupt_joins_reader_and_preserves_partial_output(self):
+        with tempfile.TemporaryDirectory() as folder, contextlib.redirect_stdout(io.StringIO()):
+            root = Path(folder).resolve()
+            bins = root / "bin"
+            bins.mkdir()
+            job = dict(format="compact-v2", mode="network", epoch=0, workload="usdc", binary="read-compact-v2-usdc")
+            reader = bins / job["binary"]
+            reader.write_text(STUB + "\nimport time\nwhile True: time.sleep(1)\n")
+            reader.chmod(0o755)
+            args = SimpleNamespace(bin_dir=bins, results_root=root / "results", archive_root=None,
+                                   origin=matrix.ORIGIN, threads=12, interval=1, wallet=matrix.WALLET)
+            processes = []
+            real_popen = matrix.subprocess.Popen
+            def start(*args, **kwargs):
+                process = real_popen(*args, **kwargs)
+                processes.append(process)
+                return process
+            def interrupt(pid):
+                deadline = time.monotonic() + 5
+                while not list((root / "results").glob("jobs/**/output.bin")) and time.monotonic() < deadline:
+                    time.sleep(0.01)
+                raise KeyboardInterrupt()
+            with patch.object(matrix.subprocess, "Popen", side_effect=start), \
+                    patch.object(matrix, "sample_process", side_effect=interrupt):
+                with self.assertRaises(KeyboardInterrupt):
+                    matrix.run_one(args, job, {("network", "compact-v2", 0): 100}, [])
+            self.assertEqual(len(processes), 1)
+            self.assertIsNotNone(processes[0].poll())
+            result = json.loads(next((root / "results").glob("jobs/**/result.json")).read_text())
+            self.assertEqual(result["status"], "FAIL")
+            self.assertEqual((Path(result["attempt"]) / "output.bin").read_bytes(), b"canonical")
+
+    def test_preflight_error_and_changed_source_have_failure_status(self):
+        with tempfile.TemporaryDirectory() as folder, contextlib.redirect_stdout(io.StringIO()):
+            root = Path(folder)
+            bins = root / "bin"
+            bins.mkdir()
+            reader = bins / "read-car"
+            reader.write_text(STUB)
+            reader.chmod(0o755)
+            command = ["runner", "--mode", "local", "--archive-root", str(root / "archive"),
+                       "--bin-dir", str(bins), "--results-root", str(root / "results"),
+                       "--formats", "car", "--epochs", "300", "--workloads", "slot-hours"]
+            with patch.object(sys, "argv", command), patch.object(matrix, "inventory", side_effect=OSError("missing source")):
+                with self.assertRaises(OSError):
+                    matrix.main()
+            self.assertEqual(json.loads((root / "results/status.json").read_text())["state"], "PREFLIGHT_FAILED")
+            before = [dict(format="car", epoch=300, object="epoch-300.car", source="local", size_bytes=100)]
+            after = [dict(before[0], size_bytes=101)]
+            with patch.object(sys, "argv", command), patch.object(matrix, "inventory", side_effect=[before, after]):
+                with self.assertRaisesRegex(ValueError, "changed during"):
+                    matrix.main()
+            self.assertEqual(json.loads((root / "results/status.json").read_text())["state"], "FAIL")
+            self.assertEqual(json.loads((root / "results/inventory.json").read_text()), before)
+            self.assertEqual(json.loads((root / "results/inventory-after.json").read_text()), after)
+
+    def test_car_reader_must_bind_the_selected_preflight_size(self):
+        with tempfile.TemporaryDirectory() as folder, contextlib.redirect_stdout(io.StringIO()):
+            root = Path(folder)
+            bins = root / "bin"
+            bins.mkdir()
+            reader = bins / "read-car"
+            reader.write_text(STUB)
+            reader.chmod(0o755)
+            args = SimpleNamespace(bin_dir=bins, results_root=root / "results", archive_root=root / "archive",
+                                   origin=matrix.ORIGIN, interval=1)
+            job = dict(format="car", mode="local", epoch=300, workload="slot-hours", binary="read-car")
+            result = matrix.run_one(args, job, {("local", "car", 300): 101}, [])
+            self.assertEqual(result["status"], "FAIL")
+            self.assertIn("different payload/index size", result["error"])
+            args.car_sources = {("local", 300): "epoch-300.car.zst"}
+            compressed = matrix.run_one(args, job, {("local", "car", 300): 100}, [])
+            self.assertEqual(compressed["status"], "PASS")
+            self.assertEqual(compressed["scan_source_bytes"], "20")
+            self.assertEqual(compressed["source_encoding"], "zstd")
+            self.assertIsNone(compressed["scan_local_read_bytes"])
+            self.assertIsNone(compressed["scan_local_read_mb_s"])
+            self.assertEqual(matrix.run_one(args, job, {("local", "car", 300): 100}, []), compressed)
+
     def test_size_check_reports_all_mismatches(self):
         rows = [dict(format="indexer-v3", epoch=200, object="messages", source="local", size_bytes=10),
                 dict(format="indexer-v3", epoch=200, object="messages", source="network", size_bytes=20),
@@ -43,13 +208,16 @@ class RunnerTests(unittest.TestCase):
         self.assertEqual([r["local_size_bytes"] for r in matrix.size_mismatches(rows)], [10, 30])
     def test_preflight_uses_identified_head_requests(self):
         class Response:
-            headers = {"Content-Length": "123", "ETag": "test-etag"}
+            headers = {"Content-Length": "123", "ETag": '"test-etag"'}
+            status = 200
+            def __init__(self, url): self.url = url
+            def geturl(self): return self.url
             def __enter__(self): return self
             def __exit__(self, *_): pass
         def reply(request, timeout):
             self.assertEqual(request.method, "HEAD")
             self.assertEqual(request.get_header("User-agent"), "blockzilla-sample-preflight/1")
-            return Response()
+            return Response(request.full_url)
         args = SimpleNamespace(archive_root=None, mode="network", origin="https://example.invalid")
         with patch.object(matrix.urllib.request, "urlopen", side_effect=reply):
             rows = matrix.inventory(args)
@@ -143,7 +311,7 @@ class RunnerTests(unittest.TestCase):
             reader = bins / "read-car"
             reader.write_text(STUB)
             reader.chmod(0o755)
-            command = ["runner", "--mode", "local", "--archive-root", str(root),
+            command = ["runner", "--mode", "local", "--archive-root", str(root / "archive"),
                        "--bin-dir", str(bins), "--results-root", str(root / "results"),
                        "--formats", "car", "--epochs", "300", "--car-count-only"]
             objects = [dict(format="car", epoch=300, object="fixture", source="local", size_bytes=100)]
@@ -174,7 +342,7 @@ class RunnerTests(unittest.TestCase):
                     path = bins / matrix.binary(fmt, workload)
                     path.write_text(STUB)
                     path.chmod(0o755)
-            command = ["runner", "--mode", "both", "--archive-root", str(root),
+            command = ["runner", "--mode", "both", "--archive-root", str(root / "archive"),
                        "--bin-dir", str(bins), "--results-root", str(results)]
             with patch.object(sys, "argv", command), patch.object(matrix, "inventory", return_value=objects), \
                     contextlib.redirect_stdout(io.StringIO()):

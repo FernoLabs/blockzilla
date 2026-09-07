@@ -35,6 +35,7 @@ FILES = {"compact-v2": BASE + ("archive-v2-blocks.index", "archive-v2-blocks.zst
 # Count an old tail if it is present. Do not require or produce one.
 OPTIONAL = ("prev_blockhash_tail.bin",)
 METRICS = ("blocks", "transactions", "recorded_inner_instructions", "setup_s", "scan_s", "total_s",
+           "source_object", "source_encoding", "output_sha256",
            "scan_tps", "total_tps", "scan_blocks_s", "total_blocks_s", "bound_source_size_bytes",
            "stored_archive_bytes", "scan_source_bytes", "scan_source_mb_s", "setup_network_bytes",
            "scan_network_bytes", "total_network_bytes", "scan_network_mb_s", "total_network_mb_s",
@@ -92,13 +93,26 @@ def object_names(fmt, epoch):
     return FILES[fmt]
 
 
+def local_object_names(archive_root, fmt, epoch):
+    if fmt != "car":
+        return object_names(fmt, epoch)
+    root = archive_root / fmt / str(epoch)
+    # Match the reader's preference. Selection only inspects file metadata;
+    # compressed CAR is decoded by the reader during its timed scan.
+    for suffix in (".car", ".car.zst"):
+        name = "epoch-{}{}".format(epoch, suffix)
+        if (root / name).is_file():
+            return (name, "epoch-{}-slot-ranges.raw".format(epoch))
+    raise ValueError("missing raw or zstd CAR: " + str(root))
+
+
 def inventory(args):
     """Inspect publication object lengths only; never read archive payloads here."""
     rows = []
     if args.archive_root:
         for fmt in getattr(args, "formats", FORMATS):
             for epoch in getattr(args, "epochs", EPOCHS):
-                for name in object_names(fmt, epoch) + (() if fmt == "car" else OPTIONAL):
+                for name in local_object_names(args.archive_root, fmt, epoch) + (() if fmt == "car" else OPTIONAL):
                     path = args.archive_root / fmt / str(epoch) / name
                     if name in OPTIONAL and not path.exists():
                         continue
@@ -106,7 +120,9 @@ def inventory(args):
                     if not path.is_file():
                         raise ValueError("not a file: {}".format(path))
                     rows.append(dict(format=fmt, epoch=epoch, object=name, size_bytes=stat.st_size,
-                                     mtime_ns=stat.st_mtime_ns, source="local"))
+                                     mtime_ns=stat.st_mtime_ns, ctime_ns=stat.st_ctime_ns,
+                                     device=stat.st_dev, inode=stat.st_ino,
+                                     resolved_path=str(path.resolve()), source="local"))
     if args.mode in ("network", "both"):
         keys = [(f, e, n) for f in getattr(args, "formats", FORMATS) for e in getattr(args, "epochs", EPOCHS)
                 for n in object_names(f, e) + (() if f == "car" else OPTIONAL)]
@@ -117,8 +133,14 @@ def inventory(args):
             try:
                 request = urllib.request.Request(url, method="HEAD", headers={"User-Agent": "blockzilla-sample-preflight/1"})
                 with urllib.request.urlopen(request, timeout=30) as response:
-                    return dict(format=fmt, epoch=epoch, object=name, size_bytes=int(response.headers["Content-Length"]),
-                                etag=response.headers.get("ETag", ""), source="network")
+                    length = int(response.headers["Content-Length"])
+                    etag = response.headers.get("ETag", "")
+                    if length < 0 or not re.fullmatch(r'"[^"\x00-\x20\x7f]+"', etag):
+                        raise ValueError("HEAD lacks a valid length or strong ETag: " + url)
+                    if response.status != 200 or response.geturl() != url:
+                        raise ValueError("HEAD returned a different resource: " + url)
+                    return dict(format=fmt, epoch=epoch, object=name, size_bytes=length,
+                                etag=etag, url=url, source="network")
             except urllib.error.HTTPError as error:
                 if error.code == 404 and name in OPTIONAL:
                     return None
@@ -130,8 +152,14 @@ def inventory(args):
 
 def size_mismatches(rows):
     local = {(r["format"], r["epoch"], r["object"]): r["size_bytes"] for r in rows if r["source"] == "local"}
+    compressed_car = {r["epoch"] for r in rows if r["source"] == "local" and r["format"] == "car"
+                      and r["object"] in ("epoch-{}.car.zst".format(r["epoch"]),)}
     return [dict(row, local_size_bytes=local.get((row["format"], row["epoch"], row["object"])))
             for row in rows if row["source"] == "network" and row["object"] not in OPTIONAL
+            # Local compressed bytes cannot be compared to the public raw CAR
+            # length. The slot index and exact application outputs still match.
+            and not (row["format"] == "car" and row["epoch"] in compressed_car
+                     and row["object"] == "epoch-{}.car".format(row["epoch"]))
             and local.get((row["format"], row["epoch"], row["object"])) != row["size_bytes"]]
 
 
@@ -160,7 +188,7 @@ def sample_process(pid):
     return row
 
 
-def parse_result(job, stdout):
+def parse_result(job, stdout, source_object=None):
     lines = stdout.read_text().splitlines()
     summaries = [fields(line) for line in lines if line.startswith("format=" + job["format"] + " ")]
     if len(summaries) != 1:
@@ -178,6 +206,10 @@ def parse_result(job, stdout):
     result["scan_source_bytes"] = raw.get("scan_logical_read_bytes", raw.get("source_read_bytes"))
     result["scan_source_mb_s"] = raw.get("scan_logical_read_mb_s", raw.get("scan_source_mb_s"))
     result["indeterminate_transactions"] = raw.get("indeterminate_transactions", raw.get("coverage_indeterminate_transactions"))
+    for key in ("blocks", "transactions", "bound_source_size_bytes", "scan_source_bytes",
+                "setup_network_bytes", "scan_network_bytes", "total_network_bytes"):
+        if not re.fullmatch(r"[0-9]+", str(result.get(key, ""))):
+            raise ValueError("invalid integer metric: " + key)
     for key in ("blocks", "transactions", "setup_s", "scan_s", "total_s", "scan_tps", "total_tps",
                 "bound_source_size_bytes", "scan_source_bytes", "scan_source_mb_s", "setup_network_bytes",
                 "scan_network_bytes", "total_network_bytes"):
@@ -189,6 +221,11 @@ def parse_result(job, stdout):
     if job["format"] == "car":
         result["scan_local_read_bytes"] = result["scan_source_bytes"] if job["mode"] == "local" else 0
         result["scan_local_read_mb_s"] = result["scan_source_mb_s"] if job["mode"] == "local" else 0
+        if job["mode"] == "local" and source_object and source_object.endswith(".zst"):
+            # CAR's logical counters measure the decoded stream. The wrapper
+            # does not expose compressed file-read counts; unavailable is not zero.
+            result["scan_local_read_bytes"] = None
+            result["scan_local_read_mb_s"] = None
         result["scan_cache_read_bytes"] = raw.get("scan_cache_bytes")
     if job["workload"] == "slot-hours":
         result["buckets"] = [fields(line) for line in lines if line.startswith("approximate_hour=")]
@@ -201,6 +238,15 @@ def parse_result(job, stdout):
         for key in ("output_schema", "output_rows", "output_bytes", "output_complete", "indeterminate_transactions", "coverage_sha256"):
             if result.get(key) is None:
                 raise ValueError("missing workload metric: " + key)
+        for key in ("output_rows", "output_bytes", "indeterminate_transactions"):
+            if not re.fullmatch(r"[0-9]+", result[key]):
+                raise ValueError("invalid integer metric: " + key)
+        if result["output_complete"] not in ("true", "false"):
+            raise ValueError("invalid output completeness")
+        if not re.fullmatch(r"[0-9a-f]{64}", result["coverage_sha256"]):
+            raise ValueError("invalid coverage digest")
+        if result["output_complete"] == "true" and int(result["indeterminate_transactions"]):
+            raise ValueError("complete output has indeterminate transactions")
     for line in lines:
         if line.startswith("pipeline="):
             for key, value in fields(line).items():
@@ -223,13 +269,23 @@ def same_bytes(left, right):
                 return True
 
 
+def output_digest(path):
+    digest = hashlib.sha256()
+    with path.open("rb") as source:
+        while True:
+            chunk = source.read(4 * 1024 * 1024)
+            if not chunk:
+                return digest.hexdigest()
+            digest.update(chunk)
+
+
 def check_parity(job, result, results):
     peers = [r for r in results if r["epoch"] == job["epoch"] and r["workload"] == job["workload"] and r["status"] == "PASS"]
     if not peers:
         return "PENDING"
     baseline = peers[0]
     keys = ("buckets", "blocks", "transactions", "recorded_inner_instructions") if job["workload"] == "slot-hours" else (
-        "output_schema", "output_rows", "output_bytes", "output_complete", "indeterminate_transactions", "coverage_sha256")
+        "blocks", "transactions", "output_schema", "output_rows", "output_bytes", "output_complete", "indeterminate_transactions", "coverage_sha256")
     if any(result.get(key) != baseline.get(key) for key in keys):
         return "MISMATCH"
     if job["workload"] != "slot-hours" and not same_bytes(Path(result["output_path"]), Path(baseline["output_path"])):
@@ -238,22 +294,37 @@ def check_parity(job, result, results):
 
 
 def run_one(args, job, sizes, results):
-    root = args.results_root / "jobs" / job_key(job)
+    results_root = args.results_root.resolve()
+    source_object = getattr(args, "car_sources", {}).get((job["mode"], job["epoch"])) if job["format"] == "car" else None
+    root = results_root / "jobs" / job_key(job)
+    if results_root not in root.resolve().parents:
+        raise ValueError("job directory escapes the results root: " + str(root))
     root.mkdir(parents=True, exist_ok=True)
     result_file = root / "result.json"
     if result_file.exists():
         previous = json.loads(result_file.read_text())
         if previous["status"] == "PASS":
+            if any(previous.get(key) != value for key, value in job.items()) or previous.get("exit_code") != 0:
+                raise ValueError("completed job identity changed: " + job_key(job))
+            previous_attempt = Path(previous["attempt"])
+            if previous_attempt.parent != root or previous_attempt.resolve() != previous_attempt:
+                raise ValueError("completed attempt escaped its job directory")
+            recorded = parse_result(job, previous_attempt / "stdout.log", source_object)
+            if any(previous.get(key) != value for key, value in recorded.items() if key not in job):
+                raise ValueError("completed metrics differ from reader log: " + job_key(job))
             if job["workload"] != "slot-hours":
                 path = Path(previous["output_path"])
-                if not path.is_file() or path.stat().st_size != int(previous["output_bytes"]):
+                if path != previous_attempt / "output.bin" or path.is_symlink() or not path.is_file() \
+                        or path.stat().st_size != int(previous["output_bytes"]) \
+                        or output_digest(path) != previous.get("output_sha256"):
                     raise ValueError("completed output is missing or changed: " + str(path))
             previous["parity"] = check_parity(job, previous, results)
             if previous["parity"] == "MISMATCH":
                 raise ValueError("completed output no longer matches: " + job_key(job))
             print("skip " + job_key(job), flush=True)
             return previous
-    attempt = root / ("attempt-{:03}".format(len(list(root.glob("attempt-*"))) + 1))
+    attempt_ids = [int(path.name[8:]) for path in root.glob("attempt-*") if path.name[8:].isdigit()]
+    attempt = root / ("attempt-{:03}".format(max(attempt_ids, default=0) + 1))
     attempt.mkdir()  # Preserve failed outputs. Retries get a fresh network cache.
     command = [str(args.bin_dir / job["binary"]), "--epoch", str(job["epoch"])]
     command += ["--archive-root", str(args.archive_root)] if job["mode"] == "local" else ["--origin", args.origin]
@@ -306,22 +377,34 @@ def run_one(args, job, sizes, results):
         result["exit_code"] = exit_code
         if exit_code:
             raise ValueError("reader exit {}".format(exit_code))
-        result.update(parse_result(job, attempt / "stdout.log"))
+        result.update(parse_result(job, attempt / "stdout.log", source_object))
         result.update(job)
         result["stored_archive_bytes"] = sizes[(job["mode"], job["format"], job["epoch"])]
+        if job["format"] == "car":
+            if int(result["bound_source_size_bytes"]) != result["stored_archive_bytes"]:
+                raise ValueError("CAR reader bound a different payload/index size than preflight")
+            if source_object:
+                result.update(source_object=source_object, source_encoding="zstd" if source_object.endswith(".zst") else "raw")
         if job["workload"] != "slot-hours":
             result["output_path"] = str(attempt / "output.bin")
             if Path(result["output_path"]).stat().st_size != int(result["output_bytes"]):
                 raise ValueError("output length differs from reader report")
+            result["output_sha256"] = output_digest(Path(result["output_path"]))
         result["parity"] = check_parity(job, result, results)
         result["status"] = "FAIL" if result["parity"] == "MISMATCH" else "PASS"
     except BaseException as error:
         if process is not None and process.poll() is None:
-            os.killpg(process.pid, signal.SIGTERM)
+            try:
+                os.killpg(process.pid, signal.SIGTERM)
+            except ProcessLookupError:
+                pass
             try:
                 process.wait(timeout=10)
             except subprocess.TimeoutExpired:
-                os.killpg(process.pid, signal.SIGKILL)
+                try:
+                    os.killpg(process.pid, signal.SIGKILL)
+                except ProcessLookupError:
+                    pass
                 process.wait()
         result["error"] = str(error)
         save(result_file, result)
@@ -371,6 +454,9 @@ def main():
     args.bin_dir, args.results_root = args.bin_dir.resolve(), args.results_root.resolve()
     if args.archive_root:
         args.archive_root = args.archive_root.resolve()
+    for protected in (args.archive_root, args.bin_dir):
+        if protected and (args.results_root == protected or protected in args.results_root.parents):
+            parser.error("results must be outside the archive and binary directories")
     args.results_root.mkdir(parents=True, exist_ok=True)
     lock = (args.results_root / ".runner-lock").open("w")
     with lock:
@@ -402,10 +488,15 @@ def execute(args, parser):
          python=platform.python_version(), cache_policy="fresh per attempt; OS and CDN caches uncontrolled",
          free_result_bytes=os.statvfs(args.results_root).f_bavail * os.statvfs(args.results_root).f_frsize))
     print("preflight: {} jobs; file lengths and HTTP HEADs only".format(len(jobs)), flush=True)
-    objects = inventory(args)
-    old_inventory = args.results_root / "inventory.json"
-    if old_inventory.exists() and json.loads(old_inventory.read_text()) != objects:
-        parser.error("source inventory changed; use a new results directory")
+    try:
+        objects = inventory(args)
+        old_inventory = args.results_root / "inventory.json"
+        if old_inventory.exists() and json.loads(old_inventory.read_text()) != objects:
+            raise ValueError("source inventory changed; use a new results directory")
+    except BaseException as error:
+        save(args.results_root / "status.json", dict(state="INTERRUPTED" if isinstance(error, KeyboardInterrupt)
+             else "PREFLIGHT_FAILED", error=str(error), completed=0, total=len(jobs)))
+        raise
     save(old_inventory, objects)
     mismatches = size_mismatches(objects) if args.mode == "both" else []
     save(args.results_root / "size-mismatches.json", mismatches)
@@ -415,9 +506,12 @@ def execute(args, parser):
             print("SIZE_MISMATCH {format}/{epoch}/{object} local={local_size_bytes} public={size_bytes}".format(**row), flush=True)
         return 1
     sizes = {}
+    args.car_sources = {}
     for row in objects:
         key = (row["source"], row["format"], row["epoch"])
         sizes[key] = sizes.get(key, 0) + row["size_bytes"]
+        if row["format"] == "car" and row["object"].endswith((".car", ".car.zst")):
+            args.car_sources[(row["source"], row["epoch"])] = row["object"]
     table(args.results_root / "archive-sizes.tsv", ("mode", "format", "epoch", "stored_archive_bytes"),
           [dict(mode=m, format=f, epoch=e, stored_archive_bytes=n) for (m, f, e), n in sizes.items()])
     if args.check_only:
@@ -433,6 +527,10 @@ def execute(args, parser):
             if args.stop_on_error and results[-1]["status"] != "PASS":
                 save(args.results_root / "status.json", dict(state="FAIL", completed=len(results), total=len(jobs), current=job_key(job)))
                 return 1
+        final_inventory = inventory(args)
+        save(args.results_root / "inventory-after.json", final_inventory)
+        if final_inventory != objects:
+            raise ValueError("source inventory changed during the run; results cannot be accepted")
     except KeyboardInterrupt:
         save(args.results_root / "status.json", dict(state="INTERRUPTED", completed=len(results), total=len(jobs)))
         raise
@@ -444,9 +542,10 @@ def execute(args, parser):
         group = [r for r in results if r["epoch"] == epoch and r["workload"] == workload]
         expected = sum(j["epoch"] == epoch and j["workload"] == workload for j in jobs)
         passed = len(group) == expected and all(r["status"] == "PASS" for r in group)
-        parity.append(dict(epoch=epoch, workload=workload, status="MATCH" if passed else "FAIL_OR_INCOMPLETE"))
+        parity.append(dict(epoch=epoch, workload=workload,
+                           status=("MATCH" if expected > 1 else "NO_PEER") if passed else "FAIL_OR_INCOMPLETE"))
     table(args.results_root / "parity.tsv", ("epoch", "workload", "status"), parity)
-    passed = all(row["status"] == "MATCH" for row in parity)
+    passed = all(row["status"] in ("MATCH", "NO_PEER") for row in parity)
     save(args.results_root / "status.json", dict(state="PASS" if passed else "FAIL", completed=len(results), total=len(jobs)))
     return 0 if passed else 1
 

@@ -176,7 +176,10 @@ pub struct ScanRequest {
     #[serde(default = "default_instruction_programs")]
     pub instruction_programs: InstructionDataRequirement,
     /// Restrict signer keys and program-key materialization to this signer.
-    /// Transactions and instruction coordinates are still reported in full.
+    /// Every transaction header remains visible. Adapters may omit instruction
+    /// rows unless this signer matches and recorded execution succeeded, marking
+    /// instruction coverage as `ProjectionNotRequested`. Matching signer keys
+    /// and recorded CPI coverage remain available for failed and unknown execution.
     #[serde(default)]
     pub required_signer: Option<[u8; 32]>,
     /// Include required signer public keys in message order.
@@ -409,6 +412,8 @@ impl ScanRequest {
     }
 
     /// Select one signer without expanding every transaction's signer keys.
+    /// Instruction rows may be omitted outside successful matching transactions;
+    /// transaction status and matching signer keys remain visible.
     pub fn with_required_signer(mut self, signer: [u8; 32]) -> Self {
         self.required_signer = Some(signer);
         self.without_instruction_accounts()

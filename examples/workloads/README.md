@@ -42,6 +42,12 @@ The count example still counts all transactions and recorded inner instructions.
 This filter changes the example output, not the stored archive. It is not
 suitable for an analysis of fees or durable nonce changes in failed transactions.
 
+FireWatch keeps failed and unknown-execution signer counts. Its signer query
+lets the reader omit instruction rows outside successful matching transactions,
+while retaining transaction status, matching signer keys, and recorded CPI
+coverage. Omitted instruction coverage is marked `ProjectionNotRequested`.
+Full instruction queries still validate the recorded instruction sequence.
+
 The indexed USDC writer records the actual token account separately from its
 owner and transaction-local account position. Registry IDs are resolved only on
 first discovery. Dictionary entries describe first observation in selected

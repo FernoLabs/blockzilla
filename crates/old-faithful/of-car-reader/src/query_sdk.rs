@@ -1047,7 +1047,21 @@ fn project_decoded_transaction(
         }
         return Ok(None);
     }
-    let (instruction_coverage, instructions) = if !request.include_instructions {
+    let include_programs = signer_matches
+        && (request.required_signer.is_none()
+            || matches!(recorded_status, ExecutionStatus::Succeeded));
+    // Signer queries consume instructions only from successful matching rows.
+    // Preserve the source geometry checks, but do not publish unused coordinates
+    // whose execution order can contradict a recorded failure in historical CARs.
+    let project_instruction_details =
+        request.include_instructions && (request.required_signer.is_none() || include_programs);
+    if request.include_instructions
+        && !project_instruction_details
+        && let Some(account_keys) = &loaded_keys
+    {
+        validate_unprojected_instructions(&message, metadata, account_keys.len(), limits)?;
+    }
+    let (instruction_coverage, instructions) = if !project_instruction_details {
         (
             InstructionCoverage::Unknown(CoverageReason::ProjectionNotRequested),
             Vec::new(),
@@ -1060,9 +1074,7 @@ fn project_decoded_transaction(
                     metadata,
                     &account_keys,
                     request,
-                    signer_matches
-                        && (request.required_signer.is_none()
-                            || matches!(recorded_status, ExecutionStatus::Succeeded)),
+                    include_programs,
                     limits,
                     output_pool,
                 )?;
@@ -1632,6 +1644,58 @@ fn decode_legacy_unit_borsh_io_error_index(bytes: &[u8]) -> Option<u32> {
         return None;
     }
     Some(u32::from(bytes[4]))
+}
+
+/// Check omitted instruction shapes without making claims about their execution.
+/// Metadata group ordering and failure-index bounds are checked before this call.
+fn validate_unprojected_instructions(
+    message: &MessageView<'_>,
+    metadata: Option<&TransactionStatusMeta>,
+    account_key_count: usize,
+    limits: CarQueryLimits,
+) -> CarQueryResult<()> {
+    let outer = message.instructions.iter().map(|instruction| {
+        (
+            u32::from(instruction.program_id_index),
+            instruction.accounts.as_slice(),
+            instruction.data.as_slice(),
+            None,
+        )
+    });
+    let inner = metadata
+        .into_iter()
+        .flat_map(|metadata| &metadata.inner_instructions)
+        .flat_map(|group| &group.instructions)
+        .map(|instruction| {
+            (
+                instruction.program_id_index,
+                instruction.accounts.as_slice(),
+                instruction.data.as_slice(),
+                instruction.stack_height,
+            )
+        });
+    for (index, (program, accounts, data, stack_height)) in outer.chain(inner).enumerate() {
+        if index >= limits.max_instructions_per_transaction
+            || index >= MAX_CANONICAL_SHORT_VEC_ITEMS
+        {
+            return Err(CarQueryError::InvalidArchive(
+                "unprojected instruction count exceeds configured or query limit".into(),
+            ));
+        }
+        if program as usize >= account_key_count
+            || accounts
+                .iter()
+                .any(|&index| usize::from(index) >= account_key_count)
+            || accounts.len() > MAX_CANONICAL_SHORT_VEC_ITEMS
+            || data.len() > MAX_CANONICAL_SHORT_VEC_ITEMS
+            || stack_height == Some(0)
+        {
+            return Err(CarQueryError::InvalidArchive(
+                "invalid source instruction geometry in omitted signer projection".into(),
+            ));
+        }
+    }
+    Ok(())
 }
 
 fn project_instructions(
@@ -2930,6 +2994,9 @@ mod tests {
             append_block(&mut car, FIRST_SLOT, &[failed], &[0], &[0], 0x67);
             for request in [
                 ScanRequest::all(),
+                ScanRequest::all()
+                    .allow_incomplete_instructions()
+                    .with_required_signer([1; 32]),
                 ScanRequest::all().without_instructions(),
                 ScanRequest::all().without_failed_transaction_details(),
                 ScanRequest::all()
@@ -2950,6 +3017,254 @@ mod tests {
                     );
                 }
             }
+        }
+    }
+
+    fn signer_query_request(signer: [u8; 32]) -> ScanRequest {
+        ScanRequest::all()
+            .allow_incomplete_instructions()
+            .allow_incomplete_cpi()
+            .allow_unknown_execution()
+            .without_primary_signatures()
+            .without_instruction_accounts()
+            .without_instruction_data()
+            .with_required_signer(signer)
+    }
+
+    fn failed_signer_metadata() -> TransactionStatusMeta {
+        TransactionStatusMeta {
+            err: Some(TransactionError {
+                err: wincode::serialize(&StoredTransactionError::InstructionError(
+                    3,
+                    StoredInstructionError::GenericError,
+                ))
+                .unwrap(),
+            }),
+            inner_instructions: vec![InnerInstructions {
+                index: 4,
+                instructions: vec![InnerInstruction {
+                    program_id_index: 1,
+                    accounts: vec![0],
+                    data: vec![99],
+                    stack_height: Some(2),
+                }],
+            }],
+            inner_instructions_none: false,
+            ..TransactionStatusMeta::default()
+        }
+    }
+
+    #[test]
+    fn signer_query_omits_failed_cpi_coordinates_but_preserves_signer_and_failure() {
+        let signer = [0x31; 32];
+        let program = [0x32; 32];
+        let failed = failed_signer_metadata();
+        // Historical epoch-100 metadata: Result::Err, fee, empty balances,
+        // Some(inner groups), one group at outer 4, one short-vector instruction.
+        // The remaining optional fields are absent at EOF in this wire format.
+        let mut historical = 1_u32.to_le_bytes().to_vec();
+        historical.extend_from_slice(&failed.err.as_ref().unwrap().err);
+        historical.extend_from_slice(&0_u64.to_le_bytes());
+        historical.extend_from_slice(&0_u64.to_le_bytes());
+        historical.extend_from_slice(&0_u64.to_le_bytes());
+        historical.push(1);
+        historical.extend_from_slice(&1_u64.to_le_bytes());
+        historical.push(4);
+        historical.extend_from_slice(&1_u64.to_le_bytes());
+        historical.extend_from_slice(&[1, 1, 0, 1, 99]);
+
+        for (slot, metadata) in [(43_200_000, historical), (FIRST_SLOT, metadata(failed))] {
+            let fixture = FixtureTransaction {
+                cid: cid(0x68),
+                transaction: legacy_transaction(
+                    [7; 64],
+                    &[signer, program],
+                    &[(1, &[0][..], &[10][..]); 5],
+                ),
+                metadata,
+                index: Some(0),
+            };
+            let mut car = car_header();
+            append_block(&mut car, slot, &[fixture], &[0], &[0], 0x69);
+            let make_source = || {
+                let mut id = identity(&[slot]);
+                id.first_slot = slot;
+                id.epoch = slot / 432_000;
+                CarInstructionSource::new(
+                    Cursor::new(car.clone()),
+                    id,
+                    CanonicalBlockPlan::new(vec![slot]),
+                    CarQueryLimits::default(),
+                )
+                .unwrap()
+            };
+            for target in [signer, [0x99; 32]] {
+                let (receipt, blocks) =
+                    collect(&mut make_source(), &signer_query_request(target)).unwrap();
+                assert_eq!(receipt.transactions, 1);
+                assert_eq!(receipt.instructions, 0);
+                let transaction = &blocks[0].transactions[0];
+                assert_eq!(transaction.header.status, ExecutionStatus::Failed);
+                assert_eq!(transaction.header.failed_outer_instruction_index, Some(3));
+                assert_eq!(transaction.header.cpi_coverage, CpiCoverage::Complete);
+                assert_eq!(
+                    transaction.required_signers,
+                    if target == signer {
+                        vec![signer]
+                    } else {
+                        Vec::new()
+                    }
+                );
+                assert_eq!(transaction.primary_signature, None);
+                assert!(transaction.instructions.is_empty());
+                assert_eq!(
+                    transaction.header.instruction_coverage,
+                    InstructionCoverage::Unknown(CoverageReason::ProjectionNotRequested)
+                );
+            }
+            let strict = ScanRequest::all()
+                .without_instruction_accounts()
+                .without_instruction_data();
+            let error = collect(&mut make_source(), &strict).unwrap_err();
+            assert!(
+                format!("{error:?}").contains("after failed outer index 3"),
+                "{error:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn signer_query_projects_only_successful_matching_instruction_rows() {
+        let signer = [0x31; 32];
+        let program = [0x32; 32];
+        let other_signer = [0x33; 32];
+        let fixtures: Vec<_> = [
+            (signer, empty_exact_metadata()),
+            (other_signer, empty_exact_metadata()),
+            (signer, Vec::new()),
+        ]
+        .into_iter()
+        .enumerate()
+        .map(|(index, (key, metadata))| FixtureTransaction {
+            cid: cid(0x70 + index as u8),
+            transaction: legacy_transaction([7; 64], &[key, program], &[(1, &[0], &[10])]),
+            metadata,
+            index: Some(index as u64),
+        })
+        .collect();
+        let mut car = car_header();
+        append_block(
+            &mut car,
+            FIRST_SLOT,
+            &fixtures,
+            &[0, 1, 2],
+            &[0, 1, 2],
+            0x73,
+        );
+        let (receipt, blocks) = collect(
+            &mut source(car, vec![FIRST_SLOT]),
+            &signer_query_request(signer),
+        )
+        .unwrap();
+        assert_eq!(receipt.transactions, 3);
+        assert_eq!(receipt.instructions, 1);
+        let transactions = &blocks[0].transactions;
+        assert_eq!(transactions[0].required_signers, vec![signer]);
+        assert_eq!(transactions[0].header.status, ExecutionStatus::Succeeded);
+        assert_eq!(transactions[0].instructions[0].program_id, Some(program));
+        assert_eq!(
+            transactions[0].header.instruction_coverage,
+            InstructionCoverage::Complete
+        );
+        assert!(transactions[1].required_signers.is_empty());
+        assert_eq!(transactions[1].header.status, ExecutionStatus::Succeeded);
+        assert_eq!(transactions[2].required_signers, vec![signer]);
+        assert_eq!(
+            transactions[2].header.status,
+            ExecutionStatus::Unknown(CoverageReason::MetadataAbsent)
+        );
+        assert_eq!(
+            transactions[2].header.cpi_coverage,
+            CpiCoverage::Unknown(CoverageReason::MetadataAbsent)
+        );
+        for transaction in &transactions[1..] {
+            assert!(transaction.instructions.is_empty());
+            assert_eq!(
+                transaction.header.instruction_coverage,
+                InstructionCoverage::Unknown(CoverageReason::ProjectionNotRequested)
+            );
+        }
+    }
+
+    #[test]
+    fn signer_query_keeps_source_shape_checks_for_omitted_failed_instructions() {
+        let signer = [0x31; 32];
+        for invalid in [
+            "outer program",
+            "outer account",
+            "inner program",
+            "inner account",
+            "data length",
+            "account length",
+            "stack height",
+            "instruction count",
+            "group index",
+            "group order",
+            "not recorded",
+            "loaded count",
+            "error bytes",
+        ] {
+            let mut meta = failed_signer_metadata();
+            let mut outer_program = 1;
+            let mut outer_accounts = vec![0];
+            let mut limits = CarQueryLimits::default();
+            match invalid {
+                "outer program" => outer_program = 2,
+                "outer account" => outer_accounts[0] = 2,
+                "inner program" => meta.inner_instructions[0].instructions[0].program_id_index = 2,
+                "inner account" => meta.inner_instructions[0].instructions[0].accounts[0] = 2,
+                "data length" => {
+                    meta.inner_instructions[0].instructions[0].data =
+                        vec![0; MAX_CANONICAL_SHORT_VEC_ITEMS + 1]
+                }
+                "account length" => {
+                    meta.inner_instructions[0].instructions[0].accounts =
+                        vec![0; MAX_CANONICAL_SHORT_VEC_ITEMS + 1]
+                }
+                "stack height" => meta.inner_instructions[0].instructions[0].stack_height = Some(0),
+                "instruction count" => limits.max_instructions_per_transaction = 5,
+                "group index" => meta.inner_instructions[0].index = 5,
+                "group order" => meta
+                    .inner_instructions
+                    .push(meta.inner_instructions[0].clone()),
+                "not recorded" => meta.inner_instructions_none = true,
+                "loaded count" => meta.loaded_writable_addresses.push(vec![0; 32]),
+                "error bytes" => meta.err.as_mut().unwrap().err.push(0),
+                _ => unreachable!(),
+            }
+            let fixture = FixtureTransaction {
+                cid: cid(0x74),
+                transaction: legacy_transaction(
+                    [7; 64],
+                    &[signer, [0x32; 32]],
+                    &[(outer_program, outer_accounts.as_slice(), &[10][..]); 5],
+                ),
+                metadata: metadata(meta),
+                index: Some(0),
+            };
+            let mut car = car_header();
+            append_block(&mut car, FIRST_SLOT, &[fixture], &[0], &[0], 0x75);
+            let mut source = CarInstructionSource::new(
+                Cursor::new(car),
+                identity(&[FIRST_SLOT]),
+                CanonicalBlockPlan::new(vec![FIRST_SLOT]),
+                limits,
+            )
+            .unwrap();
+            assert!(
+                collect(&mut source, &signer_query_request(signer)).is_err(),
+                "accepted invalid {invalid} in excluded instructions"
+            );
         }
     }
 

@@ -3013,7 +3013,12 @@ impl IndexerV3InstructionSource {
             | ProjectedMetadata::ExactUnprojected => None,
         };
 
-        let (instruction_coverage, instructions) = if !request.include_instructions {
+        // Match V2 signer queries: only a successful matching signer consumes
+        // instruction rows. Retain every selected transaction's header and
+        // signer evidence; full instruction scans keep strict validation.
+        let project_instructions =
+            request.include_instructions && (request.required_signer.is_none() || include_programs);
+        let (instruction_coverage, instructions) = if !project_instructions {
             (
                 InstructionCoverage::Unknown(CoverageReason::ProjectionNotRequested),
                 Vec::new(),
@@ -6470,6 +6475,129 @@ mod tests {
         assert!(receipt.io.source_read_calls.is_some_and(|calls| calls > 0));
         assert!(receipt.io.source_read_bytes.is_some_and(|bytes| bytes > 0));
         assert!(receipt.io.decoded_bytes.is_some_and(|bytes| bytes > 0));
+    }
+
+    #[test]
+    fn selected_signer_scan_omits_failed_instructions_but_keeps_signer_status_counts() {
+        let message = |instructions| {
+            legacy_message(
+                vec![CompactPubkey::Id(1), CompactPubkey::Id(2)],
+                instructions,
+            )
+        };
+        let failed_metadata = metadata(
+            2,
+            Some(CompactTransactionError::InstructionError(
+                3,
+                CompactInstructionError::Custom(42),
+            )),
+            Some(vec![CompactInnerInstructions {
+                index: 4,
+                instructions: vec![CompactInnerInstruction {
+                    program_id_index: 1,
+                    accounts: vec![0],
+                    data: Vec::new(),
+                    stack_height: Some(2),
+                }],
+            }]),
+            Vec::new(),
+            Vec::new(),
+        );
+        let fixture = Fixture::build(
+            &[SIGNER, PROGRAM],
+            vec![
+                Vec::new(),
+                vec![
+                    FixtureTransaction::exact(
+                        message(vec![raw_instruction(1, &[0], &[])]),
+                        metadata(2, None, Some(Vec::new()), Vec::new(), Vec::new()),
+                        ARCHIVE_V2_TX_FLAG_HAS_INNER_IX,
+                    ),
+                    FixtureTransaction::exact(
+                        message((0..5).map(|_| raw_instruction(1, &[0], &[])).collect()),
+                        failed_metadata,
+                        ARCHIVE_V2_TX_FLAG_HAS_ERROR | ARCHIVE_V2_TX_FLAG_HAS_INNER_IX,
+                    ),
+                    FixtureTransaction::absent(message(vec![raw_instruction(1, &[0], &[])])),
+                ],
+            ],
+            None,
+            false,
+            100,
+        );
+        let base = ScanRequest::all()
+            .allow_unverified_source()
+            .allow_incomplete_instructions()
+            .allow_incomplete_cpi()
+            .allow_unknown_execution()
+            .without_primary_signatures()
+            .without_instruction_accounts()
+            .without_instruction_data();
+        let request = base.clone().with_required_signer(SIGNER);
+
+        for workers in [1, 2] {
+            let mut source = fixture.open("selected-failed-signer");
+            let mut selected = Vec::new();
+            let receipt = source
+                .scan_selected_blocks_parallel_with_registry_policy(
+                    &request,
+                    &[1],
+                    IndexerV3RegistryReadPolicy::sparse_only(),
+                    NonZeroUsize::new(workers).unwrap(),
+                    &mut OwnedBlockSink {
+                        output: &mut selected,
+                    },
+                )
+                .unwrap();
+            assert_eq!(receipt.candidate_blocks, 1);
+            assert_eq!(receipt.skipped_blocks, 1);
+            assert_eq!(receipt.scan_receipt.transactions, 3);
+            assert_eq!(selected.len(), 1);
+            assert_eq!(selected[0].0.block_ordinal, 1);
+            let transactions = &selected[0].1;
+            assert_eq!(transactions.len(), 3);
+            assert!(
+                transactions
+                    .iter()
+                    .all(|tx| tx.required_signers == [SIGNER])
+            );
+            assert_eq!(transactions[0].header.status, ExecutionStatus::Succeeded);
+            assert_eq!(transactions[0].instructions.len(), 1);
+            assert_eq!(transactions[0].instructions[0].program_id, Some(PROGRAM));
+            assert_eq!(transactions[1].header.status, ExecutionStatus::Failed);
+            assert_eq!(
+                transactions[1].header.failed_outer_instruction_index,
+                Some(3)
+            );
+            assert_eq!(transactions[1].header.cpi_coverage, CpiCoverage::Complete);
+            assert_eq!(
+                transactions[2].header.status,
+                ExecutionStatus::Unknown(CoverageReason::MetadataAbsent)
+            );
+            for transaction in &transactions[1..] {
+                assert!(transaction.instructions.is_empty());
+                assert_eq!(
+                    transaction.header.instruction_coverage,
+                    InstructionCoverage::Unknown(CoverageReason::ProjectionNotRequested)
+                );
+            }
+            // FireWatch must still count all three signer transactions and its
+            // failed signer; unknown status must not become another failure.
+            assert_eq!(
+                transactions
+                    .iter()
+                    .filter(|tx| tx.header.status == ExecutionStatus::Failed)
+                    .count(),
+                1
+            );
+        }
+
+        // The same selected block remains invalid for a full instruction query.
+        let mut strict = fixture.open("selected-failed-signer-strict");
+        let error = strict
+            .scan_selected_blocks(&base, &[1], &mut NullBlockSink)
+            .unwrap_err();
+        assert!(error.to_string().contains("after failed outer index 3"));
     }
 
     #[test]
