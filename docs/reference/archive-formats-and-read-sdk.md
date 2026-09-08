@@ -56,8 +56,8 @@ cargo run --release --locked -p blockzilla-read-archive-v3 \
   --archive-root archive
 ```
 
-Replace the binary name with the Pump.fun or FireWatch program in the same
-package. Read the package guide for output names and the FireWatch wallet
+Replace the binary name with the Pump.fun or user-program-index program in the same
+package. Read the package guide for output names and the user-program-index wallet
 argument.
 
 When the public sample is active, omit `--archive-root archive`. All three

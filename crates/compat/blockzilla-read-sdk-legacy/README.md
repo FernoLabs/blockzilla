@@ -1,5 +1,8 @@
 # blockzilla-read-sdk
 
+FireWatch here means the external `ferno-watcher` application. The Blockzilla
+index and example workload are named `user-program-index`.
+
 Read-only Rust SDK for an immutable Blockzilla Archive V2 generation. It is
 designed for the Mac/FireWatch flow: cache the small control files locally,
 stream compressed block frames from Blockzilla, filter compact transactions by

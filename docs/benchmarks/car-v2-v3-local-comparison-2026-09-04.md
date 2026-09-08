@@ -1,5 +1,8 @@
 # CAR, Compact V2, and Indexer V3: local comparison
 
+Naming note: the wallet workload is now `user-program-index`. Saved commands,
+source references, and result IDs below keep their names from the recorded run.
+
 Status: Compact V2 and Indexer V3 are complete for all 11 sample epochs. The
 CAR run is in progress. CAR measurements in this report are preliminary.
 
@@ -24,9 +27,9 @@ Each value is the sum of one local-disk run on epochs 0, 100, ..., 1000.
 | Count transactions and inner instructions | 53m 07s | 22m 29s | 2.36x |
 | Recorded USDC token balances | 57m 10s | 23m 28s | 2.44x |
 | Pump.fun transaction dump | 1h 18m 28s | 34m 45s | 2.26x |
-| FireWatch wallet to program list | 1h 00m 01s | 8.21s | 438.79x |
+| user-program-index wallet to program list | 1h 00m 01s | 8.21s | 438.79x |
 
-The FireWatch result is the strongest V3 design result. Its reverse index can
+The user-program-index result is the strongest V3 design result. Its reverse index can
 reject almost every block before payload decoding. V2 must scan the epoch.
 
 ## Large-epoch full scan
@@ -54,10 +57,10 @@ Epoch 0 is complete for all three formats and all outputs match.
 | Count | 44.80s | 1.39s | 3.16s |
 | USDC | 19.38s | 0.60s | 1.98s |
 | Pump.fun | 17.31s | 1.67s | 2.62s |
-| FireWatch | 17.29s | 0.57s | 0.18s |
+| user-program-index | 17.29s | 0.57s | 0.18s |
 
 The tiny epoch exposes fixed setup cost. V2 starts faster than V3 for the three
-full-scan jobs. V3 still wins the indexed FireWatch query.
+full-scan jobs. V3 still wins the indexed user-program-index query.
 
 ## Current CAR limits
 

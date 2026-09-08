@@ -1,4 +1,4 @@
-//! Streaming semantic parity gate for Firewatch signer-to-program indexes.
+//! Streaming semantic parity gate for user-program indexes.
 //!
 //! The production manifest intentionally records a build timestamp and may
 //! describe a different shard layout after a format-preserving optimization.
@@ -35,6 +35,7 @@ const CURRENT_FORMAT_VERSION: u32 = 3;
 const HEADER_LEN: u64 = 16;
 const WALLET_RECORD_LEN: u64 = 16;
 const RELATION_RECORD_LEN: u64 = 4;
+// Legacy hash/schema/state identifiers are frozen; see README.md compatibility notes.
 const HASH_DOMAIN: &[u8] = b"firewatch-index-canonical-relations-v1\0";
 const PUBKEY_RELATION_RECORD_LEN: usize = 64;
 const PUBKEY_HASH_DOMAIN: &[u8] = b"firewatch-index-canonical-pubkey-relations-v1\0";
@@ -63,7 +64,7 @@ const _: () = assert!(REGISTRY_CACHE_ACCOUNTED_BYTES <= REGISTRY_CACHE_LIMIT_BYT
 #[derive(Debug, Parser)]
 #[command(
     name = "index-parity",
-    about = "Compare two Firewatch indexes by canonical wallet-to-program relations"
+    about = "Compare two user-program indexes by canonical wallet-to-program relations"
 )]
 struct Args {
     /// Report the exact set-difference cardinalities instead of failing at

@@ -10,9 +10,9 @@ use crate::calendar;
 use crate::calendar_view::calendar_page;
 use crate::components::{
     archive_progress, bottom_panels, compaction_history, dashboard_frame, dashboard_shell,
-    epoch_list, epoch_table, firewatch_project, live_capture_banner, poh_migration_lane_list,
-    poh_migration_progress, registry_reprocess_lane_list, registry_reprocess_progress,
-    service_unavailable, system_dashboard, top_stats,
+    epoch_list, epoch_table, live_capture_banner, poh_migration_lane_list, poh_migration_progress,
+    registry_reprocess_lane_list, registry_reprocess_progress, service_unavailable,
+    system_dashboard, top_stats, user_program_index_project,
 };
 use crate::state::{DashboardState, snapshot};
 
@@ -99,7 +99,7 @@ pub(crate) async fn render_dashboard_frame(
                     poh_migration_lane_list(state: state)
                     registry_reprocess_progress(state: state)
                     registry_reprocess_lane_list(state: state)
-                    firewatch_project(state: state)
+                    user_program_index_project(state: state)
                     live_capture_banner(state: state)
                     epoch_list(state: state)
                     bottom_panels(state: state)
@@ -220,7 +220,7 @@ async fn calendar_route() -> Result<impl View> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::state::{EpochTask, FirewatchIndexEntry};
+    use crate::state::{EpochTask, UserProgramIndexEntry};
 
     #[tokio::test]
     async fn offline_first_page_keeps_the_stable_streaming_shell() {
@@ -335,23 +335,25 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn overview_renders_firewatch_project_evidence_and_next_item() {
+    async fn overview_renders_user_program_index_project_evidence_and_next_item() {
         let state = DashboardState {
             live: true,
-            firewatch_enabled: true,
-            firewatch_capacity_configured: 1,
-            firewatch_running: 1,
-            firewatch_epochs_total: 3,
-            firewatch_epochs_accepted: 1,
-            firewatch_epochs_queued: 1,
-            firewatch_archive_epochs_total: Some(736),
-            firewatch_epochs_eligible: Some(729),
-            firewatch_epochs_blocked_migration: Some(7),
-            firewatch_epochs_blocked_wire_profile: Some(0),
-            firewatch_queue_eta_secs: Some(86_400),
-            firewatch_next_epoch: Some(900),
-            firewatch_admission_blocked_reason: Some("Waiting for archive storage headroom".into()),
-            firewatch_indexes: vec![FirewatchIndexEntry {
+            user_program_index_enabled: true,
+            user_program_index_capacity_configured: 1,
+            user_program_index_running: 1,
+            user_program_index_epochs_total: 3,
+            user_program_index_epochs_accepted: 1,
+            user_program_index_epochs_queued: 1,
+            user_program_index_archive_epochs_total: Some(736),
+            user_program_index_epochs_eligible: Some(729),
+            user_program_index_epochs_blocked_migration: Some(7),
+            user_program_index_epochs_blocked_wire_profile: Some(0),
+            user_program_index_queue_eta_secs: Some(86_400),
+            user_program_index_next_epoch: Some(900),
+            user_program_index_admission_blocked_reason: Some(
+                "Waiting for archive storage headroom".into(),
+            ),
+            user_program_indexes: vec![UserProgramIndexEntry {
                 epoch: 301,
                 state: "accepted".into(),
                 phase: "parity".into(),
@@ -373,7 +375,7 @@ mod tests {
             .unwrap()
             .render(&Cx::default());
 
-        assert!(html.contains("Firewatch indexes"));
+        assert!(html.contains("User program indexes"));
         assert!(html.contains(
             "1 accepted \u{b7} 1 active \u{b7} 1 queued \u{b7} 0 failed \u{b7} 0 awaiting profile audit"
         ));
@@ -386,14 +388,14 @@ mod tests {
         assert!(html.contains("Failed epochs and profile-audit work are excluded."));
         assert!(html.contains("1d 0h"));
         assert!(html.contains("All 1 reported epochs"));
-        assert!(html.contains("id=\"firewatch-epoch-301\""));
+        assert!(html.contains("id=\"user-program-index-epoch-301\""));
         assert!(html.contains("2,045,290 wallets \u{b7} 6,018,402 relations"));
         assert!(html.contains("Waiting for archive storage headroom"));
         assert!(html.contains("82.5/3.2 MiB/s R/W"));
     }
 
     #[tokio::test]
-    async fn overview_hides_firewatch_until_scheduler_reports_the_project() {
+    async fn overview_hides_user_program_index_until_scheduler_reports_the_project() {
         let state = DashboardState {
             live: true,
             ..Default::default()
@@ -403,7 +405,7 @@ mod tests {
             .unwrap()
             .render(&Cx::default());
 
-        assert!(!html.contains("id=\"firewatch-project\""));
+        assert!(!html.contains("id=\"user-program-index-project\""));
     }
 
     #[tokio::test]

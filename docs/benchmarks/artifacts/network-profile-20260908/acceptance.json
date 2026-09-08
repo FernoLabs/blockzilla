@@ -1,0 +1,2054 @@
+{
+  "state": "PASS",
+  "source_hashes_unchanged_after_run": true,
+  "source_file_count": 639,
+  "build_manifest_sha256": "ad7d17caefccd794eea67ba0684b6e766c8712e89ff848761273ca7d9cf41c46",
+  "collected_results_sha256": "17112aa0c0f9cab0a680cb3eeb484dff6fb64c8876b21dc84e4116b9daa4dd79",
+  "analysis_sha256": "466c57818f6faf7b6bf48fe3abc7963fff6eaec7d7e48057fff5503ccb26ed51",
+  "analysis": {
+    "state": "PASS",
+    "control": "network-profile-20260908T104622Z",
+    "source_identities_unchanged": true,
+    "exact_output_parity": true,
+    "cases": [
+      {
+        "label": "v2-local-normal",
+        "profiled": false,
+        "setup_s": 0.030614263,
+        "scan_s": 1.274211017,
+        "total_s": 1.305044614,
+        "scan_tps": 7004987.306588325,
+        "total_tps": 6839484.186400389,
+        "scan_logical_mb_s": 1344.8508034678216,
+        "scan_http_mb_s": 0.0,
+        "setup_transport": {
+          "cache_downloads": 0,
+          "cache_hits": 0,
+          "cache_read_bytes": 0,
+          "cache_read_calls": 0,
+          "get_requests": 0,
+          "head_requests": 0,
+          "incomplete_body_retries": 0,
+          "network_body_bytes": 0,
+          "server_error_retries": 0
+        },
+        "scan_transport": {
+          "cache_downloads": 0,
+          "cache_hits": 0,
+          "cache_read_bytes": 0,
+          "cache_read_calls": 0,
+          "get_requests": 0,
+          "head_requests": 0,
+          "incomplete_body_retries": 0,
+          "network_body_bytes": 0,
+          "server_error_retries": 0
+        },
+        "total_transport": {
+          "cache_downloads": 0,
+          "cache_hits": 0,
+          "cache_read_bytes": 0,
+          "cache_read_calls": 0,
+          "get_requests": 0,
+          "head_requests": 0,
+          "incomplete_body_retries": 0,
+          "network_body_bytes": 0,
+          "server_error_retries": 0
+        },
+        "mean_http_get_bytes": 0.0,
+        "scan_peak_sampled_rss_mib": 140.55859375,
+        "reader_peak_sampled_rss_mib": 140.55859375,
+        "exit_peak_rss_mib": 140.15625,
+        "process_cpu_s_including_profile_report": 8.581392000000001,
+        "cpu_cores_mean_normal_only": 6.575554512039081,
+        "process_disk_read_bytes_including_profile_report": 1751228416,
+        "process_disk_write_bytes_including_profile_report": 12288,
+        "host_busy_percent_approx": 59.47712418300654,
+        "scan_thread_state_samples": {
+          "R": 43,
+          "S": 47
+        },
+        "scan_thread_wait_samples": {
+          "0": 43,
+          "futex_do_wait": 47
+        },
+        "threads_observed": [
+          {
+            "tid": "2798730",
+            "name": "reader-normal",
+            "observed_cpu_s": 1.12
+          },
+          {
+            "tid": "2798736",
+            "name": "blockzilla-bloc",
+            "observed_cpu_s": 0.57
+          },
+          {
+            "tid": "2798740",
+            "name": "blockzilla-bloc",
+            "observed_cpu_s": 0.56
+          },
+          {
+            "tid": "2798741",
+            "name": "blockzilla-bloc",
+            "observed_cpu_s": 0.56
+          },
+          {
+            "tid": "2798744",
+            "name": "blockzilla-bloc",
+            "observed_cpu_s": 0.56
+          },
+          {
+            "tid": "2798745",
+            "name": "blockzilla-bloc",
+            "observed_cpu_s": 0.56
+          },
+          {
+            "tid": "2798747",
+            "name": "blockzilla-bloc",
+            "observed_cpu_s": 0.56
+          },
+          {
+            "tid": "2798738",
+            "name": "blockzilla-bloc",
+            "observed_cpu_s": 0.55
+          },
+          {
+            "tid": "2798739",
+            "name": "blockzilla-bloc",
+            "observed_cpu_s": 0.55
+          },
+          {
+            "tid": "2798743",
+            "name": "blockzilla-bloc",
+            "observed_cpu_s": 0.55
+          },
+          {
+            "tid": "2798742",
+            "name": "blockzilla-bloc",
+            "observed_cpu_s": 0.54
+          },
+          {
+            "tid": "2798746",
+            "name": "blockzilla-bloc",
+            "observed_cpu_s": 0.54
+          },
+          {
+            "tid": "2798737",
+            "name": "blockzilla-bloc",
+            "observed_cpu_s": 0.53
+          },
+          {
+            "tid": "2798749",
+            "name": "blockzilla-bloc",
+            "observed_cpu_s": 0.31
+          },
+          {
+            "tid": "2798748",
+            "name": "blockzilla-bloc",
+            "observed_cpu_s": 0.03
+          }
+        ],
+        "stages": {
+          "batch_count": 138,
+          "block_count": 8192,
+          "compressed_buffer_count": 3,
+          "compressed_bytes": 1112942046,
+          "consume_s": 1.247138123,
+          "decode_project_wall_s": 1.250937259,
+          "decode_sum_s": 3.3317364,
+          "effective_workers": 12,
+          "input_wait_s": 0.01837555,
+          "max_active_workers": 12,
+          "max_blocks_per_batch": 48,
+          "max_compressed_batch_bytes": 13442144,
+          "max_declared_uncompressed_batch_bytes": 31887676,
+          "max_in_flight_blocks": 96,
+          "max_in_flight_declared_uncompressed_bytes": 53161948,
+          "max_in_flight_transactions": 111274,
+          "max_projected_batch_bytes": 33540614,
+          "max_projected_block_bytes": 654454,
+          "max_retained_decompressed_buffer_bytes": 1122432,
+          "max_transactions_per_batch": 56360,
+          "producer_buffer_wait_s": 0.811093921,
+          "projection_buffer_wait_s": 1.22577189,
+          "projection_sum_s": 3.769374251,
+          "publish_s": 0.818296841,
+          "read_call_count": 138,
+          "read_s": 0.431076221,
+          "registry_mode": "SparseWorkerCache",
+          "registry_prefetch_read_bytes": 0,
+          "registry_prefetch_read_calls": 0,
+          "registry_resident_bound_bytes": 6291456,
+          "requested_workers": 12,
+          "result_send_wait_s": 0.0,
+          "signature_assign_s": 0.207575473,
+          "signature_read_s": 0.207768496
+        },
+        "oracle": "records=8925832 bytes=714066608 sha256=54531e48c946cb66c0c148d7339fdbb11511cffaaec9bc9c5a33f650a10d3685 first_slot=Some(388800002) last_slot=Some(388808197)",
+        "phase_unix_s": {
+          "setup": 1788864772.707,
+          "scan": 1788864772.738,
+          "finalize": 1788864774.012,
+          "profile_report": 1788864774.012
+        }
+      },
+      {
+        "label": "v2-network-normal",
+        "profiled": false,
+        "setup_s": 26.642394478,
+        "scan_s": 28.447817585,
+        "total_s": 55.090370455,
+        "scan_tps": 313761.5732148966,
+        "total_tps": 162021.63692638397,
+        "scan_logical_mb_s": 60.23744017901611,
+        "scan_http_mb_s": 60.23744017901611,
+        "setup_transport": {
+          "cache_downloads": 3,
+          "cache_hits": 0,
+          "cache_read_bytes": 22456718,
+          "cache_read_calls": 2,
+          "get_requests": 29,
+          "head_requests": 21,
+          "incomplete_body_retries": 0,
+          "network_body_bytes": 912008526,
+          "server_error_retries": 0
+        },
+        "scan_transport": {
+          "cache_downloads": 0,
+          "cache_hits": 0,
+          "cache_read_bytes": 0,
+          "cache_read_calls": 0,
+          "get_requests": 156,
+          "head_requests": 0,
+          "incomplete_body_retries": 0,
+          "network_body_bytes": 1713623710,
+          "server_error_retries": 0
+        },
+        "total_transport": {
+          "cache_downloads": 3,
+          "cache_hits": 0,
+          "cache_read_bytes": 22456718,
+          "cache_read_calls": 2,
+          "get_requests": 185,
+          "head_requests": 21,
+          "incomplete_body_retries": 0,
+          "network_body_bytes": 2625632236,
+          "server_error_retries": 0
+        },
+        "mean_http_get_bytes": 10984767.371794872,
+        "scan_peak_sampled_rss_mib": 138.796875,
+        "reader_peak_sampled_rss_mib": 138.796875,
+        "exit_peak_rss_mib": 138.1875,
+        "process_cpu_s_including_profile_report": 15.255801000000002,
+        "cpu_cores_mean_normal_only": 0.2769231877368032,
+        "process_disk_read_bytes_including_profile_report": 0,
+        "process_disk_write_bytes_including_profile_report": 912543744,
+        "host_busy_percent_approx": 3.3961151793471513,
+        "scan_thread_state_samples": {
+          "S": 2757,
+          "R": 53,
+          "D": 3
+        },
+        "scan_thread_wait_samples": {
+          "futex_do_wait": 2644,
+          "do_epoll_wait": 117,
+          "0": 49,
+          "do_mremap": 1,
+          "__vm_munmap": 2
+        },
+        "threads_observed": [
+          {
+            "tid": "2798754",
+            "name": "reqwest-interna",
+            "observed_cpu_s": 5.39
+          },
+          {
+            "tid": "2798753",
+            "name": "reader-normal",
+            "observed_cpu_s": 2.2
+          },
+          {
+            "tid": "2798857",
+            "name": "blockzilla-bloc",
+            "observed_cpu_s": 0.58
+          },
+          {
+            "tid": "2798856",
+            "name": "blockzilla-bloc",
+            "observed_cpu_s": 0.57
+          },
+          {
+            "tid": "2798858",
+            "name": "blockzilla-bloc",
+            "observed_cpu_s": 0.57
+          },
+          {
+            "tid": "2798862",
+            "name": "blockzilla-bloc",
+            "observed_cpu_s": 0.57
+          },
+          {
+            "tid": "2798864",
+            "name": "blockzilla-bloc",
+            "observed_cpu_s": 0.57
+          },
+          {
+            "tid": "2798866",
+            "name": "blockzilla-bloc",
+            "observed_cpu_s": 0.57
+          },
+          {
+            "tid": "2798859",
+            "name": "blockzilla-bloc",
+            "observed_cpu_s": 0.56
+          },
+          {
+            "tid": "2798861",
+            "name": "blockzilla-bloc",
+            "observed_cpu_s": 0.56
+          },
+          {
+            "tid": "2798863",
+            "name": "blockzilla-bloc",
+            "observed_cpu_s": 0.55
+          },
+          {
+            "tid": "2798860",
+            "name": "blockzilla-bloc",
+            "observed_cpu_s": 0.54
+          },
+          {
+            "tid": "2798865",
+            "name": "blockzilla-bloc",
+            "observed_cpu_s": 0.54
+          },
+          {
+            "tid": "2798867",
+            "name": "blockzilla-bloc",
+            "observed_cpu_s": 0.54
+          },
+          {
+            "tid": "2798870",
+            "name": "blockzilla-rang",
+            "observed_cpu_s": 0.22
+          },
+          {
+            "tid": "2798871",
+            "name": "blockzilla-rang",
+            "observed_cpu_s": 0.22
+          },
+          {
+            "tid": "2798872",
+            "name": "blockzilla-rang",
+            "observed_cpu_s": 0.22
+          },
+          {
+            "tid": "2798868",
+            "name": "blockzilla-bloc",
+            "observed_cpu_s": 0.01
+          },
+          {
+            "tid": "2798869",
+            "name": "blockzilla-bloc",
+            "observed_cpu_s": 0.0
+          },
+          {
+            "tid": "2798873",
+            "name": "tokio-rt-worker",
+            "observed_cpu_s": 0.0
+          },
+          {
+            "tid": "2798874",
+            "name": "tokio-rt-worker",
+            "observed_cpu_s": 0.0
+          }
+        ],
+        "stages": {
+          "batch_count": 138,
+          "block_count": 8192,
+          "compressed_buffer_count": 3,
+          "compressed_bytes": 1112942046,
+          "consume_s": 14.944866084000001,
+          "decode_project_wall_s": 27.714770042,
+          "decode_sum_s": 3.216147782,
+          "effective_workers": 12,
+          "input_wait_s": 17.943211238,
+          "max_active_workers": 12,
+          "max_blocks_per_batch": 48,
+          "max_compressed_batch_bytes": 13442144,
+          "max_declared_uncompressed_batch_bytes": 31887676,
+          "max_in_flight_blocks": 96,
+          "max_in_flight_declared_uncompressed_bytes": 53066658,
+          "max_in_flight_transactions": 111262,
+          "max_projected_batch_bytes": 31845073,
+          "max_projected_block_bytes": 706294,
+          "max_retained_decompressed_buffer_bytes": 1122432,
+          "max_transactions_per_batch": 56360,
+          "producer_buffer_wait_s": 24.799915855,
+          "projection_buffer_wait_s": 10.48366261,
+          "projection_sum_s": 4.202822641,
+          "publish_s": 0.754431859,
+          "read_call_count": 138,
+          "read_s": 48.037713628,
+          "registry_mode": "SparseWorkerCache",
+          "registry_prefetch_read_bytes": 0,
+          "registry_prefetch_read_calls": 0,
+          "registry_resident_bound_bytes": 6291456,
+          "requested_workers": 12,
+          "result_send_wait_s": 0.0,
+          "signature_assign_s": 0.141923685,
+          "signature_read_s": 14.029763418
+        },
+        "oracle": "records=8925832 bytes=714066608 sha256=54531e48c946cb66c0c148d7339fdbb11511cffaaec9bc9c5a33f650a10d3685 first_slot=Some(388800002) last_slot=Some(388808197)",
+        "phase_unix_s": {
+          "setup": 1788864774.164,
+          "scan": 1788864800.807,
+          "finalize": 1788864829.255,
+          "profile_report": 1788864829.255
+        }
+      },
+      {
+        "label": "v3-local-normal",
+        "profiled": false,
+        "setup_s": 0.172216183,
+        "scan_s": 1.104824097,
+        "total_s": 1.277224981,
+        "scan_tps": 8078962.09381827,
+        "total_tps": 6988457.110360888,
+        "scan_logical_mb_s": 774.8710752459266,
+        "scan_http_mb_s": 0.0,
+        "setup_transport": {
+          "cache_downloads": 0,
+          "cache_hits": 0,
+          "cache_read_bytes": 0,
+          "cache_read_calls": 0,
+          "get_requests": 0,
+          "head_requests": 0,
+          "incomplete_body_retries": 0,
+          "network_body_bytes": 0,
+          "server_error_retries": 0
+        },
+        "scan_transport": {
+          "cache_downloads": 0,
+          "cache_hits": 0,
+          "cache_read_bytes": 0,
+          "cache_read_calls": 0,
+          "get_requests": 0,
+          "head_requests": 0,
+          "incomplete_body_retries": 0,
+          "network_body_bytes": 0,
+          "server_error_retries": 0
+        },
+        "total_transport": {
+          "cache_downloads": 0,
+          "cache_hits": 0,
+          "cache_read_bytes": 0,
+          "cache_read_calls": 0,
+          "get_requests": 0,
+          "head_requests": 0,
+          "incomplete_body_retries": 0,
+          "network_body_bytes": 0,
+          "server_error_retries": 0
+        },
+        "mean_http_get_bytes": 0.0,
+        "scan_peak_sampled_rss_mib": 179.5703125,
+        "reader_peak_sampled_rss_mib": 179.5703125,
+        "exit_peak_rss_mib": 180.5234375,
+        "process_cpu_s_including_profile_report": 9.428407,
+        "cpu_cores_mean_normal_only": 7.381946908537643,
+        "process_disk_read_bytes_including_profile_report": 964050944,
+        "process_disk_write_bytes_including_profile_report": 12288,
+        "host_busy_percent_approx": 60.70826306913997,
+        "scan_thread_state_samples": {
+          "R": 46,
+          "S": 32
+        },
+        "scan_thread_wait_samples": {
+          "0": 48,
+          "futex_do_wait": 30
+        },
+        "threads_observed": [
+          {
+            "tid": "2798935",
+            "name": "reader-normal",
+            "observed_cpu_s": 1.01
+          },
+          {
+            "tid": "2798937",
+            "name": "reader-normal",
+            "observed_cpu_s": 0.65
+          },
+          {
+            "tid": "2798941",
+            "name": "reader-normal",
+            "observed_cpu_s": 0.65
+          },
+          {
+            "tid": "2798944",
+            "name": "reader-normal",
+            "observed_cpu_s": 0.65
+          },
+          {
+            "tid": "2798946",
+            "name": "reader-normal",
+            "observed_cpu_s": 0.65
+          },
+          {
+            "tid": "2798947",
+            "name": "reader-normal",
+            "observed_cpu_s": 0.65
+          },
+          {
+            "tid": "2798939",
+            "name": "reader-normal",
+            "observed_cpu_s": 0.64
+          },
+          {
+            "tid": "2798940",
+            "name": "reader-normal",
+            "observed_cpu_s": 0.64
+          },
+          {
+            "tid": "2798942",
+            "name": "reader-normal",
+            "observed_cpu_s": 0.64
+          },
+          {
+            "tid": "2798943",
+            "name": "reader-normal",
+            "observed_cpu_s": 0.64
+          },
+          {
+            "tid": "2798945",
+            "name": "reader-normal",
+            "observed_cpu_s": 0.64
+          },
+          {
+            "tid": "2798938",
+            "name": "reader-normal",
+            "observed_cpu_s": 0.63
+          },
+          {
+            "tid": "2798948",
+            "name": "reader-normal",
+            "observed_cpu_s": 0.63
+          }
+        ],
+        "stages": {
+          "parallel": {
+            "blocks_per_job_limit": 4,
+            "declared_decoded_byte_limit": 268435456,
+            "effective_workers": 12,
+            "global_projected_block_bound": 96,
+            "job_window_limit": 24,
+            "jobs": 2048,
+            "max_active_workers": 12,
+            "max_coordinator_pending_projected_blocks": 64,
+            "max_coordinator_pending_results": 16,
+            "max_in_flight_declared_decoded_bytes": 19826604,
+            "max_in_flight_jobs": 23,
+            "max_in_flight_owned_payload_bytes": 18844000,
+            "max_in_flight_transactions": 99243,
+            "max_owned_payload_block_bytes": 367040,
+            "max_result_channel_backlog": 12,
+            "projected_blocks": 8192,
+            "requested_workers": 12,
+            "transaction_limit": 100000
+          },
+          "path": "dense",
+          "registry": {
+            "evictions": 0,
+            "hits": 0,
+            "misses": 0,
+            "mode": "unused",
+            "prefetch_read_bytes": 0,
+            "prefetch_read_calls": 0,
+            "resident_payload_bytes": 0,
+            "resolutions": 0
+          }
+        },
+        "oracle": "records=8925832 bytes=714066608 sha256=54531e48c946cb66c0c148d7339fdbb11511cffaaec9bc9c5a33f650a10d3685 first_slot=Some(388800002) last_slot=Some(388808197)",
+        "phase_unix_s": {
+          "setup": 1788864829.386,
+          "scan": 1788864829.558,
+          "finalize": 1788864830.663,
+          "profile_report": 1788864830.663
+        }
+      },
+      {
+        "label": "v3-network-normal",
+        "profiled": false,
+        "setup_s": 4.472677055,
+        "scan_s": 35.161852538,
+        "total_s": 39.634646541,
+        "scan_tps": 253849.87865339874,
+        "total_tps": 225202.76523134086,
+        "scan_logical_mb_s": 24.347301811666565,
+        "scan_http_mb_s": 24.347301811666565,
+        "setup_transport": {
+          "cache_downloads": 1,
+          "cache_hits": 0,
+          "cache_read_bytes": 107100848,
+          "cache_read_calls": 5,
+          "get_requests": 15,
+          "head_requests": 38,
+          "incomplete_body_retries": 0,
+          "network_body_bytes": 107101552,
+          "server_error_retries": 0
+        },
+        "scan_transport": {
+          "cache_downloads": 0,
+          "cache_hits": 0,
+          "cache_read_bytes": 0,
+          "cache_read_calls": 0,
+          "get_requests": 2176,
+          "head_requests": 0,
+          "incomplete_body_retries": 0,
+          "network_body_bytes": 856096236,
+          "server_error_retries": 0
+        },
+        "total_transport": {
+          "cache_downloads": 1,
+          "cache_hits": 0,
+          "cache_read_bytes": 107100848,
+          "cache_read_calls": 5,
+          "get_requests": 2191,
+          "head_requests": 38,
+          "incomplete_body_retries": 0,
+          "network_body_bytes": 963197788,
+          "server_error_retries": 0
+        },
+        "mean_http_get_bytes": 393426.57904411765,
+        "scan_peak_sampled_rss_mib": 198.03125,
+        "reader_peak_sampled_rss_mib": 198.03125,
+        "exit_peak_rss_mib": 198.63671875,
+        "process_cpu_s_including_profile_report": 10.160198,
+        "cpu_cores_mean_normal_only": 0.2563463758782306,
+        "process_disk_read_bytes_including_profile_report": 0,
+        "process_disk_write_bytes_including_profile_report": 107364352,
+        "host_busy_percent_approx": 3.1620298815043792,
+        "scan_thread_state_samples": {
+          "S": 2908,
+          "R": 51
+        },
+        "scan_thread_wait_samples": {
+          "futex_do_wait": 2748,
+          "do_epoll_wait": 163,
+          "0": 48
+        },
+        "threads_observed": [
+          {
+            "tid": "2798951",
+            "name": "reqwest-interna",
+            "observed_cpu_s": 2.25
+          },
+          {
+            "tid": "2798950",
+            "name": "reader-normal",
+            "observed_cpu_s": 1.04
+          },
+          {
+            "tid": "2798971",
+            "name": "reader-normal",
+            "observed_cpu_s": 0.58
+          },
+          {
+            "tid": "2798961",
+            "name": "reader-normal",
+            "observed_cpu_s": 0.57
+          },
+          {
+            "tid": "2798962",
+            "name": "reader-normal",
+            "observed_cpu_s": 0.56
+          },
+          {
+            "tid": "2798972",
+            "name": "reader-normal",
+            "observed_cpu_s": 0.56
+          },
+          {
+            "tid": "2798963",
+            "name": "reader-normal",
+            "observed_cpu_s": 0.55
+          },
+          {
+            "tid": "2798969",
+            "name": "reader-normal",
+            "observed_cpu_s": 0.55
+          },
+          {
+            "tid": "2798967",
+            "name": "reader-normal",
+            "observed_cpu_s": 0.54
+          },
+          {
+            "tid": "2798964",
+            "name": "reader-normal",
+            "observed_cpu_s": 0.53
+          },
+          {
+            "tid": "2798965",
+            "name": "reader-normal",
+            "observed_cpu_s": 0.52
+          },
+          {
+            "tid": "2798968",
+            "name": "reader-normal",
+            "observed_cpu_s": 0.52
+          },
+          {
+            "tid": "2798970",
+            "name": "reader-normal",
+            "observed_cpu_s": 0.52
+          },
+          {
+            "tid": "2798966",
+            "name": "reader-normal",
+            "observed_cpu_s": 0.51
+          },
+          {
+            "tid": "2798960",
+            "name": "blockzilla-v3-i",
+            "observed_cpu_s": 0.15
+          },
+          {
+            "tid": "2798952",
+            "name": "tokio-rt-worker",
+            "observed_cpu_s": 0.0
+          },
+          {
+            "tid": "2798973",
+            "name": "tokio-rt-worker",
+            "observed_cpu_s": 0.0
+          },
+          {
+            "tid": "2798974",
+            "name": "tokio-rt-worker",
+            "observed_cpu_s": 0.0
+          },
+          {
+            "tid": "2798975",
+            "name": "tokio-rt-worker",
+            "observed_cpu_s": 0.0
+          },
+          {
+            "tid": "2798976",
+            "name": "tokio-rt-worker",
+            "observed_cpu_s": 0.0
+          },
+          {
+            "tid": "2798977",
+            "name": "tokio-rt-worker",
+            "observed_cpu_s": 0.0
+          },
+          {
+            "tid": "2798978",
+            "name": "tokio-rt-worker",
+            "observed_cpu_s": 0.0
+          }
+        ],
+        "stages": {
+          "parallel": {
+            "blocks_per_job_limit": 4,
+            "declared_decoded_byte_limit": 268435456,
+            "effective_workers": 12,
+            "global_projected_block_bound": 96,
+            "job_window_limit": 24,
+            "jobs": 2048,
+            "max_active_workers": 12,
+            "max_coordinator_pending_projected_blocks": 92,
+            "max_coordinator_pending_results": 23,
+            "max_in_flight_declared_decoded_bytes": 20940600,
+            "max_in_flight_jobs": 24,
+            "max_in_flight_owned_payload_bytes": 19376320,
+            "max_in_flight_transactions": 99914,
+            "max_owned_payload_block_bytes": 367040,
+            "max_result_channel_backlog": 12,
+            "projected_blocks": 8192,
+            "requested_workers": 12,
+            "transaction_limit": 100000
+          },
+          "path": "dense",
+          "registry": {
+            "evictions": 0,
+            "hits": 0,
+            "misses": 0,
+            "mode": "unused",
+            "prefetch_read_bytes": 0,
+            "prefetch_read_calls": 0,
+            "resident_payload_bytes": 0,
+            "resolutions": 0
+          }
+        },
+        "oracle": "records=8925832 bytes=714066608 sha256=54531e48c946cb66c0c148d7339fdbb11511cffaaec9bc9c5a33f650a10d3685 first_slot=Some(388800002) last_slot=Some(388808197)",
+        "phase_unix_s": {
+          "setup": 1788864830.802,
+          "scan": 1788864835.275,
+          "finalize": 1788864870.436,
+          "profile_report": 1788864870.437
+        }
+      },
+      {
+        "label": "v2-local-profile",
+        "profiled": true,
+        "setup_s": 0.027858556,
+        "scan_s": 1.258532575,
+        "total_s": 1.286558137,
+        "scan_tps": 7092253.452398719,
+        "total_tps": 6937760.326022483,
+        "scan_logical_mb_s": 1361.6045734851161,
+        "scan_http_mb_s": 0.0,
+        "setup_transport": {
+          "cache_downloads": 0,
+          "cache_hits": 0,
+          "cache_read_bytes": 0,
+          "cache_read_calls": 0,
+          "get_requests": 0,
+          "head_requests": 0,
+          "incomplete_body_retries": 0,
+          "network_body_bytes": 0,
+          "server_error_retries": 0
+        },
+        "scan_transport": {
+          "cache_downloads": 0,
+          "cache_hits": 0,
+          "cache_read_bytes": 0,
+          "cache_read_calls": 0,
+          "get_requests": 0,
+          "head_requests": 0,
+          "incomplete_body_retries": 0,
+          "network_body_bytes": 0,
+          "server_error_retries": 0
+        },
+        "total_transport": {
+          "cache_downloads": 0,
+          "cache_hits": 0,
+          "cache_read_bytes": 0,
+          "cache_read_calls": 0,
+          "get_requests": 0,
+          "head_requests": 0,
+          "incomplete_body_retries": 0,
+          "network_body_bytes": 0,
+          "server_error_retries": 0
+        },
+        "mean_http_get_bytes": 0.0,
+        "scan_peak_sampled_rss_mib": 184.66796875,
+        "reader_peak_sampled_rss_mib": 184.66796875,
+        "exit_peak_rss_mib": 184.32421875,
+        "process_cpu_s_including_profile_report": 8.834653,
+        "cpu_cores_mean_normal_only": null,
+        "process_disk_read_bytes_including_profile_report": 1154093056,
+        "process_disk_write_bytes_including_profile_report": 356352,
+        "host_busy_percent_approx": 61.178369652945925,
+        "scan_thread_state_samples": {
+          "R": 45,
+          "S": 45
+        },
+        "scan_thread_wait_samples": {
+          "0": 46,
+          "futex_do_wait": 44
+        },
+        "threads_observed": [
+          {
+            "tid": "2799107",
+            "name": "reader-profile",
+            "observed_cpu_s": 1.18
+          },
+          {
+            "tid": "2799108",
+            "name": "blockzilla-bloc",
+            "observed_cpu_s": 0.55
+          },
+          {
+            "tid": "2799111",
+            "name": "blockzilla-bloc",
+            "observed_cpu_s": 0.55
+          },
+          {
+            "tid": "2799115",
+            "name": "blockzilla-bloc",
+            "observed_cpu_s": 0.55
+          },
+          {
+            "tid": "2799116",
+            "name": "blockzilla-bloc",
+            "observed_cpu_s": 0.55
+          },
+          {
+            "tid": "2799117",
+            "name": "blockzilla-bloc",
+            "observed_cpu_s": 0.55
+          },
+          {
+            "tid": "2799118",
+            "name": "blockzilla-bloc",
+            "observed_cpu_s": 0.55
+          },
+          {
+            "tid": "2799109",
+            "name": "blockzilla-bloc",
+            "observed_cpu_s": 0.54
+          },
+          {
+            "tid": "2799110",
+            "name": "blockzilla-bloc",
+            "observed_cpu_s": 0.54
+          },
+          {
+            "tid": "2799112",
+            "name": "blockzilla-bloc",
+            "observed_cpu_s": 0.54
+          },
+          {
+            "tid": "2799114",
+            "name": "blockzilla-bloc",
+            "observed_cpu_s": 0.54
+          },
+          {
+            "tid": "2799119",
+            "name": "blockzilla-bloc",
+            "observed_cpu_s": 0.54
+          },
+          {
+            "tid": "2799113",
+            "name": "blockzilla-bloc",
+            "observed_cpu_s": 0.53
+          },
+          {
+            "tid": "2799121",
+            "name": "blockzilla-bloc",
+            "observed_cpu_s": 0.34
+          },
+          {
+            "tid": "2799120",
+            "name": "blockzilla-bloc",
+            "observed_cpu_s": 0.03
+          }
+        ],
+        "stages": {
+          "batch_count": 138,
+          "block_count": 8192,
+          "compressed_buffer_count": 3,
+          "compressed_bytes": 1112942046,
+          "consume_s": 1.231262263,
+          "decode_project_wall_s": 1.230896037,
+          "decode_sum_s": 3.347764004,
+          "effective_workers": 12,
+          "input_wait_s": 0.020692123,
+          "max_active_workers": 12,
+          "max_blocks_per_batch": 48,
+          "max_compressed_batch_bytes": 13442144,
+          "max_declared_uncompressed_batch_bytes": 31887676,
+          "max_in_flight_blocks": 96,
+          "max_in_flight_declared_uncompressed_bytes": 53161948,
+          "max_in_flight_transactions": 111274,
+          "max_projected_batch_bytes": 32759056,
+          "max_projected_block_bytes": 663193,
+          "max_retained_decompressed_buffer_bytes": 1122432,
+          "max_transactions_per_batch": 56360,
+          "producer_buffer_wait_s": 0.768434785,
+          "projection_buffer_wait_s": 1.2025205429999999,
+          "projection_sum_s": 3.782263115,
+          "publish_s": 0.887483676,
+          "read_call_count": 138,
+          "read_s": 0.453880856,
+          "registry_mode": "SparseWorkerCache",
+          "registry_prefetch_read_bytes": 0,
+          "registry_prefetch_read_calls": 0,
+          "registry_resident_bound_bytes": 6291456,
+          "requested_workers": 12,
+          "result_send_wait_s": 0.0,
+          "signature_assign_s": 0.222687364,
+          "signature_read_s": 0.112157565
+        },
+        "oracle": "records=8925832 bytes=714066608 sha256=54531e48c946cb66c0c148d7339fdbb11511cffaaec9bc9c5a33f650a10d3685 first_slot=Some(388800002) last_slot=Some(388808197)",
+        "phase_unix_s": {
+          "setup": 1788864870.623,
+          "scan": 1788864870.651,
+          "finalize": 1788864871.909,
+          "profile_report": 1788864871.909
+        },
+        "cpu_profile_samples": 324,
+        "cpu_profile_leaf_top": [
+          {
+            "samples": 60,
+            "function": "<blockzilla_compact_v2_reader::compact_query::ContiguousSignatureScan<blockzilla_source_local::PinnedLocalRangeSource>>::read_block_selected",
+            "percent": 18.51851851851852
+          },
+          {
+            "samples": 58,
+            "function": "<sha2::block_api::Sha256VarCore as digest::block_api::UpdateCore>::update_blocks",
+            "percent": 17.901234567901234
+          },
+          {
+            "samples": 50,
+            "function": "ZSTD_decompressFrame",
+            "percent": 15.432098765432098
+          },
+          {
+            "samples": 33,
+            "function": "<blockzilla_model::source::OrderedBlockPublisher>::publish",
+            "percent": 10.185185185185185
+          },
+          {
+            "samples": 28,
+            "function": "",
+            "percent": 8.641975308641975
+          },
+          {
+            "samples": 27,
+            "function": "<blockzilla_compact_v2_reader::message_projection::CompactV2MessageProjector>::count_message",
+            "percent": 8.333333333333334
+          },
+          {
+            "samples": 13,
+            "function": "<blockzilla_source_local::PinnedLocalRangeSource as blockzilla_source::RangeSource>::read_range_into",
+            "percent": 4.012345679012346
+          },
+          {
+            "samples": 13,
+            "function": "blockzilla_compact_v2_reader::compact_query::load_signature_batch::<blockzilla_source_local::PinnedLocalRangeSource>",
+            "percent": 4.012345679012346
+          },
+          {
+            "samples": 9,
+            "function": "blockzilla_compact_v2_reader::message_projection::skip_vote_tower_sync",
+            "percent": 2.7777777777777777
+          },
+          {
+            "samples": 5,
+            "function": "<u64 as wincode::schema::SchemaRead<wincode::config::Configuration<true, 18446744073709551615, wincode::len::UseIntLen<u64, 0>, wincode::schema::int_encoding::LittleEndian, blockzilla_primitives::framed::HistoricalSourceLeb128>>>::read::<&mut &[u8]>",
+            "percent": 1.5432098765432098
+          },
+          {
+            "samples": 5,
+            "function": "ZSTD_buildSeqTable",
+            "percent": 1.5432098765432098
+          },
+          {
+            "samples": 4,
+            "function": "blockzilla_compact_v2_reader::reader::validate_borrowed_decoded_block",
+            "percent": 1.2345679012345678
+          },
+          {
+            "samples": 3,
+            "function": "blockzilla_compact_v2_reader::reader::validate_generation_layout::<blockzilla_source_local::PinnedLocalRangeSource>",
+            "percent": 0.9259259259259259
+          },
+          {
+            "samples": 2,
+            "function": "<blockzilla_compact_v2_reader::compact_query::CompactV2InstructionSource<blockzilla_source_local::PinnedLocalRangeSource>>::scan_ordered_parallel::{closure#5}",
+            "percent": 0.6172839506172839
+          },
+          {
+            "samples": 2,
+            "function": "<i64 as wincode::schema::SchemaRead<wincode::config::Configuration<true, 18446744073709551615, wincode::len::UseIntLen<u64, 0>, wincode::schema::int_encoding::LittleEndian, blockzilla_primitives::framed::HistoricalSourceLeb128>>>::read::<&mut &[u8]>",
+            "percent": 0.6172839506172839
+          },
+          {
+            "samples": 2,
+            "function": "blockzilla_compact_v2_reader::message_projection::decode_message::<false>",
+            "percent": 0.6172839506172839
+          },
+          {
+            "samples": 2,
+            "function": "std::thread::lifecycle::spawn_unchecked::<<blockzilla_compact_v2_reader::reader::ArchiveReader<blockzilla_source_local::PinnedLocalRangeSource>>::process_borrowed_blocks_parallel_ordered<blockzilla_compact_v2_reader::compact_query::ParallelProjectionWorker, blockzilla_compact_v2_reader::compact_query::ParallelProjectedBlock, blockzilla_compact_v2_reader::compact_query::CompactV2ParallelScanError, <blockzilla_compact_v2_reader::compact_query::CompactV2InstructionSource<blockzilla_source_local::PinnedLocalRangeSource>>::scan_ordered_parallel::{closure#4}, <blockzilla_compact_v2_reader::compact_query::CompactV2InstructionSource<blockzilla_source_local::PinnedLocalRangeSource>>::scan_ordered_parallel::{closure#5}, <blockzilla_compact_v2_reader::compact_query::CompactV2InstructionSource<blockzilla_source_local::PinnedLocalRangeSource>>::scan_ordered_parallel::{closure#6}>::{closure#1}::{closure#0}, blockzilla_compact_v2_reader::reader::OrderedParallelWorker<blockzilla_compact_v2_reader::compact_query::ParallelProjectionWorker>>::{closure#1}::{closure#0}",
+            "percent": 0.6172839506172839
+          },
+          {
+            "samples": 1,
+            "function": "<blockzilla_archive_v2::v2::ArchiveV2VoteHashRef as wincode::schema::SchemaRead<wincode::config::Configuration<true, 18446744073709551615, wincode::len::UseIntLen<u64, 0>, wincode::schema::int_encoding::LittleEndian, blockzilla_primitives::framed::HistoricalSourceLeb128>>>::get::<&mut &[u8]>",
+            "percent": 0.30864197530864196
+          },
+          {
+            "samples": 1,
+            "function": "<blockzilla_compact::compact::meta::CompactReward as wincode::schema::SchemaRead<wincode::config::Configuration<true, 18446744073709551615, wincode::len::UseIntLen<u64, 0>, wincode::schema::int_encoding::LittleEndian, blockzilla_primitives::framed::HistoricalSourceLeb128>>>::get::<&mut &[u8]>",
+            "percent": 0.30864197530864196
+          },
+          {
+            "samples": 1,
+            "function": "<blockzilla_compact_v2_reader::compact_query::CompactV2InstructionSource<blockzilla_source_local::PinnedLocalRangeSource>>::project_transaction",
+            "percent": 0.30864197530864196
+          }
+        ]
+      },
+      {
+        "label": "v2-network-profile",
+        "profiled": true,
+        "setup_s": 22.274216337,
+        "scan_s": 21.667591614,
+        "total_s": 43.941933085,
+        "scan_tps": 411943.89108906715,
+        "total_tps": 203127.88658464636,
+        "scan_logical_mb_s": 79.08694886480983,
+        "scan_http_mb_s": 79.08694886480983,
+        "setup_transport": {
+          "cache_downloads": 3,
+          "cache_hits": 0,
+          "cache_read_bytes": 22456718,
+          "cache_read_calls": 2,
+          "get_requests": 29,
+          "head_requests": 21,
+          "incomplete_body_retries": 0,
+          "network_body_bytes": 912008526,
+          "server_error_retries": 0
+        },
+        "scan_transport": {
+          "cache_downloads": 0,
+          "cache_hits": 0,
+          "cache_read_bytes": 0,
+          "cache_read_calls": 0,
+          "get_requests": 156,
+          "head_requests": 0,
+          "incomplete_body_retries": 0,
+          "network_body_bytes": 1713623710,
+          "server_error_retries": 0
+        },
+        "total_transport": {
+          "cache_downloads": 3,
+          "cache_hits": 0,
+          "cache_read_bytes": 22456718,
+          "cache_read_calls": 2,
+          "get_requests": 185,
+          "head_requests": 21,
+          "incomplete_body_retries": 0,
+          "network_body_bytes": 2625632236,
+          "server_error_retries": 0
+        },
+        "mean_http_get_bytes": 10984767.371794872,
+        "scan_peak_sampled_rss_mib": 179.7109375,
+        "reader_peak_sampled_rss_mib": 179.7109375,
+        "exit_peak_rss_mib": 180.33984375,
+        "process_cpu_s_including_profile_report": 15.831313000000002,
+        "cpu_cores_mean_normal_only": null,
+        "process_disk_read_bytes_including_profile_report": 22474752,
+        "process_disk_write_bytes_including_profile_report": 913059840,
+        "host_busy_percent_approx": 4.210669888157126,
+        "scan_thread_state_samples": {
+          "S": 2036,
+          "R": 97
+        },
+        "scan_thread_wait_samples": {
+          "futex_do_wait": 1947,
+          "do_epoll_wait": 90,
+          "0": 96
+        },
+        "threads_observed": [
+          {
+            "tid": "2799124",
+            "name": "reqwest-interna",
+            "observed_cpu_s": 5.47
+          },
+          {
+            "tid": "2799123",
+            "name": "reader-profile",
+            "observed_cpu_s": 2.38
+          },
+          {
+            "tid": "2799190",
+            "name": "blockzilla-bloc",
+            "observed_cpu_s": 0.59
+          },
+          {
+            "tid": "2799194",
+            "name": "blockzilla-bloc",
+            "observed_cpu_s": 0.59
+          },
+          {
+            "tid": "2799189",
+            "name": "blockzilla-bloc",
+            "observed_cpu_s": 0.58
+          },
+          {
+            "tid": "2799191",
+            "name": "blockzilla-bloc",
+            "observed_cpu_s": 0.58
+          },
+          {
+            "tid": "2799192",
+            "name": "blockzilla-bloc",
+            "observed_cpu_s": 0.58
+          },
+          {
+            "tid": "2799193",
+            "name": "blockzilla-bloc",
+            "observed_cpu_s": 0.58
+          },
+          {
+            "tid": "2799187",
+            "name": "blockzilla-bloc",
+            "observed_cpu_s": 0.57
+          },
+          {
+            "tid": "2799195",
+            "name": "blockzilla-bloc",
+            "observed_cpu_s": 0.57
+          },
+          {
+            "tid": "2799197",
+            "name": "blockzilla-bloc",
+            "observed_cpu_s": 0.57
+          },
+          {
+            "tid": "2799198",
+            "name": "blockzilla-bloc",
+            "observed_cpu_s": 0.57
+          },
+          {
+            "tid": "2799196",
+            "name": "blockzilla-bloc",
+            "observed_cpu_s": 0.56
+          },
+          {
+            "tid": "2799188",
+            "name": "blockzilla-bloc",
+            "observed_cpu_s": 0.55
+          },
+          {
+            "tid": "2799201",
+            "name": "blockzilla-rang",
+            "observed_cpu_s": 0.22
+          },
+          {
+            "tid": "2799202",
+            "name": "blockzilla-rang",
+            "observed_cpu_s": 0.22
+          },
+          {
+            "tid": "2799203",
+            "name": "blockzilla-rang",
+            "observed_cpu_s": 0.21
+          },
+          {
+            "tid": "2799199",
+            "name": "blockzilla-bloc",
+            "observed_cpu_s": 0.0
+          },
+          {
+            "tid": "2799200",
+            "name": "blockzilla-bloc",
+            "observed_cpu_s": 0.0
+          },
+          {
+            "tid": "2799204",
+            "name": "tokio-rt-worker",
+            "observed_cpu_s": 0.0
+          },
+          {
+            "tid": "2799205",
+            "name": "tokio-rt-worker",
+            "observed_cpu_s": 0.0
+          }
+        ],
+        "stages": {
+          "batch_count": 138,
+          "block_count": 8192,
+          "compressed_buffer_count": 3,
+          "compressed_bytes": 1112942046,
+          "consume_s": 12.612640699,
+          "decode_project_wall_s": 21.355840091,
+          "decode_sum_s": 3.302813312,
+          "effective_workers": 12,
+          "input_wait_s": 12.42365511,
+          "max_active_workers": 12,
+          "max_blocks_per_batch": 48,
+          "max_compressed_batch_bytes": 13442144,
+          "max_declared_uncompressed_batch_bytes": 31887676,
+          "max_in_flight_blocks": 96,
+          "max_in_flight_declared_uncompressed_bytes": 52506536,
+          "max_in_flight_transactions": 111262,
+          "max_projected_batch_bytes": 31344877,
+          "max_projected_block_bytes": 656790,
+          "max_retained_decompressed_buffer_bytes": 1122432,
+          "max_transactions_per_batch": 56360,
+          "producer_buffer_wait_s": 20.475085463,
+          "projection_buffer_wait_s": 9.221995289,
+          "projection_sum_s": 4.267774343,
+          "publish_s": 0.789936589,
+          "read_call_count": 138,
+          "read_s": 39.672434715,
+          "registry_mode": "SparseWorkerCache",
+          "registry_prefetch_read_bytes": 0,
+          "registry_prefetch_read_calls": 0,
+          "registry_resident_bound_bytes": 6291456,
+          "requested_workers": 12,
+          "result_send_wait_s": 0.0,
+          "signature_assign_s": 0.148714059,
+          "signature_read_s": 11.660772426
+        },
+        "oracle": "records=8925832 bytes=714066608 sha256=54531e48c946cb66c0c148d7339fdbb11511cffaaec9bc9c5a33f650a10d3685 first_slot=Some(388800002) last_slot=Some(388808197)",
+        "phase_unix_s": {
+          "setup": 1788864872.071,
+          "scan": 1788864894.345,
+          "finalize": 1788864916.013,
+          "profile_report": 1788864916.013
+        },
+        "cpu_profile_samples": 1616,
+        "cpu_profile_leaf_top": [
+          {
+            "samples": 392,
+            "function": "",
+            "percent": 24.257425742574256
+          },
+          {
+            "samples": 226,
+            "function": "<rustls::conn::ConnectionCommon<rustls::client::client_conn::ClientConnectionData>>::process_new_packets",
+            "percent": 13.985148514851485
+          },
+          {
+            "samples": 210,
+            "function": "<hyper_util::rt::tokio::TokioIo<tokio::net::tcp::stream::TcpStream> as hyper::rt::io::Read>::poll_read",
+            "percent": 12.995049504950495
+          },
+          {
+            "samples": 130,
+            "function": "<blockzilla_source_http::HttpRangeSource as blockzilla_source::RangeSource>::read_range_into",
+            "percent": 8.044554455445544
+          },
+          {
+            "samples": 105,
+            "function": "hw_gcm_decrypt",
+            "percent": 6.497524752475248
+          },
+          {
+            "samples": 87,
+            "function": "<alloc::boxed::Box<dyn reqwest::connect::AsyncConnWithInfo> as hyper::rt::io::Read>::poll_read",
+            "percent": 5.383663366336633
+          },
+          {
+            "samples": 61,
+            "function": "ZSTD_decompressFrame",
+            "percent": 3.7747524752475248
+          },
+          {
+            "samples": 52,
+            "function": "<sha2::block_api::Sha256VarCore as digest::block_api::UpdateCore>::update_blocks",
+            "percent": 3.217821782178218
+          },
+          {
+            "samples": 47,
+            "function": "<blockzilla_compact_v2_reader::message_projection::CompactV2MessageProjector>::count_message",
+            "percent": 2.9084158415841586
+          },
+          {
+            "samples": 34,
+            "function": "<blockzilla_compact_v2_reader::compact_query::ContiguousSignatureScan<blockzilla_compact_v2_reader::archive::CompactV2HttpObjectSet>>::read_block_selected",
+            "percent": 2.103960396039604
+          },
+          {
+            "samples": 32,
+            "function": "<blockzilla_model::source::OrderedBlockPublisher>::publish",
+            "percent": 1.9801980198019802
+          },
+          {
+            "samples": 28,
+            "function": "blockzilla_source_cache::download_entry",
+            "percent": 1.7326732673267327
+          },
+          {
+            "samples": 27,
+            "function": "<core::pin::Pin<&mut dyn futures_io::if_std::AsyncRead> as futures_io::if_std::AsyncRead>::poll_read",
+            "percent": 1.6707920792079207
+          },
+          {
+            "samples": 21,
+            "function": "<mio::waker::Waker>::wake",
+            "percent": 1.2995049504950495
+          },
+          {
+            "samples": 17,
+            "function": "blockzilla_compact_v2_reader::message_projection::skip_vote_tower_sync",
+            "percent": 1.051980198019802
+          },
+          {
+            "samples": 11,
+            "function": "<rustls::client::tls13::ExpectTraffic as rustls::common_state::State<rustls::client::client_conn::ClientConnectionData>>::handle",
+            "percent": 0.6806930693069307
+          },
+          {
+            "samples": 10,
+            "function": "<blockzilla_compact_v2_reader::compact_query::CompactV2InstructionSource<blockzilla_compact_v2_reader::archive::CompactV2HttpObjectSet>>::project_transaction",
+            "percent": 0.6188118811881188
+          },
+          {
+            "samples": 9,
+            "function": "<blockzilla_compact_v2_reader::compact_query::CompactV2InstructionSource<blockzilla_compact_v2_reader::archive::CompactV2HttpObjectSet>>::scan_ordered_parallel::{closure#5}",
+            "percent": 0.556930693069307
+          },
+          {
+            "samples": 9,
+            "function": "<u64 as wincode::schema::SchemaRead<wincode::config::Configuration<true, 18446744073709551615, wincode::len::UseIntLen<u64, 0>, wincode::schema::int_encoding::LittleEndian, blockzilla_primitives::framed::HistoricalSourceLeb128>>>::read::<&mut &[u8]>",
+            "percent": 0.556930693069307
+          },
+          {
+            "samples": 7,
+            "function": "<futures_channel::mpsc::Sender<core::result::Result<bytes::bytes::Bytes, hyper::error::Error>>>::try_send",
+            "percent": 0.43316831683168316
+          }
+        ]
+      },
+      {
+        "label": "v3-local-profile",
+        "profiled": true,
+        "setup_s": 0.149244304,
+        "scan_s": 1.169670634,
+        "total_s": 1.319090614,
+        "scan_tps": 7631064.455705571,
+        "total_tps": 6766655.683291823,
+        "scan_logical_mb_s": 731.9122247878884,
+        "scan_http_mb_s": 0.0,
+        "setup_transport": {
+          "cache_downloads": 0,
+          "cache_hits": 0,
+          "cache_read_bytes": 0,
+          "cache_read_calls": 0,
+          "get_requests": 0,
+          "head_requests": 0,
+          "incomplete_body_retries": 0,
+          "network_body_bytes": 0,
+          "server_error_retries": 0
+        },
+        "scan_transport": {
+          "cache_downloads": 0,
+          "cache_hits": 0,
+          "cache_read_bytes": 0,
+          "cache_read_calls": 0,
+          "get_requests": 0,
+          "head_requests": 0,
+          "incomplete_body_retries": 0,
+          "network_body_bytes": 0,
+          "server_error_retries": 0
+        },
+        "total_transport": {
+          "cache_downloads": 0,
+          "cache_hits": 0,
+          "cache_read_bytes": 0,
+          "cache_read_calls": 0,
+          "get_requests": 0,
+          "head_requests": 0,
+          "incomplete_body_retries": 0,
+          "network_body_bytes": 0,
+          "server_error_retries": 0
+        },
+        "mean_http_get_bytes": 0.0,
+        "scan_peak_sampled_rss_mib": 223.66796875,
+        "reader_peak_sampled_rss_mib": 223.66796875,
+        "exit_peak_rss_mib": 225.4296875,
+        "process_cpu_s_including_profile_report": 9.897178,
+        "cpu_cores_mean_normal_only": null,
+        "process_disk_read_bytes_including_profile_report": 354349056,
+        "process_disk_write_bytes_including_profile_report": 299008,
+        "host_busy_percent_approx": 63.591022443890274,
+        "scan_thread_state_samples": {
+          "R": 42,
+          "S": 36
+        },
+        "scan_thread_wait_samples": {
+          "0": 41,
+          "futex_do_wait": 37
+        },
+        "threads_observed": [
+          {
+            "tid": "2799301",
+            "name": "reader-profile",
+            "observed_cpu_s": 1.06
+          },
+          {
+            "tid": "2799303",
+            "name": "reader-profile",
+            "observed_cpu_s": 0.64
+          },
+          {
+            "tid": "2799305",
+            "name": "reader-profile",
+            "observed_cpu_s": 0.64
+          },
+          {
+            "tid": "2799306",
+            "name": "reader-profile",
+            "observed_cpu_s": 0.64
+          },
+          {
+            "tid": "2799313",
+            "name": "reader-profile",
+            "observed_cpu_s": 0.64
+          },
+          {
+            "tid": "2799304",
+            "name": "reader-profile",
+            "observed_cpu_s": 0.63
+          },
+          {
+            "tid": "2799308",
+            "name": "reader-profile",
+            "observed_cpu_s": 0.63
+          },
+          {
+            "tid": "2799310",
+            "name": "reader-profile",
+            "observed_cpu_s": 0.63
+          },
+          {
+            "tid": "2799311",
+            "name": "reader-profile",
+            "observed_cpu_s": 0.63
+          },
+          {
+            "tid": "2799312",
+            "name": "reader-profile",
+            "observed_cpu_s": 0.63
+          },
+          {
+            "tid": "2799314",
+            "name": "reader-profile",
+            "observed_cpu_s": 0.63
+          },
+          {
+            "tid": "2799307",
+            "name": "reader-profile",
+            "observed_cpu_s": 0.62
+          },
+          {
+            "tid": "2799309",
+            "name": "reader-profile",
+            "observed_cpu_s": 0.62
+          }
+        ],
+        "stages": {
+          "parallel": {
+            "blocks_per_job_limit": 4,
+            "declared_decoded_byte_limit": 268435456,
+            "effective_workers": 12,
+            "global_projected_block_bound": 96,
+            "job_window_limit": 24,
+            "jobs": 2048,
+            "max_active_workers": 12,
+            "max_coordinator_pending_projected_blocks": 48,
+            "max_coordinator_pending_results": 12,
+            "max_in_flight_declared_decoded_bytes": 19741556,
+            "max_in_flight_jobs": 22,
+            "max_in_flight_owned_payload_bytes": 19813440,
+            "max_in_flight_transactions": 98115,
+            "max_owned_payload_block_bytes": 367040,
+            "max_result_channel_backlog": 12,
+            "projected_blocks": 8192,
+            "requested_workers": 12,
+            "transaction_limit": 100000
+          },
+          "path": "dense",
+          "registry": {
+            "evictions": 0,
+            "hits": 0,
+            "misses": 0,
+            "mode": "unused",
+            "prefetch_read_bytes": 0,
+            "prefetch_read_calls": 0,
+            "resident_payload_bytes": 0,
+            "resolutions": 0
+          }
+        },
+        "oracle": "records=8925832 bytes=714066608 sha256=54531e48c946cb66c0c148d7339fdbb11511cffaaec9bc9c5a33f650a10d3685 first_slot=Some(388800002) last_slot=Some(388808197)",
+        "phase_unix_s": {
+          "setup": 1788864916.275,
+          "scan": 1788864916.425,
+          "finalize": 1788864917.594,
+          "profile_report": 1788864917.594
+        },
+        "cpu_profile_samples": 319,
+        "cpu_profile_leaf_top": [
+          {
+            "samples": 68,
+            "function": "<sha2::block_api::Sha256VarCore as digest::block_api::UpdateCore>::update_blocks",
+            "percent": 21.316614420062695
+          },
+          {
+            "samples": 43,
+            "function": "<blockzilla_model::source::OrderedBlockPublisher>::publish",
+            "percent": 13.47962382445141
+          },
+          {
+            "samples": 25,
+            "function": "<blockzilla_archive_v3_reader::indexer_v3_query::IndexerV3InstructionSource>::scan_ordered_parallel_with_registry_policy::{closure#0}",
+            "percent": 7.836990595611285
+          },
+          {
+            "samples": 25,
+            "function": "<blockzilla_archive_v3_reader::indexer_v3_wire::Reader>::visit_semantic_transactions_with_reader::<<blockzilla_archive_v3_reader::indexer_v3_wire::ReusableContiguousSemanticScan>::visit_semantic_transactions<<blockzilla_archive_v3_reader::indexer_v3_query::IndexerV3InstructionSource>::decode_parallel_job::{closure#7}>::{closure#4}, <blockzilla_archive_v3_reader::indexer_v3_query::IndexerV3InstructionSource>::decode_parallel_job::{closure#7}>::{closure#5}",
+            "percent": 7.836990595611285
+          },
+          {
+            "samples": 24,
+            "function": "<blockzilla_compact_v2_reader::message_projection::CompactV2MessageProjector>::count_message",
+            "percent": 7.523510971786834
+          },
+          {
+            "samples": 24,
+            "function": "<u64 as wincode::schema::SchemaRead<wincode::config::Configuration<true, 18446744073709551615, wincode::len::UseIntLen<u64, 0>, wincode::schema::int_encoding::LittleEndian, blockzilla_primitives::framed::HistoricalSourceLeb128>>>::read::<&mut &[u8]>",
+            "percent": 7.523510971786834
+          },
+          {
+            "samples": 15,
+            "function": "<blockzilla_archive_v3_reader::indexer_v3_query::IndexerV3InstructionSource>::open_operator_trusted_source::<alloc::string::String, alloc::string::String>",
+            "percent": 4.702194357366771
+          },
+          {
+            "samples": 15,
+            "function": "ZSTD_decompressFrame",
+            "percent": 4.702194357366771
+          },
+          {
+            "samples": 11,
+            "function": "blockzilla_archive_v3_reader::indexer_v3_wire::directory_v3::read_uleb_u32",
+            "percent": 3.4482758620689653
+          },
+          {
+            "samples": 8,
+            "function": "<blockzilla_archive_v3_reader::indexer_v3_wire::directory_v3::DirectoryCursor as core::iter::traits::iterator::Iterator>::next",
+            "percent": 2.5078369905956115
+          },
+          {
+            "samples": 7,
+            "function": "<blockzilla_archive_v3_reader::indexer_v3_query::IndexerV3InstructionSource>::run_parallel_jobs::<<blockzilla_archive_v3_reader::indexer_v3_query::IndexerV3InstructionSource>::scan_ordered_parallel_with_registry_policy::{closure#0}>::{closure#2}::{closure#0}::{closure#0}",
+            "percent": 2.19435736677116
+          },
+          {
+            "samples": 6,
+            "function": "<blockzilla_archive_v3_reader::indexer_v3_wire::directory_v3::DecodedDirectory>::decode_with_header",
+            "percent": 1.8808777429467085
+          },
+          {
+            "samples": 6,
+            "function": "blockzilla_compact_v2_reader::message_projection::skip_vote_tower_sync",
+            "percent": 1.8808777429467085
+          },
+          {
+            "samples": 6,
+            "function": "blockzilla_compact_v2_reader::source_decode::skip_vote_tower_sync",
+            "percent": 1.8808777429467085
+          },
+          {
+            "samples": 5,
+            "function": "",
+            "percent": 1.567398119122257
+          },
+          {
+            "samples": 5,
+            "function": "blockzilla_archive_v3_reader::indexer_v3_query::reclaim_parallel_worker_output",
+            "percent": 1.567398119122257
+          },
+          {
+            "samples": 4,
+            "function": "<alloc::sync::Arc<dyn blockzilla_source::RangeSource> as blockzilla_source::RangeSource>::read_range_into",
+            "percent": 1.2539184952978057
+          },
+          {
+            "samples": 4,
+            "function": "<blockzilla_primitives::primitives::pubkey::CompactPubkey as wincode::schema::SchemaRead<wincode::config::Configuration<true, 18446744073709551615, wincode::len::UseIntLen<u64, 0>, wincode::schema::int_encoding::LittleEndian, blockzilla_primitives::framed::HistoricalSourceLeb128>>>::get::<&mut &[u8]>",
+            "percent": 1.2539184952978057
+          },
+          {
+            "samples": 4,
+            "function": "blockzilla_compact_v2_reader::source_decode::stream_message_accounts_with_schema::<anyhow::Error, blockzilla_archive_v3_reader::indexer_v3_wire::validate_message::{closure#0}>",
+            "percent": 1.2539184952978057
+          },
+          {
+            "samples": 3,
+            "function": "<blockzilla_source_local::PinnedLocalRangeSource as blockzilla_source::RangeSource>::read_range_into",
+            "percent": 0.9404388714733543
+          }
+        ]
+      },
+      {
+        "label": "v3-network-profile",
+        "profiled": true,
+        "setup_s": 6.88529309,
+        "scan_s": 22.6917289,
+        "total_s": 29.577143572,
+        "scan_tps": 393351.7820230965,
+        "total_tps": 301781.4069256464,
+        "scan_logical_mb_s": 37.72723708152533,
+        "scan_http_mb_s": 37.72723708152533,
+        "setup_transport": {
+          "cache_downloads": 1,
+          "cache_hits": 0,
+          "cache_read_bytes": 107100848,
+          "cache_read_calls": 5,
+          "get_requests": 15,
+          "head_requests": 38,
+          "incomplete_body_retries": 0,
+          "network_body_bytes": 107101552,
+          "server_error_retries": 0
+        },
+        "scan_transport": {
+          "cache_downloads": 0,
+          "cache_hits": 0,
+          "cache_read_bytes": 0,
+          "cache_read_calls": 0,
+          "get_requests": 2176,
+          "head_requests": 0,
+          "incomplete_body_retries": 0,
+          "network_body_bytes": 856096236,
+          "server_error_retries": 0
+        },
+        "total_transport": {
+          "cache_downloads": 1,
+          "cache_hits": 0,
+          "cache_read_bytes": 107100848,
+          "cache_read_calls": 5,
+          "get_requests": 2191,
+          "head_requests": 38,
+          "incomplete_body_retries": 0,
+          "network_body_bytes": 963197788,
+          "server_error_retries": 0
+        },
+        "mean_http_get_bytes": 393426.57904411765,
+        "scan_peak_sampled_rss_mib": 237.96484375,
+        "reader_peak_sampled_rss_mib": 237.96484375,
+        "exit_peak_rss_mib": 241.4375,
+        "process_cpu_s_including_profile_report": 10.98591,
+        "cpu_cores_mean_normal_only": null,
+        "process_disk_read_bytes_including_profile_report": 0,
+        "process_disk_write_bytes_including_profile_report": 108040192,
+        "host_busy_percent_approx": 4.291647438855561,
+        "scan_thread_state_samples": {
+          "S": 2082,
+          "R": 48
+        },
+        "scan_thread_wait_samples": {
+          "futex_do_wait": 1979,
+          "do_epoll_wait": 105,
+          "0": 46
+        },
+        "threads_observed": [
+          {
+            "tid": "2799318",
+            "name": "reqwest-interna",
+            "observed_cpu_s": 2.41
+          },
+          {
+            "tid": "2799317",
+            "name": "reader-profile",
+            "observed_cpu_s": 1.1
+          },
+          {
+            "tid": "2799330",
+            "name": "reader-profile",
+            "observed_cpu_s": 0.62
+          },
+          {
+            "tid": "2799340",
+            "name": "reader-profile",
+            "observed_cpu_s": 0.61
+          },
+          {
+            "tid": "2799337",
+            "name": "reader-profile",
+            "observed_cpu_s": 0.6
+          },
+          {
+            "tid": "2799339",
+            "name": "reader-profile",
+            "observed_cpu_s": 0.6
+          },
+          {
+            "tid": "2799336",
+            "name": "reader-profile",
+            "observed_cpu_s": 0.59
+          },
+          {
+            "tid": "2799329",
+            "name": "reader-profile",
+            "observed_cpu_s": 0.58
+          },
+          {
+            "tid": "2799332",
+            "name": "reader-profile",
+            "observed_cpu_s": 0.58
+          },
+          {
+            "tid": "2799333",
+            "name": "reader-profile",
+            "observed_cpu_s": 0.57
+          },
+          {
+            "tid": "2799338",
+            "name": "reader-profile",
+            "observed_cpu_s": 0.57
+          },
+          {
+            "tid": "2799331",
+            "name": "reader-profile",
+            "observed_cpu_s": 0.56
+          },
+          {
+            "tid": "2799334",
+            "name": "reader-profile",
+            "observed_cpu_s": 0.55
+          },
+          {
+            "tid": "2799335",
+            "name": "reader-profile",
+            "observed_cpu_s": 0.52
+          },
+          {
+            "tid": "2799327",
+            "name": "blockzilla-v3-i",
+            "observed_cpu_s": 0.16
+          },
+          {
+            "tid": "2799319",
+            "name": "tokio-rt-worker",
+            "observed_cpu_s": 0.0
+          },
+          {
+            "tid": "2799341",
+            "name": "tokio-rt-worker",
+            "observed_cpu_s": 0.0
+          },
+          {
+            "tid": "2799342",
+            "name": "tokio-rt-worker",
+            "observed_cpu_s": 0.0
+          },
+          {
+            "tid": "2799343",
+            "name": "tokio-rt-worker",
+            "observed_cpu_s": 0.0
+          },
+          {
+            "tid": "2799344",
+            "name": "tokio-rt-worker",
+            "observed_cpu_s": 0.0
+          },
+          {
+            "tid": "2799345",
+            "name": "tokio-rt-worker",
+            "observed_cpu_s": 0.0
+          },
+          {
+            "tid": "2799346",
+            "name": "tokio-rt-worker",
+            "observed_cpu_s": 0.0
+          },
+          {
+            "tid": "2799347",
+            "name": "tokio-rt-worker",
+            "observed_cpu_s": 0.0
+          },
+          {
+            "tid": "2799348",
+            "name": "tokio-rt-worker",
+            "observed_cpu_s": 0.0
+          }
+        ],
+        "stages": {
+          "parallel": {
+            "blocks_per_job_limit": 4,
+            "declared_decoded_byte_limit": 268435456,
+            "effective_workers": 12,
+            "global_projected_block_bound": 96,
+            "job_window_limit": 24,
+            "jobs": 2048,
+            "max_active_workers": 12,
+            "max_coordinator_pending_projected_blocks": 88,
+            "max_coordinator_pending_results": 22,
+            "max_in_flight_declared_decoded_bytes": 20163806,
+            "max_in_flight_jobs": 24,
+            "max_in_flight_owned_payload_bytes": 18144000,
+            "max_in_flight_transactions": 99951,
+            "max_owned_payload_block_bytes": 367040,
+            "max_result_channel_backlog": 12,
+            "projected_blocks": 8192,
+            "requested_workers": 12,
+            "transaction_limit": 100000
+          },
+          "path": "dense",
+          "registry": {
+            "evictions": 0,
+            "hits": 0,
+            "misses": 0,
+            "mode": "unused",
+            "prefetch_read_bytes": 0,
+            "prefetch_read_calls": 0,
+            "resident_payload_bytes": 0,
+            "resolutions": 0
+          }
+        },
+        "oracle": "records=8925832 bytes=714066608 sha256=54531e48c946cb66c0c148d7339fdbb11511cffaaec9bc9c5a33f650a10d3685 first_slot=Some(388800002) last_slot=Some(388808197)",
+        "phase_unix_s": {
+          "setup": 1788864917.719,
+          "scan": 1788864924.604,
+          "finalize": 1788864947.296,
+          "profile_report": 1788864947.296
+        },
+        "cpu_profile_samples": 1753,
+        "cpu_profile_leaf_top": [
+          {
+            "samples": 224,
+            "function": "<blockzilla_compact_v2_reader::message_projection::CompactV2MessageProjector>::count_message",
+            "percent": 12.7780946948089
+          },
+          {
+            "samples": 207,
+            "function": "",
+            "percent": 11.808328579577866
+          },
+          {
+            "samples": 141,
+            "function": "<u64 as wincode::schema::SchemaRead<wincode::config::Configuration<true, 18446744073709551615, wincode::len::UseIntLen<u64, 0>, wincode::schema::int_encoding::LittleEndian, blockzilla_primitives::framed::HistoricalSourceLeb128>>>::read::<&mut &[u8]>",
+            "percent": 8.043354249857387
+          },
+          {
+            "samples": 94,
+            "function": "blockzilla_compact_v2_reader::source_decode::stream_message_accounts_with_schema::<anyhow::Error, blockzilla_archive_v3_reader::indexer_v3_wire::validate_message::{closure#0}>",
+            "percent": 5.362236166571591
+          },
+          {
+            "samples": 93,
+            "function": "<blockzilla_archive_v3_reader::indexer_v3_wire::Reader>::visit_semantic_transactions_with_reader::<<blockzilla_archive_v3_reader::indexer_v3_wire::ReusableContiguousSemanticScan>::visit_semantic_transactions<<blockzilla_archive_v3_reader::indexer_v3_query::IndexerV3InstructionSource>::decode_parallel_job::{closure#7}>::{closure#4}, <blockzilla_archive_v3_reader::indexer_v3_query::IndexerV3InstructionSource>::decode_parallel_job::{closure#7}>::{closure#5}",
+            "percent": 5.3051911009697665
+          },
+          {
+            "samples": 80,
+            "function": "<rustls::conn::ConnectionCommon<rustls::client::client_conn::ClientConnectionData>>::process_new_packets",
+            "percent": 4.563605248146035
+          },
+          {
+            "samples": 76,
+            "function": "ZSTD_decompressFrame",
+            "percent": 4.335424985738734
+          },
+          {
+            "samples": 71,
+            "function": "<sha2::block_api::Sha256VarCore as digest::block_api::UpdateCore>::update_blocks",
+            "percent": 4.050199657729606
+          },
+          {
+            "samples": 66,
+            "function": "<blockzilla_archive_v3_reader::indexer_v3_query::IndexerV3InstructionSource>::run_parallel_jobs::<<blockzilla_archive_v3_reader::indexer_v3_query::IndexerV3InstructionSource>::scan_ordered_parallel_with_registry_policy::{closure#0}>::{closure#2}::{closure#0}::{closure#0}",
+            "percent": 3.764974329720479
+          },
+          {
+            "samples": 63,
+            "function": "blockzilla_archive_v3_reader::indexer_v3_wire::directory_v3::read_uleb_u32",
+            "percent": 3.593839132915003
+          },
+          {
+            "samples": 62,
+            "function": "<hyper_util::rt::tokio::TokioIo<tokio::net::tcp::stream::TcpStream> as hyper::rt::io::Read>::poll_read",
+            "percent": 3.5367940673131772
+          },
+          {
+            "samples": 43,
+            "function": "<blockzilla_primitives::primitives::pubkey::CompactPubkey as wincode::schema::SchemaRead<wincode::config::Configuration<true, 18446744073709551615, wincode::len::UseIntLen<u64, 0>, wincode::schema::int_encoding::LittleEndian, blockzilla_primitives::framed::HistoricalSourceLeb128>>>::get::<&mut &[u8]>",
+            "percent": 2.452937820878494
+          },
+          {
+            "samples": 36,
+            "function": "<alloc::boxed::Box<dyn reqwest::connect::AsyncConnWithInfo> as hyper::rt::io::Read>::poll_read",
+            "percent": 2.053622361665716
+          },
+          {
+            "samples": 36,
+            "function": "blockzilla_compact_v2_reader::source_decode::skip_vote_tower_sync",
+            "percent": 2.053622361665716
+          },
+          {
+            "samples": 35,
+            "function": "<blockzilla_model::source::OrderedBlockPublisher>::publish",
+            "percent": 1.9965772960638906
+          },
+          {
+            "samples": 33,
+            "function": "<blockzilla_archive_v3_reader::indexer_v3_query::IndexerV3InstructionSource>::scan_ordered_parallel_with_registry_policy::{closure#0}",
+            "percent": 1.8824871648602395
+          },
+          {
+            "samples": 32,
+            "function": "hw_gcm_decrypt",
+            "percent": 1.8254420992584142
+          },
+          {
+            "samples": 30,
+            "function": "<blockzilla_archive_v3_reader::indexer_v3_wire::directory_v3::DecodedDirectory>::decode_group_into",
+            "percent": 1.7113519680547633
+          },
+          {
+            "samples": 27,
+            "function": "<blockzilla_archive_v3_reader::indexer_v3_wire::directory_v3::DecodedDirectory>::decode_with_header",
+            "percent": 1.540216771249287
+          },
+          {
+            "samples": 26,
+            "function": "blockzilla_compact_v2_reader::message_projection::decode_message::<false>",
+            "percent": 1.4831717056474616
+          }
+        ]
+      }
+    ]
+  },
+  "flamegraphs_sha256": {
+    "v3-network.svg": "1a1eeabc8b8f263a249f23292d34920145b22a0d9364ae3b12bcbd392e250dd4",
+    "v2-network.svg": "8432afbf5b53957de59e12f688c06a791b09a44ce43944b7f005df370c3c3574",
+    "v2-local.svg": "6347269695ef4fb2e50b42a79f0c22fa9b3176f3196fee16c11ceaf22f5a9246",
+    "v3-local.svg": "69f3b4ca1272750ca4e99e81fa5feddc73d1593801d6b0d95a32f4f55d7a3a73"
+  },
+  "artifact_sha256": {
+    "v3-network.top.tsv": "df75d88189f799e91af68d9c6cb8c6fe4a210a74b6f0355dc03307d348706bae",
+    "v3-network.svg": "1a1eeabc8b8f263a249f23292d34920145b22a0d9364ae3b12bcbd392e250dd4",
+    "network-resources.svg": "2199cce776edec4ed1d6fafeab8268c83722a607442ed74fa356bfc609a151bc",
+    "v2-network.top.tsv": "543dec31916a40242c202d21148f042378187bbe6cdb1f68e587b70f69625f54",
+    "v2-local.top.tsv": "aa1f737ef5ce06c1e73dc0c0a0f40a8dda4393a1c0c0573e93b8d2729921b546",
+    "v3-local.top.tsv": "42b110337fc33d931712fb01fcde910867434d8eb8115f822af353e406c26c8a",
+    "v2-network.svg": "8432afbf5b53957de59e12f688c06a791b09a44ce43944b7f005df370c3c3574",
+    "v2-local.svg": "6347269695ef4fb2e50b42a79f0c22fa9b3176f3196fee16c11ceaf22f5a9246",
+    "v3-local.svg": "69f3b4ca1272750ca4e99e81fa5feddc73d1593801d6b0d95a32f4f55d7a3a73"
+  },
+  "raw_receipt_sha256": {
+    "control/network-profile-20260908T104622Z/status.json": "7fdeaf6e299202a4ac70b1dfc4470ace5b63c390ab8d88f19c6131b8b8089a7c",
+    "control/network-profile-20260908T104622Z/launch.json": "74da9266533399349431e41f394279f4934b9fef8a3eff79a30292b22630c0b6",
+    "control/network-profile-20260908T104622Z/supervisor.log": "c1a0869d31aece695855e6b24af85dc7916e95cf8a126cbefedd5771bb633448",
+    "control/network-profile-20260908T104622Z/archive-before.json": "e3c1f0a0232454b633f992b4d773831dc661564431a1cfcc843d002bd4da579f",
+    "control/network-profile-20260908T104622Z/archive-after.json": "e3c1f0a0232454b633f992b4d773831dc661564431a1cfcc843d002bd4da579f",
+    "control/network-profile-20260908T104622Z/http-before.json": "a32705377ec5ae7576447b911b2a79397c4498ebc672e834b5247f2787da72bb",
+    "control/network-profile-20260908T104622Z/http-after.json": "3d58d9885810bdcc0879973e3e439fb6820669c2daa6cd354843d60d4cdf4153",
+    "control/network-profile-20260908T104622Z/host-before.json": "caa625184b5532dd23ce894bef9f0bd0d8af3a65d05fd251521c2e7982bbb576",
+    "results/network-profile-20260908T104622Z/v2-local-normal/stdout.log": "6d61b14d8773dc9bc3ab14ed13d52aa26864b55eba72d2617d885ec61967b335",
+    "results/network-profile-20260908T104622Z/v2-local-normal/stderr.log": "5ed861c55dec270a241224c8f634090297aefc89e81dbe13895dd8f77b75b26b",
+    "results/network-profile-20260908T104622Z/v2-local-normal/monitor.jsonl": "cc85ff92f5fedacb1e7c5d6d722480d5136928a3c12b2a5707cb011161a9a284",
+    "results/network-profile-20260908T104622Z/v2-network-normal/stdout.log": "94c85acba7324d96a76ecdb73ec77affb61d3900367d71632aea2809763adfa4",
+    "results/network-profile-20260908T104622Z/v2-network-normal/stderr.log": "353ab5475cafacf35dad554f98b55769052b9c23446f65f50c753ab445f225d0",
+    "results/network-profile-20260908T104622Z/v2-network-normal/monitor.jsonl": "7721c675fe85b7b3e1262b8350a735ef80c122b7e70d4d7c1534c175fbde7bda",
+    "results/network-profile-20260908T104622Z/v3-local-normal/stdout.log": "866cce2c02b256cdaeea80ce38e66b10075729f15c4c30eb0ec5c08043ce0b75",
+    "results/network-profile-20260908T104622Z/v3-local-normal/stderr.log": "543f834aaad1c27bd1b3be32251dd0f644e44fdd19f52e43f49e01c5cc53ae09",
+    "results/network-profile-20260908T104622Z/v3-local-normal/monitor.jsonl": "9bf70310679d9afc160eb66e07d3a290b3bf965ae2283e7d1e4c09f8ee98e658",
+    "results/network-profile-20260908T104622Z/v3-network-normal/stdout.log": "13977679f4b24f21dd9b9a3fcecd291096bde696bdcbea179e9b681e7bdeff02",
+    "results/network-profile-20260908T104622Z/v3-network-normal/stderr.log": "c5745a895d0b07a0401e31aa75a58b2de45c386c109ddcf53aa76c52161a9f72",
+    "results/network-profile-20260908T104622Z/v3-network-normal/monitor.jsonl": "0a84584c1bdbea7ac13442fc3c73a128b2d23797d45a003664b150f33b767c57",
+    "results/network-profile-20260908T104622Z/v2-local-profile/stdout.log": "eb712ce9e951949715f9be6e92a1af0542ad8f8e89dd0cd2e53a60fe5556457d",
+    "results/network-profile-20260908T104622Z/v2-local-profile/stderr.log": "d058d72811afaa5d868553afd27e4dfb409d0b6ad439e72ad65881fa4710cb00",
+    "results/network-profile-20260908T104622Z/v2-local-profile/monitor.jsonl": "28b3b35dfd81a09e9e6aa0a58d70f764e51ab5f489a615272363ab8ab803883d",
+    "results/network-profile-20260908T104622Z/v2-local-profile/cpu.svg": "6347269695ef4fb2e50b42a79f0c22fa9b3176f3196fee16c11ceaf22f5a9246",
+    "results/network-profile-20260908T104622Z/v2-local-profile/cpu.top.tsv": "aa1f737ef5ce06c1e73dc0c0a0f40a8dda4393a1c0c0573e93b8d2729921b546",
+    "results/network-profile-20260908T104622Z/v2-network-profile/stdout.log": "7b7002e44bebede33777a016f775d4c0b18779376274fe7b951f2f27bbde3184",
+    "results/network-profile-20260908T104622Z/v2-network-profile/stderr.log": "3a710e1c8306bee74f94e95221b668909f9866bfa9c1de8484cecb23a16ef9ae",
+    "results/network-profile-20260908T104622Z/v2-network-profile/monitor.jsonl": "a8a33101a0ac0d1ad84696b240b4a96b95e67ae6bc685bb1d752ea31e44f3aee",
+    "results/network-profile-20260908T104622Z/v2-network-profile/cpu.svg": "8432afbf5b53957de59e12f688c06a791b09a44ce43944b7f005df370c3c3574",
+    "results/network-profile-20260908T104622Z/v2-network-profile/cpu.top.tsv": "543dec31916a40242c202d21148f042378187bbe6cdb1f68e587b70f69625f54",
+    "results/network-profile-20260908T104622Z/v3-local-profile/stdout.log": "a883af16718888fde71203ee8528f1f3b95aac76922413402d6c80c726da5e5e",
+    "results/network-profile-20260908T104622Z/v3-local-profile/stderr.log": "3f6551e459acac86ceee219c0a35dd50b93efaf50c866523c639edbfc7da404e",
+    "results/network-profile-20260908T104622Z/v3-local-profile/monitor.jsonl": "66e7a3c6cfef09d4a94b4d5327370054f51f2f50226f1be9be005004bce10148",
+    "results/network-profile-20260908T104622Z/v3-local-profile/cpu.svg": "69f3b4ca1272750ca4e99e81fa5feddc73d1593801d6b0d95a32f4f55d7a3a73",
+    "results/network-profile-20260908T104622Z/v3-local-profile/cpu.top.tsv": "42b110337fc33d931712fb01fcde910867434d8eb8115f822af353e406c26c8a",
+    "results/network-profile-20260908T104622Z/v3-network-profile/stdout.log": "28b38be63861074b767c22f77fe8f64f30cafcd8316b34fb019ee169b0b1ca0d",
+    "results/network-profile-20260908T104622Z/v3-network-profile/stderr.log": "29e028ba61af451819277955a1c702c24c40a75df7f7f55ab3c5a305dc10ee46",
+    "results/network-profile-20260908T104622Z/v3-network-profile/monitor.jsonl": "a76b3bd747b670a024ed044ce702288f7a35faa04071042326fbfdd3b5b01253",
+    "results/network-profile-20260908T104622Z/v3-network-profile/cpu.svg": "1a1eeabc8b8f263a249f23292d34920145b22a0d9364ae3b12bcbd392e250dd4",
+    "results/network-profile-20260908T104622Z/v3-network-profile/cpu.top.tsv": "df75d88189f799e91af68d9c6cb8c6fe4a210a74b6f0355dc03307d348706bae"
+  },
+  "derivation_sha256": {
+    "analyze.py": "85813df90b41319a59ba5d2ec15f9ecccd028136565d6affccb2db1e29970788",
+    "chart.py": "55a15e60a299abab9ef67f1bc3bdad644fc5d76b05cb26d43e06ad35e622e7a4"
+  }
+}

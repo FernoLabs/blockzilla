@@ -1,5 +1,8 @@
 # Reader allocation review — 2026-09-05
 
+Naming note: the wallet workload is now `user-program-index`. Saved commands,
+source references, and result IDs below keep their names from the recorded run.
+
 Base: `ffffcbe1`, branch `codex/sample-archive-benchmark`.
 
 ## Scope and run state
@@ -10,7 +13,7 @@ The final check also found an older paused CAR reader (690104). Its CAR-only
 launchers (688906 and 795234) and the reader were terminated to prevent a restart.
 Do not restart the benchmark as part of this patch.
 
-The example bundle contains count/slot-hours, USDC, Pump.fun, and FireWatch
+The example bundle contains count/slot-hours, USDC, Pump.fun, and user-program-index
 for each of CAR, Compact V2, and Indexer V3: 12 Linux binaries. This is not
 a new Jetstreamer comparison.
 
@@ -56,7 +59,7 @@ Its source revision and source patch identify the SDK changes used by the binari
 All three example packages use workspace path dependencies for their SDKs.
 Count requests omit keys, signatures, and instruction payloads. USDC requests
 token balances for the selected mint. Pump.fun requests selected program IDs
-and signatures. FireWatch filters by signer and does not request instruction
+and signatures. user-program-index filters by signer and does not request instruction
 account lists or data. V2/V3 examples retain their parallel SDK calls; V3
 sparse workloads retain their reverse-index path. Progress remains per block,
 with a log interval of ten seconds. Output is flushed at completion, not per row.

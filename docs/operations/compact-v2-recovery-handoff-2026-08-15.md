@@ -1,5 +1,8 @@
 # Compact V2 recovery handoff — 2026-08-15
 
+Historical handoff: Firewatch below is the former controller name. The current
+tools use `user-program-index`; stored state and lock IDs remain compatible.
+
 ## Goal
 
 Finish the clean, canonical Compact V2 recovery for 18 exceptional epochs without replacing or deleting validated source data.

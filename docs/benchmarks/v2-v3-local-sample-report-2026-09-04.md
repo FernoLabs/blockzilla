@@ -1,5 +1,8 @@
 # Compact V2 and Indexer V3: local sample result
 
+Naming note: the wallet workload is now `user-program-index`. Saved commands,
+source references, and result IDs below keep their names from the recorded run.
+
 Status: complete V2/V3 local-disk comparison, 2026-09-04.
 
 ## Result
@@ -13,9 +16,9 @@ transactions divided by total time. Network reads are not included.
 | Count transactions and inner instructions | 53m 07s | 22m 29s | **2.36×** | 1.80M | 4.27M |
 | Recorded USDC token balances | 57m 10s | 23m 28s | **2.44×** | 1.68M | 4.09M |
 | Pump.fun transaction dump | 1h 18m 28s | 34m 45s | **2.26×** | 1.22M | 2.76M |
-| FireWatch wallet → program list | 1h 00m 01s | 8.21s | **438.79×** | 1.60M | 701.10M effective |
+| user-program-index wallet → program list | 1h 00m 01s | 8.21s | **438.79×** | 1.60M | 701.10M effective |
 
-FireWatch's effective TPS uses all source transactions as the numerator. V3
+user-program-index's effective TPS uses all source transactions as the numerator. V3
 does not decode all of them: its reverse index proves that almost all blocks
 cannot contain the selected wallet. For example, it decoded 10 blocks in
 epoch 900 and zero blocks in epoch 1000. Completion time and exact output are
@@ -36,7 +39,7 @@ unused data, and its reverse index can reject blocks before payload decoding.
 Application outputs match between V2 and V3. The first V2 run reported three
 reader failures. A final-wave channel race caused the epoch 500 and 900
 Pump.fun failures; an unnecessarily broad instruction projection caused the
-epoch 100 FireWatch failure. The corrected V2 reruns passed and matched V3
+epoch 100 user-program-index failure. The corrected V2 reruns passed and matched V3
 byte-for-byte. No archive was rebuilt or repaired.
 
 The active matrix keeps the original failed rows for provenance. This report

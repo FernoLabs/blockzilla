@@ -8,8 +8,8 @@ parity before a speed comparison. Compare the output files outside the timed
 reader run.
 
 The full comparison target has 12 distinct workload binaries: USDC, Pump.fun,
-and FireWatch for each of the four readers. The Jetstreamer workload binaries
-are code references and are excluded from final real-workload timings.
+and user-program-index for each of the four readers. The Jetstreamer workload
+binaries are code references and are excluded from final real-workload timings.
 Transaction identity exporters and durable instruction-ledger binaries are
 separate from this count.
 
@@ -26,8 +26,8 @@ bit. A count alone cannot hide gaps at different positions.
 - `PumpSink` writes one transaction record with its primary signature and its
   confirmed direct and CPI invocation counts, except for known failed
   transactions. `mainnet()` selects Pump.fun.
-- `FirewatchSink` writes the sorted, distinct program set reached by successful
-  transactions for one required signer wallet.
+- `UserProgramIndexSink` writes the sorted, distinct program set reached by
+  successful transactions for one required signer wallet.
 - `TransactionIdentityDumpSink` writes every transaction coordinate and its
   required primary signature. It is a strict cross-format transaction identity
   parity output.
@@ -42,8 +42,8 @@ The count example still counts all transactions and recorded inner instructions.
 This filter changes the example output, not the stored archive. It is not
 suitable for an analysis of fees or durable nonce changes in failed transactions.
 
-FireWatch keeps failed and unknown-execution signer counts. Its signer query
-lets the reader omit instruction rows outside successful matching transactions,
+The user-program-index workload keeps failed and unknown-execution signer
+counts. Its signer query lets the reader omit instruction rows outside successful matching transactions,
 while retaining transaction status, matching signer keys, and recorded CPI
 coverage. Omitted instruction coverage is marked `ProjectionNotRequested`.
 Full instruction queries still validate the recorded instruction sequence.
@@ -59,8 +59,8 @@ to verify completion, hashes, counts, and coverage before a parity comparison.
 
 Each `*_scan_request` helper removes data planes that the workload does not
 use. The format reader can then avoid unnecessary decoding and allocation.
-Full instruction account projection is the default. Pump.fun and FireWatch
-permit readers to omit unused instruction account lists. CAR, Compact V2, and
+Full instruction account projection is the default. Pump.fun and
+user-program-index permit readers to omit unused instruction account lists. CAR, Compact V2, and
 Indexer V3 avoid their resolution and allocation. The current Jetstreamer path
 can still materialize the lists.
 
@@ -72,7 +72,8 @@ and digests.
 
 ## Canonical binary records
 
-The canonical USDC, Pump.fun, and FireWatch outputs start with a 44-byte header:
+The canonical USDC, Pump.fun, and user-program-index outputs start with a
+44-byte header:
 
 | Offset | Bytes | Value |
 | --- | ---: | --- |
@@ -105,7 +106,12 @@ Do not compare their output files for parity with these version-2 outputs.
 `epoch:u64, slot:u64, tx_index:u32, primary_signature:[u8;64],
 direct_count:u32, cpi_count:u32`
 
-### FireWatch wallet-program relation: 64 bytes
+### User program index wallet-program relation: 64 bytes
+
+Header magic: `BZFWAL01`. Schema: `blockzilla-example-firewatch-wallet-program/v1`.
+These legacy wire identifiers remain unchanged so saved files retain the same
+bytes and schema. The current command and report workload name is
+`user-program-index`.
 
 `wallet:[u8;32], program:[u8;32]`
 

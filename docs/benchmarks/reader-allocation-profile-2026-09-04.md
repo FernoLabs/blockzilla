@@ -1,5 +1,8 @@
 # V2/V3 allocation pass — 2026-09-04
 
+Naming note: the wallet workload is now `user-program-index`. Saved commands,
+source references, and result IDs below keep their names from the recorded run.
+
 ## Measured result
 
 Real epoch 700, block ordinals 0–2047: 3,560,931 transactions, 354,726
@@ -43,7 +46,7 @@ every output byte. The full sample matrix remains the complete archive run.
   per-block/group clocks, not per-transaction clocks.
 
 These changes are shared by the SDK entry points, including local and network
-sources. The measured 2× gain is for **USDC**. Pump.fun and FireWatch retain their
+sources. The measured 2× gain is for **USDC**. Pump.fun and user-program-index retain their
 instruction projections; their improvement has not been established. Native
 counting already avoids the object graph. CAR code was not changed in this pass.
 
@@ -76,7 +79,7 @@ based only on a CPU profile.
 
 Tool: `bench/reader-profile`. This is a diagnostic tool, separate
 from the 12 public examples. Its block-range options do not alter example CLIs.
-It supports all four workloads with V2/V3; V3 Pump.fun and FireWatch use reverse
+It supports all four workloads with V2/V3; V3 Pump.fun and user-program-index use reverse
 candidates by default, with `--dense` available to isolate projection costs.
 
 Example normal timing:
@@ -136,7 +139,7 @@ NAS package and live log:
 
 The archive root is unchanged: `sample-reader-package-20260904-final/archive`.
 No compactor, registry builder, download, or archive file was changed by this
-deployment. The known V2 epoch 100 FireWatch execution-boundary failure is not
+deployment. The known V2 epoch 100 user-program-index execution-boundary failure is not
 fixed by this allocation pass.
 
 Initial check: five jobs passed (all four V2 epoch 0 workloads and V2 epoch 100

@@ -1,5 +1,8 @@
 # Reader verification, round 2 — 4 September 2026
 
+Naming note: the wallet workload is now `user-program-index`. Saved commands,
+source references, and result IDs below keep their names from the recorded run.
+
 This review used the active NAS run and existing source code. No reader code,
 binary, archive, or running job was changed. No extra benchmark was started.
 
@@ -142,7 +145,7 @@ NAS root: `/volume1/blockzilla/benchmark-results/`.
 - Count comparison: all `approximate_hour=` lines and the total line for epoch 200.
 
 At the last check, runner 1281842 had completed 11 of 264 jobs and was running
-`compact-v2/local/epoch-200/firewatch`. Epoch 100 FireWatch still has its known
+`compact-v2/local/epoch-200/firewatch`. Epoch 100 user-program-index still has its known
 failed-instruction-boundary error. It is not a valid speed result. The current
 full run has not reached V3 or CAR, so this review makes no new full-epoch speed
 claim for those formats. No job was stopped or restarted during this review.

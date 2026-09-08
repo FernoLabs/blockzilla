@@ -28,8 +28,8 @@ use topcoat::{
 };
 
 use crate::state::{
-    CompactionHistoryEntry, DashboardState, EpochTask, ErrorEntry, FirewatchIndexEntry,
-    MachineSnapshot, ProcessEntry, SchedulerReasoning, format_bytes, format_thousands,
+    CompactionHistoryEntry, DashboardState, EpochTask, ErrorEntry, MachineSnapshot, ProcessEntry,
+    SchedulerReasoning, UserProgramIndexEntry, format_bytes, format_thousands,
     registry_task_eta_label,
 };
 
@@ -421,36 +421,36 @@ pub async fn registry_reprocess_lane_list(state: &DashboardState) -> Result<impl
     })
 }
 
-/// Firewatch signer-to-program index project. The scheduler owns every value:
+/// User program index project. The scheduler owns every value:
 /// this view does not infer parity from build completion or estimate resource
 /// use when a worker has not reported it.
 #[component]
-pub async fn firewatch_project(state: &DashboardState) -> Result<impl View> {
+pub async fn user_program_index_project(state: &DashboardState) -> Result<impl View> {
     let card = CARD;
-    let overview_indexes = state.overview_firewatch_indexes();
+    let overview_indexes = state.overview_user_program_indexes();
     Ok(view! {
-        if state.firewatch_enabled {
-            <section id="firewatch-project" class=(format!("overflow-hidden {card}"))>
+        if state.user_program_index_enabled {
+            <section id="user-program-index-project" class=(format!("overflow-hidden {card}"))>
                 <div
                     class="flex items-center justify-between border-b border-zinc-800/70 px-6 py-4"
                 >
                     <div>
                         <h2 class="text-sm font-semibold text-zinc-100">
-                            "Firewatch indexes"
+                            "User program indexes"
                         </h2>
                         <p
-                            id="firewatch-summary"
-                            data-text="$firewatch_summary_label"
+                            id="user-program-index-summary"
+                            data-text="$user_program_index_summary_label"
                             class="mt-0.5 text-xs tabular-nums text-zinc-500"
                         >
-                            (state.firewatch_summary_label())
+                            (state.user_program_index_summary_label())
                         </p>
                         <p
-                            id="firewatch-coverage"
-                            data-text="$firewatch_coverage_label"
+                            id="user-program-index-coverage"
+                            data-text="$user_program_index_coverage_label"
                             class="mt-1 text-xs tabular-nums text-zinc-400"
                         >
-                            (state.firewatch_coverage_label())
+                            (state.user_program_index_coverage_label())
                         </p>
                         <p class="mt-1 text-xs text-zinc-500">
                             "Runnable-work ETA includes active and queued work only. Failed epochs and profile-audit work are excluded."
@@ -460,50 +460,50 @@ pub async fn firewatch_project(state: &DashboardState) -> Result<impl View> {
                         <div>
                             <div class=(EYEBROW)>"Next queued"</div>
                             <div
-                                id="firewatch-next"
-                                data-text="$firewatch_next_label"
+                                id="user-program-index-next"
+                                data-text="$user_program_index_next_label"
                                 class="mt-0.5 font-medium tabular-nums text-zinc-200"
                             >
-                                (state.firewatch_next_label())
+                                (state.user_program_index_next_label())
                             </div>
                         </div>
                         <div>
                             <div class=(EYEBROW)>"Runnable-work ETA"</div>
                             <div
-                                id="firewatch-queue-eta"
-                                data-text="$firewatch_queue_eta_label"
+                                id="user-program-index-queue-eta"
+                                data-text="$user_program_index_queue_eta_label"
                                 class="mt-0.5 font-medium tabular-nums text-zinc-200"
                             >
-                                (state.firewatch_queue_eta_label())
+                                (state.user_program_index_queue_eta_label())
                             </div>
                         </div>
                         <div>
                             <div class=(EYEBROW)>"Capacity"</div>
                             <div
-                                id="firewatch-capacity"
-                                data-text="$firewatch_capacity_label"
+                                id="user-program-index-capacity"
+                                data-text="$user_program_index_capacity_label"
                                 class="mt-0.5 font-medium tabular-nums text-zinc-200"
                             >
-                                (state.firewatch_capacity_label())
+                                (state.user_program_index_capacity_label())
                             </div>
                         </div>
                     </div>
                 </div>
                 <p
-                    id="firewatch-admission-reason"
-                    data-text="$firewatch_admission_blocked_reason"
-                    data-show="$firewatch_admission_blocked_reason"
-                    class=(if state.firewatch_admission_blocked_reason.is_some() {
+                    id="user-program-index-admission-reason"
+                    data-text="$user_program_index_admission_blocked_reason"
+                    data-show="$user_program_index_admission_blocked_reason"
+                    class=(if state.user_program_index_admission_blocked_reason.is_some() {
                         "border-b border-amber-700/60 bg-amber-500/10 px-6 py-3 text-sm text-amber-400"
                     } else {
                         "hidden border-b border-amber-700/60 bg-amber-500/10 px-6 py-3 text-sm text-amber-400"
                     })
                 >
-                    (state.firewatch_admission_blocked_reason.clone().unwrap_or_default())
+                    (state.user_program_index_admission_blocked_reason.clone().unwrap_or_default())
                 </p>
                 <div class="border-b border-zinc-800/70 px-4 py-2 text-xs text-zinc-500">
-                    <span id="firewatch-rows-label" data-text="$firewatch_rows_label">
-                        (state.firewatch_rows_label())
+                    <span id="user-program-index-rows-label" data-text="$user_program_index_rows_label">
+                        (state.user_program_index_rows_label())
                     </span>
                 </div>
                 <div class="overflow-auto">
@@ -534,12 +534,12 @@ pub async fn firewatch_project(state: &DashboardState) -> Result<impl View> {
                             if overview_indexes.is_empty() {
                                 <tr>
                                     <td colspan="6" class="px-4 py-5 text-zinc-500">
-                                        "No per-epoch Firewatch status reported yet."
+                                        "No per-epoch User program index status reported yet."
                                     </td>
                                 </tr>
                             } else {
                                 for index in overview_indexes {
-                                    firewatch_index_row(index: index)
+                                    user_program_index_row(index: index)
                                 }
                             }
                         </tbody>
@@ -551,9 +551,9 @@ pub async fn firewatch_project(state: &DashboardState) -> Result<impl View> {
 }
 
 #[component]
-async fn firewatch_index_row(index: &FirewatchIndexEntry) -> Result<impl View> {
-    let id = format!("firewatch-epoch-{}", index.epoch);
-    let sig = format!("firewatch_epoch_{}", index.epoch);
+async fn user_program_index_row(index: &UserProgramIndexEntry) -> Result<impl View> {
+    let id = format!("user-program-index-epoch-{}", index.epoch);
+    let sig = format!("user_program_index_epoch_{}", index.epoch);
     let dot = state_dot_class(&index.state);
     Ok(view! {
         <tr id=(id) class="border-b border-zinc-800/70 transition-colors hover:bg-white/[0.02]">

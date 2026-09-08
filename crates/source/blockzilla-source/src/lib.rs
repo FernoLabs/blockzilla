@@ -1,5 +1,7 @@
 //! Shared byte-range contract and object-name validation.
 
+pub mod input_budget;
+
 use std::sync::Arc;
 use thiserror::Error;
 
@@ -12,6 +14,13 @@ pub type SourceResult<T> = std::result::Result<T, SourceError>;
 /// `/v1/epochs/{epoch}/manifest` and files to
 /// `/v1/epochs/{epoch}/files/{name}`.
 pub trait RangeSource: Send + Sync {
+    /// Useful concurrent input reads for this source. Local and custom sources
+    /// remain serial unless they opt in. Callers must also apply their own
+    /// buffer and worker limits; this hint does not reserve memory or threads.
+    fn recommended_read_concurrency(&self) -> usize {
+        1
+    }
+
     /// Return `None` only when the object does not exist.
     fn size(&self, object: &str) -> SourceResult<Option<u64>>;
 
@@ -75,6 +84,10 @@ pub trait RangeSource: Send + Sync {
 }
 
 impl<T: RangeSource + ?Sized> RangeSource for Arc<T> {
+    fn recommended_read_concurrency(&self) -> usize {
+        (**self).recommended_read_concurrency()
+    }
+
     fn size(&self, object: &str) -> SourceResult<Option<u64>> {
         (**self).size(object)
     }

@@ -130,8 +130,9 @@ static NEXT_READER_ID: AtomicU64 = AtomicU64::new(1);
 
 /// Bounded resources for monotonic block I/O with parallel borrowed decoding.
 ///
-/// One producer reads frame-aligned ranges in increasing offset order. A
-/// fixed private worker threads project the blocks in parallel, and the coordinator
+/// Local input reads frame-aligned ranges serially. Remote input uses bounded
+/// concurrent reads and publishes them in offset order. Private worker
+/// threads project the blocks in parallel, and the coordinator
 /// publishes owned projection results in exact block-index order.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct OrderedParallelBlockConfig {
@@ -197,6 +198,7 @@ pub struct OrderedParallelBlockStats {
     pub max_in_flight_declared_uncompressed_bytes: u64,
     pub read_call_count: u64,
     pub compressed_bytes: u64,
+    /// Sum of input request durations; concurrent requests overlap in wall time.
     pub producer_read_wall_time: Duration,
     /// Elapsed span from first admission to last projection completion,
     /// including gaps waiting for input or ordered-consumer capacity.
@@ -1675,13 +1677,28 @@ impl<S: RangeSource> ArchiveReader<S> {
                         window: &window,
                         armed: true,
                     };
-                    let result = produce_ordered_compressed_batches(
-                        self,
-                        &plans,
-                        free_receiver,
-                        ready_sender,
-                        &window.cancelled,
-                    );
+                    let input_workers = self
+                        .source
+                        .recommended_read_concurrency()
+                        .clamp(1, config.compressed_buffer_count.min(8));
+                    let result = if input_workers == 1 {
+                        produce_ordered_compressed_batches(
+                            self,
+                            &plans,
+                            free_receiver,
+                            ready_sender,
+                            &window.cancelled,
+                        )
+                    } else {
+                        produce_concurrent_compressed_batches(
+                            self,
+                            &plans,
+                            free_receiver,
+                            ready_sender,
+                            &window.cancelled,
+                            input_workers,
+                        )
+                    };
                     // Source errors close the ready stream. Already admitted
                     // earlier rows still reach the ordered consumer.
                     shutdown.armed = false;
@@ -2254,6 +2271,188 @@ struct OrderedProducerStats {
     wait_for_free_buffer_time: Duration,
     max_compressed_batch_bytes: usize,
     max_declared_uncompressed_batch_bytes: u64,
+}
+
+/// Fetch independent indexed batches concurrently without changing the number
+/// of live compressed buffers. Input workers publish in index order, so source
+/// errors have the same ordering as the serial producer.
+fn produce_concurrent_compressed_batches<S: RangeSource>(
+    archive: &ArchiveReader<S>,
+    plans: &[OrderedParallelBatchPlan],
+    free_receiver: Receiver<Option<Vec<u8>>>,
+    ready_sender: SyncSender<OrderedReadyBatch>,
+    cancelled: &AtomicBool,
+    workers: usize,
+) -> Result<OrderedProducerStats> {
+    struct PublishState {
+        next: usize,
+        error: Option<Error>,
+    }
+    struct StopOnDrop<'a> {
+        stopped: &'a AtomicBool,
+        changed: &'a Condvar,
+    }
+    impl Drop for StopOnDrop<'_> {
+        fn drop(&mut self) {
+            self.stopped.store(true, Ordering::Release);
+            self.changed.notify_all();
+        }
+    }
+    let claim = Mutex::new((0_usize, free_receiver));
+    let publish = Mutex::new(PublishState {
+        next: 0,
+        error: None,
+    });
+    let changed = Condvar::new();
+    let stopped = AtomicBool::new(false);
+    let stats = thread::scope(|scope| {
+        // Also wakes workers after a partial thread-creation failure.
+        let _stop = StopOnDrop {
+            stopped: &stopped,
+            changed: &changed,
+        };
+        let mut handles = Vec::with_capacity(workers);
+        for worker in 0..workers {
+            let claim = &claim;
+            let publish = &publish;
+            let changed = &changed;
+            let stopped = &stopped;
+            let ready_sender = &ready_sender;
+            handles.push(
+                thread::Builder::new()
+                    .name(format!("blockzilla-range-read-{worker}"))
+                    .spawn_scoped(scope, move || {
+                        let mut stats = OrderedProducerStats::default();
+                        loop {
+                            let wait = Instant::now();
+                            let task = {
+                                // Claim the earliest unassigned plan only after
+                                // obtaining a buffer. Later reads cannot consume
+                                // all tokens before the earliest read is admitted.
+                                let mut claim = claim.lock().unwrap();
+                                loop {
+                                    if stopped.load(Ordering::Acquire)
+                                        || cancelled.load(Ordering::Acquire)
+                                        || claim.0 == plans.len()
+                                    {
+                                        break None;
+                                    }
+                                    match claim.1.recv_timeout(Duration::from_millis(25)) {
+                                        Ok(Some(bytes)) => {
+                                            let sequence = claim.0;
+                                            claim.0 += 1;
+                                            break Some((sequence, bytes));
+                                        }
+                                        Ok(None)
+                                        | Err(std::sync::mpsc::RecvTimeoutError::Disconnected) => {
+                                            break None;
+                                        }
+                                        Err(std::sync::mpsc::RecvTimeoutError::Timeout) => continue,
+                                    }
+                                }
+                            };
+                            stats.wait_for_free_buffer_time += wait.elapsed();
+                            let Some((sequence, mut bytes)) = task else {
+                                break;
+                            };
+                            let plan = plans[sequence];
+                            let started = Instant::now();
+                            let read =
+                                std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+                                    archive
+                                        .source
+                                        .read_range_into(
+                                            BLOCKS_FILE,
+                                            plan.compressed_offset,
+                                            plan.compressed_len,
+                                            &mut bytes,
+                                        )
+                                        .map_err(Error::from)?;
+                                    if bytes.len() != plan.compressed_len {
+                                        return Err(Error::InvalidIndex(format!(
+                                            "ordered block range returned {} bytes, expected {}",
+                                            bytes.len(),
+                                            plan.compressed_len
+                                        )));
+                                    }
+                                    Ok(())
+                                }))
+                                .unwrap_or_else(|_| {
+                                    Err(Error::InvalidManifest(
+                                        "parallel input source panicked".into(),
+                                    ))
+                                });
+                            stats.read_wall_time += started.elapsed();
+                            let mut state = publish.lock().unwrap();
+                            while state.next != sequence
+                                && !stopped.load(Ordering::Acquire)
+                                && !cancelled.load(Ordering::Acquire)
+                            {
+                                state = changed
+                                    .wait_timeout(state, Duration::from_millis(25))
+                                    .unwrap()
+                                    .0;
+                            }
+                            if stopped.load(Ordering::Acquire) || cancelled.load(Ordering::Acquire)
+                            {
+                                break;
+                            }
+                            if let Err(error) = read {
+                                state.error = Some(error);
+                                stopped.store(true, Ordering::Release);
+                                changed.notify_all();
+                                break;
+                            }
+                            stats.read_call_count += 1;
+                            stats.compressed_bytes += bytes.len() as u64;
+                            stats.max_compressed_batch_bytes =
+                                stats.max_compressed_batch_bytes.max(bytes.len());
+                            stats.max_declared_uncompressed_batch_bytes = stats
+                                .max_declared_uncompressed_batch_bytes
+                                .max(plan.declared_uncompressed_bytes);
+                            // Every queued item owns one of the original buffer
+                            // tokens. The ready channel can hold all such tokens.
+                            if ready_sender
+                                .send(OrderedReadyBatch { plan, bytes })
+                                .is_err()
+                            {
+                                stopped.store(true, Ordering::Release);
+                                changed.notify_all();
+                                break;
+                            }
+                            state.next += 1;
+                            changed.notify_all();
+                        }
+                        stats
+                    })
+                    .map_err(|error| {
+                        Error::InvalidManifest(format!("cannot create input worker: {error}"))
+                    })?,
+            );
+        }
+        let mut total = OrderedProducerStats::default();
+        for handle in handles {
+            let s = handle
+                .join()
+                .map_err(|_| Error::InvalidManifest("input worker panicked".into()))?;
+            total.read_call_count += s.read_call_count;
+            total.compressed_bytes += s.compressed_bytes;
+            // Parallel durations are sums over requests, not elapsed scan time.
+            total.read_wall_time += s.read_wall_time;
+            total.wait_for_free_buffer_time += s.wait_for_free_buffer_time;
+            total.max_compressed_batch_bytes = total
+                .max_compressed_batch_bytes
+                .max(s.max_compressed_batch_bytes);
+            total.max_declared_uncompressed_batch_bytes = total
+                .max_declared_uncompressed_batch_bytes
+                .max(s.max_declared_uncompressed_batch_bytes);
+        }
+        Ok::<_, Error>(total)
+    })?;
+    match publish.into_inner().unwrap().error {
+        Some(error) => Err(error),
+        None => Ok(stats),
+    }
 }
 
 fn produce_ordered_compressed_batches<S: RangeSource>(
@@ -5357,6 +5556,124 @@ mod tests {
         assert_eq!(reads.len(), 1, "reads were {reads:?}");
         assert_eq!(reads[0].0, 0);
         assert_eq!(reads[0].1 as u64, archive.index().blob_file_bytes);
+    }
+
+    #[test]
+    fn concurrent_input_preserves_order_errors_and_buffer_limit() {
+        #[derive(Clone)]
+        struct RemoteFixture {
+            inner: LocalRangeSource,
+            state: Arc<(Mutex<(usize, usize)>, Condvar)>,
+            enabled: Arc<AtomicBool>,
+            fail_later: bool,
+        }
+        impl RangeSource for RemoteFixture {
+            fn recommended_read_concurrency(&self) -> usize {
+                8
+            }
+            fn size(&self, object: &str) -> SourceResult<Option<u64>> {
+                self.inner.size(object)
+            }
+            fn read_range(
+                &self,
+                object: &str,
+                offset: u64,
+                length: usize,
+            ) -> SourceResult<Vec<u8>> {
+                self.inner.read_range(object, offset, length)
+            }
+            fn read_range_into(
+                &self,
+                object: &str,
+                offset: u64,
+                length: usize,
+                bytes: &mut Vec<u8>,
+            ) -> SourceResult<()> {
+                if object != BLOCKS_FILE || !self.enabled.load(Ordering::Acquire) {
+                    return self.inner.read_range_into(object, offset, length, bytes);
+                }
+                let (lock, changed) = &*self.state;
+                let mut state = lock.lock().unwrap();
+                state.0 += 1;
+                state.1 = state.1.max(state.0);
+                changed.notify_all();
+                while state.1 < 2 {
+                    let (next, timeout) =
+                        changed.wait_timeout(state, Duration::from_secs(2)).unwrap();
+                    state = next;
+                    assert!(
+                        !timeout.timed_out(),
+                        "independent input reads did not overlap"
+                    );
+                }
+                drop(state);
+                if offset == 0 {
+                    thread::sleep(Duration::from_millis(20));
+                }
+                let result = if self.fail_later && offset != 0 {
+                    Err(SourceError::Protocol("later input failed".into()))
+                } else {
+                    self.inner.read_range_into(object, offset, length, bytes)
+                };
+                lock.lock().unwrap().0 -= 1;
+                result
+            }
+        }
+        for (fail_later, stop_sink) in [(false, false), (true, false), (false, true)] {
+            let fixture = Fixture::build();
+            let source = RemoteFixture {
+                inner: fixture.source(),
+                state: Arc::new((Mutex::new((0, 0)), Condvar::new())),
+                enabled: Arc::new(AtomicBool::new(false)),
+                fail_later,
+            };
+            let archive = ArchiveReader::open_with_options(
+                source.clone(),
+                OpenOptions {
+                    hash_verification: HashVerification::SizesOnly,
+                    ..OpenOptions::default()
+                },
+            )
+            .unwrap();
+            source.enabled.store(true, Ordering::Release);
+            let mut rows = Vec::new();
+            let result = archive.process_borrowed_blocks_parallel_ordered(
+                0..2,
+                OrderedParallelBlockConfig {
+                    compressed_buffer_count: 2,
+                    max_blocks_per_batch: 1,
+                    decode_workers: 2,
+                    ..OrderedParallelBlockConfig::default()
+                },
+                |_| Ok(()),
+                |_, row, _| -> Result<usize> { Ok(row) },
+                |row, value| {
+                    assert_eq!(row, value);
+                    rows.push(row);
+                    if stop_sink {
+                        Err(Error::InvalidMetadata("sink stopped".into()))
+                    } else {
+                        Ok(())
+                    }
+                },
+            );
+            assert_eq!(*source.state.0.lock().unwrap(), (0, 2));
+            if fail_later {
+                assert!(
+                    result
+                        .unwrap_err()
+                        .to_string()
+                        .contains("later input failed")
+                );
+                assert_eq!(rows, vec![0]);
+            } else if stop_sink {
+                assert!(result.unwrap_err().to_string().contains("sink stopped"));
+                assert_eq!(rows, vec![0]);
+            } else {
+                assert_eq!(result.unwrap().block_count, 2);
+                assert_eq!(rows, vec![0, 1]);
+            }
+        }
     }
 
     #[test]

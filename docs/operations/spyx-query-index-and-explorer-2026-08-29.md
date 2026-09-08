@@ -1,5 +1,8 @@
 # SPYx query index and explorer handoff
 
+FireWatch references below identify the external `ferno-watcher` application
+and its saved identity cache, not Blockzilla's `user-program-index` workload.
+
 Date: 2026-08-29 CEST
 
 Owner-index release update: 2026-08-30 CEST

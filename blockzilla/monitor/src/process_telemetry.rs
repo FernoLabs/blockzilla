@@ -869,8 +869,16 @@ fn has_blockzilla_command_marker(sample: &ProcessSample) -> bool {
         "blockzilla-monitor",
         "blockzilla-replay-poc",
         "blockzilla-user-program-index",
+        "user-program-index-controller",
+        "user-program-index-wire-profile-audit",
+        "user-program-index-wire-profile-audit-batch",
+        "user-program-index-wire-profile-marker-transition",
+        // Older deployments remain part of the same service during migration.
         "blockzilla-firebase-indexer",
         "firewatch-index-controller",
+        "firewatch-wire-profile-audit",
+        "firewatch-wire-profile-audit-batch",
+        "firewatch-wire-profile-marker-transition",
         "hivezilla",
         "index-parity",
     ];
@@ -1476,9 +1484,16 @@ mod tests {
     }
 
     #[test]
-    fn firewatch_processes_are_not_reported_as_competing_host_io() {
+    fn user_program_index_processes_are_not_reported_as_competing_host_io() {
         for executable in [
+            "user-program-index-controller",
+            "user-program-index-wire-profile-audit",
+            "user-program-index-wire-profile-audit-batch",
+            "user-program-index-wire-profile-marker-transition",
             "firewatch-index-controller",
+            "firewatch-wire-profile-audit",
+            "firewatch-wire-profile-audit-batch",
+            "firewatch-wire-profile-marker-transition",
             "blockzilla-user-program-index",
             "blockzilla-firebase-indexer",
             "index-parity",

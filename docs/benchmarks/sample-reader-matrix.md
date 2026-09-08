@@ -2,6 +2,11 @@
 
 ## Scope
 
+The current run uses the [epoch900 network pilot](network-reader-epoch900-pilot.md):
+eight V2/V3 cases and one CAR count, then the Jetstreamer reference. Finish the
+local matrix first. The full network sample matrix below describes runner
+capability; it is deferred until the pilot and network-reader review.
+
 Run each complete epoch once: **0, 100, 200, 300, 400, 500, 600, 700, 800, 900, 1000**.
 The order is all Compact V2 jobs, all Indexer V3 jobs, then all CAR jobs.
 Within each format, run disk first, then network. Run one process at a time.
@@ -13,7 +18,7 @@ There are 12 dedicated binaries and 264 jobs. Each format has four examples:
 | `slot-hours` | Count all blocks, transactions, and recorded inner instructions in ordered 9,000-slot buckets. |
 | `usdc` | Write the recorded USDC pre/post token balances. This is not the instruction-ledger tool. |
 | `pumpfun` | Write transactions with a direct or CPI Pump.fun invocation. |
-| `firewatch` | Write the sorted, distinct programs reached by successful transactions for the selected signer wallet. |
+| `user-program-index` | Write the sorted, distinct programs reached by successful transactions for the selected signer wallet. |
 
 The wallet is fixed in `run.json`. Its default is the wallet used by the existing
 examples. A target can have no matches in an old epoch. Report that result; do
@@ -170,7 +175,7 @@ caches remain on disk and can be large. Check free space before the full run.
    concurrent jobs, sample epochs, target wallet, and completeness limits.
 2. Show stored sizes for CAR, V2, and V3 for every epoch.
 3. Show full-scan elapsed time, coverage TPS, and source/download MB/s separately.
-4. Show USDC, Pump.fun, and FireWatch elapsed time and output parity. Include zero
+4. Show USDC, Pump.fun, and user-program-index elapsed time and output parity. Include zero
    matches and failures. Do not remove unfavourable results.
 5. Explain V2's compressed ordered blocks and shared key registry. Explain V3's
    separate data planes and reverse lookup, backed by bytes and decoded/skipped
@@ -181,3 +186,8 @@ caches remain on disk and can be large. Check free space before the full run.
 CAR uses the current CAR example and its SDK. It does not use 12 decode workers
 just because V2/V3 receive `--threads 12`. Report the actual reader settings. Do
 not confuse this application scan with the separate optimized compactor benchmark.
+
+The current wallet workload name is `user-program-index`. The runner accepts
+`firewatch` as a legacy command-line alias and writes new jobs with the current
+name. The comparison tool can read saved result directories under either name;
+it rejects a result root that contains both names for the same case.

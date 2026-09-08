@@ -23,12 +23,17 @@ These paths admit fixed object names and pin local files or HTTP object
 identities. They do not require a publication manifest or hash the full archive.
 See the [working examples](../../../examples/read-compact-v2/README.md).
 
-`scan_ordered_parallel` uses one sequential input producer, reusable private
-workers, and a bounded rolling output window. The ordered sink receives a block
+`scan_ordered_parallel` uses reusable private decode workers and a bounded
+rolling output window. Local input has one sequential producer. HTTP input
+can read concurrently, with the worker count limited by the source hint,
+eight workers, and the existing compressed-buffer count (three in the
+examples). Input batches are still published in order. The ordered sink receives a block
 as soon as that block is ready. A slow later block does not hold back a completed
 prefix. Admission remains charged until the sink returns. Worker threads join
 before the scan returns. See the [pipeline contract](../../../docs/design/reader-pipeline-rolling-window.md)
-for block, transaction, byte, and shutdown limits.
+for block, transaction, byte, and shutdown limits. Concurrent input read
+durations are summed in `producer_read_wall_time` / `pipeline_read_s`; they
+can exceed elapsed scan time. See the [network input design](../../../docs/design/network-reader-window.md).
 
 `scan_token_balances_indexed_parallel` is the optional token-only interface.
 It retains registry references in flat balance rows and lets an `IndexedTokenSink`

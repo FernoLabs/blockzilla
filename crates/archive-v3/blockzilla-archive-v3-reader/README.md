@@ -81,10 +81,14 @@ println!("{} blocks, {} transactions", receipt.blocks, receipt.transactions);
 # }
 ```
 
-The sequential profile caches the block index and the complete transaction
-directory for the selected prototype source. It range-reads signatures, registry
-rows, and required semantic payload planes. The cold setup can be large. A
-later ordered scan can read the transaction directory from the local cache.
+The default `Streaming` profile caches only the block index. It reads selected
+transaction-directory ranges with the semantic payload planes, then processes
+blocks in order. It also range-reads signatures and registry rows as needed.
+Opening a short scan no longer downloads the complete transaction directory.
+
+Call `open_with_options` with `cache_profile: IndexerV3CacheProfile::Sequential`
+to retain the previous whole-directory cache policy for repeated full scans.
+`Selective` retains the reverse-index sidecar policy for targeted queries.
 
 ## Parallel scan
 
@@ -110,6 +114,19 @@ registry cache for later jobs. A dense registry image has one shared
 allocation. The ordered merge moves each owned canonical block. It does not
 make a second copy of all canonical transactions.
 
+For remote sources that opt into concurrent input, a separate producer groups
+up to 128 adjacent selected blocks and 16 MiB of stored planes. Four-block
+decode jobs share the compressed input. A 64 MiB budget covers queued,
+active, and consumer-held prefetched buffers. Input can overlap decoding;
+plane reads within each group remain sequential. Sparse gaps are not filled.
+Sparse or oversized jobs use the existing per-job read path. Local input is
+unchanged. See the [network input design](../../../docs/design/network-reader-window.md).
+
+Each processing worker retains at most 16 MiB of semantic workspace between
+jobs; it releases larger buffers after a job. These limits do not bound total
+process memory: the block index, projected results, registry data, and the
+existing oversized-job path have their own limits.
+
 This path is not fully zero-copy. The range and decode buffers are reused, but
 the canonical query model owns the selected vectors that it gives to the
 application. One job has at most four projected blocks. The reader has one
@@ -118,7 +135,7 @@ projected blocks. At 12 workers, this is 96 blocks. It also has a 256 MiB
 declared decoded-payload budget and a 100,000-transaction budget across jobs
 that execute or wait for ordered publication. A valid block that is larger
 than one budget runs alone. Each worker releases semantic buffers when their
-retained capacity is more than 64 MiB after a job. It also releases projection
+retained capacity is more than 16 MiB after a job. It also releases projection
 scratch above 8 MiB and does not recycle an outer transaction vector above
 4 MiB. These bounds do not include data that the application keeps after its
 callback returns.
@@ -249,7 +266,7 @@ application requires complete coverage. Select exact instruction data with
 Primary transaction signatures are included by default. Add
 `without_primary_signatures()` only when the callback does not use them. V3
 then skips the signature sidecar unless selected instruction data still needs
-signature proof. The USDC and FireWatch examples use this option. The Pump.fun
+signature proof. The USDC and user-program-index examples use this option. The Pump.fun
 example keeps primary signatures because it writes them to its output.
 
 ## Local public-tree copy
@@ -342,11 +359,11 @@ skipped blocks and it does not change candidate or exact-match semantics.
 ## Select the correct workload
 
 The selective path fits a targeted Pump.fun program query. It also fits a
-targeted FireWatch program query, or a FireWatch wallet query that has signer
+targeted user-program-index program query, or a user-program-index wallet query that has signer
 semantics. A signer-wallet query does not mean that the wallet can occur in any
 account role.
 
-A full FireWatch `wallet -> program list` build for all wallets must process
+A full user-program-index `wallet -> program list` build for all wallets must process
 the complete relation set. One targeted lookup is not an estimate for that
 build.
 

@@ -188,7 +188,7 @@ semantic data into planes. Its transaction directory tells the reader where
 each transaction is in those planes.
 
 The adaptive reverse objects map a public key to sound candidate blocks. A
-Pump.fun or FireWatch query can reject most blocks before it reads transaction
+Pump.fun or user-program-index query can reject most blocks before it reads transaction
 payloads. The application still checks each candidate for an exact match.
 Coverage rows keep a block when the reverse index cannot prove that it is safe
 to skip.
@@ -230,11 +230,11 @@ switch in these beginner examples.
 
 The three application jobs are separate source files for each format:
 
-| Format | USDC | Pump.fun | FireWatch |
+| Format | USDC | Pump.fun | user-program-index |
 |---|---|---|---|
-| CAR | [`read-car-usdc`](../../examples/read-car/src/bin/read-car-usdc.rs) | [`read-car-pumpfun`](../../examples/read-car/src/bin/read-car-pumpfun.rs) | [`read-car-firewatch`](../../examples/read-car/src/bin/read-car-firewatch.rs) |
-| Compact V2 | [`read-compact-v2-usdc`](../../examples/read-compact-v2/src/bin/read-compact-v2-usdc.rs) | [`read-compact-v2-pumpfun`](../../examples/read-compact-v2/src/bin/read-compact-v2-pumpfun.rs) | [`read-compact-v2-firewatch`](../../examples/read-compact-v2/src/bin/read-compact-v2-firewatch.rs) |
-| Indexer V3 | [`read-archive-v3-usdc`](../../examples/read-archive-v3/src/bin/read-archive-v3-usdc.rs) | [`read-archive-v3-pumpfun`](../../examples/read-archive-v3/src/bin/read-archive-v3-pumpfun.rs) | [`read-archive-v3-firewatch`](../../examples/read-archive-v3/src/bin/read-archive-v3-firewatch.rs) |
+| CAR | [`read-car-usdc`](../../examples/read-car/src/bin/read-car-usdc.rs) | [`read-car-pumpfun`](../../examples/read-car/src/bin/read-car-pumpfun.rs) | [`read-car-user-program-index`](../../examples/read-car/src/bin/read-car-user-program-index.rs) |
+| Compact V2 | [`read-compact-v2-usdc`](../../examples/read-compact-v2/src/bin/read-compact-v2-usdc.rs) | [`read-compact-v2-pumpfun`](../../examples/read-compact-v2/src/bin/read-compact-v2-pumpfun.rs) | [`read-compact-v2-user-program-index`](../../examples/read-compact-v2/src/bin/read-compact-v2-user-program-index.rs) |
+| Indexer V3 | [`read-archive-v3-usdc`](../../examples/read-archive-v3/src/bin/read-archive-v3-usdc.rs) | [`read-archive-v3-pumpfun`](../../examples/read-archive-v3/src/bin/read-archive-v3-pumpfun.rs) | [`read-archive-v3-user-program-index`](../../examples/read-archive-v3/src/bin/read-archive-v3-user-program-index.rs) |
 
 The Compact V2 and Indexer V3 packages also have a small ordered slot-hour
 reader. It scans the complete epoch and prints one count row for each fixed

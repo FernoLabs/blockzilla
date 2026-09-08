@@ -21,7 +21,7 @@ use blockzilla_example_workloads::{CoverageReport, FinishedOutput, OutputReport}
 pub const DEFAULT_ORIGIN: &str =
     "https://blockzilla-archive-samples-v1.cheron-augustin.workers.dev";
 pub const DEFAULT_EPOCH: u64 = 900;
-pub const DEFAULT_FIREWATCH_WALLET: &str = "5LikTUsx695BHRipWoRrn6YmTQEcPrvbR8YaHxdSRQo8";
+pub const DEFAULT_USER_PROGRAM_INDEX_WALLET: &str = "5LikTUsx695BHRipWoRrn6YmTQEcPrvbR8YaHxdSRQo8";
 pub const SAMPLE_EPOCHS: [u64; 11] = [0, 100, 200, 300, 400, 500, 600, 700, 800, 900, 1_000];
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -112,7 +112,7 @@ fn flag_arguments(
     let mut cache_root = None;
     let mut output = None;
     let mut threads = CompactV2ParallelScanConfig::default().workers;
-    let mut target = target_name.map(|_| DEFAULT_FIREWATCH_WALLET.to_owned());
+    let mut target = target_name.map(|_| DEFAULT_USER_PROGRAM_INDEX_WALLET.to_owned());
     let mut values = values.into_iter();
 
     while let Some(flag) = values.next() {
@@ -369,7 +369,7 @@ pub fn finish_count(
     let logical_bytes = receipt.io.source_read_bytes.unwrap_or(0);
 
     println!(
-        "format=compact-v2 workload=slot-hours epoch={} source={} threads={} requested_workers={} effective_workers={} max_active_workers={} blocks={} transactions={} instructions={} recorded_inner_instructions={} transactions_with_incomplete_instructions={} transactions_with_incomplete_cpi={} setup_s={:.6} scan_s={:.6} total_s={:.6} scan_tps={:.3} total_tps={:.3} bound_source_size_bytes={} scan_logical_read_calls={} scan_logical_read_bytes={} scan_logical_read_mb_s={:.6} setup_network_bytes={} scan_network_bytes={} total_network_bytes={} scan_network_mb_s={:.6} total_network_mb_s={:.6} setup_cache_read_bytes={} scan_cache_read_bytes={} total_cache_read_bytes={} setup_local_read_calls={} scan_local_read_calls={} total_local_read_calls={} setup_local_read_bytes={} scan_local_read_bytes={} total_local_read_bytes={} scan_local_read_mb_s={:.6} total_local_read_mb_s={:.6}",
+        "format=compact-v2 workload=slot-hours epoch={} source={} threads={} requested_workers={} effective_workers={} max_active_workers={} blocks={} transactions={} instructions={} recorded_inner_instructions={} transactions_with_incomplete_instructions={} transactions_with_incomplete_cpi={} setup_s={:.6} scan_s={:.6} total_s={:.6} scan_tps={:.3} total_tps={:.3} bound_source_size_bytes={} scan_logical_read_calls={} scan_logical_read_bytes={} scan_logical_read_mb_s={:.6} setup_network_bytes={} scan_network_bytes={} total_network_bytes={} scan_network_mb_s={:.6} total_network_mb_s={:.6} setup_cache_read_bytes={} scan_cache_read_bytes={} total_cache_read_bytes={} setup_local_read_calls={} scan_local_read_calls={} total_local_read_calls={} setup_local_read_bytes={} scan_local_read_bytes={} total_local_read_bytes={} scan_local_read_mb_s={:.6} total_local_read_mb_s={:.6} {}",
         arguments.epoch,
         source_name(&arguments.source),
         arguments.threads,
@@ -407,6 +407,7 @@ pub fn finish_count(
         total_io.local_read_bytes,
         decimal_mb_s(scan_io.local_read_bytes, scan_seconds_nonzero),
         decimal_mb_s(total_io.local_read_bytes, total_seconds_nonzero),
+        blockzilla_example_workloads::transport_metrics(setup_http, total_http),
     );
     Ok(())
 }
@@ -472,7 +473,7 @@ pub fn print_run(report: RunReport<'_>) {
     let total_http = report.total_io.http_and_cache;
     let logical_bytes = report.receipt.io.source_read_bytes.unwrap_or(0);
     println!(
-        "format=compact-v2 workload={} epoch={} source={} threads={} requested_workers={} effective_workers={} max_active_workers={} max_batch_blocks={} max_batch_transactions={} max_projected_block_bytes={} max_projected_batch_bytes={} registry_mode={} registry_prefetch_read_calls={} registry_prefetch_read_bytes={} registry_resident_bound_bytes={} blocks={} transactions={} setup_s={:.6} scan_s={:.6} total_s={:.6} scan_tps={:.3} total_tps={:.3} bound_source_size_bytes={} scan_logical_read_calls={} scan_logical_read_bytes={} scan_logical_read_mb_s={:.6} setup_network_bytes={} scan_network_bytes={} total_network_bytes={} scan_network_mb_s={:.6} total_network_mb_s={:.6} setup_cache_read_bytes={} scan_cache_read_bytes={} total_cache_read_bytes={} setup_local_read_calls={} scan_local_read_calls={} total_local_read_calls={} setup_local_read_bytes={} scan_local_read_bytes={} total_local_read_bytes={} scan_local_read_mb_s={:.6} total_local_read_mb_s={:.6} output_path={} output_schema={} output_rows={} output_bytes={} output_complete={} indeterminate_transactions={} coverage_sha256={}",
+        "format=compact-v2 workload={} epoch={} source={} threads={} requested_workers={} effective_workers={} max_active_workers={} max_batch_blocks={} max_batch_transactions={} max_projected_block_bytes={} max_projected_batch_bytes={} registry_mode={} registry_prefetch_read_calls={} registry_prefetch_read_bytes={} registry_resident_bound_bytes={} blocks={} transactions={} setup_s={:.6} scan_s={:.6} total_s={:.6} scan_tps={:.3} total_tps={:.3} bound_source_size_bytes={} scan_logical_read_calls={} scan_logical_read_bytes={} scan_logical_read_mb_s={:.6} setup_network_bytes={} scan_network_bytes={} total_network_bytes={} scan_network_mb_s={:.6} total_network_mb_s={:.6} setup_cache_read_bytes={} scan_cache_read_bytes={} total_cache_read_bytes={} setup_local_read_calls={} scan_local_read_calls={} total_local_read_calls={} setup_local_read_bytes={} scan_local_read_bytes={} total_local_read_bytes={} scan_local_read_mb_s={:.6} total_local_read_mb_s={:.6} output_path={} output_schema={} output_rows={} output_bytes={} output_complete={} indeterminate_transactions={} coverage_sha256={} {}",
         report.workload,
         report.arguments.epoch,
         source_name(&report.arguments.source),
@@ -522,6 +523,7 @@ pub fn print_run(report: RunReport<'_>) {
         report.output_complete,
         report.coverage.indeterminate_transactions,
         report.coverage.sha256_hex(),
+        blockzilla_example_workloads::transport_metrics(setup_http, total_http),
     );
 }
 
@@ -633,19 +635,22 @@ mod tests {
         };
         assert_eq!(origin, DEFAULT_ORIGIN);
 
-        let firewatch = arguments_from(
-            "read-compact-v2-firewatch",
+        let user_program_index = arguments_from(
+            "read-compact-v2-user-program-index",
             Some("wallet"),
             std::iter::empty(),
         )
         .unwrap();
-        assert_eq!(firewatch.target.as_deref(), Some(DEFAULT_FIREWATCH_WALLET));
+        assert_eq!(
+            user_program_index.target.as_deref(),
+            Some(DEFAULT_USER_PROGRAM_INDEX_WALLET)
+        );
     }
 
     #[test]
     fn local_mode_follows_the_public_key_layout() {
         let parsed = arguments_from(
-            "read-compact-v2-firewatch",
+            "read-compact-v2-user-program-index",
             Some("wallet"),
             [
                 "--archive-root",

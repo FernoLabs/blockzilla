@@ -1,5 +1,8 @@
 # V2 and V3 reader review — 2026-09-04
 
+Naming note: the wallet workload is now `user-program-index`. Saved commands,
+source references, and result IDs below keep their names from the recorded run.
+
 ## Scope and result
 
 This is a code review, not another benchmark pass. It covers the current dirty
@@ -39,10 +42,10 @@ is not the main cost. It does not prove a fixed disk bandwidth limit. Background
 NAS work and cache state differ between jobs. Cross-format parity for this new
 build is not yet established by these V2-only results.
 
-The existing V2 epoch 100 FireWatch failure remains:
+The existing V2 epoch 100 user-program-index failure remains:
 `inner instruction belongs to outer index 4, after failed outer index 3`.
 The count example does not check that same execution-boundary rule. A successful
-count run therefore does not prove that FireWatch will accept the archive. Do
+count run therefore does not prove that user-program-index will accept the archive. Do
 not suppress this error or include its partial run as a successful speed result.
 
 ## Findings, in proposed fix order
@@ -147,7 +150,7 @@ memory is needed.
 Acceptance, not run: equal-size repeated reads do not zero the whole destination;
 growth and smaller reads remain correct; no stale bytes are exposed on a failure.
 
-### 6. P2 — Pump.fun and FireWatch still allocate temporary CPI/loaded-key lists
+### 6. P2 — Pump.fun and user-program-index still allocate temporary CPI/loaded-key lists
 
 `crates/compact-v2/blockzilla-compact-v2-reader/src/metadata_projection.rs:754` allocates a CPI group
 vector and an instruction vector per nonempty group. At `:990`, loaded key IDs

@@ -17151,6 +17151,7 @@ fn ensure_profile_neutral_registry_lock_unchanged(
 }
 
 fn profile_neutral_controller_lock_path(config: &SchedulerConfig) -> PathBuf {
+    // Keep the persisted state path shared with existing controller deployments.
     config
         .state_root
         .join("firewatch-index")
@@ -17169,33 +17170,37 @@ fn try_exclusive_profile_neutral_controller_lock(
     let root = path
         .parent()
         .context("profile-neutral controller lock has no parent")?;
-    let root_before = fs::symlink_metadata(root)
-        .with_context(|| format!("inspect Firewatch controller root {}", root.display()))?;
+    let root_before = fs::symlink_metadata(root).with_context(|| {
+        format!(
+            "inspect User program index controller root {}",
+            root.display()
+        )
+    })?;
     anyhow::ensure!(
         root_before.file_type().is_dir()
             && root_before.uid() == unsafe { libc::geteuid() }
             && root_before.permissions().mode() & 0o022 == 0
             && fs::canonicalize(root)? == root,
-        "Firewatch controller root is not one canonical protected euid-owned directory"
+        "User program index controller root is not one canonical protected euid-owned directory"
     );
     let root_file = OpenOptions::new()
         .read(true)
         .custom_flags(libc::O_CLOEXEC | libc::O_NOFOLLOW | libc::O_DIRECTORY)
         .open(root)
-        .with_context(|| format!("open Firewatch controller root {}", root.display()))?;
+        .with_context(|| format!("open User program index controller root {}", root.display()))?;
     let opened_root = root_file.metadata()?;
     anyhow::ensure!(
         opened_root.file_type().is_dir()
             && opened_root.dev() == root_before.dev()
             && opened_root.ino() == root_before.ino(),
-        "Firewatch controller root changed while opening its lock"
+        "User program index controller root changed while opening its lock"
     );
     let file = OpenOptions::new()
         .read(true)
         .write(true)
         .custom_flags(libc::O_CLOEXEC | libc::O_NOFOLLOW | libc::O_NONBLOCK)
         .open(&path)
-        .with_context(|| format!("open Firewatch controller lock {}", path.display()))?;
+        .with_context(|| format!("open User program index controller lock {}", path.display()))?;
     let opened = file.metadata()?;
     let published = fs::symlink_metadata(&path)?;
     let root_after = fs::symlink_metadata(root)?;
@@ -17219,7 +17224,7 @@ fn try_exclusive_profile_neutral_controller_lock(
             && root_after.uid() == unsafe { libc::geteuid() }
             && root_after.permissions().mode() & 0o022 == 0
             && fs::canonicalize(root)? == root,
-        "Firewatch controller lock is not one stable private euid-owned file"
+        "User program index controller lock is not one stable private euid-owned file"
     );
     // The controller and every reviewed direct audit take this exact flock. Holding it from
     // before full validation through final proof publication excludes both launch paths.
@@ -17238,8 +17243,12 @@ fn try_exclusive_profile_neutral_controller_lock(
         {
             Ok(None)
         } else {
-            Err(error)
-                .with_context(|| format!("lock Firewatch controller guard {}", path.display()))
+            Err(error).with_context(|| {
+                format!(
+                    "lock User program index controller guard {}",
+                    path.display()
+                )
+            })
         }
     }
 }
@@ -17276,7 +17285,7 @@ fn ensure_profile_neutral_controller_lock_unchanged(
             && opened_root.dev() == root_metadata.dev()
             && opened_root.ino() == root_metadata.ino()
             && fs::canonicalize(root)? == root,
-        "Firewatch controller lock path changed during recovery"
+        "User program index controller lock path changed during recovery"
     );
     Ok(())
 }
@@ -17386,7 +17395,7 @@ where
         .insert(authority.epoch);
     ensure_profile_neutral_runtime_quiescent(runtime, authority.epoch)?;
     let controller_lock = try_exclusive_profile_neutral_controller_lock(config)?
-        .context("Firewatch controller or direct audit lock is still held")?;
+        .context("User program index controller or direct audit lock is still held")?;
     let registry_lock = try_exclusive_profile_neutral_registry_lock(config, authority.epoch)?
         .context("profile-neutral registry worker lock is still held")?;
     ensure_profile_neutral_process_scan_empty("registry writer", registry_writer_scan())?;

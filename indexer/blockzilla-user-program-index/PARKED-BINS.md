@@ -1,6 +1,6 @@
-# Parked binary: firewatch-index-controller
+# Parked binary: user-program-index-controller
 
-The source is retained at `src/bin/firewatch-index-controller.rs` in
+The source is retained at `src/bin/user-program-index-controller.rs` in
 `blockzilla-user-program-index`. It is not declared in `Cargo.toml`, so it is
 not built, including with `developer-tools`.
 

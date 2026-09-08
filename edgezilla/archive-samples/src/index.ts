@@ -283,8 +283,42 @@ async function cancelBody(object: R2ObjectBody): Promise<void> {
   }
 }
 
+// Log only slow or failed storage operations. Never consume the object body
+// here: these timings end when R2 returns its metadata and stream handle.
+async function observeR2<T>(
+  route: FileRoute,
+  operation: "head" | "get_full" | "get_range",
+  read: () => Promise<T>,
+  range?: ByteRange,
+): Promise<T> {
+  const started = performance.now();
+  const details = () => ({
+    event: "archive_sample_r2_operation",
+    operation,
+    key: route.key,
+    elapsed_ms: Math.max(0, Math.round(performance.now() - started)),
+    ...(range === undefined ? {} : { offset: range.start, length: range.length }),
+  });
+  let result: T;
+  try {
+    result = await read();
+  } catch (error) {
+    console.error(JSON.stringify({
+      ...details(),
+      outcome: "error",
+      error: error instanceof Error ? error.name : "unknown",
+    }));
+    throw error;
+  }
+  const timing = details();
+  if (timing.elapsed_ms >= 1_000) {
+    console.warn(JSON.stringify({ ...timing, outcome: "slow" }));
+  }
+  return result;
+}
+
 async function requireHead(env: Env, route: FileRoute): Promise<R2Object> {
-  const object = await env.ARCHIVE_BUCKET.head(route.key);
+  const object = await observeR2(route, "head", () => env.ARCHIVE_BUCKET.head(route.key));
   if (object === null) {
     throw new HttpError(404, "object_not_found");
   }
@@ -303,7 +337,7 @@ async function serveHead(request: Request, env: Env, route: FileRoute): Promise<
 }
 
 async function serveFull(request: Request, env: Env, route: FileRoute): Promise<Response> {
-  const object = await env.ARCHIVE_BUCKET.get(route.key);
+  const object = await observeR2(route, "get_full", () => env.ARCHIVE_BUCKET.get(route.key));
   if (object === null) {
     throw new HttpError(404, "object_not_found");
   }
@@ -337,10 +371,10 @@ async function serveRange(
   }
 
   const range = parseRange(rangeValue, head.size);
-  const object = await env.ARCHIVE_BUCKET.get(route.key, {
+  const object = await observeR2(route, "get_range", () => env.ARCHIVE_BUCKET.get(route.key, {
     onlyIf: { etagMatches: head.etag },
     range: { offset: range.start, length: range.length },
-  });
+  }), range);
   if (object === null) {
     throw new HttpError(404, "object_not_found");
   }

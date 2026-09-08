@@ -1,0 +1,88 @@
+{
+  "source": "docs/benchmarks/artifacts/early-reader-results-20260907T0526Z.json",
+  "source_sha256": "7544b7e62f9f265938ae62bb908df6a516e2cd56f50492b73009b25a24d5deef",
+  "snapshot_utc": "2026-09-07 05:25:58 UTC",
+  "winner_counts": {
+    "compact-v2": 13,
+    "indexer-v3": 31
+  },
+  "all_three_complete_groups": 24,
+  "provisional_groups": 20,
+  "incomplete_output_groups": 2,
+  "leads_below_one_percent": [
+    {
+      "epoch": 200,
+      "workload": "usdc",
+      "winner": "compact-v2",
+      "winner_total_tps": 9901492.697,
+      "winner_total_s": 21.969585,
+      "second_format": "indexer-v3",
+      "speed_ratio_to_second": 1.0070235737270412,
+      "lead_percent": 0.702357372704121,
+      "completed_formats": "compact-v2;indexer-v3;car",
+      "full_three_format": true,
+      "incomplete_output": false
+    },
+    {
+      "epoch": 900,
+      "workload": "pumpfun",
+      "winner": "compact-v2",
+      "winner_total_tps": 1707335.154,
+      "winner_total_s": 278.812751,
+      "second_format": "indexer-v3",
+      "speed_ratio_to_second": 1.008463626543393,
+      "lead_percent": 0.8463626543393055,
+      "completed_formats": "compact-v2;indexer-v3",
+      "full_three_format": false,
+      "incomplete_output": false
+    }
+  ],
+  "report_sha256": "f9a94a8715b174fe4fe713d87856e509ca294abf8e71bc2532b65dd92b63f6e9",
+  "files": [
+    {
+      "path": "docs/benchmarks/artifacts/early-reader-visuals-20260907T0526Z/tps-by-epoch.png",
+      "sha256": "d6f6c391563f86e578f8a1e9fb02db54d571c706b91814c7f6b8fb56fb38049a"
+    },
+    {
+      "path": "docs/benchmarks/artifacts/early-reader-visuals-20260907T0526Z/tps-by-epoch.svg",
+      "sha256": "7821313613884a82cd87eff815c2fe57ccf69115cb80c12c8d07c1d5d96444da"
+    },
+    {
+      "path": "docs/benchmarks/artifacts/early-reader-visuals-20260907T0526Z/logical-read-by-epoch.png",
+      "sha256": "3d8b8c025658fe5abbfd3892eafd7014c22099705b77c69154906074f0b05cb1"
+    },
+    {
+      "path": "docs/benchmarks/artifacts/early-reader-visuals-20260907T0526Z/logical-read-by-epoch.svg",
+      "sha256": "eda6fa7397bedcdbdffb116e83c246d6cb9857ea4d09cec2d055626dff564235"
+    },
+    {
+      "path": "docs/benchmarks/artifacts/early-reader-visuals-20260907T0526Z/v3-decoded-tps.png",
+      "sha256": "2dee356cb92db39b3de76ddafd6015ca60c269fd3e88373c803b4803fe350312"
+    },
+    {
+      "path": "docs/benchmarks/artifacts/early-reader-visuals-20260907T0526Z/v3-decoded-tps.svg",
+      "sha256": "73baa33cff498e3c9f7825259a6cdf5e1437a902ca1709ecdcbdaff78aa540c2"
+    },
+    {
+      "path": "docs/benchmarks/artifacts/early-reader-visuals-20260907T0526Z/speedup-vs-v2.png",
+      "sha256": "9cc43f13a8ff080fa33ac25ee0ab9d66c79c14e2d43786691e567e0074dab691"
+    },
+    {
+      "path": "docs/benchmarks/artifacts/early-reader-visuals-20260907T0526Z/speedup-vs-v2.svg",
+      "sha256": "dace455fbbaf962183913eca00f1060621c69df1379e3b4bc19de123993d27ad"
+    },
+    {
+      "path": "docs/benchmarks/artifacts/early-reader-visuals-20260907T0526Z/fastest-format.png",
+      "sha256": "5c7485f3244bcf89427531faa2a070d311b27b551c757cc796412b951806765d"
+    },
+    {
+      "path": "docs/benchmarks/artifacts/early-reader-visuals-20260907T0526Z/fastest-format.svg",
+      "sha256": "4a357aa567b5b010134738df894560bcf72b8b530b43bb698dd322a80810ebe4"
+    },
+    {
+      "path": "docs/benchmarks/artifacts/early-reader-visuals-20260907T0526Z/fastest-format.csv",
+      "sha256": "6b17dd7e135600ba991086da1f2a1db25a3c9d4acc3c4b9bada10f949963540d"
+    }
+  ],
+  "validation": "Rates recomputed; unique 132 local cases; all winner groups have equal transaction counts; pending values remain unavailable; source JSON unchanged."
+}

@@ -1,11 +1,14 @@
 # Reader ID filter pass — 4 September 2026
 
+Naming note: the wallet workload is now `user-program-index`. Saved commands,
+source references, and result IDs below keep their names from the recorded run.
+
 This is a focused SDK change. It is not a claim that all allocation or throughput
 work is complete. No archive data, scheduler, or compactor was changed.
 
 ## Changes
 
-The 12 binaries remain separate: count, USDC, Pump.fun, and FireWatch, each for
+The 12 binaries remain separate: count, USDC, Pump.fun, and user-program-index, each for
 CAR, Compact V2, and Indexer V3. Local and network inputs use the same projection
 code. Jetstreamer is not part of this build.
 
@@ -20,7 +23,7 @@ code. Jetstreamer is not part of this build.
 - USDC compares mint IDs before resolving output fields. Selected balance rows
   still need their owner and token-program keys to preserve the output schema.
   The shared dense registry policy remains available for this output work.
-- FireWatch compares signer IDs first. It materializes program keys only for
+- user-program-index compares signer IDs first. It materializes program keys only for
   successful transactions signed by the target wallet. The fixed output still
   contains real wallet and program public keys.
 - CAR borrows static and loaded key lanes instead of copying and joining them

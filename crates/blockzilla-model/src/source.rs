@@ -386,7 +386,7 @@ impl ScanRequest {
     ///
     /// Compact V2, Indexer V3, and CAR then avoid instruction-account-list
     /// public-key resolution and heap allocation. Other adapters can still
-    /// publish full account lists. Applications such as Pump.fun and FireWatch
+    /// publish full account lists. Applications such as Pump.fun and user-program-index
     /// do not use those lists.
     pub const fn without_instruction_accounts(mut self) -> Self {
         self.include_instruction_accounts = false;
@@ -478,6 +478,9 @@ pub struct ArchiveIoSnapshot {
     /// Full closed-range GET retries after incomplete response bodies.
     #[serde(default)]
     pub incomplete_body_retries: u64,
+    /// Range GET retries after transient HTTP server errors.
+    #[serde(default)]
+    pub server_error_retries: u64,
     /// Response-body bytes consumed across successful and failed attempts.
     pub network_body_bytes: u64,
     pub cache_hits: u64,
@@ -495,6 +498,9 @@ impl ArchiveIoSnapshot {
             incomplete_body_retries: self
                 .incomplete_body_retries
                 .saturating_sub(earlier.incomplete_body_retries),
+            server_error_retries: self
+                .server_error_retries
+                .saturating_sub(earlier.server_error_retries),
             network_body_bytes: self
                 .network_body_bytes
                 .saturating_sub(earlier.network_body_bytes),

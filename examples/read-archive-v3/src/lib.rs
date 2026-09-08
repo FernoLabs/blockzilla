@@ -22,7 +22,7 @@ use blockzilla_example_workloads::{CoverageReport, FinishedOutput, OutputReport}
 pub const DEFAULT_PUBLIC_ORIGIN: &str =
     "https://blockzilla-archive-samples-v1.cheron-augustin.workers.dev";
 pub const DEFAULT_SAMPLE_EPOCH: u64 = 900;
-pub const DEFAULT_FIREWATCH_WALLET: &str = "5LikTUsx695BHRipWoRrn6YmTQEcPrvbR8YaHxdSRQo8";
+pub const DEFAULT_USER_PROGRAM_INDEX_WALLET: &str = "5LikTUsx695BHRipWoRrn6YmTQEcPrvbR8YaHxdSRQo8";
 pub const SAMPLE_EPOCHS: [u64; 11] = [0, 100, 200, 300, 400, 500, 600, 700, 800, 900, 1000];
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -403,7 +403,7 @@ pub fn finish_count(
     let logical_bytes = receipt.io.source_read_bytes.unwrap_or(0);
 
     println!(
-        "format=indexer-v3 workload=slot-hours scan_kind=ordered-full-scan epoch={} source={} threads={} requested_workers={} effective_workers={} max_active_workers={} parallel_jobs={} projected_blocks={} registry_mode={} registry_prefetch_read_calls={} registry_prefetch_read_bytes={} blocks={} transactions={} instructions={} recorded_inner_instructions={} transactions_with_incomplete_instructions={} transactions_with_incomplete_cpi={} setup_s={:.6} scan_s={:.6} total_s={:.6} scan_tps={:.3} total_tps={:.3} bound_source_size_bytes={} scan_logical_read_calls={} scan_logical_read_bytes={} scan_logical_read_mb_s={:.6} setup_network_bytes={} scan_network_bytes={} total_network_bytes={} scan_network_mb_s={:.6} total_network_mb_s={:.6} setup_cache_read_bytes={} scan_cache_read_bytes={} total_cache_read_bytes={} setup_local_read_calls={} scan_local_read_calls={} total_local_read_calls={} setup_local_read_bytes={} scan_local_read_bytes={} total_local_read_bytes={} scan_local_read_mb_s={:.6} total_local_read_mb_s={:.6}",
+        "format=indexer-v3 workload=slot-hours scan_kind=ordered-full-scan epoch={} source={} threads={} requested_workers={} effective_workers={} max_active_workers={} parallel_jobs={} projected_blocks={} registry_mode={} registry_prefetch_read_calls={} registry_prefetch_read_bytes={} blocks={} transactions={} instructions={} recorded_inner_instructions={} transactions_with_incomplete_instructions={} transactions_with_incomplete_cpi={} setup_s={:.6} scan_s={:.6} total_s={:.6} scan_tps={:.3} total_tps={:.3} bound_source_size_bytes={} scan_logical_read_calls={} scan_logical_read_bytes={} scan_logical_read_mb_s={:.6} setup_network_bytes={} scan_network_bytes={} total_network_bytes={} scan_network_mb_s={:.6} total_network_mb_s={:.6} setup_cache_read_bytes={} scan_cache_read_bytes={} total_cache_read_bytes={} setup_local_read_calls={} scan_local_read_calls={} total_local_read_calls={} setup_local_read_bytes={} scan_local_read_bytes={} total_local_read_bytes={} scan_local_read_mb_s={:.6} total_local_read_mb_s={:.6} {}",
         arguments.epoch,
         workload_source_name(&arguments.source),
         arguments.threads,
@@ -446,6 +446,7 @@ pub fn finish_count(
         total_io.local_read_bytes,
         decimal_mb_s(scan_io.local_read_bytes, scan_seconds_nonzero),
         decimal_mb_s(total_io.local_read_bytes, total_seconds_nonzero),
+        blockzilla_example_workloads::transport_metrics(setup_http, total_http),
     );
     Ok(())
 }
@@ -605,7 +606,7 @@ pub fn print_run(report: RunReport<'_>) {
     let total_http = report.total_io.http_and_cache;
     let logical_bytes = report.source_io.source_read_bytes.unwrap_or(0);
     println!(
-        "format=indexer-v3 workload={} scan_kind={} epoch={} source={} threads={} requested_workers={} effective_workers={} max_active_workers={} parallel_jobs={} projected_blocks={} blocks_per_job_limit={} job_window_limit={} max_in_flight_jobs={} max_coordinator_pending_results={} max_result_channel_backlog={} max_coordinator_pending_projected_blocks={} declared_decoded_byte_limit={} transaction_limit={} max_in_flight_declared_decoded_bytes={} max_in_flight_transactions={} max_owned_payload_block_bytes={} max_in_flight_owned_payload_bytes={} global_projected_block_bound={} registry_mode={} registry_prefetch_read_calls={} registry_prefetch_read_bytes={} registry_resolutions={} registry_resident_payload_bytes={} requested_blocks={} requested_transactions={} candidate_blocks={} candidate_transactions={} skipped_blocks={} skipped_transactions={} decoded_blocks={} decoded_transactions={} setup_s={:.6} scan_s={:.6} total_s={:.6} scan_tps={:.3} total_tps={:.3} decoded_scan_tps={:.3} decoded_total_tps={:.3} bound_source_size_bytes={} scan_logical_read_calls={} scan_logical_read_bytes={} scan_logical_read_mb_s={:.6} setup_network_bytes={} scan_network_bytes={} total_network_bytes={} scan_network_mb_s={:.6} total_network_mb_s={:.6} setup_cache_read_bytes={} scan_cache_read_bytes={} total_cache_read_bytes={} setup_local_read_calls={} scan_local_read_calls={} total_local_read_calls={} setup_local_read_bytes={} scan_local_read_bytes={} total_local_read_bytes={} scan_local_read_mb_s={:.6} total_local_read_mb_s={:.6} output_path={} output_schema={} output_rows={} output_bytes={} output_complete={} indeterminate_transactions={} coverage_sha256={}",
+        "format=indexer-v3 workload={} scan_kind={} epoch={} source={} threads={} requested_workers={} effective_workers={} max_active_workers={} parallel_jobs={} projected_blocks={} blocks_per_job_limit={} job_window_limit={} max_in_flight_jobs={} max_coordinator_pending_results={} max_result_channel_backlog={} max_coordinator_pending_projected_blocks={} declared_decoded_byte_limit={} transaction_limit={} max_in_flight_declared_decoded_bytes={} max_in_flight_transactions={} max_owned_payload_block_bytes={} max_in_flight_owned_payload_bytes={} global_projected_block_bound={} registry_mode={} registry_prefetch_read_calls={} registry_prefetch_read_bytes={} registry_resolutions={} registry_resident_payload_bytes={} requested_blocks={} requested_transactions={} candidate_blocks={} candidate_transactions={} skipped_blocks={} skipped_transactions={} decoded_blocks={} decoded_transactions={} setup_s={:.6} scan_s={:.6} total_s={:.6} scan_tps={:.3} total_tps={:.3} decoded_scan_tps={:.3} decoded_total_tps={:.3} bound_source_size_bytes={} scan_logical_read_calls={} scan_logical_read_bytes={} scan_logical_read_mb_s={:.6} setup_network_bytes={} scan_network_bytes={} total_network_bytes={} scan_network_mb_s={:.6} total_network_mb_s={:.6} setup_cache_read_bytes={} scan_cache_read_bytes={} total_cache_read_bytes={} setup_local_read_calls={} scan_local_read_calls={} total_local_read_calls={} setup_local_read_bytes={} scan_local_read_bytes={} total_local_read_bytes={} scan_local_read_mb_s={:.6} total_local_read_mb_s={:.6} output_path={} output_schema={} output_rows={} output_bytes={} output_complete={} indeterminate_transactions={} coverage_sha256={} {}",
         report.workload,
         report.scan_kind,
         report.arguments.epoch,
@@ -676,6 +677,7 @@ pub fn print_run(report: RunReport<'_>) {
         report.output_complete,
         report.coverage.indeterminate_transactions,
         report.coverage.sha256_hex(),
+        blockzilla_example_workloads::transport_metrics(setup_http, total_http),
     );
 }
 
@@ -862,7 +864,7 @@ mod tests {
     #[test]
     fn parses_targeted_local_split_run() {
         let parsed = arguments_from(
-            "read-archive-v3-firewatch",
+            "read-archive-v3-user-program-index",
             Some("wallet"),
             [
                 "local-split",

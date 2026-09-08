@@ -56,8 +56,8 @@ use thiserror::Error;
 
 use crate::indexer_v3_postings::AdaptiveV3Reader;
 use crate::indexer_v3_wire::{
-    BlockRow, INDEX_FILE, Object, Reader, ReusableSemanticScanWorkspace, SemanticPlaneSelection,
-    SemanticTransaction, StandaloneFormat,
+    BlockRow, INDEX_FILE, Object, PrefetchedSemanticBatch, Reader, ReusableSemanticScanWorkspace,
+    SemanticPlaneSelection, SemanticTransaction, StandaloneFormat,
 };
 
 const REGISTRY_KEY_BYTES: usize = 32;
@@ -82,7 +82,12 @@ pub const INDEXER_V3_PARALLEL_DECLARED_DECODED_BYTE_LIMIT: u64 = 256 << 20;
 /// Maximum declared transactions across all assigned, unconsumed jobs.
 pub const INDEXER_V3_PARALLEL_TRANSACTION_LIMIT: u64 = 100_000;
 /// Maximum semantic buffer capacity retained by one worker between jobs.
-pub const INDEXER_V3_PARALLEL_RETAINED_WORKSPACE_LIMIT: usize = 64 << 20;
+pub const INDEXER_V3_PARALLEL_RETAINED_WORKSPACE_LIMIT: usize = 16 << 20;
+/// Shared compressed input, including queued and consumer-held groups.
+const NETWORK_INPUT_BYTE_LIMIT: usize = 64 << 20;
+/// Keep download grouping independent from four-block decode admission.
+const NETWORK_INPUT_GROUP_BYTES: usize = 16 << 20;
+const NETWORK_INPUT_GROUP_BLOCKS: usize = 128;
 /// Maximum retained allocation for one recycled outer transaction vector.
 pub const INDEXER_V3_PARALLEL_RETAINED_TRANSACTION_BUFFER_LIMIT: usize = 4 << 20;
 /// Maximum projection-scratch capacity retained by one worker between jobs.
@@ -352,6 +357,7 @@ impl TransactionProjectionScratch {
 
 #[derive(Debug)]
 struct ParallelScanJob {
+    prefetched: Option<Arc<PrefetchedSemanticBatch>>,
     id: usize,
     blocks: ParallelScanJobBlocks,
     resources: ParallelScanJobResources,
@@ -1974,7 +1980,7 @@ impl IndexerV3InstructionSource {
         request: &ScanRequest,
         _registry_policy: IndexerV3RegistryReadPolicy,
         workers: NonZeroUsize,
-        mut jobs: ParallelScanJobPlan,
+        jobs: ParallelScanJobPlan,
         mut consume: F,
     ) -> blockzilla_model::Result<ParallelScanTotals>
     where
@@ -2010,6 +2016,8 @@ impl IndexerV3InstructionSource {
         let result_channel_activity = Arc::new(ParallelResultChannelActivity::default());
         let owned_payload_tracker = Arc::new(ParallelOwnedPayloadTracker::default());
         let cancelled = Arc::new(AtomicBool::new(false));
+        let mut jobs =
+            ParallelInputJobs::new(jobs, self.context.source.recommended_read_concurrency() > 1)?;
         let mut next_job = jobs.next_job()?;
         #[cfg(test)]
         let initial_worker_barrier = self
@@ -2075,6 +2083,7 @@ impl IndexerV3InstructionSource {
                                 {
                                     barrier.wait();
                                 }
+                                semantic_workspace.set_prefetched(work.job.prefetched.clone());
                                 let result = source.decode_parallel_job(
                                     &request,
                                     work.job,
@@ -2085,6 +2094,9 @@ impl IndexerV3InstructionSource {
                                     Arc::clone(&owned_payload_tracker),
                                     worker,
                                 );
+                                // Input credit must be released before this worker
+                                // waits for another job, including on decode errors.
+                                semantic_workspace.set_prefetched(None);
                                 projection_scratch.shed_buffers_above(
                                     INDEXER_V3_PARALLEL_RETAINED_PROJECTION_SCRATCH_LIMIT,
                                 );
@@ -2106,6 +2118,7 @@ impl IndexerV3InstructionSource {
                                 )))
                             })
                         };
+                        semantic_workspace.set_prefetched(None);
                         #[cfg(test)]
                         let result = {
                             let mut result = result;
@@ -3730,6 +3743,168 @@ fn validate_parallel_job_output(
     Ok(())
 }
 
+/// Network batches are independent of four-block projection jobs. A single
+/// producer coalesces adjacent selected blocks, while the existing decoder
+/// pool consumes shared compressed planes. One byte budget includes queued,
+/// active and consumer-held input. Sparse gaps are never filled.
+struct ParallelInputJobs {
+    local: Option<ParallelScanJobPlan>,
+    receiver: Option<mpsc::Receiver<blockzilla_model::Result<VecDeque<ParallelScanJob>>>>,
+    pending: VecDeque<ParallelScanJob>,
+    producer: Option<thread::JoinHandle<()>>,
+    cancelled: Arc<AtomicBool>,
+}
+
+impl ParallelInputJobs {
+    fn new(mut plan: ParallelScanJobPlan, remote: bool) -> blockzilla_model::Result<Self> {
+        let cancelled = Arc::new(AtomicBool::new(false));
+        if !remote {
+            return Ok(Self {
+                local: Some(plan),
+                receiver: None,
+                pending: VecDeque::new(),
+                producer: None,
+                cancelled,
+            });
+        }
+        let (reader, selection) = match &plan {
+            ParallelScanJobPlan::Ordered {
+                reader, selection, ..
+            }
+            | ParallelScanJobPlan::Selected {
+                reader, selection, ..
+            } => (Arc::clone(reader), *selection),
+        };
+        let (sender, receiver) = mpsc::sync_channel(1);
+        let stop = Arc::clone(&cancelled);
+        let producer = thread::Builder::new()
+            .name("blockzilla-v3-input".into())
+            .spawn(move || {
+                let budget = blockzilla_source::input_budget::InputBudget::new(
+                    NETWORK_INPUT_BYTE_LIMIT,
+                    Arc::clone(&stop),
+                );
+                let result = catch_unwind(AssertUnwindSafe(|| -> blockzilla_model::Result<()> {
+                    let mut next = plan.next_job()?;
+                    while let Some(first) = next.take() {
+                        if stop.load(Ordering::Acquire) {
+                            return Ok(());
+                        }
+                        let start = first.blocks.get(0).expect("nonempty input job");
+                        let mut end = start + first.blocks.len();
+                        let contiguous = first.blocks.iter().eq(start..end);
+                        let mut bytes = if contiguous {
+                            reader
+                                .semantic_input_bytes(start..end, selection)
+                                .map_err(|e| {
+                                    source_error(IndexerV3InstructionSourceError::Reader(e))
+                                })?
+                        } else {
+                            usize::MAX
+                        };
+                        let mut group = VecDeque::from([first]);
+                        next = plan.next_job()?;
+                        while contiguous
+                            && bytes <= NETWORK_INPUT_GROUP_BYTES
+                            && end - start < NETWORK_INPUT_GROUP_BLOCKS
+                        {
+                            let Some(candidate) = next.as_ref() else {
+                                break;
+                            };
+                            let candidate_end = end + candidate.blocks.len();
+                            if candidate_end - start > NETWORK_INPUT_GROUP_BLOCKS
+                                || !candidate.blocks.iter().eq(end..candidate_end)
+                            {
+                                break;
+                            }
+                            let more = reader
+                                .semantic_input_bytes(end..candidate_end, selection)
+                                .map_err(|e| {
+                                source_error(IndexerV3InstructionSourceError::Reader(e))
+                            })?;
+                            if more > NETWORK_INPUT_GROUP_BYTES - bytes {
+                                break;
+                            }
+                            bytes += more;
+                            end = candidate_end;
+                            group.push_back(next.take().unwrap());
+                            next = plan.next_job()?;
+                        }
+                        if contiguous && bytes <= NETWORK_INPUT_GROUP_BYTES {
+                            // Vec's small-allocation minimum is also charged.
+                            let Some(permit) = budget.acquire(bytes + 8 * Object::ALL.len()) else {
+                                return Ok(());
+                            };
+                            let batch = reader
+                                .prefetch_semantic_input(start..end, selection, permit)
+                                .map_err(|e| {
+                                    source_error(IndexerV3InstructionSourceError::Reader(e))
+                                })?;
+                            for job in &mut group {
+                                job.prefetched = Some(Arc::clone(&batch));
+                            }
+                        }
+                        // Oversized jobs and jobs containing sparse gaps keep the
+                        // existing bounded per-job read path, without overfetch.
+                        if sender.send(Ok(group)).is_err() {
+                            return Ok(());
+                        }
+                    }
+                    Ok(())
+                }))
+                .unwrap_or_else(|_| {
+                    Err(QueryError::InvalidStream(
+                        "V3 input producer panicked".into(),
+                    ))
+                });
+                if let Err(error) = result {
+                    let _ = sender.send(Err(error));
+                }
+            })
+            .map_err(|e| {
+                QueryError::InvalidStream(format!("cannot create V3 input producer: {e}"))
+            })?;
+        Ok(Self {
+            local: None,
+            receiver: Some(receiver),
+            pending: VecDeque::new(),
+            producer: Some(producer),
+            cancelled,
+        })
+    }
+
+    fn next_job(&mut self) -> blockzilla_model::Result<Option<ParallelScanJob>> {
+        if let Some(plan) = self.local.as_mut() {
+            return plan.next_job();
+        }
+        if self.pending.is_empty() {
+            match self
+                .receiver
+                .as_ref()
+                .expect("remote input receiver")
+                .recv()
+            {
+                Ok(group) => self.pending = group?,
+                Err(_) => return Ok(None),
+            }
+        }
+        Ok(self.pending.pop_front())
+    }
+}
+
+impl Drop for ParallelInputJobs {
+    fn drop(&mut self) {
+        self.cancelled.store(true, Ordering::Release);
+        // Release credits and disconnect before joining a producer that may
+        // be waiting for either memory or a free queue slot.
+        self.pending.clear();
+        self.receiver.take();
+        if let Some(producer) = self.producer.take() {
+            let _ = producer.join();
+        }
+    }
+}
+
 impl ParallelScanJobPlan {
     fn ordered(
         reader: Arc<Reader>,
@@ -3807,6 +3982,7 @@ impl ParallelScanJobPlan {
                     }
                 }
                 let job = ParallelScanJob {
+                    prefetched: None,
                     id: *next_id,
                     blocks: ParallelScanJobBlocks::Ordered(start..end),
                     resources,
@@ -3847,6 +4023,7 @@ impl ParallelScanJobPlan {
                     }
                 }
                 let job = ParallelScanJob {
+                    prefetched: None,
                     id: *next_id,
                     blocks: ParallelScanJobBlocks::Selected {
                         all: Arc::clone(blocks),
@@ -4425,6 +4602,10 @@ impl CountingRangeSource {
 }
 
 impl RangeSource for CountingRangeSource {
+    fn recommended_read_concurrency(&self) -> usize {
+        self.inner.recommended_read_concurrency()
+    }
+
     fn size(&self, object: &str) -> blockzilla_source::SourceResult<Option<u64>> {
         self.inner.size(object)
     }
@@ -6581,7 +6762,7 @@ mod tests {
                     InstructionCoverage::Unknown(CoverageReason::ProjectionNotRequested)
                 );
             }
-            // FireWatch must still count all three signer transactions and its
+            // user-program-index must still count all three signer transactions and its
             // failed signer; unknown status must not become another failure.
             assert_eq!(
                 transactions
@@ -7420,6 +7601,162 @@ mod tests {
         assert_eq!(receipt.registry.prefetch_read_calls, 1);
         assert_eq!(receipt.registry.prefetch_read_bytes, 64);
         assert_eq!(receipt.registry.resident_payload_bytes, 64);
+    }
+
+    #[test]
+    fn network_input_groups_preserve_dense_and_sparse_outputs_with_fewer_reads() {
+        #[derive(Clone)]
+        struct RemoteFixture {
+            inner: LocalRangeSource,
+            remote: bool,
+            reads: Arc<Mutex<(usize, usize)>>,
+            fail: Arc<AtomicBool>,
+        }
+        impl RangeSource for RemoteFixture {
+            fn recommended_read_concurrency(&self) -> usize {
+                if self.remote { 8 } else { 1 }
+            }
+            fn size(&self, object: &str) -> blockzilla_source::SourceResult<Option<u64>> {
+                self.inner.size(object)
+            }
+            fn read_range(
+                &self,
+                object: &str,
+                offset: u64,
+                length: usize,
+            ) -> blockzilla_source::SourceResult<Vec<u8>> {
+                self.inner.read_range(object, offset, length)
+            }
+            fn read_range_into_slice(
+                &self,
+                object: &str,
+                offset: u64,
+                bytes: &mut [u8],
+            ) -> blockzilla_source::SourceResult<()> {
+                if object != INDEX_FILE {
+                    let mut reads = self.reads.lock().unwrap();
+                    reads.0 += 1;
+                    reads.1 += bytes.len();
+                    if self.fail.load(Ordering::Acquire) {
+                        return Err(blockzilla_source::SourceError::Protocol(
+                            "input fixture failure".into(),
+                        ));
+                    }
+                }
+                self.inner.read_range_into_slice(object, offset, bytes)
+            }
+        }
+        let fixture = Fixture::build(&[], raw_parallel_blocks(800), None, false, 2_000);
+        let request = ScanRequest::all()
+            .allow_unverified_source()
+            .allow_incomplete_instructions()
+            .allow_incomplete_cpi()
+            .allow_unknown_execution()
+            .without_instruction_data()
+            .without_primary_signatures();
+        for sparse in [false, true] {
+            let mut outputs = Vec::new();
+            let mut reads = Vec::new();
+            for remote in [false, true] {
+                let transport = RemoteFixture {
+                    inner: LocalRangeSource::new(fixture.directory.path()),
+                    remote,
+                    reads: Arc::new(Mutex::new((0, 0))),
+                    fail: Arc::new(AtomicBool::new(false)),
+                };
+                let mut source = IndexerV3InstructionSource::open_operator_trusted_source(
+                    Arc::new(transport.clone()),
+                    "input-fixture",
+                    FIRST_SLOT,
+                    "test-parallel-delay-first",
+                )
+                .unwrap();
+                *transport.reads.lock().unwrap() = (0, 0);
+                let mut blocks = Vec::new();
+                let mut sink = OwnedBlockSink {
+                    output: &mut blocks,
+                };
+                if sparse {
+                    source
+                        .scan_selected_blocks_parallel_with_registry_policy(
+                            &request,
+                            &[0, 1, 4, 5, 127, 128, 512, 799],
+                            IndexerV3RegistryReadPolicy::sparse_only(),
+                            NonZeroUsize::new(2).unwrap(),
+                            &mut sink,
+                        )
+                        .unwrap();
+                } else {
+                    let result = source
+                        .scan_ordered_parallel_with_registry_policy(
+                            &request,
+                            IndexerV3RegistryReadPolicy::sparse_only(),
+                            NonZeroUsize::new(12).unwrap(),
+                            &mut sink,
+                        )
+                        .unwrap();
+                    assert_eq!(result.parallel.blocks_per_job_limit, 4);
+                    assert_eq!(result.parallel.effective_workers, 12);
+                }
+                outputs.push(blocks);
+                reads.push(*transport.reads.lock().unwrap());
+            }
+            assert_eq!(outputs[0], outputs[1]);
+            assert_eq!(
+                reads[0].1, reads[1].1,
+                "prefetch must not read extra payload bytes"
+            );
+            if !sparse {
+                assert!(
+                    reads[1].0 * 4 < reads[0].0,
+                    "network input was not coalesced: {reads:?}"
+                );
+            }
+        }
+        // Failure and sink cancellation must disconnect and join the producer
+        // even with later input groups already queued.
+        for fail_input in [false, true] {
+            let transport = RemoteFixture {
+                inner: LocalRangeSource::new(fixture.directory.path()),
+                remote: true,
+                reads: Arc::new(Mutex::new((0, 0))),
+                fail: Arc::new(AtomicBool::new(false)),
+            };
+            let mut source = IndexerV3InstructionSource::open_operator_trusted_source(
+                Arc::new(transport.clone()),
+                "input-fixture",
+                FIRST_SLOT,
+                "input-errors",
+            )
+            .unwrap();
+            transport.fail.store(fail_input, Ordering::Release);
+            struct StopSink;
+            impl BlockSink for StopSink {
+                fn visit_block(
+                    &mut self,
+                    _block: blockzilla_model::BlockView<'_>,
+                ) -> blockzilla_model::Result<()> {
+                    Err(QueryError::InvalidStream("input-test sink stopped".into()))
+                }
+            }
+            let error = source
+                .scan_ordered_parallel_with_registry_policy(
+                    &request,
+                    IndexerV3RegistryReadPolicy::sparse_only(),
+                    NonZeroUsize::new(12).unwrap(),
+                    &mut StopSink,
+                )
+                .unwrap_err();
+            let message = format!("{error:?}");
+            assert!(
+                message.contains(if fail_input {
+                    "input fixture failure"
+                } else {
+                    "input-test sink stopped"
+                }),
+                "{message}"
+            );
+        }
     }
 
     #[test]

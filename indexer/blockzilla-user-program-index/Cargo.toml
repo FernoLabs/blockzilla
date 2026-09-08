@@ -75,18 +75,18 @@ path = "src/bin/archive-v2-lean-read-bench.rs"
 required-features = ["developer-tools"]
 
 [[bin]]
-name = "firewatch-wire-profile-audit-batch"
-path = "src/bin/firewatch-wire-profile-audit-batch.rs"
+name = "user-program-index-wire-profile-audit-batch"
+path = "src/bin/user-program-index-wire-profile-audit-batch.rs"
 required-features = ["developer-tools"]
 
 [[bin]]
-name = "firewatch-wire-profile-audit"
-path = "src/bin/firewatch-wire-profile-audit.rs"
+name = "user-program-index-wire-profile-audit"
+path = "src/bin/user-program-index-wire-profile-audit.rs"
 required-features = ["developer-tools"]
 
 [[bin]]
-name = "firewatch-wire-profile-marker-transition"
-path = "src/bin/firewatch-wire-profile-marker-transition.rs"
+name = "user-program-index-wire-profile-marker-transition"
+path = "src/bin/user-program-index-wire-profile-marker-transition.rs"
 required-features = ["developer-tools"]
 
 [[bin]]

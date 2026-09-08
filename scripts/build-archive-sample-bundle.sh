@@ -9,9 +9,9 @@ mkdir "$1"
 bundle=$(cd "$1" && pwd)
 cd "$repo"
 target=${CARGO_TARGET_DIR:-$repo/target}
-bins=(read-car read-car-usdc read-car-pumpfun read-car-firewatch)
+bins=(read-car read-car-usdc read-car-pumpfun read-car-user-program-index)
 for format in compact-v2 archive-v3; do
-  for workload in slot-hours usdc pumpfun firewatch; do
+  for workload in slot-hours usdc pumpfun user-program-index; do
     bins+=("read-$format-$workload")
   done
 done

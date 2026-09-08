@@ -1,5 +1,8 @@
 # Patched V2 SSD rerun — 6 September 2026
 
+Naming note: the wallet workload is now `user-program-index`. Saved commands,
+source references, and result IDs below keep their names from the recorded run.
+
 ## Scope
 
 Run the four separate V2 examples once on each sample epoch: 0, 100, 200, 300, 400, 500, 600, 700, 800, 900 and 1000. Use local SSD input and SSD output, twelve workers, and one example process at a time. No CAR/V3/network run, archive conversion, upload, or archive hash pass is part of this rerun.
@@ -14,7 +17,7 @@ Progress log: `/volume2/blockzilla-bench/control/v2-patched-20260906/run.log`.
 - USDC and Pump.fun exclude known failed transactions. The V2 SDK can use typed row status flags to omit their instruction/balance projection and selected signatures. Transaction headers and scan totals remain present. Unknown status is not silently skipped and remains a coverage issue.
 - USDC status selection retains its lightweight message-count/token-balance projection path for non-failed transactions; it does not enable full instruction projection.
 - The output schemas and magic values are versioned because the filtering changes their meaning: `BZUSDC02` and `BZPUMP02`. These are example output changes, not archive-format changes. Both reports include `skipped_failed_transactions`.
-- FireWatch already excludes failed transactions from its reached-program list; its behavior remains unchanged. The count example still counts all transactions and recorded inner instructions.
+- user-program-index already excludes failed transactions from its reached-program list; its behavior remains unchanged. The count example still counts all transactions and recorded inner instructions.
 - The CAR borrowed-array decoder rejects indefinite-length arrays and wrong CBOR types before iteration. This closes the reproduced `next` bypass. No CID lookup table or per-transaction allocation was added.
 
 The shared workload layer also makes the failure-filter semantics available when CAR/V3 examples are next rebuilt. The new early row-flag projection optimization is implemented for V2; other adapters may still project details before the workload rejects a failure.
@@ -23,7 +26,7 @@ The shared workload layer also makes the failure-filter semantics available when
 
 This remains the recorded-balance USDC workload, not the instruction-derived account tracker. Do not present its speed as a benchmark of account discovery.
 
-USDC/Pump.fun output and timing now reflect a changed filter. Compare elapsed time, transaction scan rate and read volume, but do not claim a pure reader speedup from that comparison alone. Count and FireWatch retain their old workload definitions. Old output files stay intact.
+USDC/Pump.fun output and timing now reflect a changed filter. Compare elapsed time, transaction scan rate and read volume, but do not claim a pure reader speedup from that comparison alone. Count and user-program-index retain their old workload definitions. Old output files stay intact.
 
 The runner stops on an execution error. It records `output_complete` separately; old source metadata can still make epoch 0 extraction incomplete. A V2-only parity value of PENDING means no other format was compared. Runner PASS is execution success, not proof of complete historical metadata.
 

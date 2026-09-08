@@ -37,11 +37,11 @@ pub enum StreamEvent {
 /// Overview is deliberately concise; `/epochs` retains and renders the
 /// complete non-finished queue.
 pub const OVERVIEW_EPOCH_LIMIT: usize = 12;
-/// Firewatch can cover hundreds of completed archive epochs. Overview keeps
+/// User program index can cover hundreds of completed archive epochs. Overview keeps
 /// the full counters but renders only an operator-focused sample.
-pub const OVERVIEW_FIREWATCH_LIMIT: usize = 16;
-const OVERVIEW_FIREWATCH_QUEUED_SAMPLE: usize = 8;
-const OVERVIEW_FIREWATCH_ACCEPTED_SAMPLE: usize = 4;
+pub const OVERVIEW_USER_PROGRAM_INDEX_LIMIT: usize = 16;
+const OVERVIEW_USER_PROGRAM_INDEX_QUEUED_SAMPLE: usize = 8;
+const OVERVIEW_USER_PROGRAM_INDEX_ACCEPTED_SAMPLE: usize = 4;
 
 /// Controls how much of a real snapshot reaches the rendered dashboard.
 /// This binary has no authentication of its own -- see
@@ -167,7 +167,7 @@ pub struct ProcessEntry {
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
-pub struct FirewatchIndexEntry {
+pub struct UserProgramIndexEntry {
     pub epoch: u32,
     pub state: String,
     pub phase: String,
@@ -182,7 +182,7 @@ pub struct FirewatchIndexEntry {
     pub write_mib_per_sec: Option<f64>,
 }
 
-impl FirewatchIndexEntry {
+impl UserProgramIndexEntry {
     pub fn counts_label(&self) -> String {
         match (self.wallet_count, self.relation_count) {
             (Some(wallets), Some(relations)) => format!(
@@ -333,22 +333,22 @@ pub struct DashboardState {
     pub registry_reprocess_epochs_total: u32,
     pub registry_reprocess_capacity_configured: u32,
     pub registry_reprocess_running: u32,
-    pub firewatch_enabled: bool,
-    pub firewatch_capacity_configured: u32,
-    pub firewatch_running: u32,
-    pub firewatch_epochs_total: u32,
-    pub firewatch_epochs_accepted: u32,
-    pub firewatch_epochs_queued: u32,
+    pub user_program_index_enabled: bool,
+    pub user_program_index_capacity_configured: u32,
+    pub user_program_index_running: u32,
+    pub user_program_index_epochs_total: u32,
+    pub user_program_index_epochs_accepted: u32,
+    pub user_program_index_epochs_queued: u32,
     /// Optional coverage fields distinguish an older migration-only
     /// controller from the all-archive controller without changing schema 1.
-    pub firewatch_archive_epochs_total: Option<u32>,
-    pub firewatch_epochs_eligible: Option<u32>,
-    pub firewatch_epochs_blocked_migration: Option<u32>,
-    pub firewatch_epochs_blocked_wire_profile: Option<u32>,
-    pub firewatch_queue_eta_secs: Option<u64>,
-    pub firewatch_next_epoch: Option<u32>,
-    pub firewatch_admission_blocked_reason: Option<String>,
-    pub firewatch_indexes: Vec<FirewatchIndexEntry>,
+    pub user_program_index_archive_epochs_total: Option<u32>,
+    pub user_program_index_epochs_eligible: Option<u32>,
+    pub user_program_index_epochs_blocked_migration: Option<u32>,
+    pub user_program_index_epochs_blocked_wire_profile: Option<u32>,
+    pub user_program_index_queue_eta_secs: Option<u64>,
+    pub user_program_index_next_epoch: Option<u32>,
+    pub user_program_index_admission_blocked_reason: Option<String>,
+    pub user_program_indexes: Vec<UserProgramIndexEntry>,
     pub live_capture_active: bool,
     pub epochs: Vec<EpochTask>,
     /// The currently-running `poh_signature_count_migration` lanes, one row
@@ -401,20 +401,20 @@ impl Default for DashboardState {
             registry_reprocess_epochs_total: 0,
             registry_reprocess_capacity_configured: 0,
             registry_reprocess_running: 0,
-            firewatch_enabled: false,
-            firewatch_capacity_configured: 0,
-            firewatch_running: 0,
-            firewatch_epochs_total: 0,
-            firewatch_epochs_accepted: 0,
-            firewatch_epochs_queued: 0,
-            firewatch_archive_epochs_total: None,
-            firewatch_epochs_eligible: None,
-            firewatch_epochs_blocked_migration: None,
-            firewatch_epochs_blocked_wire_profile: None,
-            firewatch_queue_eta_secs: None,
-            firewatch_next_epoch: None,
-            firewatch_admission_blocked_reason: None,
-            firewatch_indexes: Vec::new(),
+            user_program_index_enabled: false,
+            user_program_index_capacity_configured: 0,
+            user_program_index_running: 0,
+            user_program_index_epochs_total: 0,
+            user_program_index_epochs_accepted: 0,
+            user_program_index_epochs_queued: 0,
+            user_program_index_archive_epochs_total: None,
+            user_program_index_epochs_eligible: None,
+            user_program_index_epochs_blocked_migration: None,
+            user_program_index_epochs_blocked_wire_profile: None,
+            user_program_index_queue_eta_secs: None,
+            user_program_index_next_epoch: None,
+            user_program_index_admission_blocked_reason: None,
+            user_program_indexes: Vec::new(),
             live_capture_active: false,
             epochs: Vec::new(),
             poh_migration_lanes: Vec::new(),
@@ -502,41 +502,43 @@ impl DashboardState {
         )
     }
 
-    pub fn firewatch_summary_label(&self) -> String {
+    pub fn user_program_index_summary_label(&self) -> String {
         let failed = self
-            .firewatch_indexes
+            .user_program_indexes
             .iter()
             .filter(|entry| snapshot::normalize(&entry.state) == "failed")
             .count();
         let profile_audit = self
-            .firewatch_epochs_blocked_wire_profile
+            .user_program_index_epochs_blocked_wire_profile
             .unwrap_or_else(|| {
-                self.firewatch_indexes
+                self.user_program_indexes
                     .iter()
                     .filter(|entry| snapshot::normalize(&entry.state) == "profile_audit_required")
                     .count() as u32
             });
         format!(
             "{} accepted \u{b7} {} active \u{b7} {} queued \u{b7} {} failed \u{b7} {} awaiting profile audit",
-            format_thousands(self.firewatch_epochs_accepted as u64),
-            format_thousands(self.firewatch_running as u64),
-            format_thousands(self.firewatch_epochs_queued as u64),
+            format_thousands(self.user_program_index_epochs_accepted as u64),
+            format_thousands(self.user_program_index_running as u64),
+            format_thousands(self.user_program_index_epochs_queued as u64),
             format_thousands(failed as u64),
             format_thousands(profile_audit as u64)
         )
     }
 
-    pub fn firewatch_coverage_label(&self) -> String {
+    pub fn user_program_index_coverage_label(&self) -> String {
         let archive_total = self
-            .firewatch_archive_epochs_total
+            .user_program_index_archive_epochs_total
             .unwrap_or(self.archive_complete);
-        let blocked_migration = self.firewatch_epochs_blocked_migration.unwrap_or_else(|| {
-            self.registry_reprocess_epochs_total
-                .saturating_sub(self.registry_reprocess_epochs_done)
-        });
+        let blocked_migration = self
+            .user_program_index_epochs_blocked_migration
+            .unwrap_or_else(|| {
+                self.registry_reprocess_epochs_total
+                    .saturating_sub(self.registry_reprocess_epochs_done)
+            });
         match (
-            self.firewatch_epochs_eligible,
-            self.firewatch_epochs_blocked_wire_profile,
+            self.user_program_index_epochs_eligible,
+            self.user_program_index_epochs_blocked_wire_profile,
         ) {
             (Some(eligible), Some(blocked_wire_profile)) => format!(
                 "{} archive-complete \u{b7} {} indexable \u{b7} {} blocked by registry migration \u{b7} {} awaiting profile audit",
@@ -554,61 +556,61 @@ impl DashboardState {
             (None, _) => format!(
                 "{} archive-complete \u{b7} {} tracked by this controller \u{b7} {} blocked by registry migration",
                 format_thousands(archive_total as u64),
-                format_thousands(self.firewatch_epochs_total as u64),
+                format_thousands(self.user_program_index_epochs_total as u64),
                 format_thousands(blocked_migration as u64)
             ),
         }
     }
 
-    pub fn firewatch_next_label(&self) -> String {
-        self.firewatch_next_epoch
+    pub fn user_program_index_next_label(&self) -> String {
+        self.user_program_index_next_epoch
             .map(|epoch| format!("Epoch {epoch}"))
             .unwrap_or_else(|| "None queued".to_string())
     }
 
-    pub fn firewatch_capacity_label(&self) -> String {
+    pub fn user_program_index_capacity_label(&self) -> String {
         format!(
             "{} of {} workers active",
-            format_thousands(self.firewatch_running as u64),
-            format_thousands(self.firewatch_capacity_configured as u64)
+            format_thousands(self.user_program_index_running as u64),
+            format_thousands(self.user_program_index_capacity_configured as u64)
         )
     }
 
-    pub fn firewatch_queue_eta_label(&self) -> String {
-        self.firewatch_queue_eta_secs
+    pub fn user_program_index_queue_eta_label(&self) -> String {
+        self.user_program_index_queue_eta_secs
             .map(format_duration)
             .unwrap_or_else(|| "unknown".to_string())
     }
 
-    pub fn overview_firewatch_indexes(&self) -> Vec<&FirewatchIndexEntry> {
-        let mut candidates = self.firewatch_indexes.iter().collect::<Vec<_>>();
+    pub fn overview_user_program_indexes(&self) -> Vec<&UserProgramIndexEntry> {
+        let mut candidates = self.user_program_indexes.iter().collect::<Vec<_>>();
         candidates.sort_by(|left, right| {
-            firewatch_overview_priority(left)
-                .cmp(&firewatch_overview_priority(right))
+            user_program_index_overview_priority(left)
+                .cmp(&user_program_index_overview_priority(right))
                 .then_with(|| right.epoch.cmp(&left.epoch))
         });
 
         let mut visible = candidates
             .iter()
             .copied()
-            .filter(|entry| firewatch_overview_priority(entry) <= 1)
-            .take(OVERVIEW_FIREWATCH_LIMIT)
+            .filter(|entry| user_program_index_overview_priority(entry) <= 1)
+            .take(OVERVIEW_USER_PROGRAM_INDEX_LIMIT)
             .collect::<Vec<_>>();
 
-        append_firewatch_sample(
+        append_user_program_index_sample(
             &mut visible,
             &candidates,
-            OVERVIEW_FIREWATCH_QUEUED_SAMPLE,
+            OVERVIEW_USER_PROGRAM_INDEX_QUEUED_SAMPLE,
             "queued",
         );
-        append_firewatch_sample(
+        append_user_program_index_sample(
             &mut visible,
             &candidates,
-            OVERVIEW_FIREWATCH_ACCEPTED_SAMPLE,
+            OVERVIEW_USER_PROGRAM_INDEX_ACCEPTED_SAMPLE,
             "accepted",
         );
         for candidate in &candidates {
-            if visible.len() == OVERVIEW_FIREWATCH_LIMIT {
+            if visible.len() == OVERVIEW_USER_PROGRAM_INDEX_LIMIT {
                 break;
             }
             if !visible.iter().any(|entry| entry.epoch == candidate.epoch) {
@@ -616,16 +618,16 @@ impl DashboardState {
             }
         }
         visible.sort_by(|left, right| {
-            firewatch_overview_priority(left)
-                .cmp(&firewatch_overview_priority(right))
+            user_program_index_overview_priority(left)
+                .cmp(&user_program_index_overview_priority(right))
                 .then_with(|| right.epoch.cmp(&left.epoch))
         });
         visible
     }
 
-    pub fn firewatch_rows_label(&self) -> String {
-        let visible = self.overview_firewatch_indexes().len();
-        let reported = self.firewatch_indexes.len();
+    pub fn user_program_index_rows_label(&self) -> String {
+        let visible = self.overview_user_program_indexes().len();
+        let reported = self.user_program_indexes.len();
         if reported == 0 {
             "No detailed epoch rows reported".to_string()
         } else if visible == reported {
@@ -735,32 +737,34 @@ impl DashboardState {
             format_pct(self.registry_reprocess_pct()).into(),
         );
         map.insert(
-            "firewatch_summary_label".into(),
-            self.firewatch_summary_label().into(),
+            "user_program_index_summary_label".into(),
+            self.user_program_index_summary_label().into(),
         );
         map.insert(
-            "firewatch_coverage_label".into(),
-            self.firewatch_coverage_label().into(),
+            "user_program_index_coverage_label".into(),
+            self.user_program_index_coverage_label().into(),
         );
         map.insert(
-            "firewatch_next_label".into(),
-            self.firewatch_next_label().into(),
+            "user_program_index_next_label".into(),
+            self.user_program_index_next_label().into(),
         );
         map.insert(
-            "firewatch_queue_eta_label".into(),
-            self.firewatch_queue_eta_label().into(),
+            "user_program_index_queue_eta_label".into(),
+            self.user_program_index_queue_eta_label().into(),
         );
         map.insert(
-            "firewatch_capacity_label".into(),
-            self.firewatch_capacity_label().into(),
+            "user_program_index_capacity_label".into(),
+            self.user_program_index_capacity_label().into(),
         );
         map.insert(
-            "firewatch_rows_label".into(),
-            self.firewatch_rows_label().into(),
+            "user_program_index_rows_label".into(),
+            self.user_program_index_rows_label().into(),
         );
         map.insert(
-            "firewatch_admission_blocked_reason".into(),
-            self.firewatch_admission_blocked_reason.clone().into(),
+            "user_program_index_admission_blocked_reason".into(),
+            self.user_program_index_admission_blocked_reason
+                .clone()
+                .into(),
         );
         map.insert(
             "live_capture_active".into(),
@@ -813,8 +817,8 @@ impl DashboardState {
             map.insert(format!("{sig}_phase"), task.phase.clone().into());
         }
 
-        for index in self.overview_firewatch_indexes() {
-            let sig = format!("firewatch_epoch_{}", index.epoch);
+        for index in self.overview_user_program_indexes() {
+            let sig = format!("user_program_index_epoch_{}", index.epoch);
             map.insert(format!("{sig}_state"), index.state.clone().into());
             map.insert(format!("{sig}_phase"), index.phase.clone().into());
             map.insert(format!("{sig}_pct"), index.pct.into());
@@ -891,20 +895,22 @@ impl DashboardState {
             })
             .collect();
 
-        let firewatch_lanes: Vec<_> = snapshot
+        let user_program_index_lanes: Vec<_> = snapshot
             .lanes
             .iter()
             .filter(|lane| lane.kind == "firewatch_index")
             .filter(|lane| lane.epoch.is_some())
             .collect();
-        let firewatch_next_epoch = firewatch_lanes
+        let user_program_index_next_epoch = user_program_index_lanes
             .iter()
             .find(|lane| snapshot::normalize(&lane.state) == "queued")
             .and_then(|lane| lane.epoch);
-        let firewatch_indexes = firewatch_lanes
+        let user_program_indexes = user_program_index_lanes
             .iter()
-            .map(|lane| FirewatchIndexEntry {
-                epoch: lane.epoch.expect("filtered to Firewatch lanes with epochs"),
+            .map(|lane| UserProgramIndexEntry {
+                epoch: lane
+                    .epoch
+                    .expect("filtered to User program index lanes with epochs"),
                 state: snapshot::humanize(&lane.state),
                 phase: snapshot::humanize(&lane.phase),
                 pct: lane_progress_pct(&lane.progress),
@@ -930,18 +936,20 @@ impl DashboardState {
                 write_mib_per_sec: lane.progress.disk_write_mib_per_sec,
             })
             .collect();
-        let firewatch_enabled = summary.firewatch_index_epochs_total > 0
-            || summary.firewatch_index_capacity_configured > 0
-            || summary.firewatch_index_archive_epochs_total.is_some()
-            || summary.firewatch_index_epochs_eligible.is_some()
+        let user_program_index_enabled = summary.user_program_index_epochs_total > 0
+            || summary.user_program_index_capacity_configured > 0
+            || summary.user_program_index_archive_epochs_total.is_some()
+            || summary.user_program_index_epochs_eligible.is_some()
             || summary
-                .firewatch_index_epochs_blocked_migration
+                .user_program_index_epochs_blocked_migration
                 .is_some_and(|blocked| blocked > 0)
             || summary
-                .firewatch_index_epochs_blocked_wire_profile
+                .user_program_index_epochs_blocked_wire_profile
                 .is_some_and(|blocked| blocked > 0)
-            || !firewatch_lanes.is_empty()
-            || summary.firewatch_index_admission_blocked_reason.is_some();
+            || !user_program_index_lanes.is_empty()
+            || summary
+                .user_program_index_admission_blocked_reason
+                .is_some();
 
         let paused_lanes = snapshot
             .lanes
@@ -1069,27 +1077,29 @@ impl DashboardState {
             registry_reprocess_epochs_total: summary.registry_reprocess_epochs_total,
             registry_reprocess_capacity_configured: summary.registry_reprocess_capacity_configured,
             registry_reprocess_running: summary.registry_reprocess_running,
-            firewatch_enabled,
-            firewatch_capacity_configured: summary.firewatch_index_capacity_configured,
-            firewatch_running: summary.firewatch_index_running,
-            firewatch_epochs_total: summary.firewatch_index_epochs_total,
-            firewatch_epochs_accepted: summary.firewatch_index_epochs_accepted,
-            firewatch_epochs_queued: summary.firewatch_index_epochs_queued,
-            firewatch_archive_epochs_total: summary.firewatch_index_archive_epochs_total,
-            firewatch_epochs_eligible: summary.firewatch_index_epochs_eligible,
-            firewatch_epochs_blocked_migration: summary.firewatch_index_epochs_blocked_migration,
-            firewatch_epochs_blocked_wire_profile: summary
-                .firewatch_index_epochs_blocked_wire_profile,
-            firewatch_queue_eta_secs: summary
-                .firewatch_index_queue_eta_secs
+            user_program_index_enabled,
+            user_program_index_capacity_configured: summary.user_program_index_capacity_configured,
+            user_program_index_running: summary.user_program_index_running,
+            user_program_index_epochs_total: summary.user_program_index_epochs_total,
+            user_program_index_epochs_accepted: summary.user_program_index_epochs_accepted,
+            user_program_index_epochs_queued: summary.user_program_index_epochs_queued,
+            user_program_index_archive_epochs_total: summary
+                .user_program_index_archive_epochs_total,
+            user_program_index_epochs_eligible: summary.user_program_index_epochs_eligible,
+            user_program_index_epochs_blocked_migration: summary
+                .user_program_index_epochs_blocked_migration,
+            user_program_index_epochs_blocked_wire_profile: summary
+                .user_program_index_epochs_blocked_wire_profile,
+            user_program_index_queue_eta_secs: summary
+                .user_program_index_queue_eta_secs
                 .filter(|secs| secs.is_finite() && *secs >= 0.0)
                 .map(|secs| secs.round() as u64),
-            firewatch_next_epoch,
-            firewatch_admission_blocked_reason: summary
-                .firewatch_index_admission_blocked_reason
+            user_program_index_next_epoch,
+            user_program_index_admission_blocked_reason: summary
+                .user_program_index_admission_blocked_reason
                 .as_deref()
                 .map(|reason| redact_text(tier, reason)),
-            firewatch_indexes,
+            user_program_indexes,
             live_capture_active: snapshot
                 .live
                 .iter()
@@ -1148,7 +1158,7 @@ fn overview_priority(task: &EpochTask) -> u8 {
     }
 }
 
-fn firewatch_overview_priority(entry: &FirewatchIndexEntry) -> u8 {
+fn user_program_index_overview_priority(entry: &UserProgramIndexEntry) -> u8 {
     match snapshot::normalize(&entry.state).as_str() {
         "running" | "paused" => 0,
         "failed" | "blocked" | "profile_audit_required" => 1,
@@ -1158,15 +1168,15 @@ fn firewatch_overview_priority(entry: &FirewatchIndexEntry) -> u8 {
     }
 }
 
-fn append_firewatch_sample<'a>(
-    visible: &mut Vec<&'a FirewatchIndexEntry>,
-    candidates: &[&'a FirewatchIndexEntry],
+fn append_user_program_index_sample<'a>(
+    visible: &mut Vec<&'a UserProgramIndexEntry>,
+    candidates: &[&'a UserProgramIndexEntry],
     group_limit: usize,
     state: &str,
 ) {
     let mut added = 0;
     for candidate in candidates.iter().copied() {
-        if visible.len() == OVERVIEW_FIREWATCH_LIMIT || added == group_limit {
+        if visible.len() == OVERVIEW_USER_PROGRAM_INDEX_LIMIT || added == group_limit {
             break;
         }
         if snapshot::normalize(&candidate.state) == state
@@ -1281,11 +1291,11 @@ struct Shared {
     last_poh_lane_ids: Mutex<Vec<u32>>,
     /// Same idea for the currently rendered registry reprocess lanes.
     last_registry_reprocess_lane_ids: Mutex<Vec<u32>>,
-    /// Firewatch rows include terminal parity results as well as active and
+    /// User program index rows include terminal parity results as well as active and
     /// queued work. A state change must remorph the row so its status color
     /// remains correct, while scalar counts continue to use signal patches.
-    last_firewatch_rows: Mutex<Vec<(u32, String)>>,
-    last_firewatch_enabled: Mutex<bool>,
+    last_user_program_index_rows: Mutex<Vec<(u32, String)>>,
+    last_user_program_index_enabled: Mutex<bool>,
     /// The stable frame must morph when a previously live dashboard goes
     /// offline or an offline-first page receives its first snapshot.
     last_live: Mutex<bool>,
@@ -1339,8 +1349,8 @@ fn shared() -> &'static Shared {
             last_overview_epoch_ids: Mutex::new(Vec::new()),
             last_poh_lane_ids: Mutex::new(Vec::new()),
             last_registry_reprocess_lane_ids: Mutex::new(Vec::new()),
-            last_firewatch_rows: Mutex::new(Vec::new()),
-            last_firewatch_enabled: Mutex::new(initial.firewatch_enabled),
+            last_user_program_index_rows: Mutex::new(Vec::new()),
+            last_user_program_index_enabled: Mutex::new(initial.user_program_index_enabled),
             last_live: Mutex::new(initial.live),
             current: Mutex::new(initial),
             tx,
@@ -1402,12 +1412,12 @@ async fn publish(state: DashboardState) {
         .iter()
         .map(|task| task.epoch)
         .collect();
-    let firewatch_rows: Vec<(u32, String)> = state
-        .overview_firewatch_indexes()
+    let user_program_index_rows: Vec<(u32, String)> = state
+        .overview_user_program_indexes()
         .into_iter()
         .map(|index| (index.epoch, index.state.clone()))
         .collect();
-    let firewatch_enabled = state.firewatch_enabled;
+    let user_program_index_enabled = state.user_program_index_enabled;
     let live = state.live;
 
     *shared.current.lock().expect("state mutex poisoned") = state.clone();
@@ -1440,16 +1450,21 @@ async fn publish(state: DashboardState) {
         &shared.last_registry_reprocess_lane_ids,
         registry_reprocess_lane_ids,
     );
-    let firewatch_rows_changed = remember_if_changed(&shared.last_firewatch_rows, firewatch_rows);
-    let firewatch_enabled_changed =
-        remember_if_changed(&shared.last_firewatch_enabled, firewatch_enabled);
+    let user_program_index_rows_changed = remember_if_changed(
+        &shared.last_user_program_index_rows,
+        user_program_index_rows,
+    );
+    let user_program_index_enabled_changed = remember_if_changed(
+        &shared.last_user_program_index_enabled,
+        user_program_index_enabled,
+    );
     let live_changed = remember_if_changed(&shared.last_live, live);
     if epoch_membership_changed
         || overview_membership_changed
         || poh_membership_changed
         || registry_reprocess_membership_changed
-        || firewatch_rows_changed
-        || firewatch_enabled_changed
+        || user_program_index_rows_changed
+        || user_program_index_enabled_changed
         || live_changed
     {
         let _ = shared.tx.send(StreamEvent::Structure);
@@ -1803,8 +1818,8 @@ mod tests {
     /// every other global-state test.
     static GLOBAL_STATE_TEST_LOCK: Mutex<()> = Mutex::new(());
 
-    fn firewatch_entry(epoch: u32, state: &str) -> FirewatchIndexEntry {
-        FirewatchIndexEntry {
+    fn user_program_index_entry(epoch: u32, state: &str) -> UserProgramIndexEntry {
+        UserProgramIndexEntry {
             epoch,
             state: state.into(),
             phase: "target build".into(),
@@ -2167,20 +2182,20 @@ mod tests {
     }
 
     #[test]
-    fn firewatch_summary_and_per_epoch_build_evidence_map_to_live_signals() {
+    fn user_program_index_summary_and_per_epoch_build_evidence_map_to_live_signals() {
         let snapshot = PipelineSnapshot {
             summary: snapshot::PipelineSummary {
-                firewatch_index_capacity_configured: 1,
-                firewatch_index_running: 1,
-                firewatch_index_epochs_total: 3,
-                firewatch_index_epochs_accepted: 1,
-                firewatch_index_epochs_queued: 1,
-                firewatch_index_archive_epochs_total: Some(736),
-                firewatch_index_epochs_eligible: Some(729),
-                firewatch_index_epochs_blocked_migration: Some(7),
-                firewatch_index_epochs_blocked_wire_profile: Some(0),
-                firewatch_index_queue_eta_secs: Some(86_400.0),
-                firewatch_index_admission_blocked_reason: Some(
+                user_program_index_capacity_configured: 1,
+                user_program_index_running: 1,
+                user_program_index_epochs_total: 3,
+                user_program_index_epochs_accepted: 1,
+                user_program_index_epochs_queued: 1,
+                user_program_index_archive_epochs_total: Some(736),
+                user_program_index_epochs_eligible: Some(729),
+                user_program_index_epochs_blocked_migration: Some(7),
+                user_program_index_epochs_blocked_wire_profile: Some(0),
+                user_program_index_queue_eta_secs: Some(86_400.0),
+                user_program_index_admission_blocked_reason: Some(
                     "archive compaction has storage priority".into(),
                 ),
                 ..Default::default()
@@ -2220,51 +2235,54 @@ mod tests {
         };
 
         let state = DashboardState::from_snapshot(&snapshot, RedactionTier::Full);
-        assert!(state.firewatch_enabled);
+        assert!(state.user_program_index_enabled);
         assert_eq!(
             state.tasks_active, 1,
-            "queued Firewatch rows are not active"
+            "queued User program index rows are not active"
         );
-        assert_eq!(state.firewatch_next_epoch, Some(900));
-        assert_eq!(state.firewatch_indexes.len(), 2);
-        assert_eq!(state.firewatch_indexes[0].phase, "canonical build");
+        assert_eq!(state.user_program_index_next_epoch, Some(900));
+        assert_eq!(state.user_program_indexes.len(), 2);
+        assert_eq!(state.user_program_indexes[0].phase, "canonical build");
         assert_eq!(
-            state.firewatch_summary_label(),
+            state.user_program_index_summary_label(),
             "1 accepted \u{b7} 1 active \u{b7} 1 queued \u{b7} 0 failed \u{b7} 0 awaiting profile audit"
         );
         assert_eq!(
-            state.firewatch_coverage_label(),
+            state.user_program_index_coverage_label(),
             "736 archive-complete \u{b7} 729 indexable \u{b7} 7 blocked by registry migration \u{b7} 0 awaiting profile audit"
         );
-        assert_eq!(state.firewatch_queue_eta_label(), "1d 0h");
+        assert_eq!(state.user_program_index_queue_eta_label(), "1d 0h");
         assert_eq!(
-            state.firewatch_indexes[0].counts_label(),
+            state.user_program_indexes[0].counts_label(),
             "2,045,290 wallets \u{b7} 6,018,402 relations"
         );
-        assert_eq!(state.firewatch_indexes[0].parity_label(), "pending");
+        assert_eq!(state.user_program_indexes[0].parity_label(), "pending");
         assert_eq!(
-            state.firewatch_indexes[0].resources_label(),
+            state.user_program_indexes[0].resources_label(),
             "900.0 MiB RSS \u{b7} 82.5/3.2 MiB/s R/W"
         );
 
         let signals = state.to_signals();
-        assert_eq!(signals["firewatch_next_label"], "Epoch 900");
-        assert_eq!(signals["firewatch_queue_eta_label"], "1d 0h");
+        assert_eq!(signals["user_program_index_next_label"], "Epoch 900");
+        assert_eq!(signals["user_program_index_queue_eta_label"], "1d 0h");
         assert_eq!(
-            signals["firewatch_coverage_label"],
+            signals["user_program_index_coverage_label"],
             "736 archive-complete \u{b7} 729 indexable \u{b7} 7 blocked by registry migration \u{b7} 0 awaiting profile audit"
         );
-        assert_eq!(signals["firewatch_epoch_301_pct"], 62);
-        assert_eq!(signals["firewatch_epoch_301_phase"], "canonical build");
+        assert_eq!(signals["user_program_index_epoch_301_pct"], 62);
         assert_eq!(
-            signals["firewatch_epoch_301_counts"],
+            signals["user_program_index_epoch_301_phase"],
+            "canonical build"
+        );
+        assert_eq!(
+            signals["user_program_index_epoch_301_counts"],
             "2,045,290 wallets \u{b7} 6,018,402 relations"
         );
-        assert_eq!(signals["firewatch_epoch_301_parity"], "pending");
+        assert_eq!(signals["user_program_index_epoch_301_parity"], "pending");
     }
 
     #[test]
-    fn firewatch_active_rows_show_measured_activity_when_progress_is_unavailable() {
+    fn user_program_index_active_rows_show_measured_activity_when_progress_is_unavailable() {
         let snapshot = PipelineSnapshot {
             lanes: vec![
                 snapshot::LaneStatus {
@@ -2301,36 +2319,36 @@ mod tests {
 
         let state = DashboardState::from_snapshot(&snapshot, RedactionTier::Full);
         assert_eq!(
-            state.firewatch_indexes[0].progress_label(),
+            state.user_program_indexes[0].progress_label(),
             "Working \u{b7} 378.9 MiB/s read \u{b7} ETA 3m 0s"
         );
         assert_eq!(
-            state.firewatch_indexes[1].progress_label(),
+            state.user_program_indexes[1].progress_label(),
             "Paused \u{b7} ETA 1m 30s"
         );
 
         let signals = state.to_signals();
         assert_eq!(
-            signals["firewatch_epoch_864_progress"],
+            signals["user_program_index_epoch_864_progress"],
             "Working \u{b7} 378.9 MiB/s read \u{b7} ETA 3m 0s"
         );
         assert_eq!(
-            signals["firewatch_epoch_865_progress"],
+            signals["user_program_index_epoch_865_progress"],
             "Paused \u{b7} ETA 1m 30s"
         );
     }
 
     #[test]
-    fn firewatch_profile_audit_rows_are_visible_but_not_active_work() {
+    fn user_program_index_profile_audit_rows_are_visible_but_not_active_work() {
         let snapshot = PipelineSnapshot {
             summary: snapshot::PipelineSummary {
-                firewatch_index_capacity_configured: 1,
-                firewatch_index_epochs_total: 3,
-                firewatch_index_epochs_accepted: 1,
-                firewatch_index_archive_epochs_total: Some(3),
-                firewatch_index_epochs_eligible: Some(2),
-                firewatch_index_epochs_blocked_migration: Some(0),
-                firewatch_index_epochs_blocked_wire_profile: Some(1),
+                user_program_index_capacity_configured: 1,
+                user_program_index_epochs_total: 3,
+                user_program_index_epochs_accepted: 1,
+                user_program_index_archive_epochs_total: Some(3),
+                user_program_index_epochs_eligible: Some(2),
+                user_program_index_epochs_blocked_migration: Some(0),
+                user_program_index_epochs_blocked_wire_profile: Some(1),
                 ..Default::default()
             },
             lanes: vec![
@@ -2365,30 +2383,33 @@ mod tests {
         let state = DashboardState::from_snapshot(&snapshot, RedactionTier::Full);
         assert_eq!(state.tasks_active, 0);
         assert_eq!(
-            state.firewatch_summary_label(),
+            state.user_program_index_summary_label(),
             "1 accepted \u{b7} 0 active \u{b7} 0 queued \u{b7} 1 failed \u{b7} 1 awaiting profile audit"
         );
         assert_eq!(
-            state.firewatch_coverage_label(),
+            state.user_program_index_coverage_label(),
             "3 archive-complete \u{b7} 2 indexable \u{b7} 0 blocked by registry migration \u{b7} 1 awaiting profile audit"
         );
         assert!(
             state
-                .overview_firewatch_indexes()
+                .overview_user_program_indexes()
                 .iter()
                 .any(|entry| entry.epoch == 12)
         );
         let signals = state.to_signals();
         assert_eq!(
-            signals["firewatch_epoch_12_state"],
+            signals["user_program_index_epoch_12_state"],
             "profile audit required"
         );
-        assert_eq!(signals["firewatch_epoch_12_phase"], "wire profile audit");
+        assert_eq!(
+            signals["user_program_index_epoch_12_phase"],
+            "wire profile audit"
+        );
     }
 
     #[test]
-    fn firewatch_queued_row_keeps_counter_label_when_progress_is_zero() {
-        let entry = FirewatchIndexEntry {
+    fn user_program_index_queued_row_keeps_counter_label_when_progress_is_zero() {
+        let entry = UserProgramIndexEntry {
             epoch: 900,
             state: "queued".into(),
             phase: "source build".into(),
@@ -2407,22 +2428,22 @@ mod tests {
     }
 
     #[test]
-    fn firewatch_overview_uses_a_bounded_priority_sample() {
+    fn user_program_index_overview_uses_a_bounded_priority_sample() {
         let mut indexes = vec![
-            firewatch_entry(1_000, "running"),
-            firewatch_entry(999, "paused"),
-            firewatch_entry(998, "failed"),
-            firewatch_entry(997, "blocked"),
+            user_program_index_entry(1_000, "running"),
+            user_program_index_entry(999, "paused"),
+            user_program_index_entry(998, "failed"),
+            user_program_index_entry(997, "blocked"),
         ];
-        indexes.extend((900..930).map(|epoch| firewatch_entry(epoch, "queued")));
-        indexes.extend((700..720).map(|epoch| firewatch_entry(epoch, "accepted")));
+        indexes.extend((900..930).map(|epoch| user_program_index_entry(epoch, "queued")));
+        indexes.extend((700..720).map(|epoch| user_program_index_entry(epoch, "accepted")));
         let state = DashboardState {
-            firewatch_indexes: indexes,
+            user_program_indexes: indexes,
             ..Default::default()
         };
 
-        let visible = state.overview_firewatch_indexes();
-        assert_eq!(visible.len(), OVERVIEW_FIREWATCH_LIMIT);
+        let visible = state.overview_user_program_indexes();
+        assert_eq!(visible.len(), OVERVIEW_USER_PROGRAM_INDEX_LIMIT);
         for epoch in [1_000, 999, 998, 997] {
             assert!(visible.iter().any(|entry| entry.epoch == epoch));
         }
@@ -2431,39 +2452,39 @@ mod tests {
                 .iter()
                 .filter(|entry| snapshot::normalize(&entry.state) == "accepted")
                 .count(),
-            OVERVIEW_FIREWATCH_ACCEPTED_SAMPLE
+            OVERVIEW_USER_PROGRAM_INDEX_ACCEPTED_SAMPLE
         );
         assert_eq!(
-            state.firewatch_rows_label(),
+            state.user_program_index_rows_label(),
             "Priority sample: 16 of 54 reported epochs. Project counts above include all reported epochs."
         );
 
         let signals = state.to_signals();
-        assert!(signals.get("firewatch_epoch_1000_state").is_some());
-        assert!(signals.get("firewatch_epoch_700_state").is_none());
+        assert!(signals.get("user_program_index_epoch_1000_state").is_some());
+        assert!(signals.get("user_program_index_epoch_700_state").is_none());
     }
 
     #[test]
-    fn legacy_firewatch_coverage_label_does_not_claim_full_eligibility() {
+    fn legacy_user_program_index_coverage_label_does_not_claim_full_eligibility() {
         let state = DashboardState {
             archive_complete: 736,
             registry_reprocess_epochs_total: 35,
             registry_reprocess_epochs_done: 28,
-            firewatch_epochs_total: 28,
+            user_program_index_epochs_total: 28,
             ..Default::default()
         };
         assert_eq!(
-            state.firewatch_coverage_label(),
+            state.user_program_index_coverage_label(),
             "736 archive-complete \u{b7} 28 tracked by this controller \u{b7} 7 blocked by registry migration"
         );
     }
 
     #[test]
-    fn firewatch_overlay_failure_reason_keeps_the_project_visible() {
+    fn user_program_index_overlay_failure_reason_keeps_the_project_visible() {
         let snapshot = PipelineSnapshot {
             summary: snapshot::PipelineSummary {
-                firewatch_index_admission_blocked_reason: Some(
-                    "Firewatch controller status unavailable".into(),
+                user_program_index_admission_blocked_reason: Some(
+                    "User program index controller status unavailable".into(),
                 ),
                 ..Default::default()
             },
@@ -2471,9 +2492,9 @@ mod tests {
         };
 
         let state = DashboardState::from_snapshot(&snapshot, RedactionTier::Full);
-        assert!(state.firewatch_enabled);
-        assert!(state.firewatch_indexes.is_empty());
-        assert_eq!(state.firewatch_epochs_accepted, 0);
+        assert!(state.user_program_index_enabled);
+        assert!(state.user_program_indexes.is_empty());
+        assert_eq!(state.user_program_index_epochs_accepted, 0);
     }
 
     #[test]

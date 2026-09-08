@@ -390,3 +390,71 @@ test("missing objects, query strings, and write methods fail closed", async () =
   assert.equal(write.status, 405);
   assert.equal(write.headers.get("allow"), "GET, HEAD");
 });
+
+test("slow R2 metadata and range reads have separate bounded logs and still stream", async (t) => {
+  let clock = 0;
+  t.mock.method(performance, "now", () => clock);
+  const logs = [];
+  t.mock.method(console, "warn", (message) => logs.push(JSON.parse(message)));
+  const object = bodyObject({ body: "abc", size: 100, range: { offset: 10, length: 3 } });
+  const response = await worker.fetch(
+    new Request(fileUrl("compact-v2", 900, "archive-v2-blocks.zstd"), { headers: { Range: "bytes=10-12" } }),
+    env({
+      async head() { clock += 1_200; return metadata(); },
+      async get(key, options) {
+        assert.deepEqual(options, { onlyIf: { etagMatches: ETAG }, range: { offset: 10, length: 3 } });
+        clock += 2_400;
+        return object;
+      },
+    }),
+  );
+  assert.equal(response.status, 206);
+  assert.equal(response.headers.get("Content-Range"), "bytes 10-12/100");
+  assert.equal(response.body, object.body);
+  assert.equal(response.bodyUsed, false);
+  assert.equal(await response.text(), "abc");
+  assert.deepEqual(logs, [
+    { event: "archive_sample_r2_operation", operation: "head", key: "compact-v2/900/archive-v2-blocks.zstd", elapsed_ms: 1_200, outcome: "slow" },
+    { event: "archive_sample_r2_operation", operation: "get_range", key: "compact-v2/900/archive-v2-blocks.zstd", elapsed_ms: 2_400, offset: 10, length: 3, outcome: "slow" },
+  ]);
+});
+
+test("R2 failures identify the operation without logging raw errors or changing the response", async (t) => {
+  for (const operation of ["head", "get_full", "get_range"]) {
+    await t.test(operation, async (t) => {
+      let clock = 0;
+      t.mock.method(performance, "now", () => clock);
+      const logs = [];
+      t.mock.method(console, "error", (message) => logs.push(JSON.parse(message)));
+      const fail = () => { clock += 19_400; throw new Error("private error detail must not be logged"); };
+      const response = await worker.fetch(
+        new Request(fileUrl("compact-v2", 900, "archive-v2-blocks.zstd"), {
+          method: operation === "head" ? "HEAD" : "GET",
+          headers: operation === "get_range" ? { Range: "bytes=10-12", Authorization: "private token" } : {},
+        }),
+        env({ async head() { return operation === "head" ? fail() : metadata(); }, async get() { return fail(); } }),
+      );
+      assert.equal(response.status, 500);
+      assert.deepEqual(await response.json(), { error: "internal_error" });
+      assert.equal(logs.length, 2);
+      const detail = logs.find((row) => row.event === "archive_sample_r2_operation");
+      assert.equal(detail.operation, operation);
+      assert.equal(detail.elapsed_ms, 19_400);
+      assert.equal(detail.outcome, "error");
+      assert.equal(detail.error, "Error");
+      assert.equal(JSON.stringify(logs).includes("private"), false);
+    });
+  }
+});
+
+test("fast R2 reads add no diagnostic log", async (t) => {
+  const logs = [];
+  t.mock.method(console, "warn", (value) => logs.push(value));
+  t.mock.method(console, "error", (value) => logs.push(value));
+  const response = await worker.fetch(
+    new Request(fileUrl("compact-v2", 900, "registry.bin"), { method: "HEAD" }),
+    env({ async head() { return metadata(); } }),
+  );
+  assert.equal(response.status, 200);
+  assert.deepEqual(logs, []);
+});

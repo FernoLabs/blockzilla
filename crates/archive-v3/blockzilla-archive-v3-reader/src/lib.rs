@@ -123,14 +123,32 @@ pub fn default_worker_count() -> NonZeroUsize {
 /// Persistent-cache layout for the expected read pattern.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
 pub enum IndexerV3CacheProfile {
+    /// Cache the block index only. Stream the selected transaction-directory
+    /// rows and payload planes through bounded input groups.
+    #[default]
+    Streaming,
     /// Cache the block index and complete transaction directory for an ordered
     /// scan. Cold setup can be large; later full scans use local directory
     /// reads.
-    #[default]
     Sequential,
     /// Cache only the block index and small reverse control objects. Candidate
     /// transaction-directory rows and semantic planes stay as bounded reads.
     Selective,
+}
+
+impl IndexerV3CacheProfile {
+    fn cached_objects<'a>(self, index: &'a str, directory: &'a str) -> Vec<&'a str> {
+        match self {
+            Self::Streaming => vec![index],
+            Self::Sequential => vec![index, directory],
+            Self::Selective => vec![
+                index,
+                REGISTRY_INDEX_OBJECT,
+                ADAPTIVE_V3_CONTROL_FILE,
+                ADAPTIVE_V3_COVERAGE_FILE,
+            ],
+        }
+    }
 }
 
 /// Network transport options.
@@ -480,17 +498,9 @@ impl IndexerV3Archive {
                 &REVERSE_OPTIONAL_OBJECTS,
             )));
         }
-        let cached_objects = match options.cache_profile {
-            IndexerV3CacheProfile::Sequential => {
-                vec![index_name, transaction_directory_name]
-            }
-            IndexerV3CacheProfile::Selective => vec![
-                index_name,
-                REGISTRY_INDEX_OBJECT,
-                ADAPTIVE_V3_CONTROL_FILE,
-                ADAPTIVE_V3_COVERAGE_FILE,
-            ],
-        };
+        let cached_objects = options
+            .cache_profile
+            .cached_objects(index_name, transaction_directory_name);
         let cached_source_size_bytes = selected_object_size(&objects, &cached_objects)?;
 
         let candidate_cache = cache_root
@@ -1436,6 +1446,7 @@ fn range_io_snapshot(cache: &CachedHttpRangeSource) -> ArchiveIoSnapshot {
         head_requests: http.head_requests,
         get_requests: http.get_requests,
         incomplete_body_retries: http.incomplete_body_retries,
+        server_error_retries: http.server_error_retries,
         network_body_bytes: http.returned_body_bytes,
         cache_hits: cache.cache_hits,
         cache_downloads: cache.cache_downloads,
@@ -1566,19 +1577,23 @@ mod tests {
                 "\"v\"",
             ),
         ];
+        let streaming = IndexerV3OpenOptions::default()
+            .cache_profile
+            .cached_objects(ledger[0], ledger[1]);
+        assert_eq!(streaming, vec![ledger[0]]);
+        assert_eq!(selected_object_size(&objects, &streaming).unwrap(), 100);
         assert_eq!(
-            selected_object_size(&objects, &[ledger[0], ledger[1]]).unwrap(),
+            selected_object_size(
+                &objects,
+                &IndexerV3CacheProfile::Sequential.cached_objects(ledger[0], ledger[1])
+            )
+            .unwrap(),
             300
         );
         assert_eq!(
             selected_object_size(
                 &objects,
-                &[
-                    ledger[0],
-                    REGISTRY_INDEX_OBJECT,
-                    ADAPTIVE_V3_CONTROL_FILE,
-                    ADAPTIVE_V3_COVERAGE_FILE,
-                ],
+                &IndexerV3CacheProfile::Selective.cached_objects(ledger[0], ledger[1]),
             )
             .unwrap(),
             220

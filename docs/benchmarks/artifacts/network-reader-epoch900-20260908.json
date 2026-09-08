@@ -1,0 +1,240 @@
+{
+  "schema": "blockzilla-accepted-network-baseline-v1",
+  "epoch": 900,
+  "acceptance_sha256": "6fb7f91b3d0ead35cba71b9ca3689c66768dd49721cbd037e1c295687ca6b0f5",
+  "results": [
+    {
+      "format": "compact-v2",
+      "workload": "slot-hours",
+      "status": "PASS",
+      "transactions": "476026811",
+      "total_s": "2515.875198",
+      "total_tps": "189209.231",
+      "scan_s": "2490.509450",
+      "scan_tps": "191136.320",
+      "total_network_bytes": "60811121562",
+      "total_network_mb_s": "24.170961",
+      "decoded_transactions": null,
+      "attempt": "/volume2/blockzilla-bench/results/all-samples-signer-fix-20260907T001310Z/network-epoch900-v2-v3-private-v1/jobs/compact-v2/network/epoch-900/slot-hours/attempt-001"
+    },
+    {
+      "format": "compact-v2",
+      "workload": "usdc",
+      "status": "PASS",
+      "transactions": "476026811",
+      "total_s": "2431.192484",
+      "total_tps": "195799.721",
+      "scan_s": "2390.169833",
+      "scan_tps": "199160.246",
+      "total_network_bytes": "60818622336",
+      "total_network_mb_s": "25.015963",
+      "decoded_transactions": null,
+      "attempt": "/volume2/blockzilla-bench/results/all-samples-signer-fix-20260907T001310Z/network-epoch900-v2-v3-private-v1/jobs/compact-v2/network/epoch-900/usdc/attempt-001"
+    },
+    {
+      "format": "compact-v2",
+      "workload": "pumpfun",
+      "status": "PASS",
+      "transactions": "476026811",
+      "total_s": "2151.124755",
+      "total_tps": "221292.052",
+      "scan_s": "2129.537562",
+      "scan_tps": "223535.297",
+      "total_network_bytes": "93197614784",
+      "total_network_mb_s": "43.325063",
+      "decoded_transactions": null,
+      "attempt": "/volume2/blockzilla-bench/results/all-samples-signer-fix-20260907T001310Z/network-epoch900-v2-v3-private-v1/jobs/compact-v2/network/epoch-900/pumpfun/attempt-001"
+    },
+    {
+      "format": "compact-v2",
+      "workload": "firewatch",
+      "status": "PASS",
+      "transactions": "476026811",
+      "total_s": "1962.236784",
+      "total_tps": "242593.970",
+      "scan_s": "1952.132719",
+      "scan_tps": "243849.614",
+      "total_network_bytes": "60818622336",
+      "total_network_mb_s": "30.994538",
+      "decoded_transactions": null,
+      "attempt": "/volume2/blockzilla-bench/results/all-samples-signer-fix-20260907T001310Z/network-epoch900-v2-v3-private-v1/jobs/compact-v2/network/epoch-900/firewatch/attempt-001"
+    },
+    {
+      "format": "indexer-v3",
+      "workload": "slot-hours",
+      "status": "PASS",
+      "transactions": "476026811",
+      "total_s": "4315.462298",
+      "total_tps": "110307.258",
+      "scan_s": "4283.622453",
+      "scan_tps": "111127.163",
+      "total_network_bytes": "29142900183",
+      "total_network_mb_s": "6.753135",
+      "decoded_transactions": null,
+      "attempt": "/volume2/blockzilla-bench/results/all-samples-signer-fix-20260907T001310Z/network-epoch900-v2-v3-private-v1/jobs/indexer-v3/network/epoch-900/slot-hours/attempt-001"
+    },
+    {
+      "format": "indexer-v3",
+      "workload": "usdc",
+      "status": "PASS",
+      "transactions": "476026811",
+      "total_s": "3545.643967",
+      "total_tps": "134256.799",
+      "scan_s": "3483.709018",
+      "scan_tps": "136643.677",
+      "total_network_bytes": "21018582198",
+      "total_network_mb_s": "5.928001",
+      "decoded_transactions": "476026811",
+      "attempt": "/volume2/blockzilla-bench/results/all-samples-signer-fix-20260907T001310Z/network-epoch900-v2-v3-private-v1/jobs/indexer-v3/network/epoch-900/usdc/attempt-001"
+    },
+    {
+      "format": "indexer-v3",
+      "workload": "pumpfun",
+      "status": "PASS",
+      "transactions": "476026811",
+      "total_s": "6605.370750",
+      "total_tps": "72066.630",
+      "scan_s": "6583.357654",
+      "scan_tps": "72307.603",
+      "total_network_bytes": "61196532065",
+      "total_network_mb_s": "9.264663",
+      "decoded_transactions": "470452521",
+      "attempt": "/volume2/blockzilla-bench/results/all-samples-signer-fix-20260907T001310Z/network-epoch900-v2-v3-private-v1/jobs/indexer-v3/network/epoch-900/pumpfun/attempt-001"
+    },
+    {
+      "format": "indexer-v3",
+      "workload": "firewatch",
+      "status": "PASS",
+      "transactions": "476026811",
+      "total_s": "14.980894",
+      "total_tps": "31775594.511",
+      "scan_s": "4.376522",
+      "scan_tps": "108768279.254",
+      "total_network_bytes": "451432426",
+      "total_network_mb_s": "30.133878",
+      "decoded_transactions": "11412",
+      "attempt": "/volume2/blockzilla-bench/results/all-samples-signer-fix-20260907T001310Z/network-epoch900-v2-v3-private-v1/jobs/indexer-v3/network/epoch-900/firewatch/attempt-001"
+    },
+    {
+      "format": "car",
+      "workload": "slot-hours",
+      "status": "PASS",
+      "transactions": "476026811",
+      "total_s": "2552.404642",
+      "total_tps": "186501.311",
+      "scan_s": "2550.852533",
+      "scan_tps": "186614.790",
+      "total_network_bytes": "527050782158",
+      "total_network_mb_s": "206.491860",
+      "decoded_transactions": null,
+      "attempt": "/volume2/blockzilla-bench/results/all-samples-signer-fix-20260907T001310Z/network-epoch900-car-count-private-v1/jobs/car/network/epoch-900/slot-hours/attempt-001"
+    }
+  ],
+  "jetstreamer": {
+    "state": "FAILED",
+    "accepted_as_full_epoch_benchmark": false,
+    "process": {
+      "exit_code": 1,
+      "timed_out": false,
+      "started_at": 1788819384.963479,
+      "finished_at": 1788820934.6799693,
+      "pid": 2700749,
+      "start_ticks": "22185026",
+      "command": [
+        "/volume2/blockzilla-bench/control/all-samples-38e1dca-20260906T203900Z/jetstreamer/bin/jetstreamer-count-reference",
+        "--epoch",
+        "900",
+        "--http-base",
+        "https://blockzilla-archive-samples-v1.cheron-augustin.workers.dev/car/",
+        "--index-base",
+        "https://blockzilla-archive-samples-v1.cheron-augustin.workers.dev/car/",
+        "--output",
+        "/volume2/blockzilla-bench/results/all-samples-signer-fix-20260907T001310Z/jetstreamer-epoch900/full-workers12/report.json",
+        "--workers",
+        "12",
+        "--start-slot",
+        "388800000",
+        "--end-slot-exclusive",
+        "389232000",
+        "--mode",
+        "decoded"
+      ],
+      "binary_sha256": "5a0a17b53e85a2de48caae864d69a0d1baa295e7ba25d892dd4c822d8c527a87"
+    },
+    "report_sha256": "52b3e68339c56c51a22254f6d9bf7ca2d94f7dcfe1d59e05751f83563d7f3308",
+    "blocks_before_stop": 24415,
+    "transaction_callbacks_before_stop": 27111371,
+    "scan_seconds_before_stop": 1549.321556311,
+    "errors": [
+      "upstream retry invalidates sample: slot=389162017 Timeout while waiting for operation: read_until_block",
+      "upstream retry invalidates sample: slot=389018336 Timeout while waiting for operation: read_until_block",
+      "upstream retry invalidates sample: slot=389053991 Timeout while waiting for operation: read_until_block",
+      "upstream retry invalidates sample: slot=388873990 Timeout while waiting for operation: read_until_block",
+      "upstream retry invalidates sample: slot=388910180 Timeout while waiting for operation: read_until_block",
+      "upstream retry invalidates sample: slot=388982095 Timeout while waiting for operation: read_until_block",
+      "upstream retry invalidates sample: slot=388838098 Timeout while waiting for operation: read_until_block",
+      "upstream retry invalidates sample: slot=389198022 Timeout while waiting for operation: read_until_block",
+      "upstream retry invalidates sample: slot=388945978 Timeout while waiting for operation: read_until_block",
+      "upstream retry invalidates sample: slot=389125544 Timeout while waiting for operation: read_until_block",
+      "upstream retry invalidates sample: slot=389089891 Timeout while waiting for operation: read_until_block",
+      "upstream retry invalidates sample: slot=388802291 Timeout while waiting for operation: read_until_block"
+    ],
+    "proofs": [
+      {
+        "status": "PASS",
+        "epoch": 900,
+        "blocks": 512,
+        "transactions": 545576,
+        "plan_parity": "EXACT_ORDERED_ROWS",
+        "processing_workers": 1,
+        "scan_seconds": 15.746970567,
+        "scan_transactions_s": 34646.410093845705,
+        "sampled_statistics_used_for_acceptance": false,
+        "retry_scope": "Reported firehose errors rejected; lower-level retries and reconnects are not counted",
+        "schema": "blockzilla-jetstreamer-plan-verification-v1",
+        "evidence": {
+          "plan": {
+            "path": "/volume2/blockzilla-bench/results/all-samples-signer-fix-20260907T001310Z/jetstreamer-epoch900/prefix-plan.json",
+            "sha256": "b64eb0060aa901c688e21f6358e025613f0c1715d91b9f720ca3011881e43ed2"
+          },
+          "report": {
+            "path": "/volume2/blockzilla-bench/results/all-samples-signer-fix-20260907T001310Z/jetstreamer-epoch900/proof-512-workers1/report.json",
+            "sha256": "2abbf7764641a350718b19bc1e84136e2090ffc582b8f7e39d6e2a115b28c019"
+          },
+          "process": {
+            "path": "/volume2/blockzilla-bench/results/all-samples-signer-fix-20260907T001310Z/jetstreamer-epoch900/proof-512-workers1/process.json",
+            "sha256": "0c2b45bc243888e00e4611541eec08dc08a9285aac727bd133123b51d3a14d0e"
+          }
+        }
+      },
+      {
+        "status": "PASS",
+        "epoch": 900,
+        "blocks": 512,
+        "transactions": 545576,
+        "plan_parity": "EXACT_ORDERED_ROWS",
+        "processing_workers": 12,
+        "scan_seconds": 26.992653006,
+        "scan_transactions_s": 20212.01842881942,
+        "sampled_statistics_used_for_acceptance": false,
+        "retry_scope": "Reported firehose errors rejected; lower-level retries and reconnects are not counted",
+        "schema": "blockzilla-jetstreamer-plan-verification-v1",
+        "evidence": {
+          "plan": {
+            "path": "/volume2/blockzilla-bench/results/all-samples-signer-fix-20260907T001310Z/jetstreamer-epoch900/prefix-plan.json",
+            "sha256": "b64eb0060aa901c688e21f6358e025613f0c1715d91b9f720ca3011881e43ed2"
+          },
+          "report": {
+            "path": "/volume2/blockzilla-bench/results/all-samples-signer-fix-20260907T001310Z/jetstreamer-epoch900/proof-512-workers12/report.json",
+            "sha256": "20e28be48471cf6e66e71493705307531631c0475821bde0a8fcd4c1d4a90dcb"
+          },
+          "process": {
+            "path": "/volume2/blockzilla-bench/results/all-samples-signer-fix-20260907T001310Z/jetstreamer-epoch900/proof-512-workers12/process.json",
+            "sha256": "30a02ec1b5510948868aeb071445bac20660523839ff9dd15ae701c8a0897791"
+          }
+        }
+      }
+    ],
+    "checked_at": 1788821873.9316502
+  }
+}

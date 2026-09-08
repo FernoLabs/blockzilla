@@ -11,7 +11,7 @@ documents rather than being duplicated here.
   without loading every registry. Consider a separate cross-epoch
   presence/translation index only if measured multi-epoch queries justify it.
 - Treat signer-to-program relations as a generic Blockzilla capability.
-  Firewatch is the first consumer, not the owner of the format. Its current
+  The external FireWatch app (`ferno-watcher`) is the first consumer, not the owner of the format. Its current
   semantics remain explicit: successful transactions only; every required
   signer maps to every directly or indirectly invoked program.
 - Keep broader account-to-program and inverse program-to-signer indexes as
@@ -38,8 +38,8 @@ This package includes the former Firebase indexer tools.
       latency before choosing production thread and shard settings.
 - [ ] Move full shard verification out of each lookup and benchmark a
       long-lived query service with verified handles cached.
-- [ ] Implement the Firewatch adapter and durable checkpoint described in
-      [Firewatch local archive indexing](docs/guides/firewatch-local-archive-indexing.md).
+- [ ] Implement the external FireWatch adapter and durable checkpoint described in
+      [External FireWatch local archive indexing](docs/guides/firewatch-local-archive-indexing.md).
 
 The detailed index status, validation gates, and remaining risks live in the
 [signer-to-program redesign](indexer/blockzilla-user-program-index/REDESIGN.md).

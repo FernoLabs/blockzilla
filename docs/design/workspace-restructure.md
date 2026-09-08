@@ -164,7 +164,7 @@ from the ordered reader's physical-order contract.
 4. Verify current archive message and metadata schemas, then finish the V2
    freeze. Only then remove legacy readers and wire-profile migration code.
    Moving a directory does not make it safe to delete.
-5. Restore the parked Firewatch controller and the excluded archive-token-events
+5. Restore the parked user-program-index controller and the excluded archive-token-events
    example against supported readers. Its obsolete source-spelling SDK test
    was removed; the example remains outside workspace CI until the port.
 6. Complete cross-format output and performance checks on the archive corpus.

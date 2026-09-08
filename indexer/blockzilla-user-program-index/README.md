@@ -103,8 +103,8 @@ The retained binaries are:
 
 - `archive-v2-account-projection` and `archive-v2-account-projection-verify`
 - `archive-v2-lean-read-bench`
-- `firewatch-wire-profile-audit` and `firewatch-wire-profile-audit-batch`
-- `firewatch-wire-profile-marker-transition`
+- `user-program-index-wire-profile-audit` and `user-program-index-wire-profile-audit-batch`
+- `user-program-index-wire-profile-marker-transition`
 - `index-bench` and `index-parity`
 
 ```sh
@@ -118,3 +118,33 @@ manifests. Each selected path still requires the manifest's exact binary hash.
 
 The controller remains parked. See [PARKED-BINS.md](PARKED-BINS.md) for its API
 blocker. [REDESIGN.md](REDESIGN.md) retains the earlier design and measurements.
+
+## Naming and compatibility
+
+The current project name is `user-program-index`. Operational binaries use
+`user-program-index-wire-profile-*`. The parked controller source is
+`user-program-index-controller.rs`. Optional Rust modules use
+`user_program_index_*`.
+
+The controller configuration uses `BLOCKZILLA_USER_PROGRAM_INDEX_*`; its output
+root variable is `BLOCKZILLA_USER_PROGRAM_INDEX_ROOT`. Old
+`BLOCKZILLA_FIREWATCH_*` variables remain fallback inputs for existing service
+configurations. A current variable takes precedence. New child processes use
+current attempt tags. Recovery also accepts an exact old attempt tag.
+
+These stored identifiers keep the legacy `firewatch` spelling:
+
+- Hash domains for canonical parity, generation identity, effective inputs,
+  profile authority and control bundles. Changing them would change identities
+  for unchanged data.
+- Audit and retry JSON `kind` values, batch receipt kinds, and generation IDs.
+  Existing manifests and receipts must still validate.
+- The scheduler `firewatch-index` state directory, accepted marker names, audit
+  scratch prefixes, and the `.firewatch-all-epochs-post.lock` name. Existing
+  state must resume under the same lock and cleanup ownership rules.
+
+The renamed batch scripts check both the current and old controller service
+names. They also detect an old `blockzilla-firebase-indexer` process. Existing
+immutable audit manifests may refer to that old executable path; their exact
+binary hash is still required. These names are compatibility identifiers, not
+separate projects or tools to install.

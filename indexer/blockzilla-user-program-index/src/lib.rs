@@ -15,10 +15,10 @@ pub mod signer_rank;
 // Historical wire-profile operations are opt-in so index library consumers do
 // not depend on the retired read SDK or the operational HTTP/process tooling.
 #[cfg(feature = "developer-tools")]
-pub mod firewatch_controller_cgroup;
+pub mod user_program_index_controller_cgroup;
 #[cfg(feature = "developer-tools")]
-pub mod firewatch_controller_eta;
+pub mod user_program_index_controller_eta;
 #[cfg(feature = "developer-tools")]
-pub mod firewatch_wire_profile_attestation;
+pub mod user_program_index_wire_profile_attestation;
 #[cfg(feature = "developer-tools")]
-pub mod firewatch_wire_profile_transition;
+pub mod user_program_index_wire_profile_transition;

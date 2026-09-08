@@ -194,7 +194,7 @@ restart adoption, progress-file configuration, and terminal validation.
 
 ## Validation gate
 
-Before starting Firewatch, require all of the following:
+Before starting user-program-index, require all of the following:
 
 1. `STATE_ROOT/registry_reprocess/epoch-N.json` is `state: "complete"`, has no
    PID/start-time claim, and names the expected immutable source and target.
@@ -217,7 +217,7 @@ discovered targets must pass the deep
 receipt-existence check is never sufficient. Preserve the child log and
 receipt with benchmark results.
 
-## Build and query the Firewatch index
+## Build and query the user-program-index index
 
 Use the exact target directory validated above. `build-dense` publishes its
 own output with no-clobber semantics, so the index output directory must not
@@ -236,7 +236,7 @@ TARGET_GENERATION_SHA256="$(
 blockzilla-user-program-index build-dense \
   --epoch "$EPOCH_NUMBER" \
   --archive "$TARGET_EPOCH_DIR" \
-  --out "$FIREWATCH_INDEX_DIR" \
+  --out "$USER_PROGRAM_INDEX_DIR" \
   --trust-local \
   --cluster-id mainnet-beta \
   --generation-id "$TARGET_GENERATION_SHA256" \
@@ -254,7 +254,7 @@ index-parity \
   --right-registry "$TARGET_EPOCH_DIR/registry.bin" \
   --sort-memory-mib 256 \
   --temp-dir "$SCRATCH_DIR" \
-  "$OLD_FIREWATCH_INDEX_DIR" "$FIREWATCH_INDEX_DIR"
+  "$OLD_USER_PROGRAM_INDEX_DIR" "$USER_PROGRAM_INDEX_DIR"
 ```
 
 Then query wallet-to-program relations against that same path:
@@ -262,7 +262,7 @@ Then query wallet-to-program relations against that same path:
 ```sh
 blockzilla-user-program-index query \
   --wallet "$WALLET_PUBKEY" \
-  --index "$FIREWATCH_INDEX_DIR" \
+  --index "$USER_PROGRAM_INDEX_DIR" \
   --archive "$TARGET_EPOCH_DIR" \
   --trust-local \
   --json
@@ -270,7 +270,7 @@ blockzilla-user-program-index query \
 
 Trusted-local binding records the original path and file identities. Its
 generation ID above is the receipt's exact target-generation digest, rather
-than a reusable epoch label, so the Firewatch index identity is tied to this
+than a reusable epoch label, so the user-program-index index identity is tied to this
 specific rewrite. Keep the target immutable and do not rename it between build
 and query. Once a valid generation manifest is published, omit `--trust-local`,
 `--cluster-id`, and `--generation-id`; queries against an index built in
@@ -282,7 +282,7 @@ There is no canonical cutover in this release. Rollback is therefore
 non-destructive:
 
 1. Set registry-reprocess concurrency back to `0` to stop new admissions.
-2. Stop directing Firewatch or other readers at the candidate target/index.
+2. Stop directing user-program-index or other readers at the candidate target/index.
 3. Continue serving the untouched `ARCHIVE_ROOT/epoch-N` source.
 4. Retain the candidate, receipt, marker, and logs for diagnosis; remove them
    only through a later explicit garbage-collection procedure after proving no

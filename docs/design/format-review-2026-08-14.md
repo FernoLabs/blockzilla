@@ -1,5 +1,9 @@
 # Format and upgrader review: the merged layout
 
+Historical design review: Firewatch below is the former name of the derived
+signer-to-program projection, now `user-program-index`. These observations
+describe the revision reviewed on 14 August.
+
 Date: 2026-08-14. **Rewritten.** The first draft of this file drew its size,
 object-count, speed and point-read evidence from the deleted 26-object,
 14-column layout and was wrong on every one of those numbers. All measurements

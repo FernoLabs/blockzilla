@@ -357,6 +357,29 @@ impl CachedHttpRangeSource {
         length: usize,
         destination: &mut Vec<u8>,
     ) -> SourceResult<()> {
+        if offset
+            .checked_add(length as u64)
+            .is_none_or(|end| end > entry.payload_length)
+        {
+            return Err(SourceError::OutOfBounds {
+                object: object.to_owned(),
+                offset,
+                length,
+                size: entry.payload_length,
+            });
+        }
+        destination.resize(length, 0);
+        self.read_cached_slice(object, entry, offset, destination)
+    }
+
+    fn read_cached_slice(
+        &self,
+        object: &str,
+        entry: &CacheEntry,
+        offset: u64,
+        destination: &mut [u8],
+    ) -> SourceResult<()> {
+        let length = destination.len();
         let length_u64 = u64::try_from(length).map_err(|_| SourceError::OutOfBounds {
             object: object.to_owned(),
             offset,
@@ -380,13 +403,7 @@ impl CachedHttpRangeSource {
             });
         }
         if length == 0 {
-            destination.clear();
             return Ok(());
-        }
-        if destination.len() < length {
-            destination.resize(length, 0);
-        } else {
-            destination.truncate(length);
         }
         let mut read = 0_usize;
         while read < length {
@@ -427,6 +444,22 @@ struct PlannedEntry {
 }
 
 impl RangeSource for CachedHttpRangeSource {
+    fn recommended_read_concurrency(&self) -> usize {
+        self.http.recommended_read_concurrency()
+    }
+
+    fn read_range_into_slice(
+        &self,
+        object: &str,
+        offset: u64,
+        destination: &mut [u8],
+    ) -> SourceResult<()> {
+        match self.entries.get(object) {
+            Some(entry) => self.read_cached_slice(object, entry, offset, destination),
+            None => self.http.read_range_into_slice(object, offset, destination),
+        }
+    }
+
     fn size(&self, object: &str) -> SourceResult<Option<u64>> {
         match self.entries.get(object) {
             Some(entry) => Ok(Some(entry.payload_length)),
@@ -1364,6 +1397,47 @@ mod tests {
             body.len()
         };
         stream.write_all(&body[..delivered]).unwrap();
+    }
+
+    #[test]
+    fn cached_and_remote_slice_reads_fill_exact_storage_and_check_bounds() {
+        let server = TestServer::start([
+            ("sidecar.bin", vec![0, 1, 2, 3, 4], "\"sidecar-v1\""),
+            ("payload.bin", vec![5, 6, 7, 8, 9], "\"payload-v1\""),
+        ]);
+        let directory = cache_tempdir();
+        let source = CachedHttpRangeSource::with_options(
+            server.source(),
+            directory.path(),
+            &["sidecar.bin"],
+            HttpRangeCacheOptions::default(),
+        )
+        .unwrap();
+        let before = source.http().stats();
+        let mut bytes = [99; 3];
+        source
+            .read_range_into_slice("sidecar.bin", 1, &mut bytes)
+            .unwrap();
+        assert_eq!(bytes, [1, 2, 3]);
+        assert_eq!(source.http().stats(), before);
+        source
+            .read_range_into_slice("payload.bin", 2, &mut bytes)
+            .unwrap();
+        assert_eq!(bytes, [7, 8, 9]);
+        assert_eq!(source.http().stats().get_requests, before.get_requests + 1);
+        assert!(matches!(
+            source.read_range_into_slice("sidecar.bin", 4, &mut bytes),
+            Err(SourceError::OutOfBounds { .. })
+        ));
+        assert_eq!(bytes, [7, 8, 9]);
+        source
+            .read_range_into_slice("sidecar.bin", 5, &mut [])
+            .unwrap();
+        assert!(
+            source
+                .read_range_into_slice("sidecar.bin", 6, &mut [])
+                .is_err()
+        );
     }
 
     #[test]

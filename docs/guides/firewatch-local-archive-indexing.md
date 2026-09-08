@@ -1,4 +1,8 @@
-# FireWatch local archive indexing
+# External FireWatch local archive indexing
+
+FireWatch in this guide is the external application in `ferno-watcher`.
+Blockzilla's signer-to-program index and reader workload are named
+`user-program-index`. The external application has not been renamed.
 
 Status: **developer handoff**. The Blockzilla read SDK and archive gateway cover
 completed, immutable Archive V2 generations. The FireWatch adapter, its durable

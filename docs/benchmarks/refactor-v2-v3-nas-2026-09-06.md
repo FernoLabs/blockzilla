@@ -1,5 +1,8 @@
 # Refactor V2/V3 NAS performance check
 
+Naming note: the wallet workload is now `user-program-index`. Saved commands,
+source references, and result IDs below keep their names from the recorded run.
+
 Status: the full matrix was stopped at the user's request after 29 completed
 jobs. Focused epoch-300 tests are complete: V2 USDC is 43.4% slower and
 Pump.fun is 14.5% slower in paired runs; all checked outputs match. V3 is
@@ -15,8 +18,8 @@ profile, `-C target-feature=+aes,+sse2`, matching the prior target and flags.
 All eight binaries built successfully and their transfer hashes match.
 
 The run selects the four dedicated examples (slot-hour count, USDC recorded
-balances, Pump.fun, and Firewatch) for epochs 0, 100, ..., 1000. It uses local
-SSD inputs and outputs, 12 reader workers, the same Firewatch wallet, and one
+balances, Pump.fun, and user-program-index) for epochs 0, 100, ..., 1000. It uses local
+SSD inputs and outputs, 12 reader workers, the same user-program-index wallet, and one
 example process at a time. It reads the frozen standalone V3 prototype; it
 does not benchmark the canonical V3 converter output.
 
@@ -55,7 +58,7 @@ affect the timings. It was not stopped by this benchmark task.
 
 At an earlier check, 17 of 88 jobs had completed without a reader error. This
 does not establish output parity or performance parity. For example, epoch-300
-V2 Firewatch took 117.57 seconds versus 117.63 seconds in the baseline, while
+V2 user-program-index took 117.57 seconds versus 117.63 seconds in the baseline, while
 V2 USDC took 112.14 seconds versus 76.45 seconds. The concurrent compression
 was still active; these are preliminary, uncontrolled measurements.
 

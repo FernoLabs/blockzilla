@@ -35,7 +35,7 @@ manual launch guard recognize the renamed binary and existing deployments.
 Immutable audit manifests can retain the old pinned executable path; new
 manifests can use the new name. Path order and binary hash checks remain.
 
-The already parked Firewatch controller and its design notes move with the
+The already parked user-program-index controller and its design notes move with the
 indexer. It is still excluded from builds because its manifest API needs a
 separate update. It is not counted as a supported binary.
 

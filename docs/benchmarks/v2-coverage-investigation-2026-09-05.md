@@ -1,5 +1,8 @@
 # V2 extraction coverage investigation
 
+Naming note: the wallet workload is now `user-program-index`. Saved commands,
+source references, and result IDs below keep their names from the recorded run.
+
 ## Read-rate audit resolved, 6 September
 
 The high USDC logical-byte rates are explained in [the read-rate audit](usdc-read-rate-audit-2026-09-06.md). Epochs 700, 800 and 1000 exceed the 1 GiB full-registry limit and use small per-worker caches. Repeated registry reads are largely served by the operating system's page cache. Independent process read-call counters confirm the high logical volume, while sampled storage reads are about 427–444 MB/s. These rates must not be published as physical SSD throughput. No performance change or rerun was made.
@@ -30,7 +33,7 @@ Saved evidence: [CAR/V2 comparison summary](car-v2-coverage-check-2026-09-06-sum
 
 ## State
 
-Benchmarks are stopped on user request. The full V2 SSD-input/SSD-output run completed 43 examples. Epoch 1000 FireWatch was interrupted; its partial output and logs are retained. No new reader benchmark, archive repair, or archive deletion was started.
+Benchmarks are stopped on user request. The full V2 SSD-input/SSD-output run completed 43 examples. Epoch 1000 user-program-index was interrupted; its partial output and logs are retained. No new reader benchmark, archive repair, or archive deletion was started.
 
 ## Confirmed evidence
 

@@ -1,0 +1,32 @@
+{
+  "schema": "blockzilla-reader-report-artifacts-v1",
+  "input_receipt_sha256": {
+    "combined-local-acceptance.json": "36b169032264873d94ddf6d83e7ec86acefc213358ce9a7a5816f9e80273d77c",
+    "network-acceptance.json": "6fb7f91b3d0ead35cba71b9ca3689c66768dd49721cbd037e1c295687ca6b0f5",
+    "jetstreamer-failure-receipt.json": "1e2f6f85bf42e723581efd1238b9f4f83836108a93490dcf2f9db5d49fc303c2"
+  },
+  "local_cases": 132,
+  "network_cases": 9,
+  "winners": {
+    "compact-v2": 13,
+    "indexer-v3": 31
+  },
+  "files": {
+    "artifacts/all-samples-reader-20260908/local-logical-mbs.png": "3ed95312d272652129836ffe25b590b92b0ee28c9f08bbddafbe64084acc3f8f",
+    "artifacts/all-samples-reader-20260908/local-logical-mbs.svg": "aeccb27c5234f2e9a85f5b0f6ed564a94a8f0c71df82160d425419b5343e7a03",
+    "artifacts/all-samples-reader-20260908/local-tps.png": "756defccf0a7091cff8912654a3afd4dcfcb79b7317a2999735810263b82fc5f",
+    "artifacts/all-samples-reader-20260908/local-tps.svg": "cb29ab3513bf5036daf7969fc51c58d5d1312e2e6d746a75664ece412c88adf2",
+    "artifacts/all-samples-reader-20260908/network-http-mbs.png": "6e570f87d1a810c4026e26827f4d08e49695b4650930ab4bde337bee5ee1c9a3",
+    "artifacts/all-samples-reader-20260908/network-http-mbs.svg": "6b36a1a614239c5314badbddcf16ba8a695f2fdbfe56a3be4a135fb40bb97687",
+    "artifacts/all-samples-reader-20260908/network-tps.png": "731724b20b77ca2c6cdb71d98aa8e5c79662b8d7d47e7a6d1d2c56051be0d125",
+    "artifacts/all-samples-reader-20260908/network-tps.svg": "61403d6557a2e3a3204168afc1b6def07a363e4ca71d0c22e954b600fcab3182",
+    "artifacts/all-samples-reader-20260908/optional-tps-per-stored-gb.tsv": "c9cf1a148a126ba3733bc09a9127344020cce6bea0c29e782ea1602e4dd00f12",
+    "artifacts/all-samples-reader-20260908/results.json": "f2d9093a40c100195eabacc4567c635dd0c99db89f38595087ed33605fd834b4",
+    "artifacts/all-samples-reader-20260908/results.tsv": "3c2b7b507ad0d85c89190833791dfa1d8c17165a2fcc0568a593315df5a2cc20",
+    "artifacts/all-samples-reader-20260908/stored-size.png": "f32208c994f4fa5349b5f0ff1c0688ec5a0e71efacf922ed5ded91c385da0338",
+    "artifacts/all-samples-reader-20260908/stored-size.svg": "05158fef12cb67d52fac9da439b238f9f2542ab648e2ea1331e70d52d0cd3529",
+    "artifacts/all-samples-reader-20260908/winner-matrix.png": "2fff8e7b74b33731333fc14fb3393b4cc1049b6cc7fe3777aa69bef8167f2f79",
+    "artifacts/all-samples-reader-20260908/winner-matrix.svg": "89023834a25b111c5ce2767267de50caa5a6c2ccd27e0c737d514dff64a46b3e",
+    "artifacts/all-samples-reader-20260908/winners.tsv": "64465bf5f4ebad29d43a7fb7678be12542a4c9196b87ef4f99ecf8b15c538739"
+  }
+}

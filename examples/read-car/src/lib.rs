@@ -20,7 +20,7 @@ use of_car_reader::archive::{ArchiveIoSnapshot, ScanIoReceipt, ScanReceipt, Sour
 pub const DEFAULT_PUBLIC_ORIGIN: &str =
     "https://blockzilla-archive-samples-v1.cheron-augustin.workers.dev";
 pub const DEFAULT_SAMPLE_EPOCH: u64 = 900;
-pub const DEFAULT_FIREWATCH_WALLET: &str = "5LikTUsx695BHRipWoRrn6YmTQEcPrvbR8YaHxdSRQo8";
+pub const DEFAULT_USER_PROGRAM_INDEX_WALLET: &str = "5LikTUsx695BHRipWoRrn6YmTQEcPrvbR8YaHxdSRQo8";
 pub const SAMPLE_EPOCH_BLOCK_COUNTS: [(u64, u32); 11] = [
     (0, 431_548),
     (100, 402_076),
@@ -610,16 +610,19 @@ mod tests {
     }
 
     #[test]
-    fn firewatch_has_a_default_wallet() {
+    fn user_program_index_has_a_default_wallet() {
         let arguments = workload_arguments_from(
-            "read-car-firewatch",
+            "read-car-user-program-index",
             Some("wallet"),
-            Some(DEFAULT_FIREWATCH_WALLET),
-            "car-firewatch.bin",
+            Some(DEFAULT_USER_PROGRAM_INDEX_WALLET),
+            "car-user-program-index.bin",
             std::iter::empty(),
         )
         .unwrap();
-        assert_eq!(arguments.target.as_deref(), Some(DEFAULT_FIREWATCH_WALLET));
+        assert_eq!(
+            arguments.target.as_deref(),
+            Some(DEFAULT_USER_PROGRAM_INDEX_WALLET)
+        );
     }
 
     #[test]

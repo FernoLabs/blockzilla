@@ -49,15 +49,15 @@ const APPLICATION_FRESHNESS_TIMEOUT: Duration = Duration::from_secs(45);
 const MAX_SSE_LINE_BYTES: usize = 8 * 1024 * 1024;
 const MAX_STATUS_BYTES: usize = MAX_SSE_LINE_BYTES;
 const MAX_GAP_INDEX_BYTES: usize = 8 * 1024 * 1024;
-const MAX_FIREWATCH_STATUS_BYTES: usize = 4 * 1024 * 1024;
-const MAX_FIREWATCH_ROWS: usize = 4_096;
-const MAX_FIREWATCH_TEXT_BYTES: usize = 16 * 1024;
-const MAX_FIREWATCH_STATUS_SKEW_SECS: u64 = 30;
+const MAX_USER_PROGRAM_INDEX_STATUS_BYTES: usize = 4 * 1024 * 1024;
+const MAX_USER_PROGRAM_INDEX_ROWS: usize = 4_096;
+const MAX_USER_PROGRAM_INDEX_TEXT_BYTES: usize = 16 * 1024;
+const MAX_USER_PROGRAM_INDEX_STATUS_SKEW_SECS: u64 = 30;
 
-pub fn start(upstream: String, firewatch_status_file: Option<PathBuf>) {
+pub fn start(upstream: String, user_program_index_status_file: Option<PathBuf>) {
     tokio::spawn(async move {
         loop {
-            if let Err(err) = run(&upstream, firewatch_status_file.clone()).await {
+            if let Err(err) = run(&upstream, user_program_index_status_file.clone()).await {
                 state::set_offline(err.to_string()).await;
             }
             tokio::time::sleep(RECONNECT_DELAY).await;
@@ -65,11 +65,11 @@ pub fn start(upstream: String, firewatch_status_file: Option<PathBuf>) {
     });
 }
 
-/// Schema-1 status published atomically by the local Firewatch controller.
+/// Schema-1 status published atomically by the local User program index controller.
 /// This is an overlay, not a replacement for the scheduler snapshot: only
-/// the Firewatch summary fields and `firewatch_index` lanes are changed.
+/// the User program index summary fields and `firewatch_index` lanes are changed.
 #[derive(Clone, Debug, Deserialize, Serialize)]
-struct FirewatchControllerStatus {
+struct UserProgramIndexControllerStatus {
     schema_version: u64,
     updated_unix_secs: u64,
     capacity_configured: u32,
@@ -77,7 +77,7 @@ struct FirewatchControllerStatus {
     epochs_total: u32,
     epochs_accepted: u32,
     epochs_queued: u32,
-    /// Complete archive epochs in the Firewatch project scope. Optional so
+    /// Complete archive epochs in the User program index project scope. Optional so
     /// a schema-1 controller from before all-archive coverage remains valid.
     #[serde(default)]
     archive_epochs_total: Option<u32>,
@@ -85,23 +85,23 @@ struct FirewatchControllerStatus {
     #[serde(default)]
     epochs_eligible: Option<u32>,
     /// Archive epochs waiting for registry migration before they can enter
-    /// the Firewatch queue.
+    /// the User program index queue.
     #[serde(default)]
     epochs_blocked_migration: Option<u32>,
     /// Archive epochs whose exact generation still needs a wire-profile
     /// attestation before it can enter the runnable queue.
     #[serde(default)]
     epochs_blocked_wire_profile: Option<u32>,
-    /// ETA for active and queued runnable Firewatch work. Failed and
+    /// ETA for active and queued runnable User program index work. Failed and
     /// profile-audit rows are excluded. Per-row ETA is the active phase ETA.
     #[serde(default)]
     queue_eta_secs: Option<f64>,
     admission_blocked_reason: Option<String>,
-    rows: Vec<FirewatchControllerRow>,
+    rows: Vec<UserProgramIndexControllerRow>,
 }
 
 #[derive(Clone, Debug, Deserialize, Serialize)]
-struct FirewatchControllerRow {
+struct UserProgramIndexControllerRow {
     epoch: u32,
     state: String,
     phase: String,
@@ -118,49 +118,52 @@ struct FirewatchControllerRow {
     parity_status: Option<String>,
 }
 
-impl FirewatchControllerStatus {
+impl UserProgramIndexControllerStatus {
     fn validate(&self) -> anyhow::Result<()> {
         ensure!(
             self.schema_version == 1,
-            "unsupported Firewatch controller schema"
+            "unsupported User program index controller schema"
         );
         ensure!(
             self.updated_unix_secs > 0,
-            "Firewatch controller timestamp is missing"
+            "User program index controller timestamp is missing"
         );
         ensure!(
-            self.rows.len() <= MAX_FIREWATCH_ROWS,
-            "Firewatch controller exceeds {MAX_FIREWATCH_ROWS} rows"
+            self.rows.len() <= MAX_USER_PROGRAM_INDEX_ROWS,
+            "User program index controller exceeds {MAX_USER_PROGRAM_INDEX_ROWS} rows"
         );
         ensure!(
             self.running <= self.capacity_configured,
-            "Firewatch running workers exceed configured capacity"
+            "User program index running workers exceed configured capacity"
         );
         ensure!(
             self.epochs_accepted <= self.epochs_total,
-            "Firewatch accepted epochs exceed total epochs"
+            "User program index accepted epochs exceed total epochs"
         );
         ensure!(
             self.epochs_queued <= self.epochs_total,
-            "Firewatch queued epochs exceed total epochs"
+            "User program index queued epochs exceed total epochs"
         );
         ensure!(
             self.rows.len() == self.epochs_total as usize,
-            "Firewatch row count does not equal total epochs"
+            "User program index row count does not equal total epochs"
         );
-        validate_firewatch_nonnegative("Firewatch queue ETA", self.queue_eta_secs)?;
+        validate_user_program_index_nonnegative(
+            "User program index queue ETA",
+            self.queue_eta_secs,
+        )?;
         if let Some(eligible) = self.epochs_eligible {
             ensure!(
                 self.epochs_accepted <= eligible,
-                "Firewatch accepted epochs exceed eligible epochs"
+                "User program index accepted epochs exceed eligible epochs"
             );
             ensure!(
                 self.running <= eligible,
-                "Firewatch running epochs exceed eligible epochs"
+                "User program index running epochs exceed eligible epochs"
             );
             ensure!(
                 self.epochs_queued <= eligible,
-                "Firewatch queued epochs exceed eligible epochs"
+                "User program index queued epochs exceed eligible epochs"
             );
         }
         if self.epochs_blocked_wire_profile.is_some() {
@@ -168,26 +171,26 @@ impl FirewatchControllerStatus {
                 self.archive_epochs_total.is_some()
                     && self.epochs_eligible.is_some()
                     && self.epochs_blocked_migration.is_some(),
-                "Firewatch wire-profile coverage is incomplete"
+                "User program index wire-profile coverage is incomplete"
             );
         }
         if let Some(archive_total) = self.archive_epochs_total {
             if let Some(eligible) = self.epochs_eligible {
                 ensure!(
                     eligible <= archive_total,
-                    "Firewatch eligible epochs exceed archive scope"
+                    "User program index eligible epochs exceed archive scope"
                 );
             }
             if let Some(blocked) = self.epochs_blocked_migration {
                 ensure!(
                     blocked <= archive_total,
-                    "Firewatch migration-blocked epochs exceed archive scope"
+                    "User program index migration-blocked epochs exceed archive scope"
                 );
             }
             if let Some(blocked) = self.epochs_blocked_wire_profile {
                 ensure!(
                     blocked <= archive_total,
-                    "Firewatch wire-profile-blocked epochs exceed archive scope"
+                    "User program index wire-profile-blocked epochs exceed archive scope"
                 );
             }
             if let (Some(eligible), Some(blocked_migration), Some(blocked_wire_profile)) = (
@@ -200,7 +203,7 @@ impl FirewatchControllerStatus {
                         + u64::from(blocked_migration)
                         + u64::from(blocked_wire_profile)
                         == u64::from(archive_total),
-                    "Firewatch coverage classes do not equal archive scope"
+                    "User program index coverage classes do not equal archive scope"
                 );
             } else if let (Some(eligible), Some(blocked)) =
                 (self.epochs_eligible, self.epochs_blocked_migration)
@@ -209,12 +212,12 @@ impl FirewatchControllerStatus {
                 // leave part of the archive scope unclassified.
                 ensure!(
                     u64::from(eligible) + u64::from(blocked) <= u64::from(archive_total),
-                    "Firewatch eligible and migration-blocked epochs exceed archive scope"
+                    "User program index eligible and migration-blocked epochs exceed archive scope"
                 );
             }
         }
-        validate_firewatch_text(
-            "Firewatch admission blocked reason",
+        validate_user_program_index_text(
+            "User program index admission blocked reason",
             self.admission_blocked_reason.as_deref(),
         )?;
 
@@ -222,7 +225,7 @@ impl FirewatchControllerStatus {
         for row in &self.rows {
             ensure!(
                 epochs.insert(row.epoch),
-                "Firewatch controller contains duplicate epochs"
+                "User program index controller contains duplicate epochs"
             );
             ensure!(
                 matches!(
@@ -235,7 +238,7 @@ impl FirewatchControllerStatus {
                         | "blocked"
                         | "profile_audit_required"
                 ),
-                "Firewatch controller row has an unknown state"
+                "User program index controller row has an unknown state"
             );
             ensure!(
                 matches!(
@@ -246,27 +249,33 @@ impl FirewatchControllerStatus {
                         | "parity"
                         | "wire_profile_audit"
                 ),
-                "Firewatch controller row has an unknown phase"
+                "User program index controller row has an unknown phase"
             );
             ensure!(
                 (row.state == "profile_audit_required") == (row.phase == "wire_profile_audit"),
-                "Firewatch profile-audit row state and phase differ"
+                "User program index profile-audit row state and phase differ"
             );
             ensure!(
                 row.progress_pct.is_finite() && (0.0..=100.0).contains(&row.progress_pct),
-                "Firewatch controller row has invalid progress"
+                "User program index controller row has invalid progress"
             );
-            validate_firewatch_nonnegative("Firewatch row ETA", row.eta_secs)?;
-            validate_firewatch_nonnegative("Firewatch row read rate", row.read_mib_per_sec)?;
-            validate_firewatch_nonnegative("Firewatch row write rate", row.write_mib_per_sec)?;
-            validate_firewatch_text(
-                "Firewatch row pause reason",
+            validate_user_program_index_nonnegative("User program index row ETA", row.eta_secs)?;
+            validate_user_program_index_nonnegative(
+                "User program index row read rate",
+                row.read_mib_per_sec,
+            )?;
+            validate_user_program_index_nonnegative(
+                "User program index row write rate",
+                row.write_mib_per_sec,
+            )?;
+            validate_user_program_index_text(
+                "User program index row pause reason",
                 row.auto_pause_reason.as_deref(),
             )?;
             if let Some(parity) = row.parity_status.as_deref() {
                 ensure!(
                     matches!(parity, "pending" | "running" | "equal" | "mismatch"),
-                    "Firewatch controller row has an unknown parity status"
+                    "User program index controller row has an unknown parity status"
                 );
             }
         }
@@ -283,31 +292,31 @@ impl FirewatchControllerStatus {
             .count();
         ensure!(
             accepted == self.epochs_accepted as usize,
-            "Firewatch accepted count does not match rows"
+            "User program index accepted count does not match rows"
         );
         ensure!(
             queued == self.epochs_queued as usize,
-            "Firewatch queued count does not match rows"
+            "User program index queued count does not match rows"
         );
         ensure!(
             active == self.running as usize,
-            "Firewatch active count does not match rows"
+            "User program index active count does not match rows"
         );
         Ok(())
     }
 }
 
-fn validate_firewatch_text(label: &str, value: Option<&str>) -> anyhow::Result<()> {
+fn validate_user_program_index_text(label: &str, value: Option<&str>) -> anyhow::Result<()> {
     if let Some(value) = value {
         ensure!(
-            value.len() <= MAX_FIREWATCH_TEXT_BYTES,
-            "{label} exceeds {MAX_FIREWATCH_TEXT_BYTES} bytes"
+            value.len() <= MAX_USER_PROGRAM_INDEX_TEXT_BYTES,
+            "{label} exceeds {MAX_USER_PROGRAM_INDEX_TEXT_BYTES} bytes"
         );
     }
     Ok(())
 }
 
-fn validate_firewatch_nonnegative(label: &str, value: Option<f64>) -> anyhow::Result<()> {
+fn validate_user_program_index_nonnegative(label: &str, value: Option<f64>) -> anyhow::Result<()> {
     if let Some(value) = value {
         ensure!(value.is_finite() && value >= 0.0, "{label} is invalid");
     }
@@ -371,14 +380,14 @@ struct Session {
     upstream: String,
     current: PipelineSnapshot,
     last_sequence: i64,
-    firewatch_status_file: Option<PathBuf>,
+    user_program_index_status_file: Option<PathBuf>,
 }
 
 impl Session {
     async fn bootstrap(
         client: reqwest::Client,
         upstream: &str,
-        firewatch_status_file: Option<PathBuf>,
+        user_program_index_status_file: Option<PathBuf>,
     ) -> anyhow::Result<Self> {
         let current = fetch_status(&client, upstream).await?;
         let last_sequence = current.sequence as i64;
@@ -387,7 +396,7 @@ impl Session {
             upstream: upstream.to_string(),
             current,
             last_sequence,
-            firewatch_status_file,
+            user_program_index_status_file,
         };
         session.publish_current().await;
         Ok(session)
@@ -401,8 +410,11 @@ impl Session {
     }
 
     async fn publish_current(&self) {
-        let snapshot =
-            snapshot_for_publication(&self.current, self.firewatch_status_file.as_deref()).await;
+        let snapshot = snapshot_for_publication(
+            &self.current,
+            self.user_program_index_status_file.as_deref(),
+        )
+        .await;
         state::set_snapshot(snapshot).await;
     }
 
@@ -461,67 +473,74 @@ impl Session {
 /// overlay from leaking back into later scheduler patch reconciliation.
 async fn snapshot_for_publication(
     scheduler: &PipelineSnapshot,
-    firewatch_status_file: Option<&Path>,
+    user_program_index_status_file: Option<&Path>,
 ) -> PipelineSnapshot {
     let mut published = scheduler.clone();
-    let Some(path) = firewatch_status_file else {
+    let Some(path) = user_program_index_status_file else {
         return published;
     };
 
-    match read_firewatch_status_file(path)
+    match read_user_program_index_status_file(path)
         .await
-        .and_then(|status| validate_firewatch_status_freshness(status, scheduler.now_unix_secs))
-    {
-        Ok(status) => apply_firewatch_overlay(&mut published, status),
-        Err(error) => apply_firewatch_overlay_error(&mut published, &error),
+        .and_then(|status| {
+            validate_user_program_index_status_freshness(status, scheduler.now_unix_secs)
+        }) {
+        Ok(status) => apply_user_program_index_overlay(&mut published, status),
+        Err(error) => apply_user_program_index_overlay_error(&mut published, &error),
     }
     published
 }
 
-fn validate_firewatch_status_freshness(
-    status: FirewatchControllerStatus,
+fn validate_user_program_index_status_freshness(
+    status: UserProgramIndexControllerStatus,
     scheduler_now_unix_secs: u64,
-) -> anyhow::Result<FirewatchControllerStatus> {
+) -> anyhow::Result<UserProgramIndexControllerStatus> {
     let skew = status.updated_unix_secs.abs_diff(scheduler_now_unix_secs);
     ensure!(
-        skew <= MAX_FIREWATCH_STATUS_SKEW_SECS,
-        "Firewatch controller status timestamp differs from scheduler time by {skew} seconds"
+        skew <= MAX_USER_PROGRAM_INDEX_STATUS_SKEW_SECS,
+        "User program index controller status timestamp differs from scheduler time by {skew} seconds"
     );
     Ok(status)
 }
 
-fn clear_firewatch_overlay(snapshot: &mut PipelineSnapshot) {
+fn clear_user_program_index_overlay(snapshot: &mut PipelineSnapshot) {
     snapshot.lanes.retain(|lane| {
         lane.kind.as_str() != "firewatch_index" && !lane.id.starts_with("firewatch_index:")
     });
-    snapshot.summary.firewatch_index_capacity_configured = 0;
-    snapshot.summary.firewatch_index_running = 0;
-    snapshot.summary.firewatch_index_epochs_total = 0;
-    snapshot.summary.firewatch_index_epochs_accepted = 0;
-    snapshot.summary.firewatch_index_epochs_queued = 0;
-    snapshot.summary.firewatch_index_archive_epochs_total = None;
-    snapshot.summary.firewatch_index_epochs_eligible = None;
-    snapshot.summary.firewatch_index_epochs_blocked_migration = None;
-    snapshot.summary.firewatch_index_epochs_blocked_wire_profile = None;
-    snapshot.summary.firewatch_index_queue_eta_secs = None;
-    snapshot.summary.firewatch_index_admission_blocked_reason = None;
+    snapshot.summary.user_program_index_capacity_configured = 0;
+    snapshot.summary.user_program_index_running = 0;
+    snapshot.summary.user_program_index_epochs_total = 0;
+    snapshot.summary.user_program_index_epochs_accepted = 0;
+    snapshot.summary.user_program_index_epochs_queued = 0;
+    snapshot.summary.user_program_index_archive_epochs_total = None;
+    snapshot.summary.user_program_index_epochs_eligible = None;
+    snapshot.summary.user_program_index_epochs_blocked_migration = None;
+    snapshot
+        .summary
+        .user_program_index_epochs_blocked_wire_profile = None;
+    snapshot.summary.user_program_index_queue_eta_secs = None;
+    snapshot.summary.user_program_index_admission_blocked_reason = None;
 }
 
-fn apply_firewatch_overlay(snapshot: &mut PipelineSnapshot, status: FirewatchControllerStatus) {
-    clear_firewatch_overlay(snapshot);
+fn apply_user_program_index_overlay(
+    snapshot: &mut PipelineSnapshot,
+    status: UserProgramIndexControllerStatus,
+) {
+    clear_user_program_index_overlay(snapshot);
     let updated_unix_secs = status.updated_unix_secs;
-    snapshot.summary.firewatch_index_capacity_configured = status.capacity_configured;
-    snapshot.summary.firewatch_index_running = status.running;
-    snapshot.summary.firewatch_index_epochs_total = status.epochs_total;
-    snapshot.summary.firewatch_index_epochs_accepted = status.epochs_accepted;
-    snapshot.summary.firewatch_index_epochs_queued = status.epochs_queued;
-    snapshot.summary.firewatch_index_archive_epochs_total = status.archive_epochs_total;
-    snapshot.summary.firewatch_index_epochs_eligible = status.epochs_eligible;
-    snapshot.summary.firewatch_index_epochs_blocked_migration = status.epochs_blocked_migration;
-    snapshot.summary.firewatch_index_epochs_blocked_wire_profile =
-        status.epochs_blocked_wire_profile;
-    snapshot.summary.firewatch_index_queue_eta_secs = status.queue_eta_secs;
-    snapshot.summary.firewatch_index_admission_blocked_reason = status.admission_blocked_reason;
+    snapshot.summary.user_program_index_capacity_configured = status.capacity_configured;
+    snapshot.summary.user_program_index_running = status.running;
+    snapshot.summary.user_program_index_epochs_total = status.epochs_total;
+    snapshot.summary.user_program_index_epochs_accepted = status.epochs_accepted;
+    snapshot.summary.user_program_index_epochs_queued = status.epochs_queued;
+    snapshot.summary.user_program_index_archive_epochs_total = status.archive_epochs_total;
+    snapshot.summary.user_program_index_epochs_eligible = status.epochs_eligible;
+    snapshot.summary.user_program_index_epochs_blocked_migration = status.epochs_blocked_migration;
+    snapshot
+        .summary
+        .user_program_index_epochs_blocked_wire_profile = status.epochs_blocked_wire_profile;
+    snapshot.summary.user_program_index_queue_eta_secs = status.queue_eta_secs;
+    snapshot.summary.user_program_index_admission_blocked_reason = status.admission_blocked_reason;
 
     snapshot.lanes.extend(status.rows.into_iter().map(|row| {
         let rss_bytes = row.rss_bytes;
@@ -551,35 +570,41 @@ fn apply_firewatch_overlay(snapshot: &mut PipelineSnapshot, status: FirewatchCon
     }));
 }
 
-fn apply_firewatch_overlay_error(snapshot: &mut PipelineSnapshot, error: &anyhow::Error) {
-    clear_firewatch_overlay(snapshot);
+fn apply_user_program_index_overlay_error(snapshot: &mut PipelineSnapshot, error: &anyhow::Error) {
+    clear_user_program_index_overlay(snapshot);
     let detail: String = error.to_string().chars().take(2_048).collect();
-    snapshot.summary.firewatch_index_admission_blocked_reason =
-        Some(format!("Firewatch controller status unavailable: {detail}"));
+    snapshot.summary.user_program_index_admission_blocked_reason = Some(format!(
+        "User program index controller status unavailable: {detail}"
+    ));
 }
 
-async fn read_firewatch_status_file(path: &Path) -> anyhow::Result<FirewatchControllerStatus> {
+async fn read_user_program_index_status_file(
+    path: &Path,
+) -> anyhow::Result<UserProgramIndexControllerStatus> {
     let path = path.to_path_buf();
     let bytes = tokio::task::spawn_blocking(move || {
         read_bounded_regular_file_bytes(
             &path,
-            MAX_FIREWATCH_STATUS_BYTES,
-            "Firewatch controller status",
+            MAX_USER_PROGRAM_INDEX_STATUS_BYTES,
+            "User program index controller status",
         )
     })
     .await
-    .context("join bounded Firewatch controller status read")??;
-    let status: FirewatchControllerStatus =
-        serde_json::from_slice(&bytes).context("decode Firewatch controller status")?;
+    .context("join bounded User program index controller status read")??;
+    let status: UserProgramIndexControllerStatus =
+        serde_json::from_slice(&bytes).context("decode User program index controller status")?;
     status.validate()?;
     Ok(status)
 }
 
-async fn run(upstream: &str, firewatch_status_file: Option<PathBuf>) -> anyhow::Result<()> {
+async fn run(
+    upstream: &str,
+    user_program_index_status_file: Option<PathBuf>,
+) -> anyhow::Result<()> {
     let client = reqwest::Client::builder()
         .connect_timeout(CONNECT_TIMEOUT)
         .build()?;
-    let mut session = Session::bootstrap(client, upstream, firewatch_status_file).await?;
+    let mut session = Session::bootstrap(client, upstream, user_program_index_status_file).await?;
 
     let response = tokio::time::timeout(
         CONNECT_TIMEOUT,
@@ -940,8 +965,8 @@ mod tests {
         }
     }
 
-    fn firewatch_status() -> FirewatchControllerStatus {
-        FirewatchControllerStatus {
+    fn user_program_index_status() -> UserProgramIndexControllerStatus {
+        UserProgramIndexControllerStatus {
             schema_version: 1,
             updated_unix_secs: 1,
             capacity_configured: 1,
@@ -956,7 +981,7 @@ mod tests {
             queue_eta_secs: Some(86_400.0),
             admission_blocked_reason: None,
             rows: vec![
-                FirewatchControllerRow {
+                UserProgramIndexControllerRow {
                     epoch: 301,
                     state: "accepted".into(),
                     phase: "parity".into(),
@@ -972,7 +997,7 @@ mod tests {
                     relation_count: Some(6_018_402),
                     parity_status: Some("equal".into()),
                 },
-                FirewatchControllerRow {
+                UserProgramIndexControllerRow {
                     epoch: 302,
                     state: "running".into(),
                     phase: "canonical_build".into(),
@@ -988,7 +1013,7 @@ mod tests {
                     relation_count: None,
                     parity_status: Some("pending".into()),
                 },
-                FirewatchControllerRow {
+                UserProgramIndexControllerRow {
                     epoch: 900,
                     state: "queued".into(),
                     phase: "target_build".into(),
@@ -1008,16 +1033,16 @@ mod tests {
         }
     }
 
-    fn scheduler_with_raw_firewatch() -> PipelineSnapshot {
+    fn scheduler_with_raw_user_program_index() -> PipelineSnapshot {
         PipelineSnapshot {
             schema_version: snapshot::STATUS_SCHEMA_VERSION,
             sequence: 1,
             now_unix_secs: 1,
             summary: snapshot::PipelineSummary {
-                firewatch_index_capacity_configured: 9,
-                firewatch_index_running: 0,
-                firewatch_index_epochs_total: 9,
-                firewatch_index_epochs_accepted: 9,
+                user_program_index_capacity_configured: 9,
+                user_program_index_running: 0,
+                user_program_index_epochs_total: 9,
+                user_program_index_epochs_accepted: 9,
                 ..Default::default()
             },
             lanes: vec![
@@ -1043,7 +1068,7 @@ mod tests {
         }
     }
 
-    fn write_firewatch_status(path: &Path, status: &FirewatchControllerStatus) {
+    fn write_user_program_index_status(path: &Path, status: &UserProgramIndexControllerStatus) {
         std::fs::write(path, serde_json::to_vec(status).unwrap()).unwrap();
     }
 
@@ -1078,36 +1103,41 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn configured_controller_overlays_only_firewatch_status() {
-        let root = test_root("firewatch-overlay");
+    async fn configured_controller_overlays_only_user_program_index_status() {
+        let root = test_root("user-program-index-overlay");
         let path = root.0.join("status.json");
-        write_firewatch_status(&path, &firewatch_status());
+        write_user_program_index_status(&path, &user_program_index_status());
 
-        let scheduler = scheduler_with_raw_firewatch();
+        let scheduler = scheduler_with_raw_user_program_index();
         let published = snapshot_for_publication(&scheduler, Some(&path)).await;
 
-        assert_eq!(published.summary.firewatch_index_capacity_configured, 1);
-        assert_eq!(published.summary.firewatch_index_running, 1);
-        assert_eq!(published.summary.firewatch_index_epochs_total, 3);
-        assert_eq!(published.summary.firewatch_index_epochs_accepted, 1);
-        assert_eq!(published.summary.firewatch_index_epochs_queued, 1);
+        assert_eq!(published.summary.user_program_index_capacity_configured, 1);
+        assert_eq!(published.summary.user_program_index_running, 1);
+        assert_eq!(published.summary.user_program_index_epochs_total, 3);
+        assert_eq!(published.summary.user_program_index_epochs_accepted, 1);
+        assert_eq!(published.summary.user_program_index_epochs_queued, 1);
         assert_eq!(
-            published.summary.firewatch_index_archive_epochs_total,
+            published.summary.user_program_index_archive_epochs_total,
             Some(10)
         );
-        assert_eq!(published.summary.firewatch_index_epochs_eligible, Some(3));
         assert_eq!(
-            published.summary.firewatch_index_epochs_blocked_migration,
+            published.summary.user_program_index_epochs_eligible,
+            Some(3)
+        );
+        assert_eq!(
+            published
+                .summary
+                .user_program_index_epochs_blocked_migration,
             Some(7)
         );
         assert_eq!(
             published
                 .summary
-                .firewatch_index_epochs_blocked_wire_profile,
+                .user_program_index_epochs_blocked_wire_profile,
             Some(0)
         );
         assert_eq!(
-            published.summary.firewatch_index_queue_eta_secs,
+            published.summary.user_program_index_queue_eta_secs,
             Some(86_400.0)
         );
         assert!(published.lanes.iter().any(|lane| lane.id == "scan:1"));
@@ -1137,7 +1167,7 @@ mod tests {
         published.validate().unwrap();
 
         // The overlay must not mutate the scheduler patch base.
-        assert_eq!(scheduler.summary.firewatch_index_epochs_accepted, 9);
+        assert_eq!(scheduler.summary.user_program_index_epochs_accepted, 9);
         assert!(
             scheduler
                 .lanes
@@ -1147,12 +1177,12 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn no_configured_file_preserves_raw_scheduler_firewatch_values() {
-        let scheduler = scheduler_with_raw_firewatch();
+    async fn no_configured_file_preserves_raw_scheduler_user_program_index_values() {
+        let scheduler = scheduler_with_raw_user_program_index();
         let published = snapshot_for_publication(&scheduler, None).await;
 
-        assert_eq!(published.summary.firewatch_index_capacity_configured, 9);
-        assert_eq!(published.summary.firewatch_index_epochs_accepted, 9);
+        assert_eq!(published.summary.user_program_index_capacity_configured, 9);
+        assert_eq!(published.summary.user_program_index_epochs_accepted, 9);
         assert!(
             published
                 .lanes
@@ -1162,21 +1192,21 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn configured_bad_file_blocks_only_firewatch_and_clears_untrusted_rows() {
-        let root = test_root("bad-firewatch-overlay");
+    async fn configured_bad_file_blocks_only_user_program_index_and_clears_untrusted_rows() {
+        let root = test_root("bad-user-program-index-overlay");
         let path = root.0.join("status.json");
         std::fs::write(&path, b"{ malformed").unwrap();
 
         let published =
-            snapshot_for_publication(&scheduler_with_raw_firewatch(), Some(&path)).await;
+            snapshot_for_publication(&scheduler_with_raw_user_program_index(), Some(&path)).await;
 
-        assert_eq!(published.summary.firewatch_index_capacity_configured, 0);
-        assert_eq!(published.summary.firewatch_index_epochs_accepted, 0);
-        assert_eq!(published.summary.firewatch_index_epochs_total, 0);
+        assert_eq!(published.summary.user_program_index_capacity_configured, 0);
+        assert_eq!(published.summary.user_program_index_epochs_accepted, 0);
+        assert_eq!(published.summary.user_program_index_epochs_total, 0);
         assert!(
             published
                 .summary
-                .firewatch_index_admission_blocked_reason
+                .user_program_index_admission_blocked_reason
                 .as_deref()
                 .is_some_and(|reason| reason.contains("controller status unavailable"))
         );
@@ -1191,18 +1221,18 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn configured_missing_file_blocks_only_firewatch() {
-        let root = test_root("missing-firewatch-overlay");
+    async fn configured_missing_file_blocks_only_user_program_index() {
+        let root = test_root("missing-user-program-index-overlay");
         let path = root.0.join("missing-status.json");
 
         let published =
-            snapshot_for_publication(&scheduler_with_raw_firewatch(), Some(&path)).await;
+            snapshot_for_publication(&scheduler_with_raw_user_program_index(), Some(&path)).await;
 
-        assert_eq!(published.summary.firewatch_index_epochs_accepted, 0);
+        assert_eq!(published.summary.user_program_index_epochs_accepted, 0);
         assert!(
             published
                 .summary
-                .firewatch_index_admission_blocked_reason
+                .user_program_index_admission_blocked_reason
                 .as_deref()
                 .is_some_and(|reason| reason.contains("controller status unavailable"))
         );
@@ -1217,14 +1247,17 @@ mod tests {
 
     #[tokio::test]
     async fn each_publication_rereads_the_controller_file() {
-        let root = test_root("reread-firewatch-overlay");
+        let root = test_root("reread-user-program-index-overlay");
         let path = root.0.join("status.json");
-        let first = firewatch_status();
-        write_firewatch_status(&path, &first);
+        let first = user_program_index_status();
+        write_user_program_index_status(&path, &first);
 
         let scheduler = valid_snapshot();
         let first_published = snapshot_for_publication(&scheduler, Some(&path)).await;
-        assert_eq!(first_published.summary.firewatch_index_epochs_accepted, 1);
+        assert_eq!(
+            first_published.summary.user_program_index_epochs_accepted,
+            1
+        );
 
         let mut second = first;
         second.running = 0;
@@ -1235,11 +1268,14 @@ mod tests {
         second.rows[1].progress_pct = 100.0;
         second.rows[1].parity_status = Some("equal".into());
         second.rows[2].state = "blocked".into();
-        write_firewatch_status(&path, &second);
+        write_user_program_index_status(&path, &second);
 
         let second_published = snapshot_for_publication(&scheduler, Some(&path)).await;
-        assert_eq!(second_published.summary.firewatch_index_epochs_accepted, 2);
-        assert_eq!(second_published.summary.firewatch_index_epochs_queued, 0);
+        assert_eq!(
+            second_published.summary.user_program_index_epochs_accepted,
+            2
+        );
+        assert_eq!(second_published.summary.user_program_index_epochs_queued, 0);
         assert_eq!(
             second_published
                 .lanes
@@ -1253,22 +1289,22 @@ mod tests {
 
     #[tokio::test]
     async fn controller_validation_rejects_unknown_schema_and_duplicate_epochs() {
-        let root = test_root("invalid-firewatch-schema");
+        let root = test_root("invalid-user-program-index-schema");
         let path = root.0.join("status.json");
-        let mut status = firewatch_status();
+        let mut status = user_program_index_status();
         status.schema_version = 2;
-        write_firewatch_status(&path, &status);
-        assert!(read_firewatch_status_file(&path).await.is_err());
+        write_user_program_index_status(&path, &status);
+        assert!(read_user_program_index_status_file(&path).await.is_err());
 
         status.schema_version = 1;
         status.rows[1].epoch = status.rows[0].epoch;
-        write_firewatch_status(&path, &status);
-        assert!(read_firewatch_status_file(&path).await.is_err());
+        write_user_program_index_status(&path, &status);
+        assert!(read_user_program_index_status_file(&path).await.is_err());
     }
 
     #[test]
     fn controller_coverage_fields_are_additive_and_validated() {
-        let mut legacy = serde_json::to_value(firewatch_status()).unwrap();
+        let mut legacy = serde_json::to_value(user_program_index_status()).unwrap();
         let object = legacy.as_object_mut().unwrap();
         for key in [
             "archive_epochs_total",
@@ -1279,7 +1315,7 @@ mod tests {
         ] {
             object.remove(key);
         }
-        let legacy: FirewatchControllerStatus = serde_json::from_value(legacy).unwrap();
+        let legacy: UserProgramIndexControllerStatus = serde_json::from_value(legacy).unwrap();
         assert!(legacy.archive_epochs_total.is_none());
         assert!(legacy.epochs_eligible.is_none());
         assert!(legacy.epochs_blocked_migration.is_none());
@@ -1287,18 +1323,18 @@ mod tests {
         assert!(legacy.queue_eta_secs.is_none());
         legacy.validate().unwrap();
 
-        let mut invalid = firewatch_status();
+        let mut invalid = user_program_index_status();
         invalid.epochs_eligible = Some(4);
         assert!(invalid.validate().is_err());
 
-        let mut invalid_eta = firewatch_status();
+        let mut invalid_eta = user_program_index_status();
         invalid_eta.queue_eta_secs = Some(-1.0);
         assert!(invalid_eta.validate().is_err());
     }
 
     #[test]
     fn controller_accepts_exact_canonical_build_phase_only() {
-        let mut status = firewatch_status();
+        let mut status = user_program_index_status();
         assert_eq!(status.rows[1].phase, "canonical_build");
         status.validate().unwrap();
 
@@ -1308,7 +1344,7 @@ mod tests {
 
     #[test]
     fn controller_accepts_profile_audit_rows_and_requires_complete_coverage() {
-        let mut status = firewatch_status();
+        let mut status = user_program_index_status();
         status.rows[2].state = "profile_audit_required".into();
         status.rows[2].phase = "wire_profile_audit".into();
         status.epochs_queued = 0;
@@ -1325,20 +1361,20 @@ mod tests {
 
     #[tokio::test]
     async fn stale_or_far_future_controller_status_is_blocked() {
-        let root = test_root("stale-firewatch-status");
+        let root = test_root("stale-user-program-index-status");
         let path = root.0.join("status.json");
         let mut scheduler = valid_snapshot();
         scheduler.now_unix_secs = 100;
 
-        let mut status = firewatch_status();
+        let mut status = user_program_index_status();
         status.updated_unix_secs = 69;
-        write_firewatch_status(&path, &status);
+        write_user_program_index_status(&path, &status);
         let stale = snapshot_for_publication(&scheduler, Some(&path)).await;
-        assert_eq!(stale.summary.firewatch_index_epochs_accepted, 0);
+        assert_eq!(stale.summary.user_program_index_epochs_accepted, 0);
         assert!(
             stale
                 .summary
-                .firewatch_index_admission_blocked_reason
+                .user_program_index_admission_blocked_reason
                 .as_deref()
                 .is_some_and(|reason| reason.contains("differs from scheduler time"))
         );
@@ -1350,9 +1386,9 @@ mod tests {
         );
 
         status.updated_unix_secs = 131;
-        write_firewatch_status(&path, &status);
+        write_user_program_index_status(&path, &status);
         let future = snapshot_for_publication(&scheduler, Some(&path)).await;
-        assert_eq!(future.summary.firewatch_index_epochs_accepted, 0);
+        assert_eq!(future.summary.user_program_index_epochs_accepted, 0);
         assert!(
             future
                 .lanes
@@ -1361,44 +1397,46 @@ mod tests {
         );
 
         status.updated_unix_secs = 130;
-        write_firewatch_status(&path, &status);
+        write_user_program_index_status(&path, &status);
         let boundary = snapshot_for_publication(&scheduler, Some(&path)).await;
-        assert_eq!(boundary.summary.firewatch_index_epochs_accepted, 1);
+        assert_eq!(boundary.summary.user_program_index_epochs_accepted, 1);
     }
 
     #[tokio::test]
-    async fn local_firewatch_status_rejects_sparse_oversize_without_reading_it_all() {
-        let root = test_root("sparse-firewatch-status");
+    async fn local_user_program_index_status_rejects_sparse_oversize_without_reading_it_all() {
+        let root = test_root("sparse-user-program-index-status");
         let path = root.0.join("status.json");
         let file = std::fs::File::create(&path).unwrap();
-        file.set_len((MAX_FIREWATCH_STATUS_BYTES + 1) as u64)
+        file.set_len((MAX_USER_PROGRAM_INDEX_STATUS_BYTES + 1) as u64)
             .unwrap();
 
-        let result =
-            tokio::time::timeout(Duration::from_secs(1), read_firewatch_status_file(&path))
-                .await
-                .expect("sparse oversize rejection must be bounded");
+        let result = tokio::time::timeout(
+            Duration::from_secs(1),
+            read_user_program_index_status_file(&path),
+        )
+        .await
+        .expect("sparse oversize rejection must be bounded");
         assert!(result.is_err());
     }
 
     #[cfg(unix)]
     #[tokio::test]
-    async fn local_firewatch_status_rejects_symlink() {
-        let root = test_root("symlink-firewatch-status");
+    async fn local_user_program_index_status_rejects_symlink() {
+        let root = test_root("symlink-user-program-index-status");
         let target = root.0.join("target.json");
         let link = root.0.join("status.json");
-        write_firewatch_status(&target, &firewatch_status());
+        write_user_program_index_status(&target, &user_program_index_status());
         std::os::unix::fs::symlink(&target, &link).unwrap();
 
-        assert!(read_firewatch_status_file(&link).await.is_err());
+        assert!(read_user_program_index_status_file(&link).await.is_err());
     }
 
     #[cfg(unix)]
     #[tokio::test]
-    async fn local_firewatch_status_rejects_fifo_without_blocking() {
+    async fn local_user_program_index_status_rejects_fifo_without_blocking() {
         use std::{ffi::CString, os::unix::ffi::OsStrExt};
 
-        let root = test_root("fifo-firewatch-status");
+        let root = test_root("fifo-user-program-index-status");
         let path = root.0.join("status.json");
         let c_path = CString::new(path.as_os_str().as_bytes()).unwrap();
         // SAFETY: `c_path` is a live, NUL-terminated path and `mkfifo` does
@@ -1411,10 +1449,12 @@ mod tests {
             std::io::Error::last_os_error()
         );
 
-        let result =
-            tokio::time::timeout(Duration::from_secs(1), read_firewatch_status_file(&path))
-                .await
-                .expect("FIFO rejection must not wait for a writer");
+        let result = tokio::time::timeout(
+            Duration::from_secs(1),
+            read_user_program_index_status_file(&path),
+        )
+        .await
+        .expect("FIFO rejection must not wait for a writer");
         assert!(result.is_err());
     }
 
@@ -1445,7 +1485,7 @@ mod tests {
             upstream: "http://127.0.0.1:1".into(),
             last_sequence: 1,
             current,
-            firewatch_status_file: None,
+            user_program_index_status_file: None,
         };
         let mut invalid = valid_snapshot();
         invalid.schema_version = snapshot::STATUS_SCHEMA_VERSION - 1;
@@ -1465,7 +1505,7 @@ mod tests {
             upstream: "http://127.0.0.1:1".into(),
             last_sequence: 1,
             current,
-            firewatch_status_file: None,
+            user_program_index_status_file: None,
         };
         let patch = PipelineSnapshotPatch {
             schema_version: snapshot::STATUS_SCHEMA_VERSION,

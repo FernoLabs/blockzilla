@@ -8,7 +8,7 @@ The primary programs are small CAR examples:
   post-token balances.
 - [`read-car-pumpfun`](src/bin/read-car-pumpfun.rs) writes transactions with a
   direct or recorded CPI call to the Pump.fun program.
-- [`read-car-firewatch`](src/bin/read-car-firewatch.rs) writes the distinct
+- [`read-car-user-program-index`](src/bin/read-car-user-program-index.rs) writes the distinct
   programs reached by successful transactions from one signer wallet.
 
 Each program opens one CAR archive through `of_car_reader::archive::CarArchive` and builds
@@ -54,11 +54,11 @@ cargo run --release --locked -p blockzilla-read-car \
   --bin read-car-pumpfun -- --archive-root archive
 
 cargo run --release --locked -p blockzilla-read-car \
-  --bin read-car-firewatch -- --archive-root archive
+  --bin read-car-user-program-index -- --archive-root archive
 ```
 
 The default output files are `car-usdc.bin`, `car-pumpfun.bin`, and
-`car-firewatch.bin`. An output file must not exist before a run. FireWatch uses
+`car-user-program-index.bin`. An output file must not exist before a run. User program index uses
 `5LikTUsx695BHRipWoRrn6YmTQEcPrvbR8YaHxdSRQo8` by default.
 
 The normal interface has only these options:
@@ -68,7 +68,7 @@ The normal interface has only these options:
 --origin URL       another compatible clean Worker origin
 --archive-root DIR local root that contains car/<epoch>/
 --output FILE      output file; it must not exist
---wallet KEY       FireWatch only
+--wallet KEY       User program index only
 ```
 
 The programs always scan the complete selected epoch. They contain the trusted

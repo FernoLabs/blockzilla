@@ -1,5 +1,8 @@
 # SDK stream and allocation pass — 4 September 2026
 
+Naming note: the wallet workload is now `user-program-index`. Saved commands,
+source references, and result IDs below keep their names from the recorded run.
+
 Scope: SDK code used by the existing dedicated CAR, Compact V2, and Indexer V3
 examples. No archive bytes, format encoding, scheduler, or compactor changed.
 The user requested a release build and immediate replacement of the benchmark,
@@ -68,7 +71,7 @@ transaction stream. Existing struct-literal callers now set `counts: None`.
   that implementation rather than replacing it with the V2 pipeline.
 - Registry IDs are still bound once per epoch. Count scans do not read registry
   keys. Real selected output rows can still require owner or program public keys.
-- The existing epoch 100 FireWatch failed-instruction-boundary error is not a
+- The existing epoch 100 user-program-index failed-instruction-boundary error is not a
   performance issue and was not suppressed.
 
 No unit tests, smoke run, full-output comparison, or separate archive validation
@@ -80,7 +83,7 @@ replacement run produces completed records.
 
 Previous NAS package: `sample-reader-package-20260904-id-filter-final`.
 Its runner was PID 1281842. At the preparation check it was on local V2 epoch 300
-FireWatch, with 15 of 264 jobs completed. Existing results are preserved.
+user-program-index, with 15 of 264 jobs completed. Existing results are preserved.
 
 Replacement package: `sample-reader-package-20260904-stream-reuse-final`.
 The release build succeeded and the package was uploaded. Old runner 1281842

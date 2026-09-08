@@ -132,33 +132,78 @@ pub struct PipelineSummary {
     pub registry_reprocess_epochs_done: u32,
     #[serde(default)]
     pub registry_reprocess_admission_blocked_reason: Option<String>,
-    /// Scheduler-owned Firewatch signer-to-program index project. Defaults
+    /// Scheduler-owned user-program-index project. Defaults
     /// preserve compatibility with an older schema-v3 scheduler during a
-    /// rolling deployment.
-    #[serde(default)]
-    pub firewatch_index_capacity_configured: u32,
-    #[serde(default)]
-    pub firewatch_index_running: u32,
-    #[serde(default)]
-    pub firewatch_index_epochs_total: u32,
-    #[serde(default)]
-    pub firewatch_index_epochs_accepted: u32,
-    #[serde(default)]
-    pub firewatch_index_epochs_queued: u32,
+    /// rolling deployment. The schema-v3 JSON names remain stable; canonical
+    /// names are also accepted as input during migration.
+    #[serde(
+        default,
+        rename = "firewatch_index_capacity_configured",
+        alias = "user_program_index_capacity_configured"
+    )]
+    pub user_program_index_capacity_configured: u32,
+    #[serde(
+        default,
+        rename = "firewatch_index_running",
+        alias = "user_program_index_running"
+    )]
+    pub user_program_index_running: u32,
+    #[serde(
+        default,
+        rename = "firewatch_index_epochs_total",
+        alias = "user_program_index_epochs_total"
+    )]
+    pub user_program_index_epochs_total: u32,
+    #[serde(
+        default,
+        rename = "firewatch_index_epochs_accepted",
+        alias = "user_program_index_epochs_accepted"
+    )]
+    pub user_program_index_epochs_accepted: u32,
+    #[serde(
+        default,
+        rename = "firewatch_index_epochs_queued",
+        alias = "user_program_index_epochs_queued"
+    )]
+    pub user_program_index_epochs_queued: u32,
     /// Additive schema-1 controller coverage fields. `None` means the
     /// connected controller predates all-archive coverage reporting.
-    #[serde(default)]
-    pub firewatch_index_archive_epochs_total: Option<u32>,
-    #[serde(default)]
-    pub firewatch_index_epochs_eligible: Option<u32>,
-    #[serde(default)]
-    pub firewatch_index_epochs_blocked_migration: Option<u32>,
-    #[serde(default)]
-    pub firewatch_index_epochs_blocked_wire_profile: Option<u32>,
-    #[serde(default)]
-    pub firewatch_index_queue_eta_secs: Option<f64>,
-    #[serde(default)]
-    pub firewatch_index_admission_blocked_reason: Option<String>,
+    #[serde(
+        default,
+        rename = "firewatch_index_archive_epochs_total",
+        alias = "user_program_index_archive_epochs_total"
+    )]
+    pub user_program_index_archive_epochs_total: Option<u32>,
+    #[serde(
+        default,
+        rename = "firewatch_index_epochs_eligible",
+        alias = "user_program_index_epochs_eligible"
+    )]
+    pub user_program_index_epochs_eligible: Option<u32>,
+    #[serde(
+        default,
+        rename = "firewatch_index_epochs_blocked_migration",
+        alias = "user_program_index_epochs_blocked_migration"
+    )]
+    pub user_program_index_epochs_blocked_migration: Option<u32>,
+    #[serde(
+        default,
+        rename = "firewatch_index_epochs_blocked_wire_profile",
+        alias = "user_program_index_epochs_blocked_wire_profile"
+    )]
+    pub user_program_index_epochs_blocked_wire_profile: Option<u32>,
+    #[serde(
+        default,
+        rename = "firewatch_index_queue_eta_secs",
+        alias = "user_program_index_queue_eta_secs"
+    )]
+    pub user_program_index_queue_eta_secs: Option<f64>,
+    #[serde(
+        default,
+        rename = "firewatch_index_admission_blocked_reason",
+        alias = "user_program_index_admission_blocked_reason"
+    )]
+    pub user_program_index_admission_blocked_reason: Option<String>,
 }
 
 impl PipelineSummary {
@@ -617,8 +662,8 @@ fn validate_summary(summary: &PipelineSummary) -> Result<()> {
     ensure_optional_nonnegative("PoH migration rate", summary.poh_migration_bytes_per_sec)?;
     ensure_optional_nonnegative("PoH migration ETA", summary.poh_migration_eta_secs)?;
     ensure_optional_nonnegative(
-        "Firewatch queue ETA",
-        summary.firewatch_index_queue_eta_secs,
+        "User program index queue ETA",
+        summary.user_program_index_queue_eta_secs,
     )?;
     ensure_optional_text("queue ETA reason", summary.queue_eta_reason.as_deref())?;
     ensure_optional_text(
@@ -640,8 +685,10 @@ fn validate_summary(summary: &PipelineSummary) -> Result<()> {
             .as_deref(),
     )?;
     ensure_optional_text(
-        "Firewatch index admission blocked reason",
-        summary.firewatch_index_admission_blocked_reason.as_deref(),
+        "User program index admission blocked reason",
+        summary
+            .user_program_index_admission_blocked_reason
+            .as_deref(),
     )?;
     ensure_optional_text(
         "legacy compact last action",
@@ -685,82 +732,84 @@ fn validate_summary(summary: &PipelineSummary) -> Result<()> {
         "registry reprocess running workers exceed configured capacity"
     );
     ensure!(
-        summary.firewatch_index_epochs_accepted <= summary.firewatch_index_epochs_total,
-        "Firewatch accepted epochs exceed total epochs"
+        summary.user_program_index_epochs_accepted <= summary.user_program_index_epochs_total,
+        "User program index accepted epochs exceed total epochs"
     );
     ensure!(
-        summary.firewatch_index_epochs_queued <= summary.firewatch_index_epochs_total,
-        "Firewatch queued epochs exceed total epochs"
+        summary.user_program_index_epochs_queued <= summary.user_program_index_epochs_total,
+        "User program index queued epochs exceed total epochs"
     );
     ensure!(
-        summary.firewatch_index_running <= summary.firewatch_index_capacity_configured,
-        "Firewatch running workers exceed configured capacity"
+        summary.user_program_index_running <= summary.user_program_index_capacity_configured,
+        "User program index running workers exceed configured capacity"
     );
-    if let Some(eligible) = summary.firewatch_index_epochs_eligible {
+    if let Some(eligible) = summary.user_program_index_epochs_eligible {
         ensure!(
-            summary.firewatch_index_epochs_accepted <= eligible,
-            "Firewatch accepted epochs exceed eligible epochs"
+            summary.user_program_index_epochs_accepted <= eligible,
+            "User program index accepted epochs exceed eligible epochs"
         );
         ensure!(
-            summary.firewatch_index_running <= eligible,
-            "Firewatch running epochs exceed eligible epochs"
+            summary.user_program_index_running <= eligible,
+            "User program index running epochs exceed eligible epochs"
         );
         ensure!(
-            summary.firewatch_index_epochs_queued <= eligible,
-            "Firewatch queued epochs exceed eligible epochs"
+            summary.user_program_index_epochs_queued <= eligible,
+            "User program index queued epochs exceed eligible epochs"
         );
     }
     if summary
-        .firewatch_index_epochs_blocked_wire_profile
+        .user_program_index_epochs_blocked_wire_profile
         .is_some()
     {
         ensure!(
-            summary.firewatch_index_archive_epochs_total.is_some()
-                && summary.firewatch_index_epochs_eligible.is_some()
-                && summary.firewatch_index_epochs_blocked_migration.is_some(),
-            "Firewatch wire-profile coverage is incomplete"
+            summary.user_program_index_archive_epochs_total.is_some()
+                && summary.user_program_index_epochs_eligible.is_some()
+                && summary
+                    .user_program_index_epochs_blocked_migration
+                    .is_some(),
+            "User program index wire-profile coverage is incomplete"
         );
     }
-    if let Some(archive_total) = summary.firewatch_index_archive_epochs_total {
-        if let Some(eligible) = summary.firewatch_index_epochs_eligible {
+    if let Some(archive_total) = summary.user_program_index_archive_epochs_total {
+        if let Some(eligible) = summary.user_program_index_epochs_eligible {
             ensure!(
                 eligible <= archive_total,
-                "Firewatch eligible epochs exceed archive scope"
+                "User program index eligible epochs exceed archive scope"
             );
         }
-        if let Some(blocked) = summary.firewatch_index_epochs_blocked_migration {
+        if let Some(blocked) = summary.user_program_index_epochs_blocked_migration {
             ensure!(
                 blocked <= archive_total,
-                "Firewatch migration-blocked epochs exceed archive scope"
+                "User program index migration-blocked epochs exceed archive scope"
             );
         }
-        if let Some(blocked) = summary.firewatch_index_epochs_blocked_wire_profile {
+        if let Some(blocked) = summary.user_program_index_epochs_blocked_wire_profile {
             ensure!(
                 blocked <= archive_total,
-                "Firewatch wire-profile-blocked epochs exceed archive scope"
+                "User program index wire-profile-blocked epochs exceed archive scope"
             );
         }
         if let (Some(eligible), Some(blocked_migration), Some(blocked_wire_profile)) = (
-            summary.firewatch_index_epochs_eligible,
-            summary.firewatch_index_epochs_blocked_migration,
-            summary.firewatch_index_epochs_blocked_wire_profile,
+            summary.user_program_index_epochs_eligible,
+            summary.user_program_index_epochs_blocked_migration,
+            summary.user_program_index_epochs_blocked_wire_profile,
         ) {
             ensure!(
                 u64::from(eligible)
                     + u64::from(blocked_migration)
                     + u64::from(blocked_wire_profile)
                     == u64::from(archive_total),
-                "Firewatch coverage classes do not equal archive scope"
+                "User program index coverage classes do not equal archive scope"
             );
         } else if let (Some(eligible), Some(blocked)) = (
-            summary.firewatch_index_epochs_eligible,
-            summary.firewatch_index_epochs_blocked_migration,
+            summary.user_program_index_epochs_eligible,
+            summary.user_program_index_epochs_blocked_migration,
         ) {
             // Preserve schema-v3 snapshots from controllers that predate
             // wire-profile coverage. Their unclassified remainder is valid.
             ensure!(
                 u64::from(eligible) + u64::from(blocked) <= u64::from(archive_total),
-                "Firewatch eligible and migration-blocked epochs exceed archive scope"
+                "User program index eligible and migration-blocked epochs exceed archive scope"
             );
         }
     }
@@ -1223,59 +1272,112 @@ mod tests {
         excess_registry_workers.summary.registry_reprocess_running = 2;
         assert!(excess_registry_workers.validate().is_err());
 
-        let mut invalid_firewatch = valid_snapshot();
-        invalid_firewatch.summary.firewatch_index_epochs_total = 1;
-        invalid_firewatch.summary.firewatch_index_epochs_accepted = 2;
-        assert!(invalid_firewatch.validate().is_err());
+        let mut invalid_user_program_index = valid_snapshot();
+        invalid_user_program_index
+            .summary
+            .user_program_index_epochs_total = 1;
+        invalid_user_program_index
+            .summary
+            .user_program_index_epochs_accepted = 2;
+        assert!(invalid_user_program_index.validate().is_err());
 
-        let mut excess_firewatch_workers = valid_snapshot();
-        excess_firewatch_workers
+        let mut excess_user_program_index_workers = valid_snapshot();
+        excess_user_program_index_workers
             .summary
-            .firewatch_index_capacity_configured = 1;
-        excess_firewatch_workers.summary.firewatch_index_running = 2;
-        assert!(excess_firewatch_workers.validate().is_err());
+            .user_program_index_capacity_configured = 1;
+        excess_user_program_index_workers
+            .summary
+            .user_program_index_running = 2;
+        assert!(excess_user_program_index_workers.validate().is_err());
 
-        let mut invalid_firewatch_coverage = valid_snapshot();
-        invalid_firewatch_coverage
+        let mut invalid_user_program_index_coverage = valid_snapshot();
+        invalid_user_program_index_coverage
             .summary
-            .firewatch_index_archive_epochs_total = Some(736);
-        invalid_firewatch_coverage
+            .user_program_index_archive_epochs_total = Some(736);
+        invalid_user_program_index_coverage
             .summary
-            .firewatch_index_epochs_eligible = Some(730);
-        invalid_firewatch_coverage
+            .user_program_index_epochs_eligible = Some(730);
+        invalid_user_program_index_coverage
             .summary
-            .firewatch_index_epochs_blocked_migration = Some(7);
-        assert!(invalid_firewatch_coverage.validate().is_err());
+            .user_program_index_epochs_blocked_migration = Some(7);
+        assert!(invalid_user_program_index_coverage.validate().is_err());
 
-        let mut complete_firewatch_coverage = valid_snapshot();
-        complete_firewatch_coverage
+        let mut complete_user_program_index_coverage = valid_snapshot();
+        complete_user_program_index_coverage
             .summary
-            .firewatch_index_archive_epochs_total = Some(10);
-        complete_firewatch_coverage
+            .user_program_index_archive_epochs_total = Some(10);
+        complete_user_program_index_coverage
             .summary
-            .firewatch_index_epochs_total = 3;
-        complete_firewatch_coverage
+            .user_program_index_epochs_total = 3;
+        complete_user_program_index_coverage
             .summary
-            .firewatch_index_epochs_eligible = Some(2);
-        complete_firewatch_coverage
+            .user_program_index_epochs_eligible = Some(2);
+        complete_user_program_index_coverage
             .summary
-            .firewatch_index_epochs_blocked_migration = Some(7);
-        complete_firewatch_coverage
+            .user_program_index_epochs_blocked_migration = Some(7);
+        complete_user_program_index_coverage
             .summary
-            .firewatch_index_epochs_blocked_wire_profile = Some(1);
-        complete_firewatch_coverage.validate().unwrap();
-        complete_firewatch_coverage
+            .user_program_index_epochs_blocked_wire_profile = Some(1);
+        complete_user_program_index_coverage.validate().unwrap();
+        complete_user_program_index_coverage
             .summary
-            .firewatch_index_epochs_blocked_wire_profile = Some(2);
-        assert!(complete_firewatch_coverage.validate().is_err());
+            .user_program_index_epochs_blocked_wire_profile = Some(2);
+        assert!(complete_user_program_index_coverage.validate().is_err());
 
-        let mut invalid_firewatch_eta = valid_snapshot();
-        invalid_firewatch_eta.summary.firewatch_index_queue_eta_secs = Some(-1.0);
-        assert!(invalid_firewatch_eta.validate().is_err());
+        let mut invalid_user_program_index_eta = valid_snapshot();
+        invalid_user_program_index_eta
+            .summary
+            .user_program_index_queue_eta_secs = Some(-1.0);
+        assert!(invalid_user_program_index_eta.validate().is_err());
     }
 
     #[test]
-    fn older_schema_v3_payload_defaults_firewatch_fields() {
+    fn user_program_index_summary_preserves_wire_keys_and_accepts_canonical_aliases() {
+        let mut snapshot = valid_snapshot();
+        let summary = &mut snapshot.summary;
+        summary.user_program_index_capacity_configured = 2;
+        summary.user_program_index_running = 1;
+        summary.user_program_index_epochs_total = 3;
+        summary.user_program_index_epochs_accepted = 1;
+        summary.user_program_index_epochs_queued = 1;
+        summary.user_program_index_archive_epochs_total = Some(10);
+        summary.user_program_index_epochs_eligible = Some(3);
+        summary.user_program_index_epochs_blocked_migration = Some(6);
+        summary.user_program_index_epochs_blocked_wire_profile = Some(1);
+        summary.user_program_index_queue_eta_secs = Some(4.5);
+        summary.user_program_index_admission_blocked_reason = Some("waiting for capacity".into());
+        snapshot.validate().unwrap();
+
+        let legacy = serde_json::to_value(snapshot).unwrap();
+        let mut canonical = legacy.clone();
+        let summary = canonical["summary"].as_object_mut().unwrap();
+        let old_keys = summary
+            .keys()
+            .filter(|key| key.starts_with("firewatch_index_"))
+            .cloned()
+            .collect::<Vec<_>>();
+        assert_eq!(old_keys.len(), 11);
+        for old in old_keys {
+            let value = summary.remove(&old).unwrap();
+            summary.insert(
+                old.replacen("firewatch_index_", "user_program_index_", 1),
+                value,
+            );
+        }
+        for value in [&legacy, &canonical] {
+            let decoded: PipelineSnapshot = serde_json::from_value(value.clone()).unwrap();
+            decoded.validate().unwrap();
+            assert_eq!(serde_json::to_value(decoded).unwrap(), legacy);
+        }
+
+        // Ambiguous mixed names must fail closed, rather than select a value.
+        let mut duplicate = legacy;
+        duplicate["summary"]["user_program_index_epochs_total"] = 999.into();
+        assert!(serde_json::from_value::<PipelineSnapshot>(duplicate).is_err());
+    }
+
+    #[test]
+    fn older_schema_v3_payload_defaults_user_program_index_fields() {
         let mut value = serde_json::to_value(valid_snapshot()).unwrap();
         let summary = value["summary"].as_object_mut().unwrap();
         for key in [
@@ -1295,32 +1397,32 @@ mod tests {
         }
 
         let decoded: PipelineSnapshot = serde_json::from_value(value).unwrap();
-        assert_eq!(decoded.summary.firewatch_index_epochs_total, 0);
-        assert_eq!(decoded.summary.firewatch_index_epochs_accepted, 0);
+        assert_eq!(decoded.summary.user_program_index_epochs_total, 0);
+        assert_eq!(decoded.summary.user_program_index_epochs_accepted, 0);
         assert!(
             decoded
                 .summary
-                .firewatch_index_archive_epochs_total
+                .user_program_index_archive_epochs_total
                 .is_none()
         );
-        assert!(decoded.summary.firewatch_index_epochs_eligible.is_none());
+        assert!(decoded.summary.user_program_index_epochs_eligible.is_none());
         assert!(
             decoded
                 .summary
-                .firewatch_index_epochs_blocked_migration
+                .user_program_index_epochs_blocked_migration
                 .is_none()
         );
         assert!(
             decoded
                 .summary
-                .firewatch_index_epochs_blocked_wire_profile
+                .user_program_index_epochs_blocked_wire_profile
                 .is_none()
         );
-        assert!(decoded.summary.firewatch_index_queue_eta_secs.is_none());
+        assert!(decoded.summary.user_program_index_queue_eta_secs.is_none());
         assert!(
             decoded
                 .summary
-                .firewatch_index_admission_blocked_reason
+                .user_program_index_admission_blocked_reason
                 .is_none()
         );
         decoded.validate().unwrap();

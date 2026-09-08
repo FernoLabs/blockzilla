@@ -62,10 +62,12 @@ require_regular() {
 }
 
 service_is_quiet() {
+    # Check both controller names during the naming migration.
     for service in \
         blockzilla-archive.service \
         blockzilla-gateway-internal.service \
         blockzilla-live-indexer.service \
+        blockzilla-user-program-index-controller.service \
         blockzilla-firewatch-index-controller.service \
         blockzilla-raw-live-fallback.service \
         blockzilla-watcher-runtime-operations.service \

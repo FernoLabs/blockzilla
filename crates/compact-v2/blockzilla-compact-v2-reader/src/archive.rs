@@ -261,6 +261,10 @@ struct CompactV2HttpObjectSet {
 }
 
 impl RangeSource for CompactV2HttpObjectSet {
+    fn recommended_read_concurrency(&self) -> usize {
+        self.cache.recommended_read_concurrency()
+    }
+
     fn size(&self, object: &str) -> std::result::Result<Option<u64>, SourceError> {
         Ok(self
             .inventory
@@ -592,7 +596,7 @@ impl CompactV2Archive {
     /// The default worker count is the host's available logical CPU count.
     /// Set it explicitly for reproducible benchmarks. The parallel path is for
     /// requests with no instruction payload bytes, including the USDC,
-    /// Pump.fun, and FireWatch reference workloads. Use `scan_ordered` when a
+    /// Pump.fun, and user-program-index reference workloads. Use `scan_ordered` when a
     /// request needs exact instruction payload reconstruction.
     ///
     /// A full scan shares one complete registry across workers when it fits the
@@ -925,6 +929,7 @@ fn io_snapshot(cache: &CachedHttpRangeSource) -> ArchiveIoSnapshot {
         head_requests: http.head_requests,
         get_requests: http.get_requests,
         incomplete_body_retries: http.incomplete_body_retries,
+        server_error_retries: http.server_error_retries,
         network_body_bytes: http.returned_body_bytes,
         cache_hits: cache.cache_hits,
         cache_downloads: cache.cache_downloads,

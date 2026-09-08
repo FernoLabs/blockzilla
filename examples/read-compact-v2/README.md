@@ -5,7 +5,7 @@ These four small programs show how to use the Compact V2 SDK:
 - [Count the epoch in approximate slot-hours](src/bin/read-compact-v2-slot-hours.rs)
 - [USDC recorded balances](src/bin/read-compact-v2-usdc.rs)
 - [Pump.fun transactions](src/bin/read-compact-v2-pumpfun.rs)
-- [FireWatch wallet-to-program index](src/bin/read-compact-v2-firewatch.rs)
+- [User program index wallet-to-program index](src/bin/read-compact-v2-user-program-index.rs)
 
 Each program opens one Compact V2 archive, builds one query, and streams the
 result to one sink. The format-specific code stays in the program. Shared
@@ -93,7 +93,7 @@ cargo run --release --locked -p blockzilla-read-compact-v2 \
   --archive-root archive
 
 cargo run --release --locked -p blockzilla-read-compact-v2 \
-  --bin read-compact-v2-firewatch -- \
+  --bin read-compact-v2-user-program-index -- \
   --archive-root archive \
   --wallet 5LikTUsx695BHRipWoRrn6YmTQEcPrvbR8YaHxdSRQo8
 ```

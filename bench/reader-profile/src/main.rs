@@ -8,10 +8,14 @@ use blockzilla_compact_v2_reader::archive::{
     CompactV2Archive, CompactV2LocalDescriptor, CompactV2ParallelScanConfig,
 };
 use blockzilla_example_workloads::{
-    FirewatchSink, IndexedUsdcBalanceSink, MAINNET_PUMP_FUN_PROGRAM, MAINNET_USDC_MINT, PumpSink,
-    UsdcBalanceSink, firewatch_scan_request, pump_scan_request, usdc_scan_request,
+    IndexedUsdcBalanceSink, MAINNET_PUMP_FUN_PROGRAM, MAINNET_USDC_MINT, PumpSink,
+    TransactionIdentityDumpSink, UsdcBalanceSink, UserProgramIndexSink, pump_scan_request,
+    usdc_scan_request, user_program_index_scan_request,
 };
-use blockzilla_model::{BlockSink, BlockView, ScanRange, ScanReceipt, ScanRequest};
+use blockzilla_model::{
+    ArchiveInstructionSource, ArchiveIoSnapshot, BlockSink, BlockView, ScanRange, ScanReceipt,
+    ScanRequest, SourceIdentity,
+};
 use clap::{Parser, ValueEnum};
 use serde_json::json;
 use std::{
@@ -34,15 +38,21 @@ enum Format {
 #[derive(Clone, Copy, Debug, ValueEnum)]
 enum Workload {
     Count,
+    Transactions,
     Usdc,
     Pumpfun,
-    Firewatch,
+    UserProgramIndex,
 }
 #[derive(Parser)]
 struct Args {
     /// Directory containing compact-v2/EPOCH and indexer-v3/EPOCH.
-    #[arg(long)]
-    archive_root: PathBuf,
+    #[arg(long, required_unless_present = "origin", conflicts_with = "origin")]
+    archive_root: Option<PathBuf>,
+    /// HTTPS sample gateway. Uses the same format SDK as the public examples.
+    #[arg(long, requires = "cache_root")]
+    origin: Option<String>,
+    #[arg(long, requires = "origin")]
+    cache_root: Option<PathBuf>,
     #[arg(long)]
     epoch: u64,
     #[arg(long, value_enum)]
@@ -67,6 +77,9 @@ struct Args {
     indexed_usdc: bool,
     #[arg(long)]
     flamegraph: Option<PathBuf>,
+    /// Include archive admission and sidecar downloads in the CPU profile.
+    #[arg(long, requires = "flamegraph")]
+    profile_setup: bool,
     /// Use dense V3 scanning to isolate projection from reverse lookup.
     #[arg(long)]
     dense: bool,
@@ -82,10 +95,11 @@ enum Archive {
     V3(IndexerV3Archive),
 }
 enum Sink {
+    Transactions(TransactionIdentityDumpSink<io::Sink>),
     Count { blocks: u64, tx: u64, inner: u64 },
     Usdc(UsdcBalanceSink<io::Sink>),
     Pump(PumpSink<io::Sink>),
-    Firewatch(FirewatchSink<io::Sink>),
+    UserProgramIndex(UserProgramIndexSink<io::Sink>),
 }
 impl BlockSink for Sink {
     fn visit_block(&mut self, block: BlockView<'_>) -> blockzilla_model::Result<()> {
@@ -99,33 +113,56 @@ impl BlockSink for Sink {
                 *inner += counts.recorded_inner_instructions;
                 Ok(())
             }
+            Self::Transactions(s) => s.visit_block(block),
             Self::Usdc(s) => s.visit_block(block),
             Self::Pump(s) => s.visit_block(block),
-            Self::Firewatch(s) => s.visit_block(block),
+            Self::UserProgramIndex(s) => s.visit_block(block),
         }
     }
 }
 impl Sink {
-    fn new(workload: Workload, wallet: [u8; 32]) -> Result<Self> {
+    fn new(workload: Workload, wallet: [u8; 32], identity: &SourceIdentity) -> Result<Self> {
         Ok(match workload {
             Workload::Count => Self::Count {
                 blocks: 0,
                 tx: 0,
                 inner: 0,
             },
+            Workload::Transactions => Self::Transactions(TransactionIdentityDumpSink::new(
+                io::sink(),
+                identity.epoch,
+                identity.first_slot,
+                identity
+                    .first_slot
+                    .checked_add(identity.slots_per_epoch)
+                    .context("slot range overflow")?,
+            )?),
             Workload::Usdc => Self::Usdc(UsdcBalanceSink::mainnet(io::sink())?),
             Workload::Pumpfun => Self::Pump(PumpSink::mainnet(io::sink())?),
-            Workload::Firewatch => Self::Firewatch(FirewatchSink::new(io::sink(), wallet)?),
+            Workload::UserProgramIndex => {
+                Self::UserProgramIndex(UserProgramIndexSink::new(io::sink(), wallet)?)
+            }
         })
     }
     fn finish(self) -> Result<String> {
-        // Check counters and coverage between iterations. This is not a check
-        // of every output byte; use the full examples for output-file parity.
+        // Transaction identities hash every output byte. Other workloads compare
+        // counters and coverage; their full examples provide output-file parity.
         Ok(match self {
             Self::Count { blocks, tx, inner } => format!("blocks={blocks} tx={tx} inner={inner}"),
+            Self::Transactions(s) => {
+                let r = s.finish()?.report;
+                format!(
+                    "records={} bytes={} sha256={} first_slot={:?} last_slot={:?}",
+                    r.records,
+                    r.output_bytes,
+                    r.output_sha256_hex(),
+                    r.first_slot,
+                    r.last_slot
+                )
+            }
             Self::Usdc(s) => format!("{:?}", s.finish()?.report),
             Self::Pump(s) => format!("{:?}", s.finish()?.report),
-            Self::Firewatch(s) => format!("{:?}", s.finish()?.report),
+            Self::UserProgramIndex(s) => format!("{:?}", s.finish()?.report),
         })
     }
 }
@@ -146,46 +183,88 @@ fn main() -> Result<()> {
         .registry_mib
         .checked_mul(1 << 20)
         .context("registry limit overflow")?;
+    ensure!(
+        !args.profile_setup || args.warmups == 0,
+        "--profile-setup requires --warmups 0"
+    );
+    let start_profiler = || {
+        pprof::ProfilerGuardBuilder::default()
+            .frequency(199)
+            .blocklist(&["libc", "libgcc", "pthread", "vdso"])
+            .build()
+    };
+    let mut profiler = if args.profile_setup {
+        Some(start_profiler()?)
+    } else {
+        None
+    };
+    let total_started = Instant::now();
+    eprintln!("phase=setup unix_ms={}", unix_ms());
     let mut archive = match args.format {
-        Format::V2 => Archive::V2(CompactV2Archive::open_local(
-            args.archive_root
-                .join("compact-v2")
-                .join(args.epoch.to_string()),
-            CompactV2LocalDescriptor::mainnet(args.epoch, "reader-profile")?,
-        )?),
+        Format::V2 => Archive::V2(if let Some(origin) = &args.origin {
+            CompactV2Archive::open(origin, args.epoch, args.cache_root.as_ref().unwrap())?
+        } else {
+            CompactV2Archive::open_local(
+                args.archive_root
+                    .as_ref()
+                    .unwrap()
+                    .join("compact-v2")
+                    .join(args.epoch.to_string()),
+                CompactV2LocalDescriptor::mainnet(args.epoch, "reader-profile")?,
+            )?
+        }),
         Format::V3 => {
-            let mut archive = IndexerV3Archive::open_local(&args.archive_root, args.epoch)?;
+            let mut archive = if let Some(origin) = &args.origin {
+                IndexerV3Archive::open(origin, args.epoch, args.cache_root.as_ref().unwrap())?
+            } else {
+                IndexerV3Archive::open_local(args.archive_root.as_ref().unwrap(), args.epoch)?
+            };
             archive.set_full_registry_limit(registry_bytes);
             Archive::V3(archive)
         }
     };
+    let setup_seconds = total_started.elapsed().as_secs_f64();
+    let (identity, setup_transport) = match &archive {
+        Archive::V2(a) => (a.identity().clone(), a.transport_snapshot().http_and_cache),
+        Archive::V3(a) => (a.identity().clone(), a.transport_snapshot().http_and_cache),
+    };
+    println!(
+        "{}",
+        json!({"phase":"setup", "seconds":setup_seconds,
+        "transport":setup_transport, "identity":identity})
+    );
     let request = ScanRequest::all();
     let mut request = match args.workload {
         Workload::Count => request
             .allow_incomplete_instructions()
             .allow_incomplete_cpi()
             .count_instructions_only(),
+        Workload::Transactions => request
+            .allow_incomplete_instructions()
+            .allow_incomplete_cpi()
+            .allow_unknown_execution()
+            .without_instructions()
+            .without_instruction_accounts()
+            .without_instruction_data()
+            .without_required_signers()
+            .without_execution_status(),
         Workload::Usdc => usdc_scan_request(request, MAINNET_USDC_MINT),
         Workload::Pumpfun => pump_scan_request(request),
-        Workload::Firewatch => firewatch_scan_request(request).with_required_signer(wallet),
+        Workload::UserProgramIndex => {
+            user_program_index_scan_request(request).with_required_signer(wallet)
+        }
     };
     request.range = Some(ScanRange {
         first_block: args.first_block,
         block_count: args.blocks,
     });
     let mut oracle = None;
-    let mut profiler = None;
     for iteration in 0..args.warmups + args.iterations {
         let measured = iteration >= args.warmups;
-        if iteration == args.warmups && args.flamegraph.is_some() {
-            profiler = Some(
-                pprof::ProfilerGuardBuilder::default()
-                    .frequency(199)
-                    .blocklist(&["libc", "libgcc", "pthread", "vdso"])
-                    .build()?,
-            );
+        if iteration == args.warmups && args.flamegraph.is_some() && profiler.is_none() {
+            profiler = Some(start_profiler()?);
         }
-        let mut sink = Sink::new(args.workload, wallet)?;
+        let mut sink = Sink::new(args.workload, wallet, &identity)?;
         // No persistent files are produced here. The full example records the
         // actual source scope; this diagnostic dictionary is discarded per scan.
         let mut indexed_sink = args
@@ -195,6 +274,8 @@ fn main() -> Result<()> {
         if measured && args.allocations {
             allocation::start();
         }
+        let transport_before = archive.http_snapshot();
+        eprintln!("phase=scan iteration={iteration} unix_ms={}", unix_ms());
         let started = Instant::now();
         let (scan, stages): (ScanReceipt, _) = match &mut archive {
             Archive::V2(a) => {
@@ -248,7 +329,10 @@ fn main() -> Result<()> {
             }
             Archive::V3(a)
                 if !args.dense
-                    && matches!(args.workload, Workload::Pumpfun | Workload::Firewatch) =>
+                    && matches!(
+                        args.workload,
+                        Workload::Pumpfun | Workload::UserProgramIndex
+                    ) =>
             {
                 let r = if matches!(args.workload, Workload::Pumpfun) {
                     a.for_each_reached_program_candidate_block_parallel(
@@ -267,13 +351,17 @@ fn main() -> Result<()> {
                 };
                 (r.scan.scan_receipt, json!({"path":"reverse-candidates"}))
             }
-            Archive::V3(a) => (
-                a.scan_ordered_parallel(&request, args.workers, &mut sink)?
-                    .scan,
-                json!({"path":"dense"}),
-            ),
+            Archive::V3(a) => {
+                let r = a.scan_ordered_parallel(&request, args.workers, &mut sink)?;
+                (
+                    r.scan,
+                    json!({"path":"dense", "parallel":r.parallel, "registry":r.registry}),
+                )
+            }
         };
         let seconds = started.elapsed().as_secs_f64();
+        let transport = archive.http_snapshot().saturating_sub(transport_before);
+        eprintln!("phase=finalize iteration={iteration} unix_ms={}", unix_ms());
         let allocations = if measured && args.allocations {
             Some(allocation::stop())
         } else {
@@ -296,7 +384,7 @@ fn main() -> Result<()> {
                 "workload output changed between iterations"
             );
         } else {
-            oracle = Some(result);
+            oracle = Some(result.clone());
         }
         if measured {
             // Serialize histogram rows after stop(), so reporting the histogram
@@ -319,6 +407,7 @@ fn main() -> Result<()> {
             println!(
                 "{}",
                 json!({"iteration":iteration-args.warmups,"format":format!("{:?}",args.format),"workload":format!("{:?}",args.workload),
+                "phase":"scan", "transport":transport, "blocks":scan.blocks, "oracle":&result,
                 "workers":args.workers.get(),"seconds":seconds,"transactions":scan.transactions,"instructions":scan.instructions,
                 "tps":scan.transactions as f64/seconds,"source_bytes":scan.io.source_read_bytes,"source_calls":scan.io.source_read_calls,
                 "allocation_calls":allocations.map(|x|x.allocation_calls),"allocation_bytes":allocations.map(|x|x.allocation_bytes),
@@ -328,6 +417,16 @@ fn main() -> Result<()> {
             );
         }
     }
+    match &archive {
+        Archive::V2(a) => a.verify_local_unchanged()?,
+        Archive::V3(a) => a.verify_local_unchanged()?,
+    }
+    println!(
+        "{}",
+        json!({"phase":"complete", "seconds":total_started.elapsed().as_secs_f64(),
+        "transport":archive.http_snapshot(), "oracle":oracle})
+    );
+    eprintln!("phase=profile_report unix_ms={}", unix_ms());
     eprintln!("workload_oracle={}", oracle.unwrap());
     if let (Some(profiler), Some(path)) = (profiler, &args.flamegraph) {
         let report = profiler.report().build()?;
@@ -359,4 +458,20 @@ fn main() -> Result<()> {
         }
     }
     Ok(())
+}
+
+impl Archive {
+    fn http_snapshot(&self) -> ArchiveIoSnapshot {
+        match self {
+            Self::V2(a) => a.transport_snapshot().http_and_cache,
+            Self::V3(a) => a.transport_snapshot().http_and_cache,
+        }
+    }
+}
+
+fn unix_ms() -> u128 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .expect("system clock before Unix epoch")
+        .as_millis()
 }

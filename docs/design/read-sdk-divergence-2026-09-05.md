@@ -1,5 +1,9 @@
 # Read SDK divergence: `wip/wire-profile-subsystem` vs `codex/sample-archive-benchmark`
 
+Historical review: package paths and quoted sink names below identify the
+reviewed revisions. The retained package and wallet workload are now
+`blockzilla-user-program-index` and `user-program-index`.
+
 Status: analysis note, 2026-09-05. Input to a merge decision, not a decision itself.
 
 Two worktrees of the same repository, diverged at `f5ad4758`:

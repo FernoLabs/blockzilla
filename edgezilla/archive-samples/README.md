@@ -124,3 +124,22 @@ npm run check
 The Wrangler configuration binds `ARCHIVE_BUCKET` to the private
 `blockzilla-archive-samples-v1` bucket. Creating the bucket, uploading objects,
 and deploying the Worker are separate, explicit operations.
+
+## Storage diagnostics
+
+The operation logging records `archive_sample_r2_operation` for R2
+calls that fail or take at least one second. `operation` distinguishes `head`,
+`get_full`, and `get_range`. Each record has the published object key, elapsed
+milliseconds, and outcome. Range calls also include the validated offset and
+length. Raw error messages, request headers and body data are omitted.
+
+The clock surrounds the awaited R2 operation. Its duration ends when R2 returns
+metadata and the stream handle; it does not measure the later body transfer.
+Cloudflare documents this use of timers around I/O in its
+[performance API reference](https://developers.cloudflare.com/workers/runtime-apis/performance/).
+Fast successful calls produce no additional log. Existing response status,
+range/ETag validation, streaming and error response fields stay the same.
+
+This diagnostic change was deployed on 8 September 2026. Twelve live exact-range
+checks passed; these checks do not measure SDK throughput. See
+[the review and validation record](../../docs/design/archive-sample-operation-logging.md).

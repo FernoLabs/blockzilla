@@ -19,7 +19,7 @@ import urllib.request
 
 EPOCHS = (0, 100, 200, 300, 400, 500, 600, 700, 800, 900, 1000)
 FORMATS = ("compact-v2", "indexer-v3", "car")
-WORKLOADS = ("slot-hours", "usdc", "pumpfun", "firewatch")
+WORKLOADS = ("slot-hours", "usdc", "pumpfun", "user-program-index")
 ORIGIN = "https://blockzilla-archive-samples-v1.cheron-augustin.workers.dev"
 WALLET = "5LikTUsx695BHRipWoRrn6YmTQEcPrvbR8YaHxdSRQo8"
 BASE = ("archive-v2-meta.wincode", "registry.bin", "registry.mphf", "signatures.bin",
@@ -50,7 +50,11 @@ METRICS = ("blocks", "transactions", "recorded_inner_instructions", "setup_s", "
            "pipeline_projection_buffer_wait_s", "pipeline_result_send_wait_s", "pipeline_signature_read_s",
            "pipeline_signature_assign_s", "pipeline_publish_s",
            "pipeline_max_in_flight_blocks", "pipeline_max_in_flight_transactions",
-           "pipeline_max_in_flight_declared_uncompressed_bytes")
+           "pipeline_max_in_flight_declared_uncompressed_bytes") + tuple(
+               phase + "_" + metric
+               for phase in ("setup", "scan", "total")
+               for metric in ("head_requests", "get_requests", "incomplete_body_retries", "server_error_retries",
+                              "cache_hits", "cache_downloads", "cache_read_calls"))
 
 
 def save(path, data):
@@ -72,14 +76,20 @@ def fields(line):
     return dict(re.findall(r"(?:^|\s)([A-Za-z0-9_]+)=([^\s]+)", line))
 
 
+def canonical_workload(workload):
+    # Accept old command lines without using the old name for new jobs.
+    return "user-program-index" if workload == "firewatch" else workload
+
+
 def binary(fmt, workload):
+    workload = canonical_workload(workload)
     return "read-car" if (fmt, workload) == ("car", "slot-hours") else "read-{}-{}".format("archive-v3" if fmt == "indexer-v3" else fmt, workload)
 
 
 def plan(args):
     modes = ("local", "network") if args.mode == "both" else (args.mode,)
     return [dict(format=f, mode=m, epoch=e, workload=w, binary=binary(f, w))
-            for f in getattr(args, "formats", FORMATS) for m in modes for e in getattr(args, "epochs", EPOCHS) for w in args.workloads
+            for f in getattr(args, "formats", FORMATS) for m in modes for e in getattr(args, "epochs", EPOCHS) for w in map(canonical_workload, args.workloads)
             if not (getattr(args, "car_count_only", False) and f == "car" and w != "slot-hours")]
 
 
@@ -334,7 +344,7 @@ def run_one(args, job, sizes, results):
             command += ["--cache-root", str(attempt / "cache")]
     if job["workload"] != "slot-hours":
         command += ["--output", str(attempt / "output.bin")]
-    if job["workload"] == "firewatch":
+    if canonical_workload(job["workload"]) == "user-program-index":
         command += ["--wallet", args.wallet]
     save(attempt / "command.json", command)
     print("start " + job_key(job), flush=True)
@@ -438,7 +448,7 @@ def main():
     if len(set(args.formats)) != len(args.formats) or not set(args.formats) <= set(FORMATS):
         parser.error("invalid format selection")
     args.formats = [fmt for fmt in FORMATS if fmt in args.formats]
-    args.workloads = args.workloads.split(",")
+    args.workloads = [canonical_workload(w) for w in args.workloads.split(",")]
     try:
         args.epochs = [int(epoch) for epoch in args.epochs.split(",")]
     except ValueError:

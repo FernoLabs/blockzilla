@@ -256,6 +256,55 @@ class RunnerTests(unittest.TestCase):
         self.assertEqual(jobs[43]["mode"], "local")
         self.assertEqual(jobs[44]["mode"], "network")
 
+    def test_user_program_index_and_legacy_cli_use_canonical_jobs_with_wallet(self):
+        with tempfile.TemporaryDirectory() as folder, contextlib.redirect_stdout(io.StringIO()):
+            root = Path(folder)
+            bins = root / "bin"
+            bins.mkdir()
+            objects = []
+            for fmt in matrix.FORMATS:
+                reader = bins / matrix.binary(fmt, "user-program-index")
+                reader.write_text(STUB)
+                reader.chmod(0o755)
+                for mode in ("local", "network"):
+                    objects.append(dict(format=fmt, epoch=900, object="fixture", source=mode, size_bytes=100))
+            for selection in ("user-program-index", "firewatch"):
+                with self.subTest(selection=selection):
+                    results = root / selection
+                    command = ["runner", "--mode", "both", "--archive-root", str(root / "archive"),
+                               "--bin-dir", str(bins), "--results-root", str(results),
+                               "--epochs", "900", "--workloads", selection, "--wallet", "selected-wallet"]
+                    with patch.object(sys, "argv", command), patch.object(matrix, "inventory", return_value=objects):
+                        self.assertEqual(matrix.main(), 0)
+                    jobs = json.loads((results / "plan.json").read_text())
+                    self.assertEqual(len(jobs), 6)
+                    self.assertEqual({job["workload"] for job in jobs}, {"user-program-index"})
+                    self.assertEqual({job["binary"] for job in jobs}, {
+                        "read-car-user-program-index", "read-compact-v2-user-program-index",
+                        "read-archive-v3-user-program-index"})
+                    commands = list(results.glob("jobs/**/command.json"))
+                    self.assertEqual(len(commands), 6)
+                    for path in commands:
+                        saved = json.loads(path.read_text())
+                        self.assertEqual(saved[saved.index("--wallet") + 1], "selected-wallet")
+                        self.assertNotIn("firewatch", str(path.relative_to(results)))
+                    self.assertEqual(json.loads((results / "run.json").read_text())["workloads"],
+                                     ["user-program-index"])
+
+    def test_legacy_and_canonical_duplicate_workloads_are_rejected_before_io(self):
+        for selection in ("firewatch,user-program-index", "user-program-index,firewatch"):
+            with self.subTest(selection=selection):
+                command = ["runner", "--mode", "network", "--bin-dir", "/unused/bin",
+                           "--results-root", "/unused/results", "--workloads", selection]
+                with patch.object(sys, "argv", command), patch.object(Path, "resolve") as resolve, \
+                        patch.object(Path, "mkdir") as mkdir, patch.object(matrix, "execute") as execute, \
+                        contextlib.redirect_stderr(io.StringIO()), self.assertRaises(SystemExit) as stopped:
+                    matrix.main()
+                self.assertEqual(stopped.exception.code, 2)
+                resolve.assert_not_called()
+                mkdir.assert_not_called()
+                execute.assert_not_called()
+
     def test_epoch_300_comparison_keeps_format_order(self):
         jobs = matrix.plan(SimpleNamespace(mode="local", workloads=("slot-hours",), epochs=[300]))
         self.assertEqual([(job["format"], job["epoch"]) for job in jobs],

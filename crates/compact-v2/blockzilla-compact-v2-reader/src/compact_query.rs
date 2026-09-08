@@ -406,7 +406,7 @@ impl<S: RangeSource> CompactV2InstructionSource<S> {
     /// This path supports requests that do not select instruction payload
     /// bytes. Exact instruction-data reconstruction can load large blockhash
     /// and vote-hash sidecars; the sequential scan keeps one bounded copy of
-    /// that state. The USDC, Pump.fun, and FireWatch reference workloads all
+    /// that state. The USDC, Pump.fun, and user-program-index reference workloads all
     /// request `InstructionDataRequirement::None` and can use this path.
     pub fn scan_ordered_parallel(
         &mut self,

@@ -1,6 +1,6 @@
 //! Shared summary counters and text output for reader workload examples.
 
-use crate::{CoverageReport, FirewatchReport, OutputReport, PumpReport, UsdcReport};
+use crate::{CoverageReport, OutputReport, PumpReport, UsdcReport, UserProgramIndexReport};
 
 /// Counters common to the three reader workload reports.
 pub trait ExampleReport {
@@ -69,9 +69,9 @@ impl ExampleReport for PumpReport {
     }
 }
 
-impl ExampleReport for FirewatchReport {
+impl ExampleReport for UserProgramIndexReport {
     fn workload(&self) -> &'static str {
-        "firewatch-wallet-programs"
+        "user-program-index"
     }
 
     fn common(&self) -> (u64, u64, OutputReport, CoverageReport, bool) {

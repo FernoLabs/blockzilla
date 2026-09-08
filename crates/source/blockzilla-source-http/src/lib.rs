@@ -16,7 +16,7 @@ use reqwest::{
     blocking::{Client, RequestBuilder, Response},
     header::{
         ACCEPT_ENCODING, AUTHORIZATION, CONTENT_LENGTH, CONTENT_RANGE, ETAG, HeaderMap,
-        HeaderValue, RANGE,
+        HeaderValue, RANGE, RETRY_AFTER,
     },
     redirect,
 };
@@ -29,6 +29,7 @@ const GENERATION_MANIFEST_FILE: &str = "archive-v2-generation.json";
 
 const DEFAULT_MAX_MANIFEST_BYTES: usize = 4 * 1024 * 1024;
 const MAX_INCOMPLETE_RANGE_BODY_RETRIES: usize = 2;
+const MAX_SERVER_ERROR_RETRIES: usize = 2;
 
 /// Exact HTTP work completed by one source and all its clones.
 ///
@@ -41,6 +42,8 @@ pub struct HttpRangeSourceStats {
     pub get_requests: u64,
     /// New full-range GET attempts made after an incomplete response body.
     pub incomplete_body_retries: u64,
+    /// New GET attempts after HTTP 500, 502, 503 or 504, with bounded backoff.
+    pub server_error_retries: u64,
     pub returned_body_bytes: u64,
 }
 
@@ -56,6 +59,9 @@ impl HttpRangeSourceStats {
             incomplete_body_retries: self
                 .incomplete_body_retries
                 .saturating_sub(earlier.incomplete_body_retries),
+            server_error_retries: self
+                .server_error_retries
+                .saturating_sub(earlier.server_error_retries),
             returned_body_bytes: self
                 .returned_body_bytes
                 .saturating_sub(earlier.returned_body_bytes),
@@ -68,6 +74,7 @@ struct HttpRangeSourceCounters {
     head_requests: AtomicU64,
     get_requests: AtomicU64,
     incomplete_body_retries: AtomicU64,
+    server_error_retries: AtomicU64,
     returned_body_bytes: AtomicU64,
 }
 
@@ -271,6 +278,7 @@ impl HttpRangeSource {
                 .counters
                 .incomplete_body_retries
                 .load(Ordering::Relaxed),
+            server_error_retries: self.counters.server_error_retries.load(Ordering::Relaxed),
             returned_body_bytes: self.counters.returned_body_bytes.load(Ordering::Relaxed),
         }
     }
@@ -522,17 +530,31 @@ impl HttpRangeSource {
             .ok_or_else(|| SourceError::Protocol(format!("range overflow for {object}")))?;
         let end_inclusive = end_exclusive - 1;
         let url = self.object_url(object)?;
-        self.record_get_request();
-        let response = self
-            .authorize(
-                self.client
-                    .get(url)
-                    .header(ACCEPT_ENCODING, HeaderValue::from_static("identity"))
-                    .header(RANGE, format!("bytes={offset}-{end_inclusive}")),
-            )
-            .send()
-            .map_err(sanitize_http_error)?;
-        self.check_origin(&response)?;
+        let mut attempt = 0;
+        let response = loop {
+            self.record_get_request();
+            let response = self
+                .authorize(
+                    self.client
+                        .get(url.clone())
+                        .header(ACCEPT_ENCODING, HeaderValue::from_static("identity"))
+                        .header(RANGE, format!("bytes={offset}-{end_inclusive}")),
+                )
+                .send()
+                .map_err(sanitize_http_error)?;
+            self.check_origin(&response)?;
+            let delay = server_error_retry_delay(&response, attempt);
+            let Some(delay) = delay else { break response };
+            // Error bodies are not archive bytes. Do not allocate or drain an
+            // untrusted error body. Every new response still passes all range,
+            // length and pinned identity checks below before data is consumed.
+            drop(response);
+            std::thread::sleep(delay);
+            self.counters
+                .server_error_retries
+                .fetch_add(1, Ordering::Relaxed);
+            attempt += 1;
+        };
         if response.status() == StatusCode::NOT_FOUND {
             self.bind_object_absence(object)?;
             return Err(SourceError::NotFound(object.to_owned()));
@@ -568,6 +590,10 @@ impl HttpRangeSource {
 }
 
 impl RangeSource for HttpRangeSource {
+    fn recommended_read_concurrency(&self) -> usize {
+        8
+    }
+
     fn size(&self, object: &str) -> SourceResult<Option<u64>> {
         Ok(self
             .head_identity(object, false)?
@@ -681,6 +707,28 @@ impl RangeSource for HttpRangeSource {
             }
         }
         unreachable!("the bounded range retry loop always returns")
+    }
+}
+
+// These are transient server statuses, not malformed successful responses.
+// Keep the existing incomplete-body budget separate. A read therefore has
+// at most nine GET attempts (three response attempts per body attempt).
+fn server_error_retry_delay(response: &Response, attempt: usize) -> Option<Duration> {
+    if attempt >= MAX_SERVER_ERROR_RETRIES
+        || !matches!(response.status().as_u16(), 500 | 502 | 503 | 504)
+    {
+        return None;
+    }
+    let backoff = Duration::from_millis(250 << attempt);
+    match response.headers().get(RETRY_AFTER) {
+        None => Some(backoff),
+        Some(value) => {
+            // Do not retry earlier than a server requests. Long waits, dates
+            // and invalid values fail normally rather than blocking this SDK
+            // call for an unbounded interval or ignoring the server's delay.
+            let seconds = value.to_str().ok()?.parse::<u64>().ok()?;
+            (seconds <= 5).then(|| backoff.max(Duration::from_secs(seconds)))
+        }
     }
 }
 
@@ -936,6 +984,7 @@ mod tests {
                 head_requests: 1,
                 get_requests: 1,
                 incomplete_body_retries: 0,
+                server_error_retries: 0,
                 returned_body_bytes: 2,
             }
         );
@@ -1049,6 +1098,107 @@ mod tests {
     }
 
     #[test]
+    fn server_error_retry_fills_vector_and_slice_without_counting_error_bodies() {
+        for direct in [false, true] {
+            let (base_url, server) = serve_once(
+                vec!["GET /gateway/v1/epochs/7/files/thing.bin HTTP/1.1"; 2],
+                vec![
+                    b"HTTP/1.1 500 Internal Server Error\r\nContent-Length: 5\r\nConnection: close\r\n\r\nerror",
+                    b"HTTP/1.1 206 Partial Content\r\nContent-Length: 2\r\nContent-Range: bytes 1-2/4\r\nETag: \"v1\"\r\nConnection: close\r\n\r\nbc",
+                ],
+            );
+            let source = HttpRangeSource::with_options(
+                base_url,
+                7,
+                None,
+                HttpRangeSourceOptions {
+                    allow_insecure_http: true,
+                    ..HttpRangeSourceOptions::default()
+                },
+            )
+            .unwrap();
+            if direct {
+                let mut bytes = [0; 2];
+                source
+                    .read_range_into_slice("thing.bin", 1, &mut bytes)
+                    .unwrap();
+                assert_eq!(&bytes, b"bc");
+            } else {
+                assert_eq!(source.read_range("thing.bin", 1, 2).unwrap(), b"bc");
+            }
+            let stats = source.stats();
+            assert_eq!(stats.get_requests, 2);
+            assert_eq!(stats.server_error_retries, 1);
+            assert_eq!(stats.incomplete_body_retries, 0);
+            assert_eq!(stats.returned_body_bytes, 2);
+            assert_eq!(stats.saturating_sub(HttpRangeSourceStats::default()), stats);
+            assert_eq!(stats.saturating_sub(stats), HttpRangeSourceStats::default());
+            server.join().unwrap();
+        }
+    }
+
+    #[test]
+    fn server_error_retry_is_bounded_and_does_not_retry_protocol_errors() {
+        for (response, attempts) in [
+            (&b"HTTP/1.1 500 Internal Server Error\r\nContent-Length: 0\r\nConnection: close\r\n\r\n"[..], 3),
+            (&b"HTTP/1.1 503 Service Unavailable\r\nRetry-After: 100\r\nContent-Length: 0\r\nConnection: close\r\n\r\n"[..], 1),
+            (&b"HTTP/1.1 412 Precondition Failed\r\nContent-Length: 0\r\nConnection: close\r\n\r\n"[..], 1),
+            (&b"HTTP/1.1 206 Partial Content\r\nContent-Length: 2\r\nContent-Range: bytes 2-3/4\r\nConnection: close\r\n\r\ncd"[..], 1),
+        ] {
+            let (base_url, server) = serve_once(
+                vec!["GET /gateway/v1/epochs/7/files/thing.bin HTTP/1.1"; attempts],
+                vec![response; attempts],
+            );
+            let source = HttpRangeSource::with_options(base_url, 7, None, HttpRangeSourceOptions {
+                allow_insecure_http: true, ..HttpRangeSourceOptions::default()
+            }).unwrap();
+            assert!(source.read_range_into_slice("thing.bin", 1, &mut [0; 2]).is_err());
+            assert_eq!(source.stats().get_requests, attempts as u64);
+            assert_eq!(source.stats().server_error_retries, (attempts - 1) as u64);
+            assert_eq!(source.stats().returned_body_bytes, 0);
+            server.join().unwrap();
+        }
+    }
+
+    #[test]
+    fn server_error_retry_keeps_the_pinned_identity() {
+        let (base_url, server) = serve_once(
+            vec![
+                "HEAD /gateway/v1/epochs/7/files/thing.bin HTTP/1.1",
+                "GET /gateway/v1/epochs/7/files/thing.bin HTTP/1.1",
+                "GET /gateway/v1/epochs/7/files/thing.bin HTTP/1.1",
+            ],
+            vec![
+                b"HTTP/1.1 200 OK\r\nContent-Length: 4\r\nETag: \"v1\"\r\nConnection: close\r\n\r\n",
+                b"HTTP/1.1 503 Service Unavailable\r\nRetry-After: 0\r\nContent-Length: 0\r\nConnection: close\r\n\r\n",
+                b"HTTP/1.1 206 Partial Content\r\nContent-Length: 2\r\nContent-Range: bytes 1-2/4\r\nETag: \"v2\"\r\nConnection: close\r\n\r\nbc",
+            ],
+        );
+        let source = HttpRangeSource::with_options(
+            base_url,
+            7,
+            None,
+            HttpRangeSourceOptions {
+                allow_insecure_http: true,
+                ..HttpRangeSourceOptions::default()
+            },
+        )
+        .unwrap();
+        source.strong_identity("thing.bin").unwrap();
+        assert!(
+            source
+                .read_range("thing.bin", 1, 2)
+                .unwrap_err()
+                .to_string()
+                .contains("changed strong ETag")
+        );
+        assert_eq!(source.stats().get_requests, 2);
+        assert_eq!(source.stats().server_error_retries, 1);
+        assert_eq!(source.stats().returned_body_bytes, 0);
+        server.join().unwrap();
+    }
+
+    #[test]
     fn incomplete_range_body_retries_the_same_bound_range_and_counts_all_bytes() {
         let (base_url, server) = serve_once(
             vec![
@@ -1081,6 +1231,7 @@ mod tests {
                 head_requests: 1,
                 get_requests: 2,
                 incomplete_body_retries: 1,
+                server_error_retries: 0,
                 returned_body_bytes: 3,
             }
         );
@@ -1183,6 +1334,7 @@ mod tests {
                 head_requests: 0,
                 get_requests: 1,
                 incomplete_body_retries: 0,
+                server_error_retries: 0,
                 returned_body_bytes: 0,
             }
         );
@@ -1391,6 +1543,7 @@ mod tests {
                 head_requests: 1,
                 get_requests: 1,
                 incomplete_body_retries: 0,
+                server_error_retries: 0,
                 returned_body_bytes: 4,
             }
         );

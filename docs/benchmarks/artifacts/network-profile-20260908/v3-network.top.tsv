@@ -1,0 +1,85 @@
+samples	function
+224	<blockzilla_compact_v2_reader::message_projection::CompactV2MessageProjector>::count_message
+207	
+141	<u64 as wincode::schema::SchemaRead<wincode::config::Configuration<true, 18446744073709551615, wincode::len::UseIntLen<u64, 0>, wincode::schema::int_encoding::LittleEndian, blockzilla_primitives::framed::HistoricalSourceLeb128>>>::read::<&mut &[u8]>
+94	blockzilla_compact_v2_reader::source_decode::stream_message_accounts_with_schema::<anyhow::Error, blockzilla_archive_v3_reader::indexer_v3_wire::validate_message::{closure#0}>
+93	<blockzilla_archive_v3_reader::indexer_v3_wire::Reader>::visit_semantic_transactions_with_reader::<<blockzilla_archive_v3_reader::indexer_v3_wire::ReusableContiguousSemanticScan>::visit_semantic_transactions<<blockzilla_archive_v3_reader::indexer_v3_query::IndexerV3InstructionSource>::decode_parallel_job::{closure#7}>::{closure#4}, <blockzilla_archive_v3_reader::indexer_v3_query::IndexerV3InstructionSource>::decode_parallel_job::{closure#7}>::{closure#5}
+80	<rustls::conn::ConnectionCommon<rustls::client::client_conn::ClientConnectionData>>::process_new_packets
+76	ZSTD_decompressFrame
+71	<sha2::block_api::Sha256VarCore as digest::block_api::UpdateCore>::update_blocks
+66	<blockzilla_archive_v3_reader::indexer_v3_query::IndexerV3InstructionSource>::run_parallel_jobs::<<blockzilla_archive_v3_reader::indexer_v3_query::IndexerV3InstructionSource>::scan_ordered_parallel_with_registry_policy::{closure#0}>::{closure#2}::{closure#0}::{closure#0}
+63	blockzilla_archive_v3_reader::indexer_v3_wire::directory_v3::read_uleb_u32
+62	<hyper_util::rt::tokio::TokioIo<tokio::net::tcp::stream::TcpStream> as hyper::rt::io::Read>::poll_read
+43	<blockzilla_primitives::primitives::pubkey::CompactPubkey as wincode::schema::SchemaRead<wincode::config::Configuration<true, 18446744073709551615, wincode::len::UseIntLen<u64, 0>, wincode::schema::int_encoding::LittleEndian, blockzilla_primitives::framed::HistoricalSourceLeb128>>>::get::<&mut &[u8]>
+36	<alloc::boxed::Box<dyn reqwest::connect::AsyncConnWithInfo> as hyper::rt::io::Read>::poll_read
+36	blockzilla_compact_v2_reader::source_decode::skip_vote_tower_sync
+35	<blockzilla_model::source::OrderedBlockPublisher>::publish
+33	<blockzilla_archive_v3_reader::indexer_v3_query::IndexerV3InstructionSource>::scan_ordered_parallel_with_registry_policy::{closure#0}
+32	hw_gcm_decrypt
+30	<blockzilla_archive_v3_reader::indexer_v3_wire::directory_v3::DecodedDirectory>::decode_group_into
+27	<blockzilla_archive_v3_reader::indexer_v3_wire::directory_v3::DecodedDirectory>::decode_with_header
+26	blockzilla_compact_v2_reader::message_projection::decode_message::<false>
+23	blockzilla_compact_v2_reader::message_projection::skip_vote_tower_sync
+22	<blockzilla_archive_v3_reader::indexer_v3_wire::directory_v3::DirectoryCursor as core::iter::traits::iterator::Iterator>::next
+18	<blockzilla_archive_v3_reader::indexer_v3_query::SelectedBlockSignatureReader>::load_batch
+16	<blockzilla_archive_v3_reader::indexer_v3_query::IndexerV3InstructionSource>::open_object_set_bound_source::<alloc::string::String, alloc::string::String>
+15	<i64 as wincode::schema::SchemaRead<wincode::config::Configuration<true, 18446744073709551615, wincode::len::UseIntLen<u64, 0>, wincode::schema::int_encoding::LittleEndian, blockzilla_primitives::framed::HistoricalSourceLeb128>>>::read::<&mut &[u8]>
+13	<core::pin::Pin<&mut dyn futures_io::if_std::AsyncRead> as futures_io::if_std::AsyncRead>::poll_read
+13	blockzilla_compact_v2_reader::message_projection::skip_instruction_data::<false>
+11	<blockzilla_archive_v3_reader::indexer_v3_wire::Reader>::prefetch_semantic_input
+11	blockzilla_archive_v3_reader::indexer_v3_query::reclaim_parallel_worker_output
+9	<blockzilla_archive_v2::v2::ArchiveV2VoteHashRef as wincode::schema::SchemaRead<wincode::config::Configuration<true, 18446744073709551615, wincode::len::UseIntLen<u64, 0>, wincode::schema::int_encoding::LittleEndian, blockzilla_primitives::framed::HistoricalSourceLeb128>>>::get::<&mut &[u8]>
+9	<blockzilla_compact::split_compact::OwnedCompactRecentBlockhash as wincode::schema::SchemaRead<wincode::config::Configuration<true, 18446744073709551615, wincode::len::UseIntLen<u64, 0>, wincode::schema::int_encoding::LittleEndian, blockzilla_primitives::framed::HistoricalSourceLeb128>>>::get::<&mut &[u8]>
+9	ZSTD_buildSeqTable
+7	<blockzilla_source_http::HttpRangeSource as blockzilla_source::RangeSource>::read_range_into
+7	<rustls::client::tls13::ExpectTraffic as rustls::common_state::State<rustls::client::client_conn::ClientConnectionData>>::handle
+7	blockzilla_compact_v2_reader::source_decode::skip_instruction_data
+6	<mio::waker::Waker>::wake
+6	alloc::alloc::realloc_nonnull
+5	<hyper::proto::h1::dispatch::Dispatcher<hyper::proto::h1::dispatch::Client<reqwest::async_impl::body::Body>, reqwest::async_impl::body::Body, reqwest::connect::sealed::Conn, hyper::proto::h1::role::Client>>::poll_read
+5	blockzilla_archive_v3_reader::indexer_v3_wire::directory_v3::validate_wire_record
+4	<blockzilla_source_cache::CachedHttpRangeSource as blockzilla_source::RangeSource>::read_range_into
+4	<core::pin::Pin<alloc::boxed::Box<dyn core::future::future::Future<Output = ()> + core::marker::Send>> as core::future::future::Future>::poll
+4	<tokio::runtime::task::raw::RawTask>::poll
+3	HUF_decompress4X1_DCtx_wksp
+3	blockzilla_source_cache::download_entry
+2	<blockzilla_archive_v2::v2::ArchiveV2ComputeBudgetInstructionData as wincode::schema::SchemaRead<wincode::config::Configuration<true, 18446744073709551615, wincode::len::UseIntLen<u64, 0>, wincode::schema::int_encoding::LittleEndian, blockzilla_primitives::framed::HistoricalSourceLeb128>>>::get::<&mut &[u8]>
+2	<blockzilla_source_cache::CachedHttpRangeSource>::read_cached_into
+2	<futures_channel::mpsc::Receiver<core::result::Result<bytes::bytes::Bytes, hyper::error::Error>> as futures_core::stream::Stream>::poll_next
+2	<rustls::record_layer::RecordLayer>::decrypt_incoming
+2	HUF_readStats_body
+2	aead_aes_gcm_open_gather_impl
+2	jent_keccakp_1600
+2	std::thread::lifecycle::spawn_unchecked::<<reqwest::blocking::client::ClientHandle>::new::{closure#0}, ()>::{closure#1}::{closure#0}
+1	<&mut alloc::string::String as core::fmt::Write::write_fmt::SpecWriteFmt>::spec_write_fmt
+1	<alloc::boxed::Box<dyn reqwest::connect::AsyncConnWithInfo> as hyper::rt::io::Write>::poll_flush
+1	<alloc::sync::Arc<dyn blockzilla_source::RangeSource> as blockzilla_source::RangeSource>::read_range_into_slice
+1	<alloc::sync::Arc<futures_channel::mpsc::BoundedInner<core::result::Result<bytes::bytes::Bytes, hyper::error::Error>>> as core::ops::drop::Drop>::drop
+1	<alloc::sync::Arc<tokio::sync::oneshot::Inner<core::result::Result<reqwest::async_impl::response::Response, reqwest::error::Error>>> as core::ops::drop::Drop>::drop
+1	<aws_lc_rs::aead::unbound_key::UnboundKey>::open_combined
+1	<bytes::bytes::Bytes as core::ops::drop::Drop>::drop
+1	<core::fmt::Formatter>::write_str
+1	<core::task::wake::Waker>::wake
+1	<http::uri::Uri as core::convert::TryFrom<&[u8]>>::try_from
+1	<http_body_util::combinators::box_body::BoxBody<bytes::bytes::Bytes, alloc::boxed::Box<dyn core::error::Error + core::marker::Send + core::marker::Sync>> as http_body::Body>::poll_frame
+1	<http_body_util::stream::BodyDataStream<reqwest::async_impl::body::Body> as futures_core::stream::Stream>::poll_next
+1	<hyper::proto::h1::io::Buffered<reqwest::connect::sealed::Conn, hyper::proto::h1::encode::EncodedBuf<bytes::bytes::Bytes>> as hyper::proto::h1::io::MemRead>::read_mem
+1	<hyper_util::client::legacy::client::Client<reqwest::connect::Connector, reqwest::async_impl::body::Body>>::try_send_request::{closure#0}
+1	<hyper_util::client::legacy::client::ResponseFuture as core::future::future::Future>::poll
+1	<hyper_util::rt::tokio::TokioIo<tokio::net::tcp::stream::TcpStream> as hyper::rt::io::Write>::poll_write_vectored
+1	<rustls::conn::ConnectionCore<rustls::client::client_conn::ClientConnectionData>>::process_more_input
+1	<tokio::runtime::task::harness::Harness<reqwest::blocking::client::forward<reqwest::async_impl::client::Pending>::{closure#0}, alloc::sync::Arc<tokio::runtime::scheduler::current_thread::Handle>>>::poll
+1	<tokio::runtime::task::raw::RawTask>::schedule
+1	<tokio::sync::mpsc::chan::Rx<hyper::client::dispatch::Envelope<http::request::Request<reqwest::async_impl::body::Body>, http::response::Response<hyper::body::incoming::Incoming>>, tokio::sync::mpsc::unbounded::Semaphore>>::recv::{closure#0}
+1	<tokio::sync::mpsc::list::Tx<(reqwest::async_impl::request::Request, tokio::sync::oneshot::Sender<core::result::Result<reqwest::async_impl::response::Response, reqwest::error::Error>>)>>::push
+1	FSE_decompress_wksp_body
+1	HUF_decompress4X1_usingDTable_internal
+1	__clock_gettime
+1	aead_aes_gcm_open_gather
+1	aead_aes_gcm_seal_scatter
+1	aws_lc_0_45_0_jent_measure_jitter
+1	blockzilla_compact_v2_reader::message_projection::skip_system_instruction
+1	blockzilla_compact_v2_reader::source_decode::skip_system_instruction_data
+1	blockzilla_source_http::read_bounded_into_slice
+1	jent_keccakp_rho
+1	std::thread::lifecycle::spawn_unchecked::<<blockzilla_archive_v3_reader::indexer_v3_query::IndexerV3InstructionSource>::run_parallel_jobs<<blockzilla_archive_v3_reader::indexer_v3_query::IndexerV3InstructionSource>::scan_ordered_parallel_with_registry_policy::{closure#0}>::{closure#2}::{closure#0}, ()>::{closure#1}::{closure#0}

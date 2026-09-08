@@ -1,5 +1,8 @@
 # CAR inner-instruction audit — 6 September 2026
 
+Naming note: the wallet workload is now `user-program-index`. Saved commands,
+source references, and result IDs below keep their names from the recorded run.
+
 ## Result
 
 The nine selected transactions do not show lost inner instructions in the CAR reader. Their raw CAR metadata explicitly says that inner instructions were not recorded. All nine have transaction errors and zero compute units. Helius confirms their signatures, error types, and zero compute units.
@@ -61,7 +64,7 @@ All three cases consumed their complete input. The diagnostic asserts these obse
 
 The user proposed skipping failed transactions in indexing workloads. This is suitable for an explicitly successful-activity index, but not for a full-ledger or fee/balance analysis. Failed transactions can still charge fees and advance a durable nonce; see [Agave rollback accounts](https://github.com/anza-xyz/agave/blob/master/svm/src/rollback_accounts.rs).
 
-Current code: FireWatch checks execution status in its sink and excludes failed transactions from its successful reached-program list. Pump.fun and USDC explicitly request `without_execution_status()`. A sink-only filter is too late to avoid SDK instruction projection. A shared SDK filter should inspect status first, skip instruction/token projection for known failures, preserve unknown status as unknown, and report skipped-failure counts. The count example must continue to count every transaction. Source archives must remain unchanged. This filter was reviewed but not implemented in this diagnostic turn.
+Current code: user-program-index checks execution status in its sink and excludes failed transactions from its successful reached-program list. Pump.fun and USDC explicitly request `without_execution_status()`. A sink-only filter is too late to avoid SDK instruction projection. A shared SDK filter should inspect status first, skip instruction/token projection for known failures, preserve unknown status as unknown, and report skipped-failure counts. The count example must continue to count every transaction. Source archives must remain unchanged. This filter was reviewed but not implemented in this diagnostic turn.
 
 ## Interpretation and next action
 

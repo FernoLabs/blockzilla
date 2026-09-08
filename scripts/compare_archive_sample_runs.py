@@ -14,7 +14,7 @@ from pathlib import Path
 
 FORMATS = ("compact-v2", "indexer-v3")
 EPOCHS = tuple(range(0, 1001, 100))
-WORKLOADS = ("slot-hours", "usdc", "pumpfun", "firewatch")
+WORKLOADS = ("slot-hours", "usdc", "pumpfun", "user-program-index")
 COUNTS = ("blocks", "transactions", "recorded_inner_instructions")
 OUTPUT_FIELDS = ("output_schema", "output_rows", "output_bytes", "output_complete",
                  "indeterminate_transactions", "coverage_sha256")
@@ -28,13 +28,26 @@ def read_json(path):
         return None, "{}: {}".format(path, error)
 
 
+def canonical_workload(workload):
+    # Frozen benchmark evidence keeps its original workload identifiers.
+    return "user-program-index" if workload == "firewatch" else workload
+
+
 def key(job):
-    return (job["format"], job["mode"], int(job["epoch"]), job["workload"])
+    return (job["format"], job["mode"], int(job["epoch"]), canonical_workload(job["workload"]))
 
 
 def job_path(root, identity):
     fmt, mode, epoch, workload = identity
-    return root / "jobs" / fmt / mode / ("epoch-{}".format(epoch)) / workload / "result.json"
+    base = root / "jobs" / fmt / mode / ("epoch-{}".format(epoch))
+    current = base / workload / "result.json"
+    if workload == "user-program-index":
+        legacy = base / "firewatch" / "result.json"
+        if current.exists() and legacy.exists():
+            raise ValueError("both current and legacy workload results exist: " + str(base))
+        if legacy.exists():
+            return legacy
+    return current
 
 
 def scalar(value):
@@ -175,7 +188,7 @@ def comparison_context(before, current, identity):
             right = current[section].get(field) if isinstance(current.get(section), dict) else None
             if left is None or right is None or scalar(left) != scalar(right):
                 reasons.append("{} {} changed or is missing".format(section, field))
-    if identity[-1] == "firewatch":
+    if identity[-1] == "user-program-index":
         left = before["run"].get("wallet") if isinstance(before.get("run"), dict) else None
         right = current["run"].get("wallet") if isinstance(current.get("run"), dict) else None
         if left is None or right is None or left != right:
@@ -241,8 +254,12 @@ def compare_job(identity, baseline_root, current_root, before_meta, current_meta
     row = dict(format=fmt, mode=mode, epoch=epoch, workload=workload,
                correctness="UNVERIFIED", comparability="INCOMPARABLE", performance="UNVERIFIED",
                issues=[], timing={}, baseline_root=str(baseline_root))
-    current, current_error = read_json(job_path(current_root, identity))
-    baseline, baseline_error = read_json(job_path(baseline_root, identity))
+    try:
+        current, current_error = read_json(job_path(current_root, identity))
+        baseline, baseline_error = read_json(job_path(baseline_root, identity))
+    except ValueError as error:
+        row.update(state="AMBIGUOUS_RESULT", issues=[str(error)])
+        return row
     current_errors = validate_result(current_root, identity, current)
     if current_error or current_errors:
         row["state"] = "INCOMPLETE_CURRENT"
@@ -292,6 +309,7 @@ def compare_job(identity, baseline_root, current_root, before_meta, current_meta
 
 
 def compare_runs(baseline_v2, baseline_v3, current, epochs=EPOCHS, workloads=WORKLOADS, threshold=10.0):
+    workloads = tuple(canonical_workload(w) for w in workloads)
     expected = [(fmt, "local", epoch, workload) for fmt in FORMATS for epoch in epochs for workload in workloads]
     roots = {"compact-v2": baseline_v2, "indexer-v3": baseline_v3}
     before = {fmt: metadata(root) for fmt, root in roots.items()}
@@ -346,7 +364,7 @@ def main(argv=None):
     args = parser.parse_args(argv)
     try:
         epochs = tuple(int(value) for value in args.epochs.split(","))
-        workloads = tuple(args.workloads.split(","))
+        workloads = tuple(canonical_workload(w) for w in args.workloads.split(","))
         if not epochs or len(set(epochs)) != len(epochs) or not set(epochs) <= set(EPOCHS):
             raise ValueError("epochs must be distinct members of the sample set")
         if not workloads or len(set(workloads)) != len(workloads) or not set(workloads) <= set(WORKLOADS):

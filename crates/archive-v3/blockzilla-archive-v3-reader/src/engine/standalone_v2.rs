@@ -2226,15 +2226,32 @@ struct SemanticStoredBatch {
     stored_bytes: usize,
 }
 
+/// Shared compressed input plus its global byte credit. The credit survives
+/// queued jobs and every borrowed block read, including delayed workers.
+#[derive(Debug)]
+pub(crate) struct PrefetchedSemanticBatch {
+    batch: SemanticStoredBatch,
+    _permit: blockzilla_source::input_budget::InputPermit,
+}
+
 /// Reusable stored-plane, decoded-plane, and zstd state for discontinuous
 /// caller-managed contiguous scan sessions.
 #[derive(Default)]
 pub(crate) struct ReusableSemanticScanWorkspace {
     batch: Option<SemanticStoredBatch>,
+    prefetched: Option<Arc<PrefetchedSemanticBatch>>,
     decode: SemanticDecodeWorkspace,
 }
 
 impl ReusableSemanticScanWorkspace {
+    pub(crate) fn set_prefetched(&mut self, batch: Option<Arc<PrefetchedSemanticBatch>>) {
+        self.prefetched = batch;
+        if self.prefetched.is_some() {
+            // Do not retain a second owned compressed batch during prefetch.
+            self.batch = None;
+        }
+    }
+
     pub(crate) fn shed_buffers_above(&mut self, limit: usize) -> Result<bool> {
         let batch_capacity = self.batch.as_ref().map_or(Ok(0_usize), |batch| {
             batch.planes.iter().try_fold(0_usize, |total, plane| {
@@ -2353,7 +2370,9 @@ impl ReusableContiguousSemanticScan<'_, '_> {
             self.requested_range.contains(&block_ordinal),
             "semantic block is outside the reusable contiguous scan"
         );
-        if self
+        if self.workspace.prefetched.as_ref().is_none_or(|batch| {
+            !batch.batch.contains(block_ordinal) || batch.batch.selection != self.selection
+        }) && self
             .workspace
             .batch
             .as_ref()
@@ -2373,8 +2392,13 @@ impl ReusableContiguousSemanticScan<'_, '_> {
         }
         let batch = self
             .workspace
-            .batch
+            .prefetched
             .as_ref()
+            .filter(|batch| {
+                batch.batch.contains(block_ordinal) && batch.batch.selection == self.selection
+            })
+            .map(|batch| &batch.batch)
+            .or(self.workspace.batch.as_ref())
             .context("reusable semantic batch is missing")?;
         let stats = self.reader.visit_semantic_transactions_with_reader(
             block_ordinal,
@@ -2904,6 +2928,50 @@ impl Reader {
         }
         ensure!(end > start, "semantic batch planner made no progress");
         Ok(end)
+    }
+
+    /// Exact compressed bytes for a validated contiguous input group.
+    pub(crate) fn semantic_input_bytes(
+        &self,
+        range: Range<usize>,
+        selection: SemanticPlaneSelection,
+    ) -> Result<usize> {
+        ensure!(
+            range.start < range.end && range.end <= self.rows.len(),
+            "input group outside archive"
+        );
+        self.rows[range].iter().try_fold(0_usize, |total, row| {
+            SEMANTIC_OBJECTS
+                .iter()
+                .filter(|object| selection.includes(**object))
+                .try_fold(total, |total, object| {
+                    total
+                        .checked_add(row.locators[object.index()].stored_len as usize)
+                        .context("semantic input byte overflow")
+                })
+        })
+    }
+
+    pub(crate) fn prefetch_semantic_input(
+        &self,
+        range: Range<usize>,
+        selection: SemanticPlaneSelection,
+        permit: blockzilla_source::input_budget::InputPermit,
+    ) -> Result<Arc<PrefetchedSemanticBatch>> {
+        let batch = self.load_semantic_stored_batch(range, selection, None)?;
+        let capacity: usize = batch
+            .planes
+            .iter()
+            .map(|plane| plane.bytes.capacity())
+            .sum();
+        ensure!(
+            capacity <= permit.bytes(),
+            "prefetched input capacity exceeds its byte credit"
+        );
+        Ok(Arc::new(PrefetchedSemanticBatch {
+            batch,
+            _permit: permit,
+        }))
     }
 
     fn load_semantic_stored_batch(

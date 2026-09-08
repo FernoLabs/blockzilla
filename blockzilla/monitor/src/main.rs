@@ -76,16 +76,32 @@ struct Cli {
     #[arg(long)]
     gap_index_file: Option<std::path::PathBuf>,
 
-    /// Optional schema-1 JSON status from the local Firewatch controller.
+    /// Optional schema-1 JSON status from the local user-program-index controller.
     /// When configured, this file is the authoritative source for only the
-    /// Firewatch summary and rows; scheduler archive telemetry is unchanged.
-    #[arg(long, env = "BLOCKZILLA_MONITOR_FIREWATCH_STATUS_FILE")]
-    firewatch_status_file: Option<std::path::PathBuf>,
+    /// user-program-index summary and rows; scheduler archive telemetry is unchanged.
+    #[arg(
+        long,
+        alias = "firewatch-status-file",
+        env = "BLOCKZILLA_MONITOR_USER_PROGRAM_INDEX_STATUS_FILE"
+    )]
+    user_program_index_status_file: Option<std::path::PathBuf>,
+}
+
+impl Cli {
+    /// Old deployments can retain their environment setting. An explicit CLI
+    /// value or canonical environment setting always takes precedence.
+    fn with_legacy_env(mut self, lookup: impl FnOnce(&str) -> Option<std::ffi::OsString>) -> Self {
+        if self.user_program_index_status_file.is_none() {
+            self.user_program_index_status_file =
+                lookup("BLOCKZILLA_MONITOR_FIREWATCH_STATUS_FILE").map(std::path::PathBuf::from);
+        }
+        self
+    }
 }
 
 #[tokio::main]
 async fn main() {
-    let cli = Cli::parse();
+    let cli = Cli::parse().with_legacy_env(|name| std::env::var_os(name));
 
     api::configure_stream_limit(cli.max_stream_connections)
         .expect("stream connection limit must only be configured once");
@@ -98,7 +114,7 @@ async fn main() {
     if cli.demo {
         state::start_demo_simulation();
     } else {
-        client::start(cli.upstream.clone(), cli.firewatch_status_file);
+        client::start(cli.upstream.clone(), cli.user_program_index_status_file);
         runtime_operations::start();
         match cli.gap_index_file {
             Some(path) => client::start_gap_index_file_poller(path),
@@ -202,21 +218,52 @@ mod tests {
     }
 
     #[test]
-    fn firewatch_status_file_is_optional_and_parses_from_cli() {
+    fn user_program_index_status_file_accepts_canonical_and_legacy_cli_and_env() {
         let absent = Cli::try_parse_from(["blockzilla-monitor"]).unwrap();
-        assert!(absent.firewatch_status_file.is_none());
+        assert!(absent.user_program_index_status_file.is_none());
 
-        let present = Cli::try_parse_from([
-            "blockzilla-monitor",
+        for flag in [
+            "--user-program-index-status-file",
             "--firewatch-status-file",
-            "/run/blockzilla/firewatch-status.json",
-        ])
-        .unwrap();
+        ] {
+            let present = Cli::try_parse_from([
+                "blockzilla-monitor",
+                flag,
+                "/run/blockzilla/user-program-index-status.json",
+            ])
+            .unwrap()
+            .with_legacy_env(|_| panic!("explicit configuration must take precedence"));
+            assert_eq!(
+                present.user_program_index_status_file.as_deref(),
+                Some(std::path::Path::new(
+                    "/run/blockzilla/user-program-index-status.json"
+                ))
+            );
+        }
+
+        let legacy = absent.with_legacy_env(|name| {
+            assert_eq!(name, "BLOCKZILLA_MONITOR_FIREWATCH_STATUS_FILE");
+            Some("/run/blockzilla/legacy-status.json".into())
+        });
         assert_eq!(
-            present.firewatch_status_file.as_deref(),
-            Some(std::path::Path::new(
-                "/run/blockzilla/firewatch-status.json"
+            legacy.user_program_index_status_file.as_deref(),
+            Some(std::path::Path::new("/run/blockzilla/legacy-status.json"))
+        );
+
+        use clap::CommandFactory;
+        let mut command = Cli::command();
+        let argument = command
+            .get_arguments()
+            .find(|argument| argument.get_id() == "user_program_index_status_file")
+            .unwrap();
+        assert_eq!(
+            argument.get_env(),
+            Some(std::ffi::OsStr::new(
+                "BLOCKZILLA_MONITOR_USER_PROGRAM_INDEX_STATUS_FILE"
             ))
         );
+        let help = command.render_long_help().to_string();
+        assert!(help.contains("--user-program-index-status-file"));
+        assert!(!help.contains("firewatch"));
     }
 }

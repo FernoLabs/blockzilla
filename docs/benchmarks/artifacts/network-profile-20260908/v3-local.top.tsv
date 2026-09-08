@@ -1,0 +1,31 @@
+samples	function
+68	<sha2::block_api::Sha256VarCore as digest::block_api::UpdateCore>::update_blocks
+43	<blockzilla_model::source::OrderedBlockPublisher>::publish
+25	<blockzilla_archive_v3_reader::indexer_v3_query::IndexerV3InstructionSource>::scan_ordered_parallel_with_registry_policy::{closure#0}
+25	<blockzilla_archive_v3_reader::indexer_v3_wire::Reader>::visit_semantic_transactions_with_reader::<<blockzilla_archive_v3_reader::indexer_v3_wire::ReusableContiguousSemanticScan>::visit_semantic_transactions<<blockzilla_archive_v3_reader::indexer_v3_query::IndexerV3InstructionSource>::decode_parallel_job::{closure#7}>::{closure#4}, <blockzilla_archive_v3_reader::indexer_v3_query::IndexerV3InstructionSource>::decode_parallel_job::{closure#7}>::{closure#5}
+24	<blockzilla_compact_v2_reader::message_projection::CompactV2MessageProjector>::count_message
+24	<u64 as wincode::schema::SchemaRead<wincode::config::Configuration<true, 18446744073709551615, wincode::len::UseIntLen<u64, 0>, wincode::schema::int_encoding::LittleEndian, blockzilla_primitives::framed::HistoricalSourceLeb128>>>::read::<&mut &[u8]>
+15	<blockzilla_archive_v3_reader::indexer_v3_query::IndexerV3InstructionSource>::open_operator_trusted_source::<alloc::string::String, alloc::string::String>
+15	ZSTD_decompressFrame
+11	blockzilla_archive_v3_reader::indexer_v3_wire::directory_v3::read_uleb_u32
+8	<blockzilla_archive_v3_reader::indexer_v3_wire::directory_v3::DirectoryCursor as core::iter::traits::iterator::Iterator>::next
+7	<blockzilla_archive_v3_reader::indexer_v3_query::IndexerV3InstructionSource>::run_parallel_jobs::<<blockzilla_archive_v3_reader::indexer_v3_query::IndexerV3InstructionSource>::scan_ordered_parallel_with_registry_policy::{closure#0}>::{closure#2}::{closure#0}::{closure#0}
+6	<blockzilla_archive_v3_reader::indexer_v3_wire::directory_v3::DecodedDirectory>::decode_with_header
+6	blockzilla_compact_v2_reader::message_projection::skip_vote_tower_sync
+6	blockzilla_compact_v2_reader::source_decode::skip_vote_tower_sync
+5	
+5	blockzilla_archive_v3_reader::indexer_v3_query::reclaim_parallel_worker_output
+4	<alloc::sync::Arc<dyn blockzilla_source::RangeSource> as blockzilla_source::RangeSource>::read_range_into
+4	<blockzilla_primitives::primitives::pubkey::CompactPubkey as wincode::schema::SchemaRead<wincode::config::Configuration<true, 18446744073709551615, wincode::len::UseIntLen<u64, 0>, wincode::schema::int_encoding::LittleEndian, blockzilla_primitives::framed::HistoricalSourceLeb128>>>::get::<&mut &[u8]>
+4	blockzilla_compact_v2_reader::source_decode::stream_message_accounts_with_schema::<anyhow::Error, blockzilla_archive_v3_reader::indexer_v3_wire::validate_message::{closure#0}>
+3	<blockzilla_source_local::PinnedLocalRangeSource as blockzilla_source::RangeSource>::read_range_into
+2	blockzilla_compact_v2_reader::message_projection::decode_message::<false>
+1	<blockzilla_archive_v3_reader::LocalSplitRangeSource as blockzilla_source::RangeSource>::read_range_into_slice
+1	<blockzilla_archive_v3_reader::indexer_v3_wire::directory_v3::DecodedDirectory>::decode_group_into
+1	<blockzilla_compact::split_compact::OwnedCompactRecentBlockhash as wincode::schema::SchemaRead<wincode::config::Configuration<true, 18446744073709551615, wincode::len::UseIntLen<u64, 0>, wincode::schema::int_encoding::LittleEndian, blockzilla_primitives::framed::HistoricalSourceLeb128>>>::get::<&mut &[u8]>
+1	<std::sys::pal::unix::stack_overflow::Handler as core::ops::drop::Drop>::drop
+1	FSE_decompress_wksp_body
+1	HUF_readDTableX1_wksp
+1	ZSTD_buildSeqTable
+1	blockzilla_compact_v2_reader::message_projection::skip_instruction_data::<false>
+1	blockzilla_compact_v2_reader::source_decode::skip_instruction_data

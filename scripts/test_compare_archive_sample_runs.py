@@ -6,6 +6,7 @@ import json
 from pathlib import Path
 import tempfile
 import unittest
+from unittest.mock import patch
 
 import compare_archive_sample_runs as compare
 
@@ -64,6 +65,89 @@ class ComparisonTests(unittest.TestCase):
     def selected_row(self, report, identity=None):
         selected = identity or self.identity
         return next(row for row in report["rows"] if compare.key(row) == selected)
+
+    def use_user_program_index_fixture(self):
+        self.workloads = ("slot-hours", "user-program-index")
+        self.identity = ("compact-v2", "local", 0, "user-program-index")
+        for root in (self.v2, self.v3, self.current):
+            saved_name = "user-program-index" if root == self.current else "firewatch"
+            jobs = json.loads((root / "plan.json").read_text())
+            for job in jobs:
+                if job["workload"] != "usdc":
+                    continue
+                old_path = compare.job_path(root, compare.key(job))
+                result = json.loads(old_path.read_text())
+                new_root = old_path.parent.with_name(saved_name)
+                old_path.parent.rename(new_root)
+                job["workload"] = saved_name
+                result.update(workload=saved_name, attempt=str(new_root / "attempt-001"),
+                              output_path=str(new_root / "attempt-001/output.bin"),
+                              output_schema="blockzilla-example-firewatch-wallet-program/v1")
+                self.save(new_root / "result.json", result)
+            self.save(root / "plan.json", jobs)
+
+    def test_legacy_baseline_matches_canonical_results_and_checks_wallet_context(self):
+        self.use_user_program_index_fixture()
+        frozen = {path: path.read_bytes() for root in (self.v2, self.v3)
+                  for path in root.rglob("*") if path.is_file()}
+        report = self.run_compare()
+        self.assertEqual(report["state"], "PASS")
+        self.assertEqual(self.selected_row(report)["workload"], "user-program-index")
+        self.assertEqual(self.selected_row(report)["correctness"], "MATCH")
+        for wallet in ("different-wallet", None):
+            with self.subTest(wallet=wallet):
+                self.save(self.current / "run.json", dict(threads=12, wallet=wallet))
+                report = self.run_compare()
+                row = self.selected_row(report)
+                self.assertEqual(row["state"], "INCOMPARABLE")
+                self.assertEqual(row["correctness"], "MATCH")
+                self.assertIn("wallet changed or is missing", row["issues"])
+                count = self.selected_row(report, ("compact-v2", "local", 0, "slot-hours"))
+                self.assertEqual(count["state"], "PASS")
+        self.assertEqual(frozen, {path: path.read_bytes() for path in frozen})
+
+    def test_legacy_and_current_result_directories_are_ambiguous(self):
+        self.use_user_program_index_fixture()
+        for root in (self.v2, self.current):
+            with self.subTest(root=root.name):
+                saved = compare.job_path(root, self.identity)
+                duplicate_name = "firewatch" if root == self.current else "user-program-index"
+                duplicate = saved.parent.with_name(duplicate_name) / "result.json"
+                duplicate.parent.mkdir()
+                duplicate.write_bytes(saved.read_bytes())
+                row = self.selected_row(self.run_compare())
+                self.assertEqual(row["state"], "AMBIGUOUS_RESULT")
+                self.assertEqual(row["correctness"], "UNVERIFIED")
+                self.assertTrue(any("both current and legacy" in issue for issue in row["issues"]))
+                self.assertEqual(duplicate.read_bytes(), saved.read_bytes())
+                duplicate.unlink()
+
+    def test_legacy_comparison_cli_normalizes_scope_without_rewriting_evidence(self):
+        self.use_user_program_index_fixture()
+        output = self.root / "legacy-cli-report"
+        argv = ["--baseline-v2", str(self.v2), "--baseline-v3", str(self.v3), "--current", str(self.current),
+                "--output-dir", str(output), "--epochs", "0", "--workloads", "slot-hours,firewatch"]
+        with contextlib.redirect_stdout(io.StringIO()):
+            self.assertEqual(compare.main(argv), 0)
+        report = json.loads((output / "comparison.json").read_text())
+        self.assertEqual({row["workload"] for row in report["rows"]}, set(self.workloads))
+        baseline = json.loads((self.v2 / "plan.json").read_text())
+        self.assertIn("firewatch", {job["workload"] for job in baseline})
+
+    def test_alias_duplicates_in_comparison_cli_are_rejected_before_io(self):
+        for selection in ("firewatch,user-program-index", "user-program-index,firewatch"):
+            with self.subTest(selection=selection):
+                argv = ["--baseline-v2", "/unused/v2", "--baseline-v3", "/unused/v3",
+                        "--current", "/unused/current", "--output-dir", "/unused/report",
+                        "--workloads", selection]
+                with patch.object(Path, "exists") as exists, patch.object(compare, "compare_runs") as run, \
+                        patch.object(compare, "write_report") as write, contextlib.redirect_stderr(io.StringIO()), \
+                        self.assertRaises(SystemExit) as stopped:
+                    compare.main(argv)
+                self.assertEqual(stopped.exception.code, 2)
+                exists.assert_not_called()
+                run.assert_not_called()
+                write.assert_not_called()
 
     def test_complete_equal_run_passes_with_equal_incomplete_source_coverage(self):
         report = self.run_compare()

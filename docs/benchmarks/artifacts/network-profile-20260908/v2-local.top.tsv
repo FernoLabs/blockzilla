@@ -1,0 +1,26 @@
+samples	function
+60	<blockzilla_compact_v2_reader::compact_query::ContiguousSignatureScan<blockzilla_source_local::PinnedLocalRangeSource>>::read_block_selected
+58	<sha2::block_api::Sha256VarCore as digest::block_api::UpdateCore>::update_blocks
+50	ZSTD_decompressFrame
+33	<blockzilla_model::source::OrderedBlockPublisher>::publish
+28	
+27	<blockzilla_compact_v2_reader::message_projection::CompactV2MessageProjector>::count_message
+13	<blockzilla_source_local::PinnedLocalRangeSource as blockzilla_source::RangeSource>::read_range_into
+13	blockzilla_compact_v2_reader::compact_query::load_signature_batch::<blockzilla_source_local::PinnedLocalRangeSource>
+9	blockzilla_compact_v2_reader::message_projection::skip_vote_tower_sync
+5	<u64 as wincode::schema::SchemaRead<wincode::config::Configuration<true, 18446744073709551615, wincode::len::UseIntLen<u64, 0>, wincode::schema::int_encoding::LittleEndian, blockzilla_primitives::framed::HistoricalSourceLeb128>>>::read::<&mut &[u8]>
+5	ZSTD_buildSeqTable
+4	blockzilla_compact_v2_reader::reader::validate_borrowed_decoded_block
+3	blockzilla_compact_v2_reader::reader::validate_generation_layout::<blockzilla_source_local::PinnedLocalRangeSource>
+2	<blockzilla_compact_v2_reader::compact_query::CompactV2InstructionSource<blockzilla_source_local::PinnedLocalRangeSource>>::scan_ordered_parallel::{closure#5}
+2	<i64 as wincode::schema::SchemaRead<wincode::config::Configuration<true, 18446744073709551615, wincode::len::UseIntLen<u64, 0>, wincode::schema::int_encoding::LittleEndian, blockzilla_primitives::framed::HistoricalSourceLeb128>>>::read::<&mut &[u8]>
+2	blockzilla_compact_v2_reader::message_projection::decode_message::<false>
+2	std::thread::lifecycle::spawn_unchecked::<<blockzilla_compact_v2_reader::reader::ArchiveReader<blockzilla_source_local::PinnedLocalRangeSource>>::process_borrowed_blocks_parallel_ordered<blockzilla_compact_v2_reader::compact_query::ParallelProjectionWorker, blockzilla_compact_v2_reader::compact_query::ParallelProjectedBlock, blockzilla_compact_v2_reader::compact_query::CompactV2ParallelScanError, <blockzilla_compact_v2_reader::compact_query::CompactV2InstructionSource<blockzilla_source_local::PinnedLocalRangeSource>>::scan_ordered_parallel::{closure#4}, <blockzilla_compact_v2_reader::compact_query::CompactV2InstructionSource<blockzilla_source_local::PinnedLocalRangeSource>>::scan_ordered_parallel::{closure#5}, <blockzilla_compact_v2_reader::compact_query::CompactV2InstructionSource<blockzilla_source_local::PinnedLocalRangeSource>>::scan_ordered_parallel::{closure#6}>::{closure#1}::{closure#0}, blockzilla_compact_v2_reader::reader::OrderedParallelWorker<blockzilla_compact_v2_reader::compact_query::ParallelProjectionWorker>>::{closure#1}::{closure#0}
+1	<blockzilla_archive_v2::v2::ArchiveV2VoteHashRef as wincode::schema::SchemaRead<wincode::config::Configuration<true, 18446744073709551615, wincode::len::UseIntLen<u64, 0>, wincode::schema::int_encoding::LittleEndian, blockzilla_primitives::framed::HistoricalSourceLeb128>>>::get::<&mut &[u8]>
+1	<blockzilla_compact::compact::meta::CompactReward as wincode::schema::SchemaRead<wincode::config::Configuration<true, 18446744073709551615, wincode::len::UseIntLen<u64, 0>, wincode::schema::int_encoding::LittleEndian, blockzilla_primitives::framed::HistoricalSourceLeb128>>>::get::<&mut &[u8]>
+1	<blockzilla_compact_v2_reader::compact_query::CompactV2InstructionSource<blockzilla_source_local::PinnedLocalRangeSource>>::project_transaction
+1	<blockzilla_primitives::primitives::pubkey::CompactPubkey as wincode::schema::SchemaRead<wincode::config::Configuration<true, 18446744073709551615, wincode::len::UseIntLen<u64, 0>, wincode::schema::int_encoding::LittleEndian, blockzilla_primitives::framed::HistoricalSourceLeb128>>>::get::<&mut &[u8]>
+1	FSE_decompress_wksp_body
+1	HUF_decompress4X1_usingDTable_internal
+1	__clock_gettime
+1	blockzilla_compact_v2_reader::message_projection::skip_instruction_data::<false>

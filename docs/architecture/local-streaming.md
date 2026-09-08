@@ -50,7 +50,7 @@ The focused `blockzilla-compact-v2-reader` can also open a completed generation 
 local or HTTP Range source, bind pubkey filters to its registry and generation,
 decode independent hot-block frames, and fetch selected signatures. The
 `blockzilla-archive-gateway` publishes an authenticated read-only Range surface.
-See the [FireWatch handoff](../guides/firewatch-local-archive-indexing.md) for
+See the [external FireWatch handoff](../guides/firewatch-local-archive-indexing.md) for
 their exact boundary. The common reader and application-sink APIs are described
 in the [query guide](../guides/blockzilla-query-sdk.md). The existing SQLite
 sink is one application implementation; it does not implement the general

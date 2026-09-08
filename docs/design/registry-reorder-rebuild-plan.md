@@ -9,7 +9,7 @@
 > observed, so compaction is a single streaming pass. Usage-sorted requires two
 > — count every reference, sort, then assign ids and rewrite. For a pipeline
 > ingesting live chain data that is a real constraint, and Compact V2 is served
-> live (hivezilla gRPC, the Firewatch indexer, the read SDK), not merely a
+> live (hivezilla gRPC, the user-program-index indexer, the read SDK), not merely a
 > migration source.
 >
 > **Do not execute Phase 2.** Rewriting 2.32 TB and 475 billion references would
@@ -131,7 +131,7 @@ must be found before the rewrite, not after. Known or suspected holders beyond
 - `registry.mphf` — rebuilt in Phase 3;
 - `archive-v2-block-access.wincode` / `.index` — present on exactly these 35
   epochs, and needs checking for embedded ids;
-- the Firewatch index tree — a separate tree built from these
+- the user-program-index index tree — a separate tree built from these
   registries; if it stores ids rather than keys it must be rebuilt;
 - `vote_hash_registry.bin`.
 
@@ -150,7 +150,7 @@ so applying the permutation there costs a lookup it is already performing, and
 it normalises all 1013 epochs rather than 35.
 
 Phase 2 earns its cost only if Compact V2 stays a served format — because
-Firewatch or another consumer reads it directly, or because the compaction
+user-program-index or another consumer reads it directly, or because the compaction
 pipeline keeps producing first-seen epochs and they must match.
 
 If Compact V2 keeps being produced, the more durable fix is upstream: make the

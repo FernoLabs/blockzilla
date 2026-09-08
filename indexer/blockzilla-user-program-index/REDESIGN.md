@@ -1,4 +1,4 @@
-# Firewatch signer-to-program index redesign
+# User-program index redesign
 
 Goal: given a wallet pubkey, return the program ids reached by transactions it
 signed, per epoch, with a tractable build and a low-latency query path.
@@ -32,7 +32,7 @@ versions, and the archive generation + registry binding.
 
 Published builds hash every archive object, retain the opened file handles for
 all later scan passes, and verify their file identities again before publish.
-The Firewatch manifest separately binds both `registry.bin` and
+The User-program index manifest separately binds both `registry.bin` and
 `registry.mphf` by exact size and SHA-256, and records the original filesystem
 identity of both. A trusted-local build does the same artifact hashing but
 marks the generation identity as `trusted_local_asserted_immutable`; query

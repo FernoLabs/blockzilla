@@ -1,5 +1,8 @@
 # Epoch 300: refactor performance diagnosis
 
+Naming note: the wallet workload is now `user-program-index`. Saved commands,
+source references, and result IDs below keep their names from the recorded run.
+
 This report measures the refactor before the USDC correction. The subsequent
 [reader fix and retest](epoch-300-usdc-single-pass-fix-2026-09-06.md) are recorded
 separately.
@@ -168,7 +171,7 @@ measure the canonical V3 catalog/ledger converter output.
 | Slot-hour count | 55.966 | 59.757 | +6.8% |
 | USDC | 74.871 | 75.835 | +1.3% |
 | Pump.fun | 0.199 | 0.188 | -5.6% |
-| Firewatch | 0.148 | 0.153 | +3.5% |
+| user-program-index | 0.148 | 0.153 | +3.5% |
 
 All four comparisons pass exact output/count checks and recorded input,
 host, worker and wallet checks. The two short indexed queries are dominated

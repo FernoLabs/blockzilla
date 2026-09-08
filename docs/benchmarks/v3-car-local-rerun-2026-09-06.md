@@ -1,8 +1,11 @@
 # V3 then CAR: local sample run, 6 September 2026
 
+Naming note: the wallet workload is now `user-program-index`. Saved commands,
+source references, and result IDs below keep their names from the recorded run.
+
 ## Scope
 
-Run count-by-slot-hour, USDC, Pump.fun, and FireWatch once for each of epochs
+Run count-by-slot-hour, USDC, Pump.fun, and user-program-index once for each of epochs
 0, 100, 200, 300, 400, 500, 600, 700, 800, 900, and 1000.
 Run all 44 V3 jobs first, then all 44 CAR jobs. Do not run network reads,
 archive copies, compaction, or archive hashing. Keep all results on the SSD.
@@ -26,7 +29,7 @@ The build uses the same AES/SSE2 flags as the completed V2 run.
 
 V3 uses 12 reader workers. CAR uses its existing ordered reader; the runner
 does not pass a worker-count option to CAR. USDC and Pump.fun use the same
-shared failed-transaction filter as the new V2 run. Count and FireWatch retain
+shared failed-transaction filter as the new V2 run. Count and user-program-index retain
 their existing semantics. The CAR build includes the malformed DataFrame
 array rejection fix.
 

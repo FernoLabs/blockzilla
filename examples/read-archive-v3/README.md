@@ -16,7 +16,7 @@ SDK directly and do not select an archive format at run time.
 - [`read-archive-v3-pumpfun`](src/bin/read-archive-v3-pumpfun.rs) writes
   transactions that call the Pump.fun program directly or through recorded
   CPI.
-- [`read-archive-v3-firewatch`](src/bin/read-archive-v3-firewatch.rs) writes
+- [`read-archive-v3-user-program-index`](src/bin/read-archive-v3-user-program-index.rs) writes
   the distinct programs reached by successful transactions from one signer
   wallet.
 
@@ -36,7 +36,7 @@ cargo build --release --locked -p blockzilla-read-archive-v3 \
   --bin read-archive-v3-slot-hours \
   --bin read-archive-v3-usdc \
   --bin read-archive-v3-pumpfun \
-  --bin read-archive-v3-firewatch
+  --bin read-archive-v3-user-program-index
 ```
 
 The clean public sample bucket is still being staged. To run the standard
@@ -90,11 +90,11 @@ cargo run --release --locked -p blockzilla-read-archive-v3 \
   --archive-root archive
 
 cargo run --release --locked -p blockzilla-read-archive-v3 \
-  --bin read-archive-v3-firewatch -- \
+  --bin read-archive-v3-user-program-index -- \
   --archive-root archive
 ```
 
-FireWatch uses the sample wallet
+User program index uses the sample wallet
 `5LikTUsx695BHRipWoRrn6YmTQEcPrvbR8YaHxdSRQo8` by default.
 
 Use these simple options when needed:
@@ -105,8 +105,8 @@ Use these simple options when needed:
 --origin URL       another compatible origin; the default bucket is staged
 --cache-root DIR   persistent network cache; default archive-cache/indexer-v3
 --threads N        worker count; default is chosen by the SDK
---output FILE      USDC, Pump.fun, and FireWatch only
---wallet KEY       FireWatch only
+--output FILE      USDC, Pump.fun, and User program index only
+--wallet KEY       User program index only
 ```
 
 ## Use the same layout on disk
@@ -142,7 +142,7 @@ need a schema option. The same interface reads each sample epoch.
 USDC uses an ordered full scan because a public-key posting does not prove a
 recorded token-balance mint match.
 
-Pump.fun and FireWatch use the V3 reverse index to find sound candidate
+Pump.fun and User program index use the V3 reverse index to find sound candidate
 blocks. Coverage fallback blocks stay in that set. The workload sink then
 checks each decoded transaction before it writes an exact result. Thus, the
 reverse index can skip unrelated blocks without changing the application
@@ -151,6 +151,12 @@ rule.
 The SDK keeps output in ledger order when it uses multiple workers. The sinks
 write the same deterministic fixed-record formats that the other archive
 examples use.
+
+Network scans cache the block index and stream the selected transaction
+directory and payload ranges. They do not download the whole transaction
+directory at startup. The SDK keeps grouped compressed input within 64 MiB
+and releases worker workspace above 16 MiB between jobs. These are buffer
+limits, not a limit on total process memory.
 
 ## Advanced tools
 

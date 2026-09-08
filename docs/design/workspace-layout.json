@@ -252,12 +252,18 @@
   ],
   "target_renames": {
     "read-indexer-v3": "read-archive-v3",
-    "read-indexer-v3-firewatch": "read-archive-v3-firewatch",
+    "read-indexer-v3-firewatch": "read-archive-v3-user-program-index",
     "read-indexer-v3-pumpfun": "read-archive-v3-pumpfun",
     "read-indexer-v3-slot-hours": "read-archive-v3-slot-hours",
     "read-indexer-v3-transactions": "read-archive-v3-transactions",
     "read-indexer-v3-usdc": "read-archive-v3-usdc",
-    "read-indexer-v3-usdc-instructions": "read-archive-v3-usdc-instructions"
+    "read-indexer-v3-usdc-instructions": "read-archive-v3-usdc-instructions",
+    "read-car-firewatch": "read-car-user-program-index",
+    "read-compact-v2-firewatch": "read-compact-v2-user-program-index",
+    "read-archive-v3-firewatch": "read-archive-v3-user-program-index",
+    "firewatch-wire-profile-audit": "user-program-index-wire-profile-audit",
+    "firewatch-wire-profile-audit-batch": "user-program-index-wire-profile-audit-batch",
+    "firewatch-wire-profile-marker-transition": "user-program-index-wire-profile-marker-transition"
   },
   "target_relocations": [
     {
@@ -320,7 +326,7 @@
     },
     {
       "package": "blockzilla-user-program-index",
-      "target": "firewatch-wire-profile-audit-batch",
+      "target": "user-program-index-wire-profile-audit-batch",
       "from": [],
       "to": [
         "developer-tools"
@@ -328,7 +334,7 @@
     },
     {
       "package": "blockzilla-user-program-index",
-      "target": "firewatch-wire-profile-audit",
+      "target": "user-program-index-wire-profile-audit",
       "from": [],
       "to": [
         "developer-tools"
@@ -336,7 +342,7 @@
     },
     {
       "package": "blockzilla-user-program-index",
-      "target": "firewatch-wire-profile-marker-transition",
+      "target": "user-program-index-wire-profile-marker-transition",
       "from": [],
       "to": [
         "developer-tools"

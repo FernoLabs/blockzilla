@@ -51,9 +51,9 @@ recommended read-SDK starting point.
   experimental finite-work scheduler and its read-only status boundary.
 - [Blockzilla monitor](../blockzilla/monitor/README.md) documents the
   separate read-only operational UI and API contract.
-- [FireWatch local archive indexing](guides/firewatch-local-archive-indexing.md)
+- [External FireWatch local archive indexing](guides/firewatch-local-archive-indexing.md)
   hands off the completed-epoch read SDK and authenticated Range-gateway flow;
-  the FireWatch adapter itself remains work for the FireWatch repository.
+  the FireWatch adapter itself remains work for the separate `ferno-watcher` repository.
 - [Replay runtime POC evidence](benchmarks/replay-runtime-poc-2026-07-28.md)
   records the verified native AArch64 and x86-64 minor-program runs, parity
   tests, genesis fingerprint, and the exact boundary of the current crate.
@@ -139,3 +139,11 @@ Archive V2 is pre-1.0. Pin the Git revision used to produce and read an archive.
 These documents preserve ideas and measurements; they are not all implemented
 or current. Machine-specific runbooks, credentials, incidents, raw benchmark
 output, and production deployment configuration do not belong here.
+
+- [User-program-index naming and compatibility](design/user-program-index-naming.md)
+
+- [Accepted all-sample reader report](benchmarks/all-samples-reader-comparison-2026-09.md)
+- [CAR to V3: short format story](benchmarks/from-car-to-v3-accepted-results-20260908.md)
+- [Epoch900 network reader pilot](benchmarks/network-reader-epoch900-pilot.md)
+
+Latest reader diagnostic: [epoch 900 network CPU profiles and resource use](benchmarks/epoch900-network-profile-20260908.md).
