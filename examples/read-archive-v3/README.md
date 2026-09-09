@@ -154,9 +154,12 @@ examples use.
 
 Network scans cache the block index and stream the selected transaction
 directory and payload ranges. They do not download the whole transaction
-directory at startup. The SDK keeps grouped compressed input within 64 MiB
-and releases worker workspace above 16 MiB between jobs. These are buffer
-limits, not a limit on total process memory.
+directory at startup. The SDK uses concurrent input workers and reusable plane
+and signature buffers within a 256 MiB input capacity budget. The planner can
+reduce the requested eight input workers to fit that budget. It releases
+worker workspace above 16 MiB between jobs. These are buffer limits, not a
+limit on total process memory. See the
+[network input design](../../docs/design/v3-concurrent-input.md).
 
 ## Advanced tools
 

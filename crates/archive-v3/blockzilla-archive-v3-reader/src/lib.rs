@@ -65,9 +65,10 @@ pub use indexer_v3_query::{
     INDEXER_V3_PARALLEL_RETAINED_WORKSPACE_LIMIT, INDEXER_V3_PARALLEL_TRANSACTION_LIMIT,
     INDEXER_V3_QUERY_REGISTRY_RETAINED_KEY_BYTES, INDEXER_V3_REQUIRED_RETAINED_SIDECARS,
     IndexerV3InstructionSource, IndexerV3InstructionSourceError, IndexerV3InstructionSourceResult,
-    IndexerV3ParallelScanReceipt, IndexerV3ParallelScanStats, IndexerV3RegistryReadMode,
-    IndexerV3RegistryReadPolicy, IndexerV3RegistryReadReceipt, IndexerV3SelectiveScanReceipt,
-    IndexerV3SourceScope, MAX_INDEXER_V3_PARALLEL_WORKERS, indexer_v3_required_ledger_objects,
+    IndexerV3NetworkInputConfig, IndexerV3ParallelScanReceipt, IndexerV3ParallelScanStats,
+    IndexerV3RegistryReadMode, IndexerV3RegistryReadPolicy, IndexerV3RegistryReadReceipt,
+    IndexerV3SelectiveScanReceipt, IndexerV3SourceScope, MAX_INDEXER_V3_PARALLEL_WORKERS,
+    indexer_v3_required_ledger_objects,
 };
 pub use indexer_v3_registry::IndexerV3RegistryIndex;
 
@@ -579,6 +580,14 @@ impl IndexerV3Archive {
     /// cache. Set a zero-byte limit to disable complete-registry loading.
     pub const fn registry_read_policy(&self) -> IndexerV3RegistryReadPolicy {
         self.registry_read_policy
+    }
+
+    /// Set the remote input window; None restores the previous input schedule.
+    pub fn set_network_input_config(
+        &mut self,
+        config: Option<IndexerV3NetworkInputConfig>,
+    ) -> QueryResult<()> {
+        self.source.set_network_input_config(config)
     }
 
     /// Set the complete-registry memory limit for later targeted scans.

@@ -24,10 +24,15 @@ identities. They do not require a publication manifest or hash the full archive.
 See the [working examples](../../../examples/read-compact-v2/README.md).
 
 `scan_ordered_parallel` uses reusable private decode workers and a bounded
-rolling output window. Local input has one sequential producer. HTTP input
-can read concurrently, with the worker count limited by the source hint,
-eight workers, and the existing compressed-buffer count (three in the
-examples). Input batches are still published in order. The ordered sink receives a block
+rolling output window. Local input has one sequential producer. The default
+query configuration uses eight HTTP input workers, adjacent ranges up to a
+32 MiB target, and reusable compressed buffers within a 256 MiB capacity budget.
+Decode jobs borrow slices from those buffers. Large frames can reduce input
+concurrency. Set `CompactV2ParallelScanConfig::network_input` to `None` to use
+the previous schedule. The input budget does not include HTTP/TLS memory,
+registries, decoded data, or output. See the
+[V2 input design](../../../docs/design/v2-concurrent-input.md).
+Input batches are still published in order. The ordered sink receives a block
 as soon as that block is ready. A slow later block does not hold back a completed
 prefix. Admission remains charged until the sink returns. Worker threads join
 before the scan returns. See the [pipeline contract](../../../docs/design/reader-pipeline-rolling-window.md)

@@ -1,0 +1,1053 @@
+{
+  "status": {
+    "state": "COMPLETE",
+    "pid": 3033174,
+    "started_at": 1788950849.4946651,
+    "archive_before": {
+      "epoch-900.car.zst": [
+        226068566559,
+        1788159361996365127,
+        4096,
+        73
+      ],
+      "epoch-900-slot-ranges.raw": [
+        5184000,
+        1788716409788226054,
+        4367,
+        73
+      ]
+    },
+    "source_before": {
+      "bytes": 527045598158,
+      "etag": "\"d98e61b8827c6c211f889dd2bf8577a8-3927\""
+    },
+    "cases": [
+      {
+        "name": "00-network-w4-legacy",
+        "http_workers": 4,
+        "reuse": false,
+        "command": [
+          "/volume2/blockzilla-bench/control/car-network-window-20260909/car-decode-reference",
+          "--url",
+          "https://blockzilla-archive-samples-v1.cheron-augustin.workers.dev/car/900/epoch-900.car",
+          "--plan",
+          "/volume2/blockzilla-bench/control/car-network-window-20260909/prefix-plan.json",
+          "--workers",
+          "12",
+          "--metadata-mode",
+          "visitor",
+          "--http-workers",
+          "4",
+          "--output",
+          "/volume2/blockzilla-bench/control/car-network-window-20260909/00-network-w4-legacy/receipt.json",
+          "--legacy-http-buffers"
+        ],
+        "started_at": 1788950849.7509465,
+        "valid": true,
+        "pid": 3033175,
+        "exit_code": 0,
+        "cpu_seconds": 66.13388,
+        "peak_rss_kib": 358136,
+        "elapsed_s": 57.02155327796936,
+        "receipt_sha256": "3f82da97152790fcfa6182a3ff044333ab0e6cff276ab193a43a7302fd912048",
+        "receipt": {
+          "allocations": null,
+          "allocator": "system",
+          "blocks": 8192,
+          "epoch": 900,
+          "failed": 341094,
+          "http": {
+            "body_buffer_allocated_bytes": 9898557440,
+            "body_buffer_allocations": 295,
+            "body_bytes": 9898557440,
+            "bytes_delivered": 9663676416,
+            "get_requests": 295,
+            "incomplete_body_retries": 0,
+            "workers_finished": 4
+          },
+          "http_body_window_bytes": 268435456,
+          "http_workers": 4,
+          "identity": {
+            "bytes": 527045598158,
+            "etag": "\"d98e61b8827c6c211f889dd2bf8577a8-3927\"",
+            "operator_trusted": false,
+            "url": "https://blockzilla-archive-samples-v1.cheron-augustin.workers.dev/car/900/epoch-900.car"
+          },
+          "metadata_mode": "Visitor",
+          "physical_blocks": 8192,
+          "reuse_http_buffers": false,
+          "scan_seconds": 55.745248673,
+          "scan_tps": 160118.25603933833,
+          "schema": "blockzilla-car-decode-reference-v1",
+          "setup_seconds": 0.125082438,
+          "signature_verification": false,
+          "transactions": 8925832,
+          "valid": true,
+          "votes": 6533434,
+          "workers": 12
+        },
+        "proof_verified": true
+      },
+      {
+        "name": "01-network-w4-reuse",
+        "http_workers": 4,
+        "reuse": true,
+        "command": [
+          "/volume2/blockzilla-bench/control/car-network-window-20260909/car-decode-reference",
+          "--url",
+          "https://blockzilla-archive-samples-v1.cheron-augustin.workers.dev/car/900/epoch-900.car",
+          "--plan",
+          "/volume2/blockzilla-bench/control/car-network-window-20260909/prefix-plan.json",
+          "--workers",
+          "12",
+          "--metadata-mode",
+          "visitor",
+          "--http-workers",
+          "4",
+          "--output",
+          "/volume2/blockzilla-bench/control/car-network-window-20260909/01-network-w4-reuse/receipt.json"
+        ],
+        "started_at": 1788950906.963471,
+        "valid": true,
+        "pid": 3033346,
+        "exit_code": 0,
+        "cpu_seconds": 66.616806,
+        "peak_rss_kib": 360956,
+        "elapsed_s": 58.008793592453,
+        "receipt_sha256": "82ce9e95d76d9fb4d1e79eb8f38616bb202932499ae1a882b94dcee2fc1dd7a2",
+        "receipt": {
+          "allocations": null,
+          "allocator": "system",
+          "blocks": 8192,
+          "epoch": 900,
+          "failed": 341094,
+          "http": {
+            "body_buffer_allocated_bytes": 268435456,
+            "body_buffer_allocations": 8,
+            "body_bytes": 9831448576,
+            "bytes_delivered": 9663676416,
+            "get_requests": 293,
+            "incomplete_body_retries": 0,
+            "workers_finished": 4
+          },
+          "http_body_window_bytes": 268435456,
+          "http_workers": 4,
+          "identity": {
+            "bytes": 527045598158,
+            "etag": "\"d98e61b8827c6c211f889dd2bf8577a8-3927\"",
+            "operator_trusted": false,
+            "url": "https://blockzilla-archive-samples-v1.cheron-augustin.workers.dev/car/900/epoch-900.car"
+          },
+          "metadata_mode": "Visitor",
+          "physical_blocks": 8192,
+          "reuse_http_buffers": true,
+          "scan_seconds": 56.796724679,
+          "scan_tps": 157153.99172129083,
+          "schema": "blockzilla-car-decode-reference-v1",
+          "setup_seconds": 0.132111241,
+          "signature_verification": false,
+          "transactions": 8925832,
+          "valid": true,
+          "votes": 6533434,
+          "workers": 12
+        },
+        "proof_verified": true
+      },
+      {
+        "name": "02-network-w8-reuse",
+        "http_workers": 8,
+        "reuse": true,
+        "command": [
+          "/volume2/blockzilla-bench/control/car-network-window-20260909/car-decode-reference",
+          "--url",
+          "https://blockzilla-archive-samples-v1.cheron-augustin.workers.dev/car/900/epoch-900.car",
+          "--plan",
+          "/volume2/blockzilla-bench/control/car-network-window-20260909/prefix-plan.json",
+          "--workers",
+          "12",
+          "--metadata-mode",
+          "visitor",
+          "--http-workers",
+          "8",
+          "--output",
+          "/volume2/blockzilla-bench/control/car-network-window-20260909/02-network-w8-reuse/receipt.json"
+        ],
+        "started_at": 1788950965.232326,
+        "valid": true,
+        "pid": 3033566,
+        "exit_code": 0,
+        "cpu_seconds": 63.004974000000004,
+        "peak_rss_kib": 360992,
+        "elapsed_s": 57.008156061172485,
+        "receipt_sha256": "831426c58b01f12c37993efc0ee8d825492b87a2af3999bc8d9d29a17bb87d2f",
+        "receipt": {
+          "allocations": null,
+          "allocator": "system",
+          "blocks": 8192,
+          "epoch": 900,
+          "failed": 341094,
+          "http": {
+            "body_buffer_allocated_bytes": 268435456,
+            "body_buffer_allocations": 8,
+            "body_bytes": 9932111872,
+            "bytes_delivered": 9663676416,
+            "get_requests": 296,
+            "incomplete_body_retries": 0,
+            "workers_finished": 8
+          },
+          "http_body_window_bytes": 268435456,
+          "http_workers": 8,
+          "identity": {
+            "bytes": 527045598158,
+            "etag": "\"d98e61b8827c6c211f889dd2bf8577a8-3927\"",
+            "operator_trusted": false,
+            "url": "https://blockzilla-archive-samples-v1.cheron-augustin.workers.dev/car/900/epoch-900.car"
+          },
+          "metadata_mode": "Visitor",
+          "physical_blocks": 8192,
+          "reuse_http_buffers": true,
+          "scan_seconds": 55.941325528,
+          "scan_tps": 159557.03437045665,
+          "schema": "blockzilla-car-decode-reference-v1",
+          "setup_seconds": 0.126501802,
+          "signature_verification": false,
+          "transactions": 8925832,
+          "valid": true,
+          "votes": 6533434,
+          "workers": 12
+        },
+        "proof_verified": true
+      },
+      {
+        "name": "03-network-w8-reuse",
+        "http_workers": 8,
+        "reuse": true,
+        "command": [
+          "/volume2/blockzilla-bench/control/car-network-window-20260909/car-decode-reference",
+          "--url",
+          "https://blockzilla-archive-samples-v1.cheron-augustin.workers.dev/car/900/epoch-900.car",
+          "--plan",
+          "/volume2/blockzilla-bench/control/car-network-window-20260909/prefix-plan.json",
+          "--workers",
+          "12",
+          "--metadata-mode",
+          "visitor",
+          "--http-workers",
+          "8",
+          "--output",
+          "/volume2/blockzilla-bench/control/car-network-window-20260909/03-network-w8-reuse/receipt.json"
+        ],
+        "started_at": 1788951022.4601784,
+        "valid": true,
+        "pid": 3033749,
+        "exit_code": 0,
+        "cpu_seconds": 63.349548999999996,
+        "peak_rss_kib": 362984,
+        "elapsed_s": 36.005370140075684,
+        "receipt_sha256": "2bc7bec7845d74764c7f21823d67e7cda346c3ac1e0d204f0710c375502d591e",
+        "receipt": {
+          "allocations": null,
+          "allocator": "system",
+          "blocks": 8192,
+          "epoch": 900,
+          "failed": 341094,
+          "http": {
+            "body_buffer_allocated_bytes": 268435456,
+            "body_buffer_allocations": 8,
+            "body_bytes": 9932111872,
+            "bytes_delivered": 9663676416,
+            "get_requests": 296,
+            "incomplete_body_retries": 0,
+            "workers_finished": 8
+          },
+          "http_body_window_bytes": 268435456,
+          "http_workers": 8,
+          "identity": {
+            "bytes": 527045598158,
+            "etag": "\"d98e61b8827c6c211f889dd2bf8577a8-3927\"",
+            "operator_trusted": false,
+            "url": "https://blockzilla-archive-samples-v1.cheron-augustin.workers.dev/car/900/epoch-900.car"
+          },
+          "metadata_mode": "Visitor",
+          "physical_blocks": 8192,
+          "reuse_http_buffers": true,
+          "scan_seconds": 34.804034319,
+          "scan_tps": 256459.6942466312,
+          "schema": "blockzilla-car-decode-reference-v1",
+          "setup_seconds": 0.10200738,
+          "signature_verification": false,
+          "transactions": 8925832,
+          "valid": true,
+          "votes": 6533434,
+          "workers": 12
+        },
+        "proof_verified": true
+      },
+      {
+        "name": "04-network-w4-reuse",
+        "http_workers": 4,
+        "reuse": true,
+        "command": [
+          "/volume2/blockzilla-bench/control/car-network-window-20260909/car-decode-reference",
+          "--url",
+          "https://blockzilla-archive-samples-v1.cheron-augustin.workers.dev/car/900/epoch-900.car",
+          "--plan",
+          "/volume2/blockzilla-bench/control/car-network-window-20260909/prefix-plan.json",
+          "--workers",
+          "12",
+          "--metadata-mode",
+          "visitor",
+          "--http-workers",
+          "4",
+          "--output",
+          "/volume2/blockzilla-bench/control/car-network-window-20260909/04-network-w4-reuse/receipt.json"
+        ],
+        "started_at": 1788951058.680287,
+        "valid": true,
+        "pid": 3033936,
+        "exit_code": 0,
+        "cpu_seconds": 67.823273,
+        "peak_rss_kib": 359624,
+        "elapsed_s": 67.00868272781372,
+        "receipt_sha256": "1cfee1921066700146f5fd89af7fb0d7611bf42e5a53733b38c2c0b81187a526",
+        "receipt": {
+          "allocations": null,
+          "allocator": "system",
+          "blocks": 8192,
+          "epoch": 900,
+          "failed": 341094,
+          "http": {
+            "body_buffer_allocated_bytes": 268435456,
+            "body_buffer_allocations": 8,
+            "body_bytes": 9932111872,
+            "bytes_delivered": 9663676416,
+            "get_requests": 296,
+            "incomplete_body_retries": 0,
+            "workers_finished": 4
+          },
+          "http_body_window_bytes": 268435456,
+          "http_workers": 4,
+          "identity": {
+            "bytes": 527045598158,
+            "etag": "\"d98e61b8827c6c211f889dd2bf8577a8-3927\"",
+            "operator_trusted": false,
+            "url": "https://blockzilla-archive-samples-v1.cheron-augustin.workers.dev/car/900/epoch-900.car"
+          },
+          "metadata_mode": "Visitor",
+          "physical_blocks": 8192,
+          "reuse_http_buffers": true,
+          "scan_seconds": 65.857162095,
+          "scan_tps": 135533.2011896344,
+          "schema": "blockzilla-car-decode-reference-v1",
+          "setup_seconds": 0.111427904,
+          "signature_verification": false,
+          "transactions": 8925832,
+          "valid": true,
+          "votes": 6533434,
+          "workers": 12
+        },
+        "proof_verified": true
+      },
+      {
+        "name": "05-network-w4-legacy",
+        "http_workers": 4,
+        "reuse": false,
+        "command": [
+          "/volume2/blockzilla-bench/control/car-network-window-20260909/car-decode-reference",
+          "--url",
+          "https://blockzilla-archive-samples-v1.cheron-augustin.workers.dev/car/900/epoch-900.car",
+          "--plan",
+          "/volume2/blockzilla-bench/control/car-network-window-20260909/prefix-plan.json",
+          "--workers",
+          "12",
+          "--metadata-mode",
+          "visitor",
+          "--http-workers",
+          "4",
+          "--output",
+          "/volume2/blockzilla-bench/control/car-network-window-20260909/05-network-w4-legacy/receipt.json",
+          "--legacy-http-buffers"
+        ],
+        "started_at": 1788951125.9021077,
+        "valid": true,
+        "pid": 3034117,
+        "exit_code": 0,
+        "cpu_seconds": 68.990618,
+        "peak_rss_kib": 357708,
+        "elapsed_s": 45.00657057762146,
+        "receipt_sha256": "03b00cf0317804254bf8dcd6fe88fe787553fb5edeba6c445481a02a81c6b09f",
+        "receipt": {
+          "allocations": null,
+          "allocator": "system",
+          "blocks": 8192,
+          "epoch": 900,
+          "failed": 341094,
+          "http": {
+            "body_buffer_allocated_bytes": 9797894144,
+            "body_buffer_allocations": 292,
+            "body_bytes": 9797894144,
+            "bytes_delivered": 9663676416,
+            "get_requests": 292,
+            "incomplete_body_retries": 0,
+            "workers_finished": 4
+          },
+          "http_body_window_bytes": 268435456,
+          "http_workers": 4,
+          "identity": {
+            "bytes": 527045598158,
+            "etag": "\"d98e61b8827c6c211f889dd2bf8577a8-3927\"",
+            "operator_trusted": false,
+            "url": "https://blockzilla-archive-samples-v1.cheron-augustin.workers.dev/car/900/epoch-900.car"
+          },
+          "metadata_mode": "Visitor",
+          "physical_blocks": 8192,
+          "reuse_http_buffers": false,
+          "scan_seconds": 44.461337184,
+          "scan_tps": 200754.91573861343,
+          "schema": "blockzilla-car-decode-reference-v1",
+          "setup_seconds": 0.114249014,
+          "signature_verification": false,
+          "transactions": 8925832,
+          "valid": true,
+          "votes": 6533434,
+          "workers": 12
+        },
+        "proof_verified": true
+      }
+    ],
+    "current": "05-network-w4-legacy",
+    "finished_at": 1788951171.0435934,
+    "archive_after": {
+      "epoch-900.car.zst": [
+        226068566559,
+        1788159361996365127,
+        4096,
+        73
+      ],
+      "epoch-900-slot-ranges.raw": [
+        5184000,
+        1788716409788226054,
+        4367,
+        73
+      ]
+    }
+  },
+  "manifest": {
+    "files": {
+      "car-decode-reference": "e90d3d286cc3bb5b8ea43d4cb99c8354d7201fafb789742a9a184094451203d3",
+      "run.py": "b25bd965177c4a91fb1958b7c65a025b02cc9e03a211510d96a9a9b6c26ff684",
+      "prefix-plan.json": "76c77bc6ef1277d138a498b8a441f3095b9c416571a9fafe4c6f28ae8c16d396",
+      "expected.json": "528ecbbcec1657c0c2f36a387064ad8cfa95e03e06af8d5e56280312efb41df8"
+    },
+    "epoch": 900,
+    "blocks": 8192,
+    "transactions": 8925832,
+    "body_window_bytes": 268435456,
+    "allocator": "system",
+    "metadata_mode": "visitor",
+    "cases": 6
+  },
+  "verified_receipts": [
+    {
+      "name": "00-network-w4-legacy",
+      "receipt_sha256": "3f82da97152790fcfa6182a3ff044333ab0e6cff276ab193a43a7302fd912048"
+    },
+    {
+      "name": "01-network-w4-reuse",
+      "receipt_sha256": "82ce9e95d76d9fb4d1e79eb8f38616bb202932499ae1a882b94dcee2fc1dd7a2"
+    },
+    {
+      "name": "02-network-w8-reuse",
+      "receipt_sha256": "831426c58b01f12c37993efc0ee8d825492b87a2af3999bc8d9d29a17bb87d2f"
+    },
+    {
+      "name": "03-network-w8-reuse",
+      "receipt_sha256": "2bc7bec7845d74764c7f21823d67e7cda346c3ac1e0d204f0710c375502d591e"
+    },
+    {
+      "name": "04-network-w4-reuse",
+      "receipt_sha256": "1cfee1921066700146f5fd89af7fb0d7611bf42e5a53733b38c2c0b81187a526"
+    },
+    {
+      "name": "05-network-w4-legacy",
+      "receipt_sha256": "03b00cf0317804254bf8dcd6fe88fe787553fb5edeba6c445481a02a81c6b09f"
+    }
+  ],
+  "final_check": {
+    "verified_at_unix": 1788951680.257572,
+    "processes_stopped": [
+      3033174,
+      3033175,
+      3033346,
+      3033566,
+      3033749,
+      3033936,
+      3034117
+    ],
+    "source": {
+      "bytes": 527045598158,
+      "etag": "\"d98e61b8827c6c211f889dd2bf8577a8-3927\""
+    },
+    "archive": {
+      "epoch-900.car.zst": [
+        226068566559,
+        1788159361996365127,
+        4096,
+        73
+      ],
+      "epoch-900-slot-ranges.raw": [
+        5184000,
+        1788716409788226054,
+        4367,
+        73
+      ]
+    }
+  },
+  "expected_file_sha256": "528ecbbcec1657c0c2f36a387064ad8cfa95e03e06af8d5e56280312efb41df8",
+  "build": {
+    "source_sha256": {
+      "/Users/augustin/Developement/ferno/blockzilla-v1/crates/compact-v2/blockzilla-compact-v2-reader/src/signed_message.rs": "45869103fbbbca08f1145b57b76f985fe7242a69f2fd5353f17ddd1761199b98",
+      "/Users/augustin/Developement/ferno/blockzilla-v1/crates/compact-v2/blockzilla-compact-v2-reader/src/http_cache.rs": "59d88762886cf2501ab4e10e005e530729020990eb3708a0efa49774d5acb261",
+      "/Users/augustin/Developement/ferno/blockzilla-v1/crates/compact-v2/blockzilla-compact-v2-reader/src/archive_integrity.rs": "3b4c0657f10ce9b6cb570be7e778f992612dcac0ed6158541c07de9e7aa8b13e",
+      "/Users/augustin/Developement/ferno/blockzilla-v1/crates/compact-v2/blockzilla-compact-v2-reader/src/error.rs": "cbfa3d13a9669081a349955ae4f23d5b91903556de5bc20466c46623c75b8795",
+      "/Users/augustin/Developement/ferno/blockzilla-v1/crates/compact-v2/blockzilla-compact-v2-reader/src/source_decode.rs": "292f38522361e63403b5c55724d7e2a5df1d8bcd16a5a40b8fad1a4af9753cfa",
+      "/Users/augustin/Developement/ferno/blockzilla-v1/crates/compact-v2/blockzilla-compact-v2-reader/src/lib.rs": "94ee502fff2164a648da4ddd08728f40f5237a10aeb27c82f971b34a60bb51bb",
+      "/Users/augustin/Developement/ferno/blockzilla-v1/crates/compact-v2/blockzilla-compact-v2-reader/src/manifest.rs": "d53ec040d42e982f11ac95315f4be26d39b2a3d3efc299bb857b826d6c09e733",
+      "/Users/augustin/Developement/ferno/blockzilla-v1/crates/compact-v2/blockzilla-compact-v2-reader/src/query_keys.rs": "e1b13fa4cdea9f30ed7cc4895de382da065312db5d30b891aa3b4d2409240cba",
+      "/Users/augustin/Developement/ferno/blockzilla-v1/crates/compact-v2/blockzilla-compact-v2-reader/src/metadata_schema.rs": "626aebc04dbe6f848de0e0e9b6cc2fb5bbe9298e08739f47e45ad22aaa8a1bb2",
+      "/Users/augustin/Developement/ferno/blockzilla-v1/crates/compact-v2/blockzilla-compact-v2-reader/src/descriptor.rs": "136b33e4186dbaa5eaba3bc698edffc97b2d7e4ea7ba5757a1be42c540886de7",
+      "/Users/augustin/Developement/ferno/blockzilla-v1/crates/compact-v2/blockzilla-compact-v2-reader/src/account_references.rs": "03a183bddb9757efc6df0b183f3469d100489f1405b16917d6769a2110bd3598",
+      "/Users/augustin/Developement/ferno/blockzilla-v1/crates/compact-v2/blockzilla-compact-v2-reader/src/archive_signatures.rs": "dcf4aa1cefa8ffb4444133bbb4c033fa9e56c73b369d242d84e0b7380f72b0c0",
+      "/Users/augustin/Developement/ferno/blockzilla-v1/crates/compact-v2/blockzilla-compact-v2-reader/src/compact_query.rs": "5b5901b665f53398b443809515a59c03fb7a98346d185b5e4427cb31a56c52ae",
+      "/Users/augustin/Developement/ferno/blockzilla-v1/crates/compact-v2/blockzilla-compact-v2-reader/src/poh.rs": "5b9e1d537188274f0b224931e12b113e3cf48ea681eff9131107e8b88dac5777",
+      "/Users/augustin/Developement/ferno/blockzilla-v1/crates/compact-v2/blockzilla-compact-v2-reader/src/source.rs": "ef70652217a4d7502affaf07dc46a5206375e3152e95423a744b4f27376424ae",
+      "/Users/augustin/Developement/ferno/blockzilla-v1/crates/compact-v2/blockzilla-compact-v2-reader/src/metadata_projection.rs": "666839bea8f9d7b407893c6fbd021951150a029de20d3be5136e2a168e547c6c",
+      "/Users/augustin/Developement/ferno/blockzilla-v1/crates/compact-v2/blockzilla-compact-v2-reader/src/message_schema.rs": "5e3ef053fe38c9b7d8bd69f2cf0972ca905f777741e9c55252a6f551eb33e2a4",
+      "/Users/augustin/Developement/ferno/blockzilla-v1/crates/compact-v2/blockzilla-compact-v2-reader/src/message_projection.rs": "b70b0a1ca0ae2806c93c67e7fd1b7032f1a3a6ef603ca4b5b5ba99a631e3be3c",
+      "/Users/augustin/Developement/ferno/blockzilla-v1/crates/compact-v2/blockzilla-compact-v2-reader/src/http.rs": "7fe91f6991cd0c02a8c44c35f22b579de1630b8de63df05ea5ed1e2d69a810d5",
+      "/Users/augustin/Developement/ferno/blockzilla-v1/crates/compact-v2/blockzilla-compact-v2-reader/src/archive.rs": "222027998161199afb67386abe9b439ddb5a779ed11a745d62c62b905e7c6aaf",
+      "/Users/augustin/Developement/ferno/blockzilla-v1/crates/compact-v2/blockzilla-compact-v2-reader/src/blockhash.rs": "3173355764924c87b5c501f1d0f068072b10f605a62c8a6a7ea7a556b6fdaee7",
+      "/Users/augustin/Developement/ferno/blockzilla-v1/crates/compact-v2/blockzilla-compact-v2-reader/src/count_projection.rs": "4015740976e941937fe634bb8bffef76fa7099a80f4ef64e9c3513b3d40099e3",
+      "/Users/augustin/Developement/ferno/blockzilla-v1/crates/compact-v2/blockzilla-compact-v2-reader/src/reader.rs": "c3a0e467464bd1a05106661ec520bc4064e46814d617b9f595794594b5a0882c",
+      "/Users/augustin/Developement/ferno/blockzilla-v1/crates/compact-v2/blockzilla-compact-v2-reader/src/reader/pipeline_tests.rs": "900be07e5f6ae2dc6d6ff166b1d8d19ec16f2159c05ad7db4821a9ab895527f5",
+      "/Users/augustin/Developement/ferno/blockzilla-v1/crates/compact-v2/blockzilla-compact-v2-reader/src/compact_query/indexed_tokens.rs": "b0c4cbfd78c68f48f438a6cf213f722995f1121a85cffc2ed9cc152f2ebd260c",
+      "/Users/augustin/Developement/ferno/blockzilla-v1/crates/archive-v3/blockzilla-archive-v3-reader/src/lib.rs": "bf7565095edf65335942d26310ec6f39eba35aa730ce4ff7817b6a0d5a31e40d",
+      "/Users/augustin/Developement/ferno/blockzilla-v1/crates/archive-v3/blockzilla-archive-v3-reader/src/indexer_v3_query.rs": "ecc2abac06fc9f29b205795b0f55b136d3eafd793ebc308bf085d31b6bbf98eb",
+      "/Users/augustin/Developement/ferno/blockzilla-v1/crates/archive-v3/blockzilla-archive-v3-reader/src/indexer_v3_candidates.rs": "0b96eae28b9c0058a686a2a772d42c52d17281ab74b2094c33711b1d41a85895",
+      "/Users/augustin/Developement/ferno/blockzilla-v1/crates/archive-v3/blockzilla-archive-v3-reader/src/indexer_v3_registry.rs": "1b74bd6aeb56865537cb17a618496548dbbf881d0154581ab0fe877db05e3410",
+      "/Users/augustin/Developement/ferno/blockzilla-v1/crates/archive-v3/blockzilla-archive-v3-reader/src/canonical.rs": "85dcb36c24ba3936374eabddd4b295a48a22588189257344b6f691fe83ce550a",
+      "/Users/augustin/Developement/ferno/blockzilla-v1/crates/archive-v3/blockzilla-archive-v3-reader/src/container.rs": "6cc390b1d517f8d909536093d19cae68aaa1e6cd62453245f13ca614c74415c6",
+      "/Users/augustin/Developement/ferno/blockzilla-v1/crates/archive-v3/blockzilla-archive-v3-reader/src/indexer_v3_query/network_input.rs": "153837c156bfd06e608bf8e1cbf850f1c0dee0a4b3eecaafad68622446408f97",
+      "/Users/augustin/Developement/ferno/blockzilla-v1/crates/archive-v3/blockzilla-archive-v3-reader/src/engine/standalone_v2.rs": "a2e3f3d4e6475b52682b0dbfd7e2c315ef9c4f6683f437f3d563679cb9f4332d",
+      "/Users/augustin/Developement/ferno/blockzilla-v1/crates/archive-v3/blockzilla-archive-v3-reader/src/engine/standalone_directory_v3.rs": "af03b8b69c0689b20545bd94117465bb0296d44a2a32d1121da8a547e944fd1d",
+      "/Users/augustin/Developement/ferno/blockzilla-v1/crates/archive-v3/blockzilla-archive-v3-reader/src/engine/standalone_account_postings.rs": "4d553fadfd208a25f7b393694e664551178c789d8a82101ea0025b64f4a17999",
+      "/Users/augustin/Developement/ferno/blockzilla-v1/crates/archive-v3/blockzilla-archive-v3-reader/src/engine/standalone_account_postings/block_group_role_summary_canary.rs": "db259e859817c1388061c41efd7da50f40db62c176b30b5cc084fd85d5404392",
+      "/Users/augustin/Developement/ferno/blockzilla-v1/crates/archive-v3/blockzilla-archive-v3-reader/src/engine/standalone_account_postings/block_group_measurement.rs": "4de84b555660e5f97583a76e0fa63d8c8300a64fe65ab7bdf8a7a037a5a6c520",
+      "/Users/augustin/Developement/ferno/blockzilla-v1/bench/reader-profile/src/main.rs": "6c26b388977939ab9bdc45335018ba4b5268d4c7517462c460dbed4204d7ff06",
+      "/Users/augustin/Developement/ferno/blockzilla-v1/crates/old-faithful/of-car-reader/src/convert_metadata.rs": "de087a4d45c646ed794cf253def61df252f65cd681105fc2a4c50777e6b8627b",
+      "/Users/augustin/Developement/ferno/blockzilla-v1/crates/old-faithful/of-car-reader/src/slot_ranges.rs": "b88c3940f9687beb79c5ce60406cd7f6a75bc6c49bc07635b9ddb9b2624c2fc0",
+      "/Users/augustin/Developement/ferno/blockzilla-v1/crates/old-faithful/of-car-reader/src/error.rs": "5492bddadfc93b1216faad4c1ed69ba93e4bf32901faa71523d2ccfd32ed9450",
+      "/Users/augustin/Developement/ferno/blockzilla-v1/crates/old-faithful/of-car-reader/src/data_buffer_pool.rs": "8acec8678037b26bb065a2ac27c68ee63e60a0fda81d8756ba8fd4eb6cc97caf",
+      "/Users/augustin/Developement/ferno/blockzilla-v1/crates/old-faithful/of-car-reader/src/lib.rs": "7834b1f1aa919b722f24917673b35917549e56e6d4411a072c0b2a1b8e3b7bde",
+      "/Users/augustin/Developement/ferno/blockzilla-v1/crates/old-faithful/of-car-reader/src/query_sdk.rs": "dcce1f69b4775672c85414205b4039d190061a775778dd24c638452cf3300076",
+      "/Users/augustin/Developement/ferno/blockzilla-v1/crates/old-faithful/of-car-reader/src/short_vec.rs": "ce7efa19694a88d62cabc8b18fb6296bafb64d54fed5d6186fd5c7eb2f37eb0e",
+      "/Users/augustin/Developement/ferno/blockzilla-v1/crates/old-faithful/of-car-reader/src/query_sdk_http.rs": "9f93559c6972ef522a63853b6f8a87656cb3f1f0993508bcc99aad7d0c36645c",
+      "/Users/augustin/Developement/ferno/blockzilla-v1/crates/old-faithful/of-car-reader/src/compact_index.rs": "1ef1eac93a3beff38ba7fe737d342ebbde46d03bb3f84169d831def770f78ce0",
+      "/Users/augustin/Developement/ferno/blockzilla-v1/crates/old-faithful/of-car-reader/src/car_block_group.rs": "2989e54db05326f8a468e1ffc45140a2a03dda1c8866131afe96986e37e8286a",
+      "/Users/augustin/Developement/ferno/blockzilla-v1/crates/old-faithful/of-car-reader/src/genesis.rs": "c7afac30e0713da8b30cf630cb1e463beac63d6b9e4cd201408af84d7095a12f",
+      "/Users/augustin/Developement/ferno/blockzilla-v1/crates/old-faithful/of-car-reader/src/reconstruct.rs": "1e0dd9d9544f6753430002441bdcdfaf9cf0e1284b00476a20df49dbec927db1",
+      "/Users/augustin/Developement/ferno/blockzilla-v1/crates/old-faithful/of-car-reader/src/node.rs": "ba5e6ea810e09fa5a43fa62b936db099ab6fbb25ed41f49293989626137bb3b0",
+      "/Users/augustin/Developement/ferno/blockzilla-v1/crates/old-faithful/of-car-reader/src/metadata_decoder.rs": "32d78521dfe6bec0ff6f243da02c87a9df53954e08288d4c5ce6c26b6dfedae7",
+      "/Users/augustin/Developement/ferno/blockzilla-v1/crates/old-faithful/of-car-reader/src/car_stream.rs": "404a862bb6ac8d1ee1cc06af530103f4466382a7349bb7f065f95e4f32c5f622",
+      "/Users/augustin/Developement/ferno/blockzilla-v1/crates/old-faithful/of-car-reader/src/archive.rs": "03e99e9fa27f78bd6a8d91d3d56be911e30f3a461d7690a741ed0bfc5e054bea",
+      "/Users/augustin/Developement/ferno/blockzilla-v1/crates/old-faithful/of-car-reader/src/reader.rs": "8e38753727e6723a88a44d201b9bc25e9bfff45e12a5d7abd57d9579cc60d1f8",
+      "/Users/augustin/Developement/ferno/blockzilla-v1/crates/old-faithful/of-car-reader/src/versioned_transaction.rs": "b87803f120fcf50a566b4918347bccaddf162ffe931d8f5b4c8f45113a1c5868",
+      "/Users/augustin/Developement/ferno/blockzilla-v1/crates/old-faithful/of-car-reader/src/ordered_lossless.rs": "5de0336c65d1a7ac7d6e323a28e8c17a563114194e0fa462c34d152b477d55b7",
+      "/Users/augustin/Developement/ferno/blockzilla-v1/crates/old-faithful/of-car-reader/src/bin/profile_big_block.rs": "13798b64e0df7b5aa7e7b2d00c05fac2c2360c1467d29b68f20431f4fe6db9e4",
+      "/Users/augustin/Developement/ferno/blockzilla-v1/crates/old-faithful/of-car-reader/src/bin/car_validate_lossless.rs": "272c40db10f1e0b037a8fa2eea36af63bb19a131ef9825f8f23343fa40051f28",
+      "/Users/augustin/Developement/ferno/blockzilla-v1/crates/old-faithful/of-car-reader/src/bin/car_df_graph.rs": "297c921b2ff12abdfa2fb223131598a2d2cb77523c8fcec6a431478193027c8b",
+      "/Users/augustin/Developement/ferno/blockzilla-v1/crates/old-faithful/of-car-reader/src/bin/car_skipped_slots.rs": "37c29385fe403f59846183696b8ffc87ccaf99a1686de8f898e92c8da39c2ce7",
+      "/Users/augustin/Developement/ferno/blockzilla-v1/crates/old-faithful/of-car-reader/src/bin/reader.rs": "26420f491dcd5e1c07486c1ed6fce90a542e54f943d13ca1c73b578d5dc65d3d",
+      "/Users/augustin/Developement/ferno/blockzilla-v1/crates/old-faithful/of-car-reader/src/bin/car_continuations.rs": "d14dcac7fd9e0e4d735aa0b72e0ff9460b3bae0af84cdcd4bf71840106ca980e",
+      "/Users/augustin/Developement/ferno/blockzilla-v1/crates/old-faithful/of-car-reader/src/stored_transaction/status_meta.rs": "8f455d5a76c329b4e8e936dc8534f48dd2611c84f797e7e8e46d8dcafeb5e1b9",
+      "/Users/augustin/Developement/ferno/blockzilla-v1/crates/old-faithful/of-car-reader/src/stored_transaction/mod.rs": "e598eed2f6f4104ccdff74c53c0f027976435508011d44e03a86ae91876b2569",
+      "/Users/augustin/Developement/ferno/blockzilla-v1/crates/old-faithful/of-car-reader/src/stored_transaction/transaction_error.rs": "65847c18586035938a7290a85292a260c90fe498685683dd77be118c16ede464",
+      "/Users/augustin/Developement/ferno/blockzilla-v1/crates/old-faithful/of-car-reader/src/stored_transaction/status_meta_v2.rs": "d152cb7be4e38cd206551947a7cfe4c19f8a685a32f4d2f95c81fd1ea92b83af",
+      "/Users/augustin/Developement/ferno/blockzilla-v1/bench/reader-profile/src/allocation.rs": "ff6c5d7acb061e74a2f530473c8fd8150fc6ba26cc12606cca5375bc76744442",
+      "/Users/augustin/Developement/ferno/blockzilla-v1/bench/reader-profile/src/bin/car-decode-reference.rs": "cb12842df63a1c3c1a0d005e0341d540006f3f71dbb2f018fc4ef59c94056392",
+      "/Users/augustin/Developement/ferno/blockzilla-v1/bench/reader-profile/src/bin/car-decode-reference/metadata_visit.rs": "8fdc89791670b73f163de78f43114f606764b5d076b3e3ab313769330bb443d9"
+    },
+    "command": [
+      "cargo",
+      "build",
+      "--offline",
+      "--locked",
+      "--release",
+      "--target",
+      "x86_64-unknown-linux-musl",
+      "--jobs",
+      "4",
+      "-p",
+      "blockzilla-reader-profile",
+      "--features",
+      "car-reference",
+      "--bin",
+      "car-decode-reference"
+    ],
+    "started": 1788950439.72117,
+    "state": "PASS",
+    "elapsed_s": 210.68475890159607,
+    "exit_code": 0,
+    "binary_sha256": "e90d3d286cc3bb5b8ea43d4cb99c8354d7201fafb789742a9a184094451203d3"
+  },
+  "validation": {
+    "library_tests": 135,
+    "documentation_tests": 5,
+    "probe_tests": 5,
+    "example_check": "PASS",
+    "strict_clippy": "Five existing warnings in unchanged query_sdk.rs; no warnings in changed HTTP module."
+  },
+  "preflight_failure": {
+    "phase": "HEAD preflight",
+    "status": 403,
+    "reader_cases_started": 0,
+    "followup": "HEAD with the previously used blockzilla-network-prefix/1 User-Agent returned 200 and the expected size/ETag. Controller now sends that identifier."
+  },
+  "verified_at_utc": "2026-09-09T11:03:29.934122+00:00",
+  "final_source_sha256": {
+    "/Users/augustin/Developement/ferno/blockzilla-v1/crates/compact-v2/blockzilla-compact-v2-reader/src/signed_message.rs": "45869103fbbbca08f1145b57b76f985fe7242a69f2fd5353f17ddd1761199b98",
+    "/Users/augustin/Developement/ferno/blockzilla-v1/crates/compact-v2/blockzilla-compact-v2-reader/src/http_cache.rs": "59d88762886cf2501ab4e10e005e530729020990eb3708a0efa49774d5acb261",
+    "/Users/augustin/Developement/ferno/blockzilla-v1/crates/compact-v2/blockzilla-compact-v2-reader/src/archive_integrity.rs": "3b4c0657f10ce9b6cb570be7e778f992612dcac0ed6158541c07de9e7aa8b13e",
+    "/Users/augustin/Developement/ferno/blockzilla-v1/crates/compact-v2/blockzilla-compact-v2-reader/src/error.rs": "cbfa3d13a9669081a349955ae4f23d5b91903556de5bc20466c46623c75b8795",
+    "/Users/augustin/Developement/ferno/blockzilla-v1/crates/compact-v2/blockzilla-compact-v2-reader/src/source_decode.rs": "292f38522361e63403b5c55724d7e2a5df1d8bcd16a5a40b8fad1a4af9753cfa",
+    "/Users/augustin/Developement/ferno/blockzilla-v1/crates/compact-v2/blockzilla-compact-v2-reader/src/lib.rs": "94ee502fff2164a648da4ddd08728f40f5237a10aeb27c82f971b34a60bb51bb",
+    "/Users/augustin/Developement/ferno/blockzilla-v1/crates/compact-v2/blockzilla-compact-v2-reader/src/manifest.rs": "d53ec040d42e982f11ac95315f4be26d39b2a3d3efc299bb857b826d6c09e733",
+    "/Users/augustin/Developement/ferno/blockzilla-v1/crates/compact-v2/blockzilla-compact-v2-reader/src/query_keys.rs": "e1b13fa4cdea9f30ed7cc4895de382da065312db5d30b891aa3b4d2409240cba",
+    "/Users/augustin/Developement/ferno/blockzilla-v1/crates/compact-v2/blockzilla-compact-v2-reader/src/metadata_schema.rs": "626aebc04dbe6f848de0e0e9b6cc2fb5bbe9298e08739f47e45ad22aaa8a1bb2",
+    "/Users/augustin/Developement/ferno/blockzilla-v1/crates/compact-v2/blockzilla-compact-v2-reader/src/descriptor.rs": "136b33e4186dbaa5eaba3bc698edffc97b2d7e4ea7ba5757a1be42c540886de7",
+    "/Users/augustin/Developement/ferno/blockzilla-v1/crates/compact-v2/blockzilla-compact-v2-reader/src/account_references.rs": "03a183bddb9757efc6df0b183f3469d100489f1405b16917d6769a2110bd3598",
+    "/Users/augustin/Developement/ferno/blockzilla-v1/crates/compact-v2/blockzilla-compact-v2-reader/src/archive_signatures.rs": "dcf4aa1cefa8ffb4444133bbb4c033fa9e56c73b369d242d84e0b7380f72b0c0",
+    "/Users/augustin/Developement/ferno/blockzilla-v1/crates/compact-v2/blockzilla-compact-v2-reader/src/compact_query.rs": "5b5901b665f53398b443809515a59c03fb7a98346d185b5e4427cb31a56c52ae",
+    "/Users/augustin/Developement/ferno/blockzilla-v1/crates/compact-v2/blockzilla-compact-v2-reader/src/poh.rs": "5b9e1d537188274f0b224931e12b113e3cf48ea681eff9131107e8b88dac5777",
+    "/Users/augustin/Developement/ferno/blockzilla-v1/crates/compact-v2/blockzilla-compact-v2-reader/src/source.rs": "ef70652217a4d7502affaf07dc46a5206375e3152e95423a744b4f27376424ae",
+    "/Users/augustin/Developement/ferno/blockzilla-v1/crates/compact-v2/blockzilla-compact-v2-reader/src/metadata_projection.rs": "666839bea8f9d7b407893c6fbd021951150a029de20d3be5136e2a168e547c6c",
+    "/Users/augustin/Developement/ferno/blockzilla-v1/crates/compact-v2/blockzilla-compact-v2-reader/src/message_schema.rs": "5e3ef053fe38c9b7d8bd69f2cf0972ca905f777741e9c55252a6f551eb33e2a4",
+    "/Users/augustin/Developement/ferno/blockzilla-v1/crates/compact-v2/blockzilla-compact-v2-reader/src/message_projection.rs": "b70b0a1ca0ae2806c93c67e7fd1b7032f1a3a6ef603ca4b5b5ba99a631e3be3c",
+    "/Users/augustin/Developement/ferno/blockzilla-v1/crates/compact-v2/blockzilla-compact-v2-reader/src/http.rs": "7fe91f6991cd0c02a8c44c35f22b579de1630b8de63df05ea5ed1e2d69a810d5",
+    "/Users/augustin/Developement/ferno/blockzilla-v1/crates/compact-v2/blockzilla-compact-v2-reader/src/archive.rs": "222027998161199afb67386abe9b439ddb5a779ed11a745d62c62b905e7c6aaf",
+    "/Users/augustin/Developement/ferno/blockzilla-v1/crates/compact-v2/blockzilla-compact-v2-reader/src/blockhash.rs": "3173355764924c87b5c501f1d0f068072b10f605a62c8a6a7ea7a556b6fdaee7",
+    "/Users/augustin/Developement/ferno/blockzilla-v1/crates/compact-v2/blockzilla-compact-v2-reader/src/count_projection.rs": "4015740976e941937fe634bb8bffef76fa7099a80f4ef64e9c3513b3d40099e3",
+    "/Users/augustin/Developement/ferno/blockzilla-v1/crates/compact-v2/blockzilla-compact-v2-reader/src/reader.rs": "c3a0e467464bd1a05106661ec520bc4064e46814d617b9f595794594b5a0882c",
+    "/Users/augustin/Developement/ferno/blockzilla-v1/crates/compact-v2/blockzilla-compact-v2-reader/src/reader/pipeline_tests.rs": "900be07e5f6ae2dc6d6ff166b1d8d19ec16f2159c05ad7db4821a9ab895527f5",
+    "/Users/augustin/Developement/ferno/blockzilla-v1/crates/compact-v2/blockzilla-compact-v2-reader/src/compact_query/indexed_tokens.rs": "b0c4cbfd78c68f48f438a6cf213f722995f1121a85cffc2ed9cc152f2ebd260c",
+    "/Users/augustin/Developement/ferno/blockzilla-v1/crates/archive-v3/blockzilla-archive-v3-reader/src/lib.rs": "bf7565095edf65335942d26310ec6f39eba35aa730ce4ff7817b6a0d5a31e40d",
+    "/Users/augustin/Developement/ferno/blockzilla-v1/crates/archive-v3/blockzilla-archive-v3-reader/src/indexer_v3_query.rs": "ecc2abac06fc9f29b205795b0f55b136d3eafd793ebc308bf085d31b6bbf98eb",
+    "/Users/augustin/Developement/ferno/blockzilla-v1/crates/archive-v3/blockzilla-archive-v3-reader/src/indexer_v3_candidates.rs": "0b96eae28b9c0058a686a2a772d42c52d17281ab74b2094c33711b1d41a85895",
+    "/Users/augustin/Developement/ferno/blockzilla-v1/crates/archive-v3/blockzilla-archive-v3-reader/src/indexer_v3_registry.rs": "1b74bd6aeb56865537cb17a618496548dbbf881d0154581ab0fe877db05e3410",
+    "/Users/augustin/Developement/ferno/blockzilla-v1/crates/archive-v3/blockzilla-archive-v3-reader/src/canonical.rs": "85dcb36c24ba3936374eabddd4b295a48a22588189257344b6f691fe83ce550a",
+    "/Users/augustin/Developement/ferno/blockzilla-v1/crates/archive-v3/blockzilla-archive-v3-reader/src/container.rs": "6cc390b1d517f8d909536093d19cae68aaa1e6cd62453245f13ca614c74415c6",
+    "/Users/augustin/Developement/ferno/blockzilla-v1/crates/archive-v3/blockzilla-archive-v3-reader/src/indexer_v3_query/network_input.rs": "153837c156bfd06e608bf8e1cbf850f1c0dee0a4b3eecaafad68622446408f97",
+    "/Users/augustin/Developement/ferno/blockzilla-v1/crates/archive-v3/blockzilla-archive-v3-reader/src/engine/standalone_v2.rs": "a2e3f3d4e6475b52682b0dbfd7e2c315ef9c4f6683f437f3d563679cb9f4332d",
+    "/Users/augustin/Developement/ferno/blockzilla-v1/crates/archive-v3/blockzilla-archive-v3-reader/src/engine/standalone_directory_v3.rs": "af03b8b69c0689b20545bd94117465bb0296d44a2a32d1121da8a547e944fd1d",
+    "/Users/augustin/Developement/ferno/blockzilla-v1/crates/archive-v3/blockzilla-archive-v3-reader/src/engine/standalone_account_postings.rs": "4d553fadfd208a25f7b393694e664551178c789d8a82101ea0025b64f4a17999",
+    "/Users/augustin/Developement/ferno/blockzilla-v1/crates/archive-v3/blockzilla-archive-v3-reader/src/engine/standalone_account_postings/block_group_role_summary_canary.rs": "db259e859817c1388061c41efd7da50f40db62c176b30b5cc084fd85d5404392",
+    "/Users/augustin/Developement/ferno/blockzilla-v1/crates/archive-v3/blockzilla-archive-v3-reader/src/engine/standalone_account_postings/block_group_measurement.rs": "4de84b555660e5f97583a76e0fa63d8c8300a64fe65ab7bdf8a7a037a5a6c520",
+    "/Users/augustin/Developement/ferno/blockzilla-v1/bench/reader-profile/src/main.rs": "6c26b388977939ab9bdc45335018ba4b5268d4c7517462c460dbed4204d7ff06",
+    "/Users/augustin/Developement/ferno/blockzilla-v1/crates/old-faithful/of-car-reader/src/convert_metadata.rs": "de087a4d45c646ed794cf253def61df252f65cd681105fc2a4c50777e6b8627b",
+    "/Users/augustin/Developement/ferno/blockzilla-v1/crates/old-faithful/of-car-reader/src/slot_ranges.rs": "b88c3940f9687beb79c5ce60406cd7f6a75bc6c49bc07635b9ddb9b2624c2fc0",
+    "/Users/augustin/Developement/ferno/blockzilla-v1/crates/old-faithful/of-car-reader/src/error.rs": "5492bddadfc93b1216faad4c1ed69ba93e4bf32901faa71523d2ccfd32ed9450",
+    "/Users/augustin/Developement/ferno/blockzilla-v1/crates/old-faithful/of-car-reader/src/data_buffer_pool.rs": "8acec8678037b26bb065a2ac27c68ee63e60a0fda81d8756ba8fd4eb6cc97caf",
+    "/Users/augustin/Developement/ferno/blockzilla-v1/crates/old-faithful/of-car-reader/src/lib.rs": "7834b1f1aa919b722f24917673b35917549e56e6d4411a072c0b2a1b8e3b7bde",
+    "/Users/augustin/Developement/ferno/blockzilla-v1/crates/old-faithful/of-car-reader/src/query_sdk.rs": "dcce1f69b4775672c85414205b4039d190061a775778dd24c638452cf3300076",
+    "/Users/augustin/Developement/ferno/blockzilla-v1/crates/old-faithful/of-car-reader/src/short_vec.rs": "ce7efa19694a88d62cabc8b18fb6296bafb64d54fed5d6186fd5c7eb2f37eb0e",
+    "/Users/augustin/Developement/ferno/blockzilla-v1/crates/old-faithful/of-car-reader/src/query_sdk_http.rs": "62ea0e986ee983e601cedfd3a061d449fa6a975e99f8b2bf8e6e994a14c7c528",
+    "/Users/augustin/Developement/ferno/blockzilla-v1/crates/old-faithful/of-car-reader/src/compact_index.rs": "1ef1eac93a3beff38ba7fe737d342ebbde46d03bb3f84169d831def770f78ce0",
+    "/Users/augustin/Developement/ferno/blockzilla-v1/crates/old-faithful/of-car-reader/src/car_block_group.rs": "2989e54db05326f8a468e1ffc45140a2a03dda1c8866131afe96986e37e8286a",
+    "/Users/augustin/Developement/ferno/blockzilla-v1/crates/old-faithful/of-car-reader/src/genesis.rs": "c7afac30e0713da8b30cf630cb1e463beac63d6b9e4cd201408af84d7095a12f",
+    "/Users/augustin/Developement/ferno/blockzilla-v1/crates/old-faithful/of-car-reader/src/reconstruct.rs": "1e0dd9d9544f6753430002441bdcdfaf9cf0e1284b00476a20df49dbec927db1",
+    "/Users/augustin/Developement/ferno/blockzilla-v1/crates/old-faithful/of-car-reader/src/node.rs": "ba5e6ea810e09fa5a43fa62b936db099ab6fbb25ed41f49293989626137bb3b0",
+    "/Users/augustin/Developement/ferno/blockzilla-v1/crates/old-faithful/of-car-reader/src/metadata_decoder.rs": "32d78521dfe6bec0ff6f243da02c87a9df53954e08288d4c5ce6c26b6dfedae7",
+    "/Users/augustin/Developement/ferno/blockzilla-v1/crates/old-faithful/of-car-reader/src/car_stream.rs": "404a862bb6ac8d1ee1cc06af530103f4466382a7349bb7f065f95e4f32c5f622",
+    "/Users/augustin/Developement/ferno/blockzilla-v1/crates/old-faithful/of-car-reader/src/archive.rs": "86be1a905ae365ada3c5773b171448665fb5d3943df14ece951cadf89af33fb9",
+    "/Users/augustin/Developement/ferno/blockzilla-v1/crates/old-faithful/of-car-reader/src/reader.rs": "8e38753727e6723a88a44d201b9bc25e9bfff45e12a5d7abd57d9579cc60d1f8",
+    "/Users/augustin/Developement/ferno/blockzilla-v1/crates/old-faithful/of-car-reader/src/versioned_transaction.rs": "b87803f120fcf50a566b4918347bccaddf162ffe931d8f5b4c8f45113a1c5868",
+    "/Users/augustin/Developement/ferno/blockzilla-v1/crates/old-faithful/of-car-reader/src/ordered_lossless.rs": "5de0336c65d1a7ac7d6e323a28e8c17a563114194e0fa462c34d152b477d55b7",
+    "/Users/augustin/Developement/ferno/blockzilla-v1/crates/old-faithful/of-car-reader/src/bin/profile_big_block.rs": "13798b64e0df7b5aa7e7b2d00c05fac2c2360c1467d29b68f20431f4fe6db9e4",
+    "/Users/augustin/Developement/ferno/blockzilla-v1/crates/old-faithful/of-car-reader/src/bin/car_validate_lossless.rs": "272c40db10f1e0b037a8fa2eea36af63bb19a131ef9825f8f23343fa40051f28",
+    "/Users/augustin/Developement/ferno/blockzilla-v1/crates/old-faithful/of-car-reader/src/bin/car_df_graph.rs": "297c921b2ff12abdfa2fb223131598a2d2cb77523c8fcec6a431478193027c8b",
+    "/Users/augustin/Developement/ferno/blockzilla-v1/crates/old-faithful/of-car-reader/src/bin/car_skipped_slots.rs": "37c29385fe403f59846183696b8ffc87ccaf99a1686de8f898e92c8da39c2ce7",
+    "/Users/augustin/Developement/ferno/blockzilla-v1/crates/old-faithful/of-car-reader/src/bin/reader.rs": "26420f491dcd5e1c07486c1ed6fce90a542e54f943d13ca1c73b578d5dc65d3d",
+    "/Users/augustin/Developement/ferno/blockzilla-v1/crates/old-faithful/of-car-reader/src/bin/car_continuations.rs": "d14dcac7fd9e0e4d735aa0b72e0ff9460b3bae0af84cdcd4bf71840106ca980e",
+    "/Users/augustin/Developement/ferno/blockzilla-v1/crates/old-faithful/of-car-reader/src/stored_transaction/status_meta.rs": "8f455d5a76c329b4e8e936dc8534f48dd2611c84f797e7e8e46d8dcafeb5e1b9",
+    "/Users/augustin/Developement/ferno/blockzilla-v1/crates/old-faithful/of-car-reader/src/stored_transaction/mod.rs": "e598eed2f6f4104ccdff74c53c0f027976435508011d44e03a86ae91876b2569",
+    "/Users/augustin/Developement/ferno/blockzilla-v1/crates/old-faithful/of-car-reader/src/stored_transaction/transaction_error.rs": "65847c18586035938a7290a85292a260c90fe498685683dd77be118c16ede464",
+    "/Users/augustin/Developement/ferno/blockzilla-v1/crates/old-faithful/of-car-reader/src/stored_transaction/status_meta_v2.rs": "d152cb7be4e38cd206551947a7cfe4c19f8a685a32f4d2f95c81fd1ea92b83af",
+    "/Users/augustin/Developement/ferno/blockzilla-v1/bench/reader-profile/src/allocation.rs": "ff6c5d7acb061e74a2f530473c8fd8150fc6ba26cc12606cca5375bc76744442",
+    "/Users/augustin/Developement/ferno/blockzilla-v1/bench/reader-profile/src/bin/car-decode-reference.rs": "cb12842df63a1c3c1a0d005e0341d540006f3f71dbb2f018fc4ef59c94056392",
+    "/Users/augustin/Developement/ferno/blockzilla-v1/bench/reader-profile/src/bin/car-decode-reference/metadata_visit.rs": "8fdc89791670b73f163de78f43114f606764b5d076b3e3ab313769330bb443d9"
+  },
+  "current_sources_match_build": false,
+  "post_benchmark_changes": "Disabled buffer reuse by default; added archive API option and assertions. The probe explicitly selects each mode, unchanged from the timed build.",
+  "confirmation": {
+    "status": {
+      "state": "COMPLETE",
+      "pid": 3034723,
+      "started_at": 1788951319.3749857,
+      "archive_before": {
+        "epoch-900.car.zst": [
+          226068566559,
+          1788159361996365127,
+          4096,
+          73
+        ],
+        "epoch-900-slot-ranges.raw": [
+          5184000,
+          1788716409788226054,
+          4367,
+          73
+        ]
+      },
+      "source_before": {
+        "bytes": 527045598158,
+        "etag": "\"d98e61b8827c6c211f889dd2bf8577a8-3927\""
+      },
+      "cases": [
+        {
+          "name": "00-network-w4-legacy",
+          "http_workers": 4,
+          "reuse": false,
+          "command": [
+            "/volume2/blockzilla-bench/control/car-network-window-confirm-20260909/car-decode-reference",
+            "--url",
+            "https://blockzilla-archive-samples-v1.cheron-augustin.workers.dev/car/900/epoch-900.car",
+            "--plan",
+            "/volume2/blockzilla-bench/control/car-network-window-confirm-20260909/prefix-plan.json",
+            "--workers",
+            "12",
+            "--metadata-mode",
+            "visitor",
+            "--http-workers",
+            "4",
+            "--output",
+            "/volume2/blockzilla-bench/control/car-network-window-confirm-20260909/00-network-w4-legacy/receipt.json",
+            "--legacy-http-buffers"
+          ],
+          "started_at": 1788951319.611802,
+          "valid": true,
+          "pid": 3034724,
+          "exit_code": 0,
+          "cpu_seconds": 21.034791,
+          "peak_rss_kib": 346824,
+          "elapsed_s": 14.002604007720947,
+          "receipt_sha256": "072cb1aca1b2a920aef2211c7ff8105c1b63a3b5280a77bb1c955257c137ef79",
+          "receipt": {
+            "allocations": null,
+            "allocator": "system",
+            "blocks": 2048,
+            "epoch": 900,
+            "failed": 92314,
+            "http": {
+              "body_buffer_allocated_bytes": 2550136832,
+              "body_buffer_allocations": 76,
+              "body_bytes": 2550136832,
+              "bytes_delivered": 2390753280,
+              "get_requests": 76,
+              "incomplete_body_retries": 0,
+              "workers_finished": 4
+            },
+            "http_body_window_bytes": 268435456,
+            "http_workers": 4,
+            "identity": {
+              "bytes": 527045598158,
+              "etag": "\"d98e61b8827c6c211f889dd2bf8577a8-3927\"",
+              "operator_trusted": false,
+              "url": "https://blockzilla-archive-samples-v1.cheron-augustin.workers.dev/car/900/epoch-900.car"
+            },
+            "metadata_mode": "Visitor",
+            "physical_blocks": 2048,
+            "reuse_http_buffers": false,
+            "scan_seconds": 13.214482196,
+            "scan_tps": 167143.89313480444,
+            "schema": "blockzilla-car-decode-reference-v1",
+            "setup_seconds": 0.123162997,
+            "signature_verification": false,
+            "transactions": 2208720,
+            "valid": true,
+            "votes": 1633196,
+            "workers": 12
+          },
+          "proof_verified": true
+        },
+        {
+          "name": "01-network-w4-reuse",
+          "http_workers": 4,
+          "reuse": true,
+          "command": [
+            "/volume2/blockzilla-bench/control/car-network-window-confirm-20260909/car-decode-reference",
+            "--url",
+            "https://blockzilla-archive-samples-v1.cheron-augustin.workers.dev/car/900/epoch-900.car",
+            "--plan",
+            "/volume2/blockzilla-bench/control/car-network-window-confirm-20260909/prefix-plan.json",
+            "--workers",
+            "12",
+            "--metadata-mode",
+            "visitor",
+            "--http-workers",
+            "4",
+            "--output",
+            "/volume2/blockzilla-bench/control/car-network-window-confirm-20260909/01-network-w4-reuse/receipt.json"
+          ],
+          "started_at": 1788951333.8507977,
+          "valid": true,
+          "pid": 3034764,
+          "exit_code": 0,
+          "cpu_seconds": 20.622253999999998,
+          "peak_rss_kib": 349860,
+          "elapsed_s": 13.00300407409668,
+          "receipt_sha256": "ec647a1637ed446ca58d396b9796eb67aa1b5b70adb97c0b84cadca254d31784",
+          "receipt": {
+            "allocations": null,
+            "allocator": "system",
+            "blocks": 2048,
+            "epoch": 900,
+            "failed": 92314,
+            "http": {
+              "body_buffer_allocated_bytes": 268435456,
+              "body_buffer_allocations": 8,
+              "body_bytes": 2550136832,
+              "bytes_delivered": 2390753280,
+              "get_requests": 76,
+              "incomplete_body_retries": 0,
+              "workers_finished": 4
+            },
+            "http_body_window_bytes": 268435456,
+            "http_workers": 4,
+            "identity": {
+              "bytes": 527045598158,
+              "etag": "\"d98e61b8827c6c211f889dd2bf8577a8-3927\"",
+              "operator_trusted": false,
+              "url": "https://blockzilla-archive-samples-v1.cheron-augustin.workers.dev/car/900/epoch-900.car"
+            },
+            "metadata_mode": "Visitor",
+            "physical_blocks": 2048,
+            "reuse_http_buffers": true,
+            "scan_seconds": 12.019482941,
+            "scan_tps": 183761.6485535973,
+            "schema": "blockzilla-car-decode-reference-v1",
+            "setup_seconds": 0.412385509,
+            "signature_verification": false,
+            "transactions": 2208720,
+            "valid": true,
+            "votes": 1633196,
+            "workers": 12
+          },
+          "proof_verified": true
+        },
+        {
+          "name": "02-network-w4-reuse",
+          "http_workers": 4,
+          "reuse": true,
+          "command": [
+            "/volume2/blockzilla-bench/control/car-network-window-confirm-20260909/car-decode-reference",
+            "--url",
+            "https://blockzilla-archive-samples-v1.cheron-augustin.workers.dev/car/900/epoch-900.car",
+            "--plan",
+            "/volume2/blockzilla-bench/control/car-network-window-confirm-20260909/prefix-plan.json",
+            "--workers",
+            "12",
+            "--metadata-mode",
+            "visitor",
+            "--http-workers",
+            "4",
+            "--output",
+            "/volume2/blockzilla-bench/control/car-network-window-confirm-20260909/02-network-w4-reuse/receipt.json"
+          ],
+          "started_at": 1788951347.0999568,
+          "valid": true,
+          "pid": 3034872,
+          "exit_code": 0,
+          "cpu_seconds": 20.796706,
+          "peak_rss_kib": 349484,
+          "elapsed_s": 17.003249168395996,
+          "receipt_sha256": "907fe16d56a580b90b69b9262b378ccbaeb51eda232a8c20c45dc7f2eed00e9d",
+          "receipt": {
+            "allocations": null,
+            "allocator": "system",
+            "blocks": 2048,
+            "epoch": 900,
+            "failed": 92314,
+            "http": {
+              "body_buffer_allocated_bytes": 268435456,
+              "body_buffer_allocations": 8,
+              "body_bytes": 2617245696,
+              "bytes_delivered": 2390753280,
+              "get_requests": 78,
+              "incomplete_body_retries": 0,
+              "workers_finished": 4
+            },
+            "http_body_window_bytes": 268435456,
+            "http_workers": 4,
+            "identity": {
+              "bytes": 527045598158,
+              "etag": "\"d98e61b8827c6c211f889dd2bf8577a8-3927\"",
+              "operator_trusted": false,
+              "url": "https://blockzilla-archive-samples-v1.cheron-augustin.workers.dev/car/900/epoch-900.car"
+            },
+            "metadata_mode": "Visitor",
+            "physical_blocks": 2048,
+            "reuse_http_buffers": true,
+            "scan_seconds": 15.926701209,
+            "scan_tps": 138680.3187311555,
+            "schema": "blockzilla-car-decode-reference-v1",
+            "setup_seconds": 0.106021582,
+            "signature_verification": false,
+            "transactions": 2208720,
+            "valid": true,
+            "votes": 1633196,
+            "workers": 12
+          },
+          "proof_verified": true
+        },
+        {
+          "name": "03-network-w4-legacy",
+          "http_workers": 4,
+          "reuse": false,
+          "command": [
+            "/volume2/blockzilla-bench/control/car-network-window-confirm-20260909/car-decode-reference",
+            "--url",
+            "https://blockzilla-archive-samples-v1.cheron-augustin.workers.dev/car/900/epoch-900.car",
+            "--plan",
+            "/volume2/blockzilla-bench/control/car-network-window-confirm-20260909/prefix-plan.json",
+            "--workers",
+            "12",
+            "--metadata-mode",
+            "visitor",
+            "--http-workers",
+            "4",
+            "--output",
+            "/volume2/blockzilla-bench/control/car-network-window-confirm-20260909/03-network-w4-legacy/receipt.json",
+            "--legacy-http-buffers"
+          ],
+          "started_at": 1788951364.3123863,
+          "valid": true,
+          "pid": 3034931,
+          "exit_code": 0,
+          "cpu_seconds": 20.557805000000002,
+          "peak_rss_kib": 283472,
+          "elapsed_s": 12.002694129943848,
+          "receipt_sha256": "e15546fc398161638e658b859f5aa5e901caf8e1a08cf8ee6e822984aecfa969",
+          "receipt": {
+            "allocations": null,
+            "allocator": "system",
+            "blocks": 2048,
+            "epoch": 900,
+            "failed": 92314,
+            "http": {
+              "body_buffer_allocated_bytes": 2550136832,
+              "body_buffer_allocations": 76,
+              "body_bytes": 2550136832,
+              "bytes_delivered": 2390753280,
+              "get_requests": 76,
+              "incomplete_body_retries": 0,
+              "workers_finished": 4
+            },
+            "http_body_window_bytes": 268435456,
+            "http_workers": 4,
+            "identity": {
+              "bytes": 527045598158,
+              "etag": "\"d98e61b8827c6c211f889dd2bf8577a8-3927\"",
+              "operator_trusted": false,
+              "url": "https://blockzilla-archive-samples-v1.cheron-augustin.workers.dev/car/900/epoch-900.car"
+            },
+            "metadata_mode": "Visitor",
+            "physical_blocks": 2048,
+            "reuse_http_buffers": false,
+            "scan_seconds": 11.128819562,
+            "scan_tps": 198468.48874626402,
+            "schema": "blockzilla-car-decode-reference-v1",
+            "setup_seconds": 0.101062969,
+            "signature_verification": false,
+            "transactions": 2208720,
+            "valid": true,
+            "votes": 1633196,
+            "workers": 12
+          },
+          "proof_verified": true
+        }
+      ],
+      "current": "03-network-w4-legacy",
+      "finished_at": 1788951376.4289973,
+      "archive_after": {
+        "epoch-900.car.zst": [
+          226068566559,
+          1788159361996365127,
+          4096,
+          73
+        ],
+        "epoch-900-slot-ranges.raw": [
+          5184000,
+          1788716409788226054,
+          4367,
+          73
+        ]
+      }
+    },
+    "manifest": {
+      "files": {
+        "run.py": "56added23993f988a55c1e65592588c18274f1928d5f8eff352bf07eb71c846d",
+        "prefix-plan.json": "7ad029bebbd1e2b0c653b2b171451d191e40d385233096d232787cd39ad91702",
+        "expected.json": "d5dd83de906046c4e8a23c60af1bcdfd5e5f8c64d76d7021ee41b8c3530270a0",
+        "car-decode-reference": "e90d3d286cc3bb5b8ea43d4cb99c8354d7201fafb789742a9a184094451203d3"
+      },
+      "blocks": 2048,
+      "cases": 4
+    },
+    "verified_receipts": [
+      {
+        "name": "00-network-w4-legacy",
+        "receipt_sha256": "072cb1aca1b2a920aef2211c7ff8105c1b63a3b5280a77bb1c955257c137ef79"
+      },
+      {
+        "name": "01-network-w4-reuse",
+        "receipt_sha256": "ec647a1637ed446ca58d396b9796eb67aa1b5b70adb97c0b84cadca254d31784"
+      },
+      {
+        "name": "02-network-w4-reuse",
+        "receipt_sha256": "907fe16d56a580b90b69b9262b378ccbaeb51eda232a8c20c45dc7f2eed00e9d"
+      },
+      {
+        "name": "03-network-w4-legacy",
+        "receipt_sha256": "e15546fc398161638e658b859f5aa5e901caf8e1a08cf8ee6e822984aecfa969"
+      }
+    ],
+    "final_check": {
+      "verified_at_unix": 1788951680.3926396,
+      "processes_stopped": [
+        3034723,
+        3034724,
+        3034764,
+        3034872,
+        3034931
+      ],
+      "source": {
+        "bytes": 527045598158,
+        "etag": "\"d98e61b8827c6c211f889dd2bf8577a8-3927\""
+      },
+      "archive": {
+        "epoch-900.car.zst": [
+          226068566559,
+          1788159361996365127,
+          4096,
+          73
+        ],
+        "epoch-900-slot-ranges.raw": [
+          5184000,
+          1788716409788226054,
+          4367,
+          73
+        ]
+      }
+    },
+    "expected_file_sha256": "d5dd83de906046c4e8a23c60af1bcdfd5e5f8c64d76d7021ee41b8c3530270a0"
+  }
+}

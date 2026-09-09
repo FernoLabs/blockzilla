@@ -82,6 +82,9 @@ pub struct CarHttpOptions {
     pub window_chunks: usize,
     /// Bytes in each range except the final range.
     pub chunk_bytes: usize,
+    /// Recycle completed body vectors within the fixed range window.
+    /// Experimental and off by default: fewer allocations have not improved throughput.
+    pub reuse_body_buffers: bool,
     /// TCP and TLS connection timeout.
     pub connect_timeout: Duration,
     /// Timeout for each complete HEAD or GET request.
@@ -96,6 +99,7 @@ impl Default for CarHttpOptions {
             workers: DEFAULT_HTTP_WORKERS,
             window_chunks: DEFAULT_HTTP_WINDOW_CHUNKS,
             chunk_bytes: DEFAULT_HTTP_CHUNK_BYTES,
+            reuse_body_buffers: false,
             connect_timeout: DEFAULT_CONNECT_TIMEOUT,
             request_timeout: DEFAULT_REQUEST_TIMEOUT,
             allow_http: false,
@@ -181,6 +185,10 @@ pub struct OperatorTrustedCarHttpIdentity {
 /// Each field is an exact cumulative counter at the time that field is loaded.
 #[derive(Debug, Default, Clone, Copy, PartialEq, Eq)]
 pub struct CarHttpStats {
+    /// Range-body vector capacity growth operations; excludes HTTP/TLS memory.
+    pub body_buffer_allocations: u64,
+    /// Sum of added vector capacities, including buffers subsequently freed.
+    pub body_buffer_allocated_bytes: u64,
     pub head_requests: u64,
     pub head_responses: u64,
     pub get_requests: u64,
@@ -198,6 +206,8 @@ pub struct CarHttpStats {
 
 #[derive(Debug, Default)]
 struct SharedStats {
+    body_buffer_allocations: AtomicU64,
+    body_buffer_allocated_bytes: AtomicU64,
     head_requests: AtomicU64,
     head_responses: AtomicU64,
     get_requests: AtomicU64,
@@ -222,6 +232,11 @@ impl CarHttpStatsHandle {
     /// Load the current counter values.
     pub fn snapshot(&self) -> CarHttpStats {
         CarHttpStats {
+            body_buffer_allocations: self.inner.body_buffer_allocations.load(Ordering::Relaxed),
+            body_buffer_allocated_bytes: self
+                .inner
+                .body_buffer_allocated_bytes
+                .load(Ordering::Relaxed),
             head_requests: self.inner.head_requests.load(Ordering::Relaxed),
             head_responses: self.inner.head_responses.load(Ordering::Relaxed),
             get_requests: self.inner.get_requests.load(Ordering::Relaxed),
@@ -410,6 +425,12 @@ impl ChunkTask {
 }
 
 #[derive(Debug)]
+struct ChunkWork {
+    task: ChunkTask,
+    body: Vec<u8>,
+}
+
+#[derive(Debug)]
 struct ChunkResult {
     task: ChunkTask,
     result: Result<Vec<u8>, CarHttpError>,
@@ -426,7 +447,7 @@ struct WorkerContext {
     url: Url,
     validation: RangeValidation,
     total_length: u64,
-    work_rx: Arc<Mutex<Receiver<ChunkTask>>>,
+    work_rx: Arc<Mutex<Receiver<ChunkWork>>>,
     result_tx: mpsc::Sender<ChunkResult>,
     cancel: Arc<AtomicBool>,
     stats: Arc<SharedStats>,
@@ -466,7 +487,7 @@ struct OrderedCarHttpStream<I: HttpObjectIdentity> {
     in_flight: usize,
     current: Option<CurrentChunk>,
     pending: BTreeMap<u64, ChunkResult>,
-    work_tx: Option<SyncSender<ChunkTask>>,
+    work_tx: Option<SyncSender<ChunkWork>>,
     result_rx: Receiver<ChunkResult>,
     cancel: Arc<AtomicBool>,
     workers: Vec<JoinHandle<()>>,
@@ -590,7 +611,7 @@ impl<I: HttpObjectIdentity> OrderedCarHttpStream<I> {
             .window_chunks
             .min(usize::try_from(total_chunks).unwrap_or(options.window_chunks));
         for _ in 0..initial {
-            if let Err(error) = stream.schedule_one() {
+            if let Err(error) = stream.schedule_one(Vec::new()) {
                 stream.shutdown();
                 return Err(error);
             }
@@ -618,7 +639,7 @@ impl<I: HttpObjectIdentity> OrderedCarHttpStream<I> {
         self.stats.snapshot()
     }
 
-    fn schedule_one(&mut self) -> Result<(), CarHttpError> {
+    fn schedule_one(&mut self, body: Vec<u8>) -> Result<(), CarHttpError> {
         if self.next_schedule_index >= self.total_chunks {
             return Ok(());
         }
@@ -648,7 +669,7 @@ impl<I: HttpObjectIdentity> OrderedCarHttpStream<I> {
         self.work_tx
             .as_ref()
             .ok_or(CarHttpError::WorkerChannelClosed)?
-            .send(task)
+            .send(ChunkWork { task, body })
             .map_err(|_| CarHttpError::WorkerChannelClosed)?;
         add_counter(&self.stats.inner.chunks_scheduled, 1, "chunks_scheduled")?;
         self.next_schedule_index = self
@@ -756,7 +777,13 @@ impl<I: HttpObjectIdentity> OrderedCarHttpStream<I> {
         })?;
         add_counter(&self.stats.inner.chunks_delivered, 1, "chunks_delivered")
             .map_err(TerminalError::from_http)?;
-        self.schedule_one().map_err(TerminalError::from_http)?;
+        let body = if self.options.reuse_body_buffers {
+            current.bytes
+        } else {
+            drop(current);
+            Vec::new()
+        };
+        self.schedule_one(body).map_err(TerminalError::from_http)?;
         Ok(())
     }
 
@@ -1106,8 +1133,8 @@ fn worker_loop(context: WorkerContext) {
             Ok(receiver) => receiver.recv(),
             Err(_) => break,
         };
-        let task = match task {
-            Ok(task) => task,
+        let ChunkWork { task, body } = match task {
+            Ok(work) => work,
             Err(_) => break,
         };
         if context.cancel.load(Ordering::Acquire) {
@@ -1118,7 +1145,7 @@ fn worker_loop(context: WorkerContext) {
             &context.url,
             &context.validation,
             context.total_length,
-            task,
+            ChunkWork { task, body },
             &context.stats,
             &context.cancel,
         );
@@ -1137,11 +1164,11 @@ fn fetch_range(
     url: &Url,
     validation: &RangeValidation,
     total_length: u64,
-    task: ChunkTask,
+    work: ChunkWork,
     stats: &SharedStats,
     cancel: &AtomicBool,
 ) -> Result<Vec<u8>, CarHttpError> {
-    let mut body = Vec::new();
+    let ChunkWork { task, mut body } = work;
     for attempt in 0..=2 {
         match fetch_range_attempt(
             client,
@@ -1241,9 +1268,19 @@ fn fetch_range_attempt(
         });
     }
 
-    body.clear();
-    body.try_reserve_exact(expected)
-        .map_err(|_| CarHttpError::ArithmeticOverflow("range body allocation"))?;
+    if body.capacity() < expected {
+        let previous = body.capacity();
+        body.try_reserve_exact(expected.saturating_sub(body.len()))
+            .map_err(|_| CarHttpError::ArithmeticOverflow("range body allocation"))?;
+        add_counter(&stats.body_buffer_allocations, 1, "body_buffer_allocations")?;
+        add_counter(
+            &stats.body_buffer_allocated_bytes,
+            (body.capacity() - previous) as u64,
+            "body_buffer_allocated_bytes",
+        )?;
+    }
+    // Keep initialized storage. A successful request overwrites every byte;
+    // incomplete bodies are never published, including on retries.
     body.resize(expected, 0);
     let mut filled = 0;
     while filled < expected {
@@ -1812,6 +1849,7 @@ mod tests {
             workers: 4,
             window_chunks: 4,
             chunk_bytes: 1024,
+            reuse_body_buffers: true,
             connect_timeout: Duration::from_secs(2),
             request_timeout: Duration::from_secs(2),
             allow_http: true,
@@ -1859,50 +1897,61 @@ mod tests {
 
     #[test]
     fn out_of_order_fetch_is_delivered_in_order_with_exact_stats() {
-        let expected = fixture_data(5 * 1024 + 17);
-        let server = TestServer::start(expected.clone(), ServerMode::OutOfOrder);
-        let mut stream = CarHttpStream::open(&server.url, fixture_options()).unwrap();
-        assert_eq!(stream.identity().content_length, expected.len() as u64);
-        assert_eq!(stream.identity().strong_etag, FIXTURE_ETAG);
-        assert!(
-            stream
-                .identity()
-                .object_binding
-                .starts_with("car-http-sha256=")
-        );
-        assert_eq!(stream.body_window_bytes(), 4 * 1024);
+        for reuse in [false, true] {
+            let expected = fixture_data(21 * 1024 + 17);
+            let server = TestServer::start(expected.clone(), ServerMode::OutOfOrder);
+            let mut stream = CarHttpStream::open(
+                &server.url,
+                CarHttpOptions {
+                    reuse_body_buffers: reuse,
+                    ..fixture_options()
+                },
+            )
+            .unwrap();
+            assert_eq!(stream.identity().content_length, expected.len() as u64);
+            assert_eq!(stream.identity().strong_etag, FIXTURE_ETAG);
+            assert!(
+                stream
+                    .identity()
+                    .object_binding
+                    .starts_with("car-http-sha256=")
+            );
+            assert_eq!(stream.body_window_bytes(), 4 * 1024);
 
-        let stats = stream.stats_handle();
-        let mut actual = Vec::new();
-        stream.read_to_end(&mut actual).unwrap();
-        assert_eq!(actual, expected);
-        drop(stream);
+            let stats = stream.stats_handle();
+            let mut actual = Vec::new();
+            stream.read_to_end(&mut actual).unwrap();
+            assert_eq!(actual, expected);
+            drop(stream);
 
-        let snapshot = stats.snapshot();
-        assert_eq!(
-            snapshot,
-            CarHttpStats {
-                head_requests: 1,
-                head_responses: 1,
-                get_requests: 6,
-                get_responses: 6,
-                get_body_bytes_received: expected.len() as u64,
-                incomplete_body_retries: 0,
-                chunks_scheduled: 6,
-                chunks_fetched: 6,
-                chunks_delivered: 6,
-                bytes_delivered: expected.len() as u64,
-                workers_started: 4,
-                workers_finished: 4,
-            }
-        );
-        assert!(server.state.max_active_gets.load(Ordering::Acquire) > 1);
-        let completions = server
-            .state
-            .completion_order
-            .lock()
-            .expect("completion order");
-        assert_ne!(completions.first(), Some(&0));
+            let snapshot = stats.snapshot();
+            assert_eq!(
+                snapshot,
+                CarHttpStats {
+                    body_buffer_allocations: if reuse { 4 } else { 22 },
+                    body_buffer_allocated_bytes: if reuse { 4096 } else { expected.len() as u64 },
+                    head_requests: 1,
+                    head_responses: 1,
+                    get_requests: 22,
+                    get_responses: 22,
+                    get_body_bytes_received: expected.len() as u64,
+                    incomplete_body_retries: 0,
+                    chunks_scheduled: 22,
+                    chunks_fetched: 22,
+                    chunks_delivered: 22,
+                    bytes_delivered: expected.len() as u64,
+                    workers_started: 4,
+                    workers_finished: 4,
+                }
+            );
+            assert!(server.state.max_active_gets.load(Ordering::Acquire) > 1);
+            let completions = server
+                .state
+                .completion_order
+                .lock()
+                .expect("completion order");
+            assert_ne!(completions.first(), Some(&0));
+        }
     }
 
     #[test]
@@ -1986,6 +2035,8 @@ mod tests {
         assert_eq!(
             stats.snapshot(),
             CarHttpStats {
+                body_buffer_allocations: 1,
+                body_buffer_allocated_bytes: expected.len() as u64,
                 head_requests: 1,
                 head_responses: 1,
                 get_requests: 1,

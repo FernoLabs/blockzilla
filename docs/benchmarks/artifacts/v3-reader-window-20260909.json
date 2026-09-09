@@ -1,0 +1,2337 @@
+{
+  "status": {
+    "state": "COMPLETE",
+    "pid": 3028687,
+    "started_at": 1788949393.2992132,
+    "archive_before": {
+      "indexer-v3/900/archive-v2-meta.wincode": [
+        66,
+        1787916007167732302,
+        582,
+        73
+      ],
+      "indexer-v3/900/blockhash_registry.bin": [
+        13819456,
+        1787916007351733044,
+        583,
+        73
+      ],
+      "indexer-v3/900/poh.wincode": [
+        9681441209,
+        1787916133852244628,
+        584,
+        73
+      ],
+      "indexer-v3/900/prev_blockhash_tail.bin": [
+        12000,
+        1787916134168245907,
+        585,
+        73
+      ],
+      "indexer-v3/900/registry.bin": [
+        889551808,
+        1787916139420267161,
+        586,
+        73
+      ],
+      "indexer-v3/900/registry.mphf": [
+        341082690,
+        1787916143772284772,
+        587,
+        73
+      ],
+      "indexer-v3/900/shredding.wincode": [
+        792857572,
+        1787916153316323401,
+        588,
+        73
+      ],
+      "indexer-v3/900/signatures.bin": [
+        32380385536,
+        1787916396885216475,
+        589,
+        73
+      ],
+      "indexer-v3/900/vote_hash_registry.bin": [
+        28070770,
+        1787916397497218492,
+        590,
+        73
+      ],
+      "indexer-v3/900/archive-v2-standalone-account-postings-adaptive-v3.control": [
+        120,
+        1787956108980251633,
+        736,
+        73
+      ],
+      "indexer-v3/900/archive-v2-standalone-account-postings-adaptive-v3.coverage": [
+        46512,
+        1787956108928251459,
+        737,
+        73
+      ],
+      "indexer-v3/900/archive-v2-standalone-account-postings-adaptive-v3.pages": [
+        4688130905,
+        1787956108884251310,
+        738,
+        73
+      ],
+      "indexer-v3/900/archive-v2-standalone-balances.wincode": [
+        10248823687,
+        1787955464302136009,
+        739,
+        73
+      ],
+      "indexer-v3/900/archive-v2-standalone-block-rewards.wincode": [
+        31853726,
+        1787955464302136009,
+        740,
+        73
+      ],
+      "indexer-v3/900/archive-v2-standalone-blocks.index": [
+        107100848,
+        1787955464302136009,
+        741,
+        73
+      ],
+      "indexer-v3/900/archive-v2-standalone-inner-instructions.wincode": [
+        12373908023,
+        1787955464302136009,
+        742,
+        73
+      ],
+      "indexer-v3/900/archive-v2-standalone-loaded-addresses.wincode": [
+        990259848,
+        1787955464302136009,
+        743,
+        73
+      ],
+      "indexer-v3/900/archive-v2-standalone-logs.wincode": [
+        13733124021,
+        1787955464302136009,
+        744,
+        73
+      ],
+      "indexer-v3/900/archive-v2-standalone-messages.wincode": [
+        13201297110,
+        1787955464302136009,
+        745,
+        73
+      ],
+      "indexer-v3/900/archive-v2-standalone-outcomes.wincode": [
+        1128420825,
+        1787955464302136009,
+        746,
+        73
+      ],
+      "indexer-v3/900/archive-v2-standalone-raw-metadata-fallbacks.wincode": [
+        64,
+        1787954960376480988,
+        747,
+        73
+      ],
+      "indexer-v3/900/archive-v2-standalone-token-balances.wincode": [
+        4350091593,
+        1787955464302136009,
+        748,
+        73
+      ],
+      "indexer-v3/900/archive-v2-standalone-transaction-directory.wincode": [
+        1341913145,
+        1787955464302136009,
+        749,
+        73
+      ],
+      "indexer-v3/900/archive-v2-standalone-transaction-rewards.wincode": [
+        64,
+        1787954960376480988,
+        750,
+        73
+      ],
+      "compact-v2/900/archive-v2-blocks.index": [
+        22456652,
+        1787923194103928100,
+        580,
+        73
+      ],
+      "compact-v2/900/archive-v2-blocks.zstd": [
+        59899113036,
+        1787923193583925925,
+        581,
+        73
+      ],
+      "compact-v2/900/archive-v2-meta.wincode": [
+        66,
+        1787916007167732302,
+        582,
+        73
+      ],
+      "compact-v2/900/blockhash_registry.bin": [
+        13819456,
+        1787916007351733044,
+        583,
+        73
+      ],
+      "compact-v2/900/poh.wincode": [
+        9681441209,
+        1787916133852244628,
+        584,
+        73
+      ],
+      "compact-v2/900/prev_blockhash_tail.bin": [
+        12000,
+        1787916134168245907,
+        585,
+        73
+      ],
+      "compact-v2/900/registry.bin": [
+        889551808,
+        1787916139420267161,
+        586,
+        73
+      ],
+      "compact-v2/900/registry.mphf": [
+        341082690,
+        1787916143772284772,
+        587,
+        73
+      ],
+      "compact-v2/900/shredding.wincode": [
+        792857572,
+        1787916153316323401,
+        588,
+        73
+      ],
+      "compact-v2/900/signatures.bin": [
+        32380385536,
+        1787916396885216475,
+        589,
+        73
+      ],
+      "compact-v2/900/vote_hash_registry.bin": [
+        28070770,
+        1787916397497218492,
+        590,
+        73
+      ]
+    },
+    "cases": [
+      {
+        "name": "00-local-count-window",
+        "mode": "local",
+        "workload": "count",
+        "legacy": false,
+        "blocks": 32768,
+        "command": [
+          "/volume2/blockzilla-bench/control/v3-network-window-20260909/reader-profile",
+          "--format",
+          "v3",
+          "--epoch",
+          "900",
+          "--workload",
+          "count",
+          "--blocks",
+          "32768",
+          "--workers",
+          "12",
+          "--iterations",
+          "1",
+          "--warmups",
+          "0",
+          "--archive-root",
+          "/volume2/blockzilla-bench/archive"
+        ],
+        "started_at": 1788949393.2992332,
+        "pid": 3028688,
+        "exit_code": 0,
+        "cpu_seconds": 39.658113,
+        "peak_rss_kib": 174748,
+        "elapsed_s": 5.023100852966309,
+        "valid": true,
+        "scan": {
+          "allocation_bytes": null,
+          "allocation_calls": null,
+          "allocation_size_buckets": null,
+          "blocks": 32768,
+          "format": "V3",
+          "indexed_dictionary_bytes": null,
+          "indexed_dictionary_rows": null,
+          "indexed_usdc": false,
+          "instructions": 106316447,
+          "iteration": 0,
+          "oracle": "blocks=32768 tx=35672161 inner=35967897",
+          "phase": "scan",
+          "seconds": 4.065978458,
+          "source_bytes": 2234237327,
+          "source_calls": 40960,
+          "stages": {
+            "parallel": {
+              "blocks_per_job_limit": 4,
+              "declared_decoded_byte_limit": 268435456,
+              "effective_workers": 12,
+              "global_projected_block_bound": 96,
+              "input_buffer_capacity_bytes": 0,
+              "input_workers": 0,
+              "job_window_limit": 24,
+              "jobs": 8192,
+              "max_active_workers": 12,
+              "max_coordinator_pending_projected_blocks": 84,
+              "max_coordinator_pending_results": 21,
+              "max_in_flight_declared_decoded_bytes": 27678934,
+              "max_in_flight_jobs": 24,
+              "max_in_flight_owned_payload_bytes": 0,
+              "max_in_flight_transactions": 99981,
+              "max_owned_payload_block_bytes": 0,
+              "max_result_channel_backlog": 12,
+              "projected_blocks": 32768,
+              "requested_workers": 12,
+              "transaction_limit": 100000
+            },
+            "path": "dense",
+            "registry": {
+              "evictions": 0,
+              "hits": 0,
+              "misses": 0,
+              "mode": "unused",
+              "prefetch_read_bytes": 0,
+              "prefetch_read_calls": 0,
+              "resident_payload_bytes": 0,
+              "resolutions": 0
+            }
+          },
+          "tps": 8773327.593463605,
+          "transactions": 35672161,
+          "transport": {
+            "cache_downloads": 0,
+            "cache_hits": 0,
+            "cache_read_bytes": 0,
+            "cache_read_calls": 0,
+            "get_requests": 0,
+            "head_requests": 0,
+            "incomplete_body_retries": 0,
+            "network_body_bytes": 0,
+            "server_error_retries": 0
+          },
+          "workers": 12,
+          "workload": "Count"
+        },
+        "setup": [
+          {
+            "identity": {
+              "binding": "local-flat-epoch-900",
+              "block_count": 431858,
+              "cluster_id": null,
+              "epoch": 900,
+              "first_slot": 388800000,
+              "format": "indexer-v3",
+              "label": "local-split:ledger=/volume2/blockzilla-bench/archive/indexer-v3/900;retained=/volume2/blockzilla-bench/archive/indexer-v3/900",
+              "slots_per_epoch": 432000,
+              "verification": "operator-trusted"
+            },
+            "phase": "setup",
+            "seconds": 0.152879653,
+            "transport": {
+              "cache_downloads": 0,
+              "cache_hits": 0,
+              "cache_read_bytes": 0,
+              "cache_read_calls": 0,
+              "get_requests": 0,
+              "head_requests": 0,
+              "incomplete_body_retries": 0,
+              "network_body_bytes": 0,
+              "server_error_retries": 0
+            }
+          }
+        ],
+        "complete": {
+          "oracle": "blocks=32768 tx=35672161 inner=35967897",
+          "phase": "complete",
+          "seconds": 4.2190402989999995,
+          "transport": {
+            "cache_downloads": 0,
+            "cache_hits": 0,
+            "cache_read_bytes": 0,
+            "cache_read_calls": 0,
+            "get_requests": 0,
+            "head_requests": 0,
+            "incomplete_body_retries": 0,
+            "network_body_bytes": 0,
+            "server_error_retries": 0
+          }
+        },
+        "result_sha256": "07726df20bdf95281e8156cbeeeed6d43547610df96b457526c9b33796dffb0e"
+      },
+      {
+        "name": "01-local-count-legacy",
+        "mode": "local",
+        "workload": "count",
+        "legacy": true,
+        "blocks": 32768,
+        "command": [
+          "/volume2/blockzilla-bench/control/v3-network-window-20260909/reader-profile",
+          "--format",
+          "v3",
+          "--epoch",
+          "900",
+          "--workload",
+          "count",
+          "--blocks",
+          "32768",
+          "--workers",
+          "12",
+          "--iterations",
+          "1",
+          "--warmups",
+          "0",
+          "--archive-root",
+          "/volume2/blockzilla-bench/archive",
+          "--v3-legacy-input"
+        ],
+        "started_at": 1788949398.345411,
+        "pid": 3028710,
+        "exit_code": 0,
+        "cpu_seconds": 40.191499,
+        "peak_rss_kib": 174620,
+        "elapsed_s": 5.005157947540283,
+        "valid": true,
+        "scan": {
+          "allocation_bytes": null,
+          "allocation_calls": null,
+          "allocation_size_buckets": null,
+          "blocks": 32768,
+          "format": "V3",
+          "indexed_dictionary_bytes": null,
+          "indexed_dictionary_rows": null,
+          "indexed_usdc": false,
+          "instructions": 106316447,
+          "iteration": 0,
+          "oracle": "blocks=32768 tx=35672161 inner=35967897",
+          "phase": "scan",
+          "seconds": 3.970542345,
+          "source_bytes": 2234237327,
+          "source_calls": 40960,
+          "stages": {
+            "parallel": {
+              "blocks_per_job_limit": 4,
+              "declared_decoded_byte_limit": 268435456,
+              "effective_workers": 12,
+              "global_projected_block_bound": 96,
+              "input_buffer_capacity_bytes": 0,
+              "input_workers": 0,
+              "job_window_limit": 24,
+              "jobs": 8192,
+              "max_active_workers": 12,
+              "max_coordinator_pending_projected_blocks": 76,
+              "max_coordinator_pending_results": 19,
+              "max_in_flight_declared_decoded_bytes": 26993737,
+              "max_in_flight_jobs": 23,
+              "max_in_flight_owned_payload_bytes": 0,
+              "max_in_flight_transactions": 99998,
+              "max_owned_payload_block_bytes": 0,
+              "max_result_channel_backlog": 12,
+              "projected_blocks": 32768,
+              "requested_workers": 12,
+              "transaction_limit": 100000
+            },
+            "path": "dense",
+            "registry": {
+              "evictions": 0,
+              "hits": 0,
+              "misses": 0,
+              "mode": "unused",
+              "prefetch_read_bytes": 0,
+              "prefetch_read_calls": 0,
+              "resident_payload_bytes": 0,
+              "resolutions": 0
+            }
+          },
+          "tps": 8984203.642840132,
+          "transactions": 35672161,
+          "transport": {
+            "cache_downloads": 0,
+            "cache_hits": 0,
+            "cache_read_bytes": 0,
+            "cache_read_calls": 0,
+            "get_requests": 0,
+            "head_requests": 0,
+            "incomplete_body_retries": 0,
+            "network_body_bytes": 0,
+            "server_error_retries": 0
+          },
+          "workers": 12,
+          "workload": "Count"
+        },
+        "setup": [
+          {
+            "identity": {
+              "binding": "local-flat-epoch-900",
+              "block_count": 431858,
+              "cluster_id": null,
+              "epoch": 900,
+              "first_slot": 388800000,
+              "format": "indexer-v3",
+              "label": "local-split:ledger=/volume2/blockzilla-bench/archive/indexer-v3/900;retained=/volume2/blockzilla-bench/archive/indexer-v3/900",
+              "slots_per_epoch": 432000,
+              "verification": "operator-trusted"
+            },
+            "phase": "setup",
+            "seconds": 0.151209696,
+            "transport": {
+              "cache_downloads": 0,
+              "cache_hits": 0,
+              "cache_read_bytes": 0,
+              "cache_read_calls": 0,
+              "get_requests": 0,
+              "head_requests": 0,
+              "incomplete_body_retries": 0,
+              "network_body_bytes": 0,
+              "server_error_retries": 0
+            }
+          }
+        ],
+        "complete": {
+          "oracle": "blocks=32768 tx=35672161 inner=35967897",
+          "phase": "complete",
+          "seconds": 4.121969515,
+          "transport": {
+            "cache_downloads": 0,
+            "cache_hits": 0,
+            "cache_read_bytes": 0,
+            "cache_read_calls": 0,
+            "get_requests": 0,
+            "head_requests": 0,
+            "incomplete_body_retries": 0,
+            "network_body_bytes": 0,
+            "server_error_retries": 0
+          }
+        },
+        "result_sha256": "fb5ea1bf9a36a8fa33f9e7b53c8780023df5c4cb8dc541e1c028a9a7b85b4334"
+      },
+      {
+        "name": "02-network-count-legacy",
+        "mode": "network",
+        "workload": "count",
+        "legacy": true,
+        "blocks": 32768,
+        "command": [
+          "/volume2/blockzilla-bench/control/v3-network-window-20260909/reader-profile",
+          "--format",
+          "v3",
+          "--epoch",
+          "900",
+          "--workload",
+          "count",
+          "--blocks",
+          "32768",
+          "--workers",
+          "12",
+          "--iterations",
+          "1",
+          "--warmups",
+          "0",
+          "--origin",
+          "https://blockzilla-archive-samples-v1.cheron-augustin.workers.dev",
+          "--cache-root",
+          "/volume2/blockzilla-bench/control/v3-network-window-20260909/results/02-network-count-legacy/cache",
+          "--v3-legacy-input"
+        ],
+        "started_at": 1788949403.3551176,
+        "pid": 3028731,
+        "exit_code": 0,
+        "cpu_seconds": 40.524877999999994,
+        "peak_rss_kib": 178068,
+        "elapsed_s": 183.02611446380615,
+        "valid": true,
+        "scan": {
+          "allocation_bytes": null,
+          "allocation_calls": null,
+          "allocation_size_buckets": null,
+          "blocks": 32768,
+          "format": "V3",
+          "indexed_dictionary_bytes": null,
+          "indexed_dictionary_rows": null,
+          "indexed_usdc": false,
+          "instructions": 106316447,
+          "iteration": 0,
+          "oracle": "blocks=32768 tx=35672161 inner=35967897",
+          "phase": "scan",
+          "seconds": 175.356044559,
+          "source_bytes": 2234237327,
+          "source_calls": 1280,
+          "stages": {
+            "parallel": {
+              "blocks_per_job_limit": 4,
+              "declared_decoded_byte_limit": 268435456,
+              "effective_workers": 12,
+              "global_projected_block_bound": 96,
+              "input_buffer_capacity_bytes": 67108864,
+              "input_workers": 1,
+              "job_window_limit": 24,
+              "jobs": 8192,
+              "max_active_workers": 12,
+              "max_coordinator_pending_projected_blocks": 84,
+              "max_coordinator_pending_results": 21,
+              "max_in_flight_declared_decoded_bytes": 27481539,
+              "max_in_flight_jobs": 24,
+              "max_in_flight_owned_payload_bytes": 0,
+              "max_in_flight_transactions": 99894,
+              "max_owned_payload_block_bytes": 0,
+              "max_result_channel_backlog": 12,
+              "projected_blocks": 32768,
+              "requested_workers": 12,
+              "transaction_limit": 100000
+            },
+            "path": "dense",
+            "registry": {
+              "evictions": 0,
+              "hits": 0,
+              "misses": 0,
+              "mode": "unused",
+              "prefetch_read_bytes": 0,
+              "prefetch_read_calls": 0,
+              "resident_payload_bytes": 0,
+              "resolutions": 0
+            }
+          },
+          "tps": 203427.0394825073,
+          "transactions": 35672161,
+          "transport": {
+            "cache_downloads": 0,
+            "cache_hits": 0,
+            "cache_read_bytes": 0,
+            "cache_read_calls": 0,
+            "get_requests": 1280,
+            "head_requests": 0,
+            "incomplete_body_retries": 0,
+            "network_body_bytes": 2234237327,
+            "server_error_retries": 0
+          },
+          "workers": 12,
+          "workload": "Count"
+        },
+        "setup": [
+          {
+            "identity": {
+              "binding": "87a3996e6fbf5c8bd839648f90eb08a234a19ba7a03d678c115636f0f4769753",
+              "block_count": 431858,
+              "cluster_id": null,
+              "epoch": 900,
+              "first_slot": 388800000,
+              "format": "indexer-v3",
+              "label": "https://blockzilla-archive-samples-v1.cheron-augustin.workers.dev/indexer-v3/",
+              "slots_per_epoch": 432000,
+              "verification": "object-set-bound"
+            },
+            "phase": "setup",
+            "seconds": 7.324714644,
+            "transport": {
+              "cache_downloads": 1,
+              "cache_hits": 0,
+              "cache_read_bytes": 107100848,
+              "cache_read_calls": 5,
+              "get_requests": 15,
+              "head_requests": 38,
+              "incomplete_body_retries": 0,
+              "network_body_bytes": 107101552,
+              "server_error_retries": 0
+            }
+          }
+        ],
+        "complete": {
+          "oracle": "blocks=32768 tx=35672161 inner=35967897",
+          "phase": "complete",
+          "seconds": 182.680909233,
+          "transport": {
+            "cache_downloads": 1,
+            "cache_hits": 0,
+            "cache_read_bytes": 107100848,
+            "cache_read_calls": 5,
+            "get_requests": 1295,
+            "head_requests": 38,
+            "incomplete_body_retries": 0,
+            "network_body_bytes": 2341338879,
+            "server_error_retries": 0
+          }
+        },
+        "result_sha256": "7e31ee4b93acbfd66219689fc72185f5953605530ea10cca50d0ece182e2ba73"
+      },
+      {
+        "name": "03-network-count-window",
+        "mode": "network",
+        "workload": "count",
+        "legacy": false,
+        "blocks": 32768,
+        "command": [
+          "/volume2/blockzilla-bench/control/v3-network-window-20260909/reader-profile",
+          "--format",
+          "v3",
+          "--epoch",
+          "900",
+          "--workload",
+          "count",
+          "--blocks",
+          "32768",
+          "--workers",
+          "12",
+          "--iterations",
+          "1",
+          "--warmups",
+          "0",
+          "--origin",
+          "https://blockzilla-archive-samples-v1.cheron-augustin.workers.dev",
+          "--cache-root",
+          "/volume2/blockzilla-bench/control/v3-network-window-20260909/results/03-network-count-window/cache"
+        ],
+        "started_at": 1788949586.38347,
+        "pid": 3029279,
+        "exit_code": 0,
+        "cpu_seconds": 42.478981000000005,
+        "peak_rss_kib": 409032,
+        "elapsed_s": 19.005874156951904,
+        "valid": true,
+        "scan": {
+          "allocation_bytes": null,
+          "allocation_calls": null,
+          "allocation_size_buckets": null,
+          "blocks": 32768,
+          "format": "V3",
+          "indexed_dictionary_bytes": null,
+          "indexed_dictionary_rows": null,
+          "indexed_usdc": false,
+          "instructions": 106316447,
+          "iteration": 0,
+          "oracle": "blocks=32768 tx=35672161 inner=35967897",
+          "phase": "scan",
+          "seconds": 13.801617038,
+          "source_bytes": 2234237327,
+          "source_calls": 335,
+          "stages": {
+            "parallel": {
+              "blocks_per_job_limit": 4,
+              "declared_decoded_byte_limit": 268435456,
+              "effective_workers": 12,
+              "global_projected_block_bound": 96,
+              "input_buffer_capacity_bytes": 250169262,
+              "input_workers": 7,
+              "job_window_limit": 24,
+              "jobs": 8192,
+              "max_active_workers": 12,
+              "max_coordinator_pending_projected_blocks": 76,
+              "max_coordinator_pending_results": 19,
+              "max_in_flight_declared_decoded_bytes": 27992814,
+              "max_in_flight_jobs": 24,
+              "max_in_flight_owned_payload_bytes": 0,
+              "max_in_flight_transactions": 99906,
+              "max_owned_payload_block_bytes": 0,
+              "max_result_channel_backlog": 12,
+              "projected_blocks": 32768,
+              "requested_workers": 12,
+              "transaction_limit": 100000
+            },
+            "path": "dense",
+            "registry": {
+              "evictions": 0,
+              "hits": 0,
+              "misses": 0,
+              "mode": "unused",
+              "prefetch_read_bytes": 0,
+              "prefetch_read_calls": 0,
+              "resident_payload_bytes": 0,
+              "resolutions": 0
+            }
+          },
+          "tps": 2584636.3438272355,
+          "transactions": 35672161,
+          "transport": {
+            "cache_downloads": 0,
+            "cache_hits": 0,
+            "cache_read_bytes": 0,
+            "cache_read_calls": 0,
+            "get_requests": 335,
+            "head_requests": 0,
+            "incomplete_body_retries": 0,
+            "network_body_bytes": 2234237327,
+            "server_error_retries": 0
+          },
+          "workers": 12,
+          "workload": "Count"
+        },
+        "setup": [
+          {
+            "identity": {
+              "binding": "87a3996e6fbf5c8bd839648f90eb08a234a19ba7a03d678c115636f0f4769753",
+              "block_count": 431858,
+              "cluster_id": null,
+              "epoch": 900,
+              "first_slot": 388800000,
+              "format": "indexer-v3",
+              "label": "https://blockzilla-archive-samples-v1.cheron-augustin.workers.dev/indexer-v3/",
+              "slots_per_epoch": 432000,
+              "verification": "object-set-bound"
+            },
+            "phase": "setup",
+            "seconds": 4.915634137,
+            "transport": {
+              "cache_downloads": 1,
+              "cache_hits": 0,
+              "cache_read_bytes": 107100848,
+              "cache_read_calls": 5,
+              "get_requests": 15,
+              "head_requests": 38,
+              "incomplete_body_retries": 0,
+              "network_body_bytes": 107101552,
+              "server_error_retries": 0
+            }
+          }
+        ],
+        "complete": {
+          "oracle": "blocks=32768 tx=35672161 inner=35967897",
+          "phase": "complete",
+          "seconds": 18.717366975,
+          "transport": {
+            "cache_downloads": 1,
+            "cache_hits": 0,
+            "cache_read_bytes": 107100848,
+            "cache_read_calls": 5,
+            "get_requests": 350,
+            "head_requests": 38,
+            "incomplete_body_retries": 0,
+            "network_body_bytes": 2341338879,
+            "server_error_retries": 0
+          }
+        },
+        "result_sha256": "b58cde37a74acb2411370cfe36f9b4e68723cfa6da88d1032a53ad062bbb558a"
+      },
+      {
+        "name": "04-network-count-window",
+        "mode": "network",
+        "workload": "count",
+        "legacy": false,
+        "blocks": 32768,
+        "command": [
+          "/volume2/blockzilla-bench/control/v3-network-window-20260909/reader-profile",
+          "--format",
+          "v3",
+          "--epoch",
+          "900",
+          "--workload",
+          "count",
+          "--blocks",
+          "32768",
+          "--workers",
+          "12",
+          "--iterations",
+          "1",
+          "--warmups",
+          "0",
+          "--origin",
+          "https://blockzilla-archive-samples-v1.cheron-augustin.workers.dev",
+          "--cache-root",
+          "/volume2/blockzilla-bench/control/v3-network-window-20260909/results/04-network-count-window/cache"
+        ],
+        "started_at": 1788949605.3911812,
+        "pid": 3029369,
+        "exit_code": 0,
+        "cpu_seconds": 42.334790999999996,
+        "peak_rss_kib": 409220,
+        "elapsed_s": 19.005190134048462,
+        "valid": true,
+        "scan": {
+          "allocation_bytes": null,
+          "allocation_calls": null,
+          "allocation_size_buckets": null,
+          "blocks": 32768,
+          "format": "V3",
+          "indexed_dictionary_bytes": null,
+          "indexed_dictionary_rows": null,
+          "indexed_usdc": false,
+          "instructions": 106316447,
+          "iteration": 0,
+          "oracle": "blocks=32768 tx=35672161 inner=35967897",
+          "phase": "scan",
+          "seconds": 13.477663292999999,
+          "source_bytes": 2234237327,
+          "source_calls": 335,
+          "stages": {
+            "parallel": {
+              "blocks_per_job_limit": 4,
+              "declared_decoded_byte_limit": 268435456,
+              "effective_workers": 12,
+              "global_projected_block_bound": 96,
+              "input_buffer_capacity_bytes": 250169262,
+              "input_workers": 7,
+              "job_window_limit": 24,
+              "jobs": 8192,
+              "max_active_workers": 12,
+              "max_coordinator_pending_projected_blocks": 84,
+              "max_coordinator_pending_results": 21,
+              "max_in_flight_declared_decoded_bytes": 27992814,
+              "max_in_flight_jobs": 23,
+              "max_in_flight_owned_payload_bytes": 0,
+              "max_in_flight_transactions": 99985,
+              "max_owned_payload_block_bytes": 0,
+              "max_result_channel_backlog": 12,
+              "projected_blocks": 32768,
+              "requested_workers": 12,
+              "transaction_limit": 100000
+            },
+            "path": "dense",
+            "registry": {
+              "evictions": 0,
+              "hits": 0,
+              "misses": 0,
+              "mode": "unused",
+              "prefetch_read_bytes": 0,
+              "prefetch_read_calls": 0,
+              "resident_payload_bytes": 0,
+              "resolutions": 0
+            }
+          },
+          "tps": 2646761.5509082596,
+          "transactions": 35672161,
+          "transport": {
+            "cache_downloads": 0,
+            "cache_hits": 0,
+            "cache_read_bytes": 0,
+            "cache_read_calls": 0,
+            "get_requests": 335,
+            "head_requests": 0,
+            "incomplete_body_retries": 0,
+            "network_body_bytes": 2234237327,
+            "server_error_retries": 0
+          },
+          "workers": 12,
+          "workload": "Count"
+        },
+        "setup": [
+          {
+            "identity": {
+              "binding": "87a3996e6fbf5c8bd839648f90eb08a234a19ba7a03d678c115636f0f4769753",
+              "block_count": 431858,
+              "cluster_id": null,
+              "epoch": 900,
+              "first_slot": 388800000,
+              "format": "indexer-v3",
+              "label": "https://blockzilla-archive-samples-v1.cheron-augustin.workers.dev/indexer-v3/",
+              "slots_per_epoch": 432000,
+              "verification": "object-set-bound"
+            },
+            "phase": "setup",
+            "seconds": 4.70998476,
+            "transport": {
+              "cache_downloads": 1,
+              "cache_hits": 0,
+              "cache_read_bytes": 107100848,
+              "cache_read_calls": 5,
+              "get_requests": 15,
+              "head_requests": 38,
+              "incomplete_body_retries": 0,
+              "network_body_bytes": 107101552,
+              "server_error_retries": 0
+            }
+          }
+        ],
+        "complete": {
+          "oracle": "blocks=32768 tx=35672161 inner=35967897",
+          "phase": "complete",
+          "seconds": 18.187780552,
+          "transport": {
+            "cache_downloads": 1,
+            "cache_hits": 0,
+            "cache_read_bytes": 107100848,
+            "cache_read_calls": 5,
+            "get_requests": 350,
+            "head_requests": 38,
+            "incomplete_body_retries": 0,
+            "network_body_bytes": 2341338879,
+            "server_error_retries": 0
+          }
+        },
+        "result_sha256": "7378eecd4f88c69f5134f291f7e7137c4e7ae53c10ffe267d28835acd120fbc8"
+      },
+      {
+        "name": "05-network-count-legacy",
+        "mode": "network",
+        "workload": "count",
+        "legacy": true,
+        "blocks": 32768,
+        "command": [
+          "/volume2/blockzilla-bench/control/v3-network-window-20260909/reader-profile",
+          "--format",
+          "v3",
+          "--epoch",
+          "900",
+          "--workload",
+          "count",
+          "--blocks",
+          "32768",
+          "--workers",
+          "12",
+          "--iterations",
+          "1",
+          "--warmups",
+          "0",
+          "--origin",
+          "https://blockzilla-archive-samples-v1.cheron-augustin.workers.dev",
+          "--cache-root",
+          "/volume2/blockzilla-bench/control/v3-network-window-20260909/results/05-network-count-legacy/cache",
+          "--v3-legacy-input"
+        ],
+        "started_at": 1788949624.3984952,
+        "pid": 3029420,
+        "exit_code": 0,
+        "cpu_seconds": 40.396325000000004,
+        "peak_rss_kib": 180704,
+        "elapsed_s": 187.03037452697754,
+        "valid": true,
+        "scan": {
+          "allocation_bytes": null,
+          "allocation_calls": null,
+          "allocation_size_buckets": null,
+          "blocks": 32768,
+          "format": "V3",
+          "indexed_dictionary_bytes": null,
+          "indexed_dictionary_rows": null,
+          "indexed_usdc": false,
+          "instructions": 106316447,
+          "iteration": 0,
+          "oracle": "blocks=32768 tx=35672161 inner=35967897",
+          "phase": "scan",
+          "seconds": 180.703902031,
+          "source_bytes": 2234237327,
+          "source_calls": 1280,
+          "stages": {
+            "parallel": {
+              "blocks_per_job_limit": 4,
+              "declared_decoded_byte_limit": 268435456,
+              "effective_workers": 12,
+              "global_projected_block_bound": 96,
+              "input_buffer_capacity_bytes": 67108864,
+              "input_workers": 1,
+              "job_window_limit": 24,
+              "jobs": 8192,
+              "max_active_workers": 12,
+              "max_coordinator_pending_projected_blocks": 80,
+              "max_coordinator_pending_results": 20,
+              "max_in_flight_declared_decoded_bytes": 27481539,
+              "max_in_flight_jobs": 24,
+              "max_in_flight_owned_payload_bytes": 0,
+              "max_in_flight_transactions": 99964,
+              "max_owned_payload_block_bytes": 0,
+              "max_result_channel_backlog": 12,
+              "projected_blocks": 32768,
+              "requested_workers": 12,
+              "transaction_limit": 100000
+            },
+            "path": "dense",
+            "registry": {
+              "evictions": 0,
+              "hits": 0,
+              "misses": 0,
+              "mode": "unused",
+              "prefetch_read_bytes": 0,
+              "prefetch_read_calls": 0,
+              "resident_payload_bytes": 0,
+              "resolutions": 0
+            }
+          },
+          "tps": 197406.70012693133,
+          "transactions": 35672161,
+          "transport": {
+            "cache_downloads": 0,
+            "cache_hits": 0,
+            "cache_read_bytes": 0,
+            "cache_read_calls": 0,
+            "get_requests": 1280,
+            "head_requests": 0,
+            "incomplete_body_retries": 0,
+            "network_body_bytes": 2234237327,
+            "server_error_retries": 0
+          },
+          "workers": 12,
+          "workload": "Count"
+        },
+        "setup": [
+          {
+            "identity": {
+              "binding": "87a3996e6fbf5c8bd839648f90eb08a234a19ba7a03d678c115636f0f4769753",
+              "block_count": 431858,
+              "cluster_id": null,
+              "epoch": 900,
+              "first_slot": 388800000,
+              "format": "indexer-v3",
+              "label": "https://blockzilla-archive-samples-v1.cheron-augustin.workers.dev/indexer-v3/",
+              "slots_per_epoch": 432000,
+              "verification": "object-set-bound"
+            },
+            "phase": "setup",
+            "seconds": 5.610517614,
+            "transport": {
+              "cache_downloads": 1,
+              "cache_hits": 0,
+              "cache_read_bytes": 107100848,
+              "cache_read_calls": 5,
+              "get_requests": 15,
+              "head_requests": 38,
+              "incomplete_body_retries": 0,
+              "network_body_bytes": 107101552,
+              "server_error_retries": 0
+            }
+          }
+        ],
+        "complete": {
+          "oracle": "blocks=32768 tx=35672161 inner=35967897",
+          "phase": "complete",
+          "seconds": 186.314570662,
+          "transport": {
+            "cache_downloads": 1,
+            "cache_hits": 0,
+            "cache_read_bytes": 107100848,
+            "cache_read_calls": 5,
+            "get_requests": 1295,
+            "head_requests": 38,
+            "incomplete_body_retries": 0,
+            "network_body_bytes": 2341338879,
+            "server_error_retries": 0
+          }
+        },
+        "result_sha256": "e876f0ef80ff94493cb13182f615b6ee5f6cd4da4151e622540b498393218ebf"
+      },
+      {
+        "name": "06-network-transactions-legacy",
+        "mode": "network",
+        "workload": "transactions",
+        "legacy": true,
+        "blocks": 8192,
+        "command": [
+          "/volume2/blockzilla-bench/control/v3-network-window-20260909/reader-profile",
+          "--format",
+          "v3",
+          "--epoch",
+          "900",
+          "--workload",
+          "transactions",
+          "--blocks",
+          "8192",
+          "--workers",
+          "12",
+          "--iterations",
+          "1",
+          "--warmups",
+          "0",
+          "--origin",
+          "https://blockzilla-archive-samples-v1.cheron-augustin.workers.dev",
+          "--cache-root",
+          "/volume2/blockzilla-bench/control/v3-network-window-20260909/results/06-network-transactions-legacy/cache",
+          "--v3-legacy-input"
+        ],
+        "started_at": 1788949811.4316587,
+        "pid": 3029971,
+        "exit_code": 0,
+        "cpu_seconds": 10.621552,
+        "peak_rss_kib": 207212,
+        "elapsed_s": 25.005638122558594,
+        "valid": true,
+        "scan": {
+          "allocation_bytes": null,
+          "allocation_calls": null,
+          "allocation_size_buckets": null,
+          "blocks": 8192,
+          "format": "V3",
+          "indexed_dictionary_bytes": null,
+          "indexed_dictionary_rows": null,
+          "indexed_usdc": false,
+          "instructions": 0,
+          "iteration": 0,
+          "oracle": "records=8925832 bytes=714066608 sha256=54531e48c946cb66c0c148d7339fdbb11511cffaaec9bc9c5a33f650a10d3685 first_slot=Some(388800002) last_slot=Some(388808197)",
+          "phase": "scan",
+          "seconds": 18.871362175,
+          "source_bytes": 856096236,
+          "source_calls": 192,
+          "stages": {
+            "parallel": {
+              "blocks_per_job_limit": 4,
+              "declared_decoded_byte_limit": 268435456,
+              "effective_workers": 12,
+              "global_projected_block_bound": 96,
+              "input_buffer_capacity_bytes": 67108864,
+              "input_workers": 1,
+              "job_window_limit": 24,
+              "jobs": 2048,
+              "max_active_workers": 12,
+              "max_coordinator_pending_projected_blocks": 68,
+              "max_coordinator_pending_results": 17,
+              "max_in_flight_declared_decoded_bytes": 20139384,
+              "max_in_flight_jobs": 23,
+              "max_in_flight_owned_payload_bytes": 20204480,
+              "max_in_flight_transactions": 99715,
+              "max_owned_payload_block_bytes": 367040,
+              "max_result_channel_backlog": 12,
+              "projected_blocks": 8192,
+              "requested_workers": 12,
+              "transaction_limit": 100000
+            },
+            "path": "dense",
+            "registry": {
+              "evictions": 0,
+              "hits": 0,
+              "misses": 0,
+              "mode": "unused",
+              "prefetch_read_bytes": 0,
+              "prefetch_read_calls": 0,
+              "resident_payload_bytes": 0,
+              "resolutions": 0
+            }
+          },
+          "tps": 472982.9207466842,
+          "transactions": 8925832,
+          "transport": {
+            "cache_downloads": 0,
+            "cache_hits": 0,
+            "cache_read_bytes": 0,
+            "cache_read_calls": 0,
+            "get_requests": 192,
+            "head_requests": 0,
+            "incomplete_body_retries": 0,
+            "network_body_bytes": 856096236,
+            "server_error_retries": 0
+          },
+          "workers": 12,
+          "workload": "Transactions"
+        },
+        "setup": [
+          {
+            "identity": {
+              "binding": "87a3996e6fbf5c8bd839648f90eb08a234a19ba7a03d678c115636f0f4769753",
+              "block_count": 431858,
+              "cluster_id": null,
+              "epoch": 900,
+              "first_slot": 388800000,
+              "format": "indexer-v3",
+              "label": "https://blockzilla-archive-samples-v1.cheron-augustin.workers.dev/indexer-v3/",
+              "slots_per_epoch": 432000,
+              "verification": "object-set-bound"
+            },
+            "phase": "setup",
+            "seconds": 5.909218556,
+            "transport": {
+              "cache_downloads": 1,
+              "cache_hits": 0,
+              "cache_read_bytes": 107100848,
+              "cache_read_calls": 5,
+              "get_requests": 15,
+              "head_requests": 38,
+              "incomplete_body_retries": 0,
+              "network_body_bytes": 107101552,
+              "server_error_retries": 0
+            }
+          }
+        ],
+        "complete": {
+          "oracle": "records=8925832 bytes=714066608 sha256=54531e48c946cb66c0c148d7339fdbb11511cffaaec9bc9c5a33f650a10d3685 first_slot=Some(388800002) last_slot=Some(388808197)",
+          "phase": "complete",
+          "seconds": 24.780732673,
+          "transport": {
+            "cache_downloads": 1,
+            "cache_hits": 0,
+            "cache_read_bytes": 107100848,
+            "cache_read_calls": 5,
+            "get_requests": 207,
+            "head_requests": 38,
+            "incomplete_body_retries": 0,
+            "network_body_bytes": 963197788,
+            "server_error_retries": 0
+          }
+        },
+        "result_sha256": "96a3969818b9a4c51ccde0ccca5bc936a5b4b84256f82996bb2fdeb468ba1f4d"
+      },
+      {
+        "name": "07-network-transactions-window",
+        "mode": "network",
+        "workload": "transactions",
+        "legacy": false,
+        "blocks": 8192,
+        "command": [
+          "/volume2/blockzilla-bench/control/v3-network-window-20260909/reader-profile",
+          "--format",
+          "v3",
+          "--epoch",
+          "900",
+          "--workload",
+          "transactions",
+          "--blocks",
+          "8192",
+          "--workers",
+          "12",
+          "--iterations",
+          "1",
+          "--warmups",
+          "0",
+          "--origin",
+          "https://blockzilla-archive-samples-v1.cheron-augustin.workers.dev",
+          "--cache-root",
+          "/volume2/blockzilla-bench/control/v3-network-window-20260909/results/07-network-transactions-window/cache"
+        ],
+        "started_at": 1788949836.4402778,
+        "pid": 3030153,
+        "exit_code": 0,
+        "cpu_seconds": 10.553699,
+        "peak_rss_kib": 418928,
+        "elapsed_s": 11.00527310371399,
+        "valid": true,
+        "scan": {
+          "allocation_bytes": null,
+          "allocation_calls": null,
+          "allocation_size_buckets": null,
+          "blocks": 8192,
+          "format": "V3",
+          "indexed_dictionary_bytes": null,
+          "indexed_dictionary_rows": null,
+          "indexed_usdc": false,
+          "instructions": 0,
+          "iteration": 0,
+          "oracle": "records=8925832 bytes=714066608 sha256=54531e48c946cb66c0c148d7339fdbb11511cffaaec9bc9c5a33f650a10d3685 first_slot=Some(388800002) last_slot=Some(388808197)",
+          "phase": "scan",
+          "seconds": 4.487861005,
+          "source_bytes": 856096236,
+          "source_calls": 78,
+          "stages": {
+            "parallel": {
+              "blocks_per_job_limit": 4,
+              "declared_decoded_byte_limit": 268435456,
+              "effective_workers": 12,
+              "global_projected_block_bound": 96,
+              "input_buffer_capacity_bytes": 240971409,
+              "input_workers": 7,
+              "job_window_limit": 24,
+              "jobs": 2048,
+              "max_active_workers": 12,
+              "max_coordinator_pending_projected_blocks": 48,
+              "max_coordinator_pending_results": 12,
+              "max_in_flight_declared_decoded_bytes": 20302839,
+              "max_in_flight_jobs": 23,
+              "max_in_flight_owned_payload_bytes": 17822560,
+              "max_in_flight_transactions": 99718,
+              "max_owned_payload_block_bytes": 367040,
+              "max_result_channel_backlog": 12,
+              "projected_blocks": 8192,
+              "requested_workers": 12,
+              "transaction_limit": 100000
+            },
+            "path": "dense",
+            "registry": {
+              "evictions": 0,
+              "hits": 0,
+              "misses": 0,
+              "mode": "unused",
+              "prefetch_read_bytes": 0,
+              "prefetch_read_calls": 0,
+              "resident_payload_bytes": 0,
+              "resolutions": 0
+            }
+          },
+          "tps": 1988883.3433244887,
+          "transactions": 8925832,
+          "transport": {
+            "cache_downloads": 0,
+            "cache_hits": 0,
+            "cache_read_bytes": 0,
+            "cache_read_calls": 0,
+            "get_requests": 78,
+            "head_requests": 0,
+            "incomplete_body_retries": 0,
+            "network_body_bytes": 856096236,
+            "server_error_retries": 0
+          },
+          "workers": 12,
+          "workload": "Transactions"
+        },
+        "setup": [
+          {
+            "identity": {
+              "binding": "87a3996e6fbf5c8bd839648f90eb08a234a19ba7a03d678c115636f0f4769753",
+              "block_count": 431858,
+              "cluster_id": null,
+              "epoch": 900,
+              "first_slot": 388800000,
+              "format": "indexer-v3",
+              "label": "https://blockzilla-archive-samples-v1.cheron-augustin.workers.dev/indexer-v3/",
+              "slots_per_epoch": 432000,
+              "verification": "object-set-bound"
+            },
+            "phase": "setup",
+            "seconds": 5.634652031,
+            "transport": {
+              "cache_downloads": 1,
+              "cache_hits": 0,
+              "cache_read_bytes": 107100848,
+              "cache_read_calls": 5,
+              "get_requests": 15,
+              "head_requests": 38,
+              "incomplete_body_retries": 0,
+              "network_body_bytes": 107101552,
+              "server_error_retries": 0
+            }
+          }
+        ],
+        "complete": {
+          "oracle": "records=8925832 bytes=714066608 sha256=54531e48c946cb66c0c148d7339fdbb11511cffaaec9bc9c5a33f650a10d3685 first_slot=Some(388800002) last_slot=Some(388808197)",
+          "phase": "complete",
+          "seconds": 10.122645251,
+          "transport": {
+            "cache_downloads": 1,
+            "cache_hits": 0,
+            "cache_read_bytes": 107100848,
+            "cache_read_calls": 5,
+            "get_requests": 93,
+            "head_requests": 38,
+            "incomplete_body_retries": 0,
+            "network_body_bytes": 963197788,
+            "server_error_retries": 0
+          }
+        },
+        "result_sha256": "0aec1cc446ec41a8c6ddcffc6ae40f9767fe3d1d4fb4c970d9de4adacc3cbb75"
+      },
+      {
+        "name": "08-network-transactions-window",
+        "mode": "network",
+        "workload": "transactions",
+        "legacy": false,
+        "blocks": 8192,
+        "command": [
+          "/volume2/blockzilla-bench/control/v3-network-window-20260909/reader-profile",
+          "--format",
+          "v3",
+          "--epoch",
+          "900",
+          "--workload",
+          "transactions",
+          "--blocks",
+          "8192",
+          "--workers",
+          "12",
+          "--iterations",
+          "1",
+          "--warmups",
+          "0",
+          "--origin",
+          "https://blockzilla-archive-samples-v1.cheron-augustin.workers.dev",
+          "--cache-root",
+          "/volume2/blockzilla-bench/control/v3-network-window-20260909/results/08-network-transactions-window/cache"
+        ],
+        "started_at": 1788949847.4476173,
+        "pid": 3030220,
+        "exit_code": 0,
+        "cpu_seconds": 10.578181,
+        "peak_rss_kib": 417252,
+        "elapsed_s": 13.005149602890015,
+        "valid": true,
+        "scan": {
+          "allocation_bytes": null,
+          "allocation_calls": null,
+          "allocation_size_buckets": null,
+          "blocks": 8192,
+          "format": "V3",
+          "indexed_dictionary_bytes": null,
+          "indexed_dictionary_rows": null,
+          "indexed_usdc": false,
+          "instructions": 0,
+          "iteration": 0,
+          "oracle": "records=8925832 bytes=714066608 sha256=54531e48c946cb66c0c148d7339fdbb11511cffaaec9bc9c5a33f650a10d3685 first_slot=Some(388800002) last_slot=Some(388808197)",
+          "phase": "scan",
+          "seconds": 6.771093181,
+          "source_bytes": 856096236,
+          "source_calls": 78,
+          "stages": {
+            "parallel": {
+              "blocks_per_job_limit": 4,
+              "declared_decoded_byte_limit": 268435456,
+              "effective_workers": 12,
+              "global_projected_block_bound": 96,
+              "input_buffer_capacity_bytes": 240971409,
+              "input_workers": 7,
+              "job_window_limit": 24,
+              "jobs": 2048,
+              "max_active_workers": 12,
+              "max_coordinator_pending_projected_blocks": 44,
+              "max_coordinator_pending_results": 11,
+              "max_in_flight_declared_decoded_bytes": 19355440,
+              "max_in_flight_jobs": 23,
+              "max_in_flight_owned_payload_bytes": 17891040,
+              "max_in_flight_transactions": 97990,
+              "max_owned_payload_block_bytes": 367040,
+              "max_result_channel_backlog": 12,
+              "projected_blocks": 8192,
+              "requested_workers": 12,
+              "transaction_limit": 100000
+            },
+            "path": "dense",
+            "registry": {
+              "evictions": 0,
+              "hits": 0,
+              "misses": 0,
+              "mode": "unused",
+              "prefetch_read_bytes": 0,
+              "prefetch_read_calls": 0,
+              "resident_payload_bytes": 0,
+              "resolutions": 0
+            }
+          },
+          "tps": 1318226.1359282865,
+          "transactions": 8925832,
+          "transport": {
+            "cache_downloads": 0,
+            "cache_hits": 0,
+            "cache_read_bytes": 0,
+            "cache_read_calls": 0,
+            "get_requests": 78,
+            "head_requests": 0,
+            "incomplete_body_retries": 0,
+            "network_body_bytes": 856096236,
+            "server_error_retries": 0
+          },
+          "workers": 12,
+          "workload": "Transactions"
+        },
+        "setup": [
+          {
+            "identity": {
+              "binding": "87a3996e6fbf5c8bd839648f90eb08a234a19ba7a03d678c115636f0f4769753",
+              "block_count": 431858,
+              "cluster_id": null,
+              "epoch": 900,
+              "first_slot": 388800000,
+              "format": "indexer-v3",
+              "label": "https://blockzilla-archive-samples-v1.cheron-augustin.workers.dev/indexer-v3/",
+              "slots_per_epoch": 432000,
+              "verification": "object-set-bound"
+            },
+            "phase": "setup",
+            "seconds": 5.52092476,
+            "transport": {
+              "cache_downloads": 1,
+              "cache_hits": 0,
+              "cache_read_bytes": 107100848,
+              "cache_read_calls": 5,
+              "get_requests": 15,
+              "head_requests": 38,
+              "incomplete_body_retries": 0,
+              "network_body_bytes": 107101552,
+              "server_error_retries": 0
+            }
+          }
+        ],
+        "complete": {
+          "oracle": "records=8925832 bytes=714066608 sha256=54531e48c946cb66c0c148d7339fdbb11511cffaaec9bc9c5a33f650a10d3685 first_slot=Some(388800002) last_slot=Some(388808197)",
+          "phase": "complete",
+          "seconds": 12.292147071,
+          "transport": {
+            "cache_downloads": 1,
+            "cache_hits": 0,
+            "cache_read_bytes": 107100848,
+            "cache_read_calls": 5,
+            "get_requests": 93,
+            "head_requests": 38,
+            "incomplete_body_retries": 0,
+            "network_body_bytes": 963197788,
+            "server_error_retries": 0
+          }
+        },
+        "result_sha256": "62768cbc9ad53b907aa1758440a22db516d44f055df1db0f32bb4f2a106d0a59"
+      },
+      {
+        "name": "09-network-transactions-legacy",
+        "mode": "network",
+        "workload": "transactions",
+        "legacy": true,
+        "blocks": 8192,
+        "command": [
+          "/volume2/blockzilla-bench/control/v3-network-window-20260909/reader-profile",
+          "--format",
+          "v3",
+          "--epoch",
+          "900",
+          "--workload",
+          "transactions",
+          "--blocks",
+          "8192",
+          "--workers",
+          "12",
+          "--iterations",
+          "1",
+          "--warmups",
+          "0",
+          "--origin",
+          "https://blockzilla-archive-samples-v1.cheron-augustin.workers.dev",
+          "--cache-root",
+          "/volume2/blockzilla-bench/control/v3-network-window-20260909/results/09-network-transactions-legacy/cache",
+          "--v3-legacy-input"
+        ],
+        "started_at": 1788949860.4571216,
+        "pid": 3030266,
+        "exit_code": 0,
+        "cpu_seconds": 10.450731000000001,
+        "peak_rss_kib": 207984,
+        "elapsed_s": 24.006478786468506,
+        "valid": true,
+        "scan": {
+          "allocation_bytes": null,
+          "allocation_calls": null,
+          "allocation_size_buckets": null,
+          "blocks": 8192,
+          "format": "V3",
+          "indexed_dictionary_bytes": null,
+          "indexed_dictionary_rows": null,
+          "indexed_usdc": false,
+          "instructions": 0,
+          "iteration": 0,
+          "oracle": "records=8925832 bytes=714066608 sha256=54531e48c946cb66c0c148d7339fdbb11511cffaaec9bc9c5a33f650a10d3685 first_slot=Some(388800002) last_slot=Some(388808197)",
+          "phase": "scan",
+          "seconds": 17.899330858,
+          "source_bytes": 856096236,
+          "source_calls": 192,
+          "stages": {
+            "parallel": {
+              "blocks_per_job_limit": 4,
+              "declared_decoded_byte_limit": 268435456,
+              "effective_workers": 12,
+              "global_projected_block_bound": 96,
+              "input_buffer_capacity_bytes": 67108864,
+              "input_workers": 1,
+              "job_window_limit": 24,
+              "jobs": 2048,
+              "max_active_workers": 12,
+              "max_coordinator_pending_projected_blocks": 44,
+              "max_coordinator_pending_results": 11,
+              "max_in_flight_declared_decoded_bytes": 19578619,
+              "max_in_flight_jobs": 23,
+              "max_in_flight_owned_payload_bytes": 18005440,
+              "max_in_flight_transactions": 98287,
+              "max_owned_payload_block_bytes": 367040,
+              "max_result_channel_backlog": 12,
+              "projected_blocks": 8192,
+              "requested_workers": 12,
+              "transaction_limit": 100000
+            },
+            "path": "dense",
+            "registry": {
+              "evictions": 0,
+              "hits": 0,
+              "misses": 0,
+              "mode": "unused",
+              "prefetch_read_bytes": 0,
+              "prefetch_read_calls": 0,
+              "resident_payload_bytes": 0,
+              "resolutions": 0
+            }
+          },
+          "tps": 498668.47374412615,
+          "transactions": 8925832,
+          "transport": {
+            "cache_downloads": 0,
+            "cache_hits": 0,
+            "cache_read_bytes": 0,
+            "cache_read_calls": 0,
+            "get_requests": 192,
+            "head_requests": 0,
+            "incomplete_body_retries": 0,
+            "network_body_bytes": 856096236,
+            "server_error_retries": 0
+          },
+          "workers": 12,
+          "workload": "Transactions"
+        },
+        "setup": [
+          {
+            "identity": {
+              "binding": "87a3996e6fbf5c8bd839648f90eb08a234a19ba7a03d678c115636f0f4769753",
+              "block_count": 431858,
+              "cluster_id": null,
+              "epoch": 900,
+              "first_slot": 388800000,
+              "format": "indexer-v3",
+              "label": "https://blockzilla-archive-samples-v1.cheron-augustin.workers.dev/indexer-v3/",
+              "slots_per_epoch": 432000,
+              "verification": "object-set-bound"
+            },
+            "phase": "setup",
+            "seconds": 5.983624621,
+            "transport": {
+              "cache_downloads": 1,
+              "cache_hits": 0,
+              "cache_read_bytes": 107100848,
+              "cache_read_calls": 5,
+              "get_requests": 15,
+              "head_requests": 38,
+              "incomplete_body_retries": 0,
+              "network_body_bytes": 107101552,
+              "server_error_retries": 0
+            }
+          }
+        ],
+        "complete": {
+          "oracle": "records=8925832 bytes=714066608 sha256=54531e48c946cb66c0c148d7339fdbb11511cffaaec9bc9c5a33f650a10d3685 first_slot=Some(388800002) last_slot=Some(388808197)",
+          "phase": "complete",
+          "seconds": 23.883097079,
+          "transport": {
+            "cache_downloads": 1,
+            "cache_hits": 0,
+            "cache_read_bytes": 107100848,
+            "cache_read_calls": 5,
+            "get_requests": 207,
+            "head_requests": 38,
+            "incomplete_body_retries": 0,
+            "network_body_bytes": 963197788,
+            "server_error_retries": 0
+          }
+        },
+        "result_sha256": "5ae48749de3104b250ee87fc60e829a46e89c2a3a2c9f87600ed0433b8843260"
+      },
+      {
+        "name": "10-network-usdc-legacy",
+        "mode": "network",
+        "workload": "usdc",
+        "legacy": true,
+        "blocks": 8192,
+        "command": [
+          "/volume2/blockzilla-bench/control/v3-network-window-20260909/reader-profile",
+          "--format",
+          "v3",
+          "--epoch",
+          "900",
+          "--workload",
+          "usdc",
+          "--blocks",
+          "8192",
+          "--workers",
+          "12",
+          "--iterations",
+          "1",
+          "--warmups",
+          "0",
+          "--origin",
+          "https://blockzilla-archive-samples-v1.cheron-augustin.workers.dev",
+          "--cache-root",
+          "/volume2/blockzilla-bench/control/v3-network-window-20260909/results/10-network-usdc-legacy/cache",
+          "--v3-legacy-input"
+        ],
+        "started_at": 1788949884.4658709,
+        "pid": 3030439,
+        "exit_code": 0,
+        "cpu_seconds": 13.745075,
+        "peak_rss_kib": 1893608,
+        "elapsed_s": 58.012951135635376,
+        "valid": true,
+        "scan": {
+          "allocation_bytes": null,
+          "allocation_calls": null,
+          "allocation_size_buckets": null,
+          "blocks": 8192,
+          "format": "V3",
+          "indexed_dictionary_bytes": null,
+          "indexed_dictionary_rows": null,
+          "indexed_usdc": false,
+          "instructions": 0,
+          "iteration": 0,
+          "oracle": "UsdcReport { blocks_seen: 8192, transactions_seen: 8925832, skipped_failed_transactions: 341094, matching_transactions: 174958, pre_rows: 452563, post_rows: 453502, token_balances_unavailable_transactions: 0, token_mint_unavailable_transactions: 0, output_complete: true, coverage: CoverageReport { indeterminate_transactions: 0, sha256: [227, 176, 196, 66, 152, 252, 28, 20, 154, 251, 244, 200, 153, 111, 185, 36, 39, 174, 65, 228, 100, 155, 147, 76, 164, 149, 153, 27, 120, 82, 184, 85] }, output: OutputReport { schema: \"blockzilla-example-usdc-recorded-balance-exclude-failed/v2\", row_count: 906065, output_bytes: 123224884 } }",
+          "phase": "scan",
+          "seconds": 51.825592484,
+          "source_bytes": 1244860541,
+          "source_calls": 283,
+          "stages": {
+            "parallel": {
+              "blocks_per_job_limit": 4,
+              "declared_decoded_byte_limit": 268435456,
+              "effective_workers": 12,
+              "global_projected_block_bound": 96,
+              "input_buffer_capacity_bytes": 67108864,
+              "input_workers": 1,
+              "job_window_limit": 24,
+              "jobs": 2048,
+              "max_active_workers": 12,
+              "max_coordinator_pending_projected_blocks": 72,
+              "max_coordinator_pending_results": 18,
+              "max_in_flight_declared_decoded_bytes": 18941561,
+              "max_in_flight_jobs": 23,
+              "max_in_flight_owned_payload_bytes": 22995360,
+              "max_in_flight_transactions": 99931,
+              "max_owned_payload_block_bytes": 531520,
+              "max_result_channel_backlog": 12,
+              "projected_blocks": 8192,
+              "requested_workers": 12,
+              "transaction_limit": 100000
+            },
+            "path": "dense",
+            "registry": {
+              "evictions": 0,
+              "hits": 1812130,
+              "misses": 0,
+              "mode": "full-registry",
+              "prefetch_read_bytes": 889551808,
+              "prefetch_read_calls": 27,
+              "resident_payload_bytes": 889551808,
+              "resolutions": 1812130
+            }
+          },
+          "tps": 172228.26739039505,
+          "transactions": 8925832,
+          "transport": {
+            "cache_downloads": 0,
+            "cache_hits": 0,
+            "cache_read_bytes": 0,
+            "cache_read_calls": 0,
+            "get_requests": 283,
+            "head_requests": 0,
+            "incomplete_body_retries": 0,
+            "network_body_bytes": 1244860541,
+            "server_error_retries": 0
+          },
+          "workers": 12,
+          "workload": "Usdc"
+        },
+        "setup": [
+          {
+            "identity": {
+              "binding": "87a3996e6fbf5c8bd839648f90eb08a234a19ba7a03d678c115636f0f4769753",
+              "block_count": 431858,
+              "cluster_id": null,
+              "epoch": 900,
+              "first_slot": 388800000,
+              "format": "indexer-v3",
+              "label": "https://blockzilla-archive-samples-v1.cheron-augustin.workers.dev/indexer-v3/",
+              "slots_per_epoch": 432000,
+              "verification": "object-set-bound"
+            },
+            "phase": "setup",
+            "seconds": 5.402715646,
+            "transport": {
+              "cache_downloads": 1,
+              "cache_hits": 0,
+              "cache_read_bytes": 107100848,
+              "cache_read_calls": 5,
+              "get_requests": 15,
+              "head_requests": 38,
+              "incomplete_body_retries": 0,
+              "network_body_bytes": 107101552,
+              "server_error_retries": 0
+            }
+          }
+        ],
+        "complete": {
+          "oracle": "UsdcReport { blocks_seen: 8192, transactions_seen: 8925832, skipped_failed_transactions: 341094, matching_transactions: 174958, pre_rows: 452563, post_rows: 453502, token_balances_unavailable_transactions: 0, token_mint_unavailable_transactions: 0, output_complete: true, coverage: CoverageReport { indeterminate_transactions: 0, sha256: [227, 176, 196, 66, 152, 252, 28, 20, 154, 251, 244, 200, 153, 111, 185, 36, 39, 174, 65, 228, 100, 155, 147, 76, 164, 149, 153, 27, 120, 82, 184, 85] }, output: OutputReport { schema: \"blockzilla-example-usdc-recorded-balance-exclude-failed/v2\", row_count: 906065, output_bytes: 123224884 } }",
+          "phase": "complete",
+          "seconds": 57.228481899,
+          "transport": {
+            "cache_downloads": 1,
+            "cache_hits": 0,
+            "cache_read_bytes": 107100848,
+            "cache_read_calls": 5,
+            "get_requests": 298,
+            "head_requests": 38,
+            "incomplete_body_retries": 0,
+            "network_body_bytes": 1351962093,
+            "server_error_retries": 0
+          }
+        },
+        "result_sha256": "6fdb1538285f686adf9bb6b17591ac78cd933d3fd7ed41415b626a8b76dddc09"
+      },
+      {
+        "name": "11-network-usdc-window",
+        "mode": "network",
+        "workload": "usdc",
+        "legacy": false,
+        "blocks": 8192,
+        "command": [
+          "/volume2/blockzilla-bench/control/v3-network-window-20260909/reader-profile",
+          "--format",
+          "v3",
+          "--epoch",
+          "900",
+          "--workload",
+          "usdc",
+          "--blocks",
+          "8192",
+          "--workers",
+          "12",
+          "--iterations",
+          "1",
+          "--warmups",
+          "0",
+          "--origin",
+          "https://blockzilla-archive-samples-v1.cheron-augustin.workers.dev",
+          "--cache-root",
+          "/volume2/blockzilla-bench/control/v3-network-window-20260909/results/11-network-usdc-window/cache"
+        ],
+        "started_at": 1788949942.4824936,
+        "pid": 3030620,
+        "exit_code": 0,
+        "cpu_seconds": 14.157143,
+        "peak_rss_kib": 1893512,
+        "elapsed_s": 21.007571935653687,
+        "valid": true,
+        "scan": {
+          "allocation_bytes": null,
+          "allocation_calls": null,
+          "allocation_size_buckets": null,
+          "blocks": 8192,
+          "format": "V3",
+          "indexed_dictionary_bytes": null,
+          "indexed_dictionary_rows": null,
+          "indexed_usdc": false,
+          "instructions": 0,
+          "iteration": 0,
+          "oracle": "UsdcReport { blocks_seen: 8192, transactions_seen: 8925832, skipped_failed_transactions: 341094, matching_transactions: 174958, pre_rows: 452563, post_rows: 453502, token_balances_unavailable_transactions: 0, token_mint_unavailable_transactions: 0, output_complete: true, coverage: CoverageReport { indeterminate_transactions: 0, sha256: [227, 176, 196, 66, 152, 252, 28, 20, 154, 251, 244, 200, 153, 111, 185, 36, 39, 174, 65, 228, 100, 155, 147, 76, 164, 149, 153, 27, 120, 82, 184, 85] }, output: OutputReport { schema: \"blockzilla-example-usdc-recorded-balance-exclude-failed/v2\", row_count: 906065, output_bytes: 123224884 } }",
+          "phase": "scan",
+          "seconds": 15.034612817,
+          "source_bytes": 1244860541,
+          "source_calls": 71,
+          "stages": {
+            "parallel": {
+              "blocks_per_job_limit": 4,
+              "declared_decoded_byte_limit": 268435456,
+              "effective_workers": 12,
+              "global_projected_block_bound": 96,
+              "input_buffer_capacity_bytes": 237335749,
+              "input_workers": 7,
+              "job_window_limit": 24,
+              "jobs": 2048,
+              "max_active_workers": 12,
+              "max_coordinator_pending_projected_blocks": 68,
+              "max_coordinator_pending_results": 17,
+              "max_in_flight_declared_decoded_bytes": 19057056,
+              "max_in_flight_jobs": 23,
+              "max_in_flight_owned_payload_bytes": 22067040,
+              "max_in_flight_transactions": 100000,
+              "max_owned_payload_block_bytes": 530560,
+              "max_result_channel_backlog": 12,
+              "projected_blocks": 8192,
+              "requested_workers": 12,
+              "transaction_limit": 100000
+            },
+            "path": "dense",
+            "registry": {
+              "evictions": 0,
+              "hits": 1812130,
+              "misses": 0,
+              "mode": "full-registry",
+              "prefetch_read_bytes": 889551808,
+              "prefetch_read_calls": 27,
+              "resident_payload_bytes": 889551808,
+              "resolutions": 1812130
+            }
+          },
+          "tps": 593685.5247717019,
+          "transactions": 8925832,
+          "transport": {
+            "cache_downloads": 0,
+            "cache_hits": 0,
+            "cache_read_bytes": 0,
+            "cache_read_calls": 0,
+            "get_requests": 71,
+            "head_requests": 0,
+            "incomplete_body_retries": 0,
+            "network_body_bytes": 1244860541,
+            "server_error_retries": 0
+          },
+          "workers": 12,
+          "workload": "Usdc"
+        },
+        "setup": [
+          {
+            "identity": {
+              "binding": "87a3996e6fbf5c8bd839648f90eb08a234a19ba7a03d678c115636f0f4769753",
+              "block_count": 431858,
+              "cluster_id": null,
+              "epoch": 900,
+              "first_slot": 388800000,
+              "format": "indexer-v3",
+              "label": "https://blockzilla-archive-samples-v1.cheron-augustin.workers.dev/indexer-v3/",
+              "slots_per_epoch": 432000,
+              "verification": "object-set-bound"
+            },
+            "phase": "setup",
+            "seconds": 5.906317232,
+            "transport": {
+              "cache_downloads": 1,
+              "cache_hits": 0,
+              "cache_read_bytes": 107100848,
+              "cache_read_calls": 5,
+              "get_requests": 15,
+              "head_requests": 38,
+              "incomplete_body_retries": 0,
+              "network_body_bytes": 107101552,
+              "server_error_retries": 0
+            }
+          }
+        ],
+        "complete": {
+          "oracle": "UsdcReport { blocks_seen: 8192, transactions_seen: 8925832, skipped_failed_transactions: 341094, matching_transactions: 174958, pre_rows: 452563, post_rows: 453502, token_balances_unavailable_transactions: 0, token_mint_unavailable_transactions: 0, output_complete: true, coverage: CoverageReport { indeterminate_transactions: 0, sha256: [227, 176, 196, 66, 152, 252, 28, 20, 154, 251, 244, 200, 153, 111, 185, 36, 39, 174, 65, 228, 100, 155, 147, 76, 164, 149, 153, 27, 120, 82, 184, 85] }, output: OutputReport { schema: \"blockzilla-example-usdc-recorded-balance-exclude-failed/v2\", row_count: 906065, output_bytes: 123224884 } }",
+          "phase": "complete",
+          "seconds": 20.941068059,
+          "transport": {
+            "cache_downloads": 1,
+            "cache_hits": 0,
+            "cache_read_bytes": 107100848,
+            "cache_read_calls": 5,
+            "get_requests": 86,
+            "head_requests": 38,
+            "incomplete_body_retries": 0,
+            "network_body_bytes": 1351962093,
+            "server_error_retries": 0
+          }
+        },
+        "result_sha256": "3f64b9a4c601b599fda6b54ae48bcc087db4b0bcf2d392d4fa6345613793d090"
+      }
+    ],
+    "current": "11-network-usdc-window",
+    "finished_at": 1788949963.4935596,
+    "archive_after": {
+      "indexer-v3/900/archive-v2-meta.wincode": [
+        66,
+        1787916007167732302,
+        582,
+        73
+      ],
+      "indexer-v3/900/blockhash_registry.bin": [
+        13819456,
+        1787916007351733044,
+        583,
+        73
+      ],
+      "indexer-v3/900/poh.wincode": [
+        9681441209,
+        1787916133852244628,
+        584,
+        73
+      ],
+      "indexer-v3/900/prev_blockhash_tail.bin": [
+        12000,
+        1787916134168245907,
+        585,
+        73
+      ],
+      "indexer-v3/900/registry.bin": [
+        889551808,
+        1787916139420267161,
+        586,
+        73
+      ],
+      "indexer-v3/900/registry.mphf": [
+        341082690,
+        1787916143772284772,
+        587,
+        73
+      ],
+      "indexer-v3/900/shredding.wincode": [
+        792857572,
+        1787916153316323401,
+        588,
+        73
+      ],
+      "indexer-v3/900/signatures.bin": [
+        32380385536,
+        1787916396885216475,
+        589,
+        73
+      ],
+      "indexer-v3/900/vote_hash_registry.bin": [
+        28070770,
+        1787916397497218492,
+        590,
+        73
+      ],
+      "indexer-v3/900/archive-v2-standalone-account-postings-adaptive-v3.control": [
+        120,
+        1787956108980251633,
+        736,
+        73
+      ],
+      "indexer-v3/900/archive-v2-standalone-account-postings-adaptive-v3.coverage": [
+        46512,
+        1787956108928251459,
+        737,
+        73
+      ],
+      "indexer-v3/900/archive-v2-standalone-account-postings-adaptive-v3.pages": [
+        4688130905,
+        1787956108884251310,
+        738,
+        73
+      ],
+      "indexer-v3/900/archive-v2-standalone-balances.wincode": [
+        10248823687,
+        1787955464302136009,
+        739,
+        73
+      ],
+      "indexer-v3/900/archive-v2-standalone-block-rewards.wincode": [
+        31853726,
+        1787955464302136009,
+        740,
+        73
+      ],
+      "indexer-v3/900/archive-v2-standalone-blocks.index": [
+        107100848,
+        1787955464302136009,
+        741,
+        73
+      ],
+      "indexer-v3/900/archive-v2-standalone-inner-instructions.wincode": [
+        12373908023,
+        1787955464302136009,
+        742,
+        73
+      ],
+      "indexer-v3/900/archive-v2-standalone-loaded-addresses.wincode": [
+        990259848,
+        1787955464302136009,
+        743,
+        73
+      ],
+      "indexer-v3/900/archive-v2-standalone-logs.wincode": [
+        13733124021,
+        1787955464302136009,
+        744,
+        73
+      ],
+      "indexer-v3/900/archive-v2-standalone-messages.wincode": [
+        13201297110,
+        1787955464302136009,
+        745,
+        73
+      ],
+      "indexer-v3/900/archive-v2-standalone-outcomes.wincode": [
+        1128420825,
+        1787955464302136009,
+        746,
+        73
+      ],
+      "indexer-v3/900/archive-v2-standalone-raw-metadata-fallbacks.wincode": [
+        64,
+        1787954960376480988,
+        747,
+        73
+      ],
+      "indexer-v3/900/archive-v2-standalone-token-balances.wincode": [
+        4350091593,
+        1787955464302136009,
+        748,
+        73
+      ],
+      "indexer-v3/900/archive-v2-standalone-transaction-directory.wincode": [
+        1341913145,
+        1787955464302136009,
+        749,
+        73
+      ],
+      "indexer-v3/900/archive-v2-standalone-transaction-rewards.wincode": [
+        64,
+        1787954960376480988,
+        750,
+        73
+      ],
+      "compact-v2/900/archive-v2-blocks.index": [
+        22456652,
+        1787923194103928100,
+        580,
+        73
+      ],
+      "compact-v2/900/archive-v2-blocks.zstd": [
+        59899113036,
+        1787923193583925925,
+        581,
+        73
+      ],
+      "compact-v2/900/archive-v2-meta.wincode": [
+        66,
+        1787916007167732302,
+        582,
+        73
+      ],
+      "compact-v2/900/blockhash_registry.bin": [
+        13819456,
+        1787916007351733044,
+        583,
+        73
+      ],
+      "compact-v2/900/poh.wincode": [
+        9681441209,
+        1787916133852244628,
+        584,
+        73
+      ],
+      "compact-v2/900/prev_blockhash_tail.bin": [
+        12000,
+        1787916134168245907,
+        585,
+        73
+      ],
+      "compact-v2/900/registry.bin": [
+        889551808,
+        1787916139420267161,
+        586,
+        73
+      ],
+      "compact-v2/900/registry.mphf": [
+        341082690,
+        1787916143772284772,
+        587,
+        73
+      ],
+      "compact-v2/900/shredding.wincode": [
+        792857572,
+        1787916153316323401,
+        588,
+        73
+      ],
+      "compact-v2/900/signatures.bin": [
+        32380385536,
+        1787916396885216475,
+        589,
+        73
+      ],
+      "compact-v2/900/vote_hash_registry.bin": [
+        28070770,
+        1787916397497218492,
+        590,
+        73
+      ]
+    }
+  },
+  "manifest": {
+    "binary_sha256": "b7714fd8db5b0bfc6d849b7c7073d183d036583aa3f5d440e5bc8e44e78890b5",
+    "controller_sha256": "3ad11900848673307274dfa4da43690ee5f3aa058b85a450e40b2b0bbbd83beb",
+    "format": "v3",
+    "epoch": 900,
+    "count_blocks": 32768,
+    "application_blocks": 8192,
+    "decode_workers": 12,
+    "legacy_switch": "--v3-legacy-input",
+    "input_capacity_limit_bytes": 268435456
+  },
+  "verified_receipts": [
+    "00-local-count-window",
+    "01-local-count-legacy",
+    "02-network-count-legacy",
+    "03-network-count-window",
+    "04-network-count-window",
+    "05-network-count-legacy",
+    "06-network-transactions-legacy",
+    "07-network-transactions-window",
+    "08-network-transactions-window",
+    "09-network-transactions-legacy",
+    "10-network-usdc-legacy",
+    "11-network-usdc-window"
+  ],
+  "active_benchmark_pids": [],
+  "build": {
+    "source_sha256": {
+      "/Users/augustin/Developement/ferno/blockzilla-v1/crates/compact-v2/blockzilla-compact-v2-reader/src/signed_message.rs": "45869103fbbbca08f1145b57b76f985fe7242a69f2fd5353f17ddd1761199b98",
+      "/Users/augustin/Developement/ferno/blockzilla-v1/crates/compact-v2/blockzilla-compact-v2-reader/src/http_cache.rs": "59d88762886cf2501ab4e10e005e530729020990eb3708a0efa49774d5acb261",
+      "/Users/augustin/Developement/ferno/blockzilla-v1/crates/compact-v2/blockzilla-compact-v2-reader/src/archive_integrity.rs": "3b4c0657f10ce9b6cb570be7e778f992612dcac0ed6158541c07de9e7aa8b13e",
+      "/Users/augustin/Developement/ferno/blockzilla-v1/crates/compact-v2/blockzilla-compact-v2-reader/src/error.rs": "cbfa3d13a9669081a349955ae4f23d5b91903556de5bc20466c46623c75b8795",
+      "/Users/augustin/Developement/ferno/blockzilla-v1/crates/compact-v2/blockzilla-compact-v2-reader/src/source_decode.rs": "292f38522361e63403b5c55724d7e2a5df1d8bcd16a5a40b8fad1a4af9753cfa",
+      "/Users/augustin/Developement/ferno/blockzilla-v1/crates/compact-v2/blockzilla-compact-v2-reader/src/lib.rs": "94ee502fff2164a648da4ddd08728f40f5237a10aeb27c82f971b34a60bb51bb",
+      "/Users/augustin/Developement/ferno/blockzilla-v1/crates/compact-v2/blockzilla-compact-v2-reader/src/manifest.rs": "d53ec040d42e982f11ac95315f4be26d39b2a3d3efc299bb857b826d6c09e733",
+      "/Users/augustin/Developement/ferno/blockzilla-v1/crates/compact-v2/blockzilla-compact-v2-reader/src/query_keys.rs": "e1b13fa4cdea9f30ed7cc4895de382da065312db5d30b891aa3b4d2409240cba",
+      "/Users/augustin/Developement/ferno/blockzilla-v1/crates/compact-v2/blockzilla-compact-v2-reader/src/metadata_schema.rs": "626aebc04dbe6f848de0e0e9b6cc2fb5bbe9298e08739f47e45ad22aaa8a1bb2",
+      "/Users/augustin/Developement/ferno/blockzilla-v1/crates/compact-v2/blockzilla-compact-v2-reader/src/descriptor.rs": "136b33e4186dbaa5eaba3bc698edffc97b2d7e4ea7ba5757a1be42c540886de7",
+      "/Users/augustin/Developement/ferno/blockzilla-v1/crates/compact-v2/blockzilla-compact-v2-reader/src/account_references.rs": "03a183bddb9757efc6df0b183f3469d100489f1405b16917d6769a2110bd3598",
+      "/Users/augustin/Developement/ferno/blockzilla-v1/crates/compact-v2/blockzilla-compact-v2-reader/src/archive_signatures.rs": "dcf4aa1cefa8ffb4444133bbb4c033fa9e56c73b369d242d84e0b7380f72b0c0",
+      "/Users/augustin/Developement/ferno/blockzilla-v1/crates/compact-v2/blockzilla-compact-v2-reader/src/compact_query.rs": "5b5901b665f53398b443809515a59c03fb7a98346d185b5e4427cb31a56c52ae",
+      "/Users/augustin/Developement/ferno/blockzilla-v1/crates/compact-v2/blockzilla-compact-v2-reader/src/poh.rs": "5b9e1d537188274f0b224931e12b113e3cf48ea681eff9131107e8b88dac5777",
+      "/Users/augustin/Developement/ferno/blockzilla-v1/crates/compact-v2/blockzilla-compact-v2-reader/src/source.rs": "ef70652217a4d7502affaf07dc46a5206375e3152e95423a744b4f27376424ae",
+      "/Users/augustin/Developement/ferno/blockzilla-v1/crates/compact-v2/blockzilla-compact-v2-reader/src/metadata_projection.rs": "666839bea8f9d7b407893c6fbd021951150a029de20d3be5136e2a168e547c6c",
+      "/Users/augustin/Developement/ferno/blockzilla-v1/crates/compact-v2/blockzilla-compact-v2-reader/src/message_schema.rs": "5e3ef053fe38c9b7d8bd69f2cf0972ca905f777741e9c55252a6f551eb33e2a4",
+      "/Users/augustin/Developement/ferno/blockzilla-v1/crates/compact-v2/blockzilla-compact-v2-reader/src/message_projection.rs": "b70b0a1ca0ae2806c93c67e7fd1b7032f1a3a6ef603ca4b5b5ba99a631e3be3c",
+      "/Users/augustin/Developement/ferno/blockzilla-v1/crates/compact-v2/blockzilla-compact-v2-reader/src/http.rs": "7fe91f6991cd0c02a8c44c35f22b579de1630b8de63df05ea5ed1e2d69a810d5",
+      "/Users/augustin/Developement/ferno/blockzilla-v1/crates/compact-v2/blockzilla-compact-v2-reader/src/archive.rs": "222027998161199afb67386abe9b439ddb5a779ed11a745d62c62b905e7c6aaf",
+      "/Users/augustin/Developement/ferno/blockzilla-v1/crates/compact-v2/blockzilla-compact-v2-reader/src/blockhash.rs": "3173355764924c87b5c501f1d0f068072b10f605a62c8a6a7ea7a556b6fdaee7",
+      "/Users/augustin/Developement/ferno/blockzilla-v1/crates/compact-v2/blockzilla-compact-v2-reader/src/count_projection.rs": "4015740976e941937fe634bb8bffef76fa7099a80f4ef64e9c3513b3d40099e3",
+      "/Users/augustin/Developement/ferno/blockzilla-v1/crates/compact-v2/blockzilla-compact-v2-reader/src/reader.rs": "c3a0e467464bd1a05106661ec520bc4064e46814d617b9f595794594b5a0882c",
+      "/Users/augustin/Developement/ferno/blockzilla-v1/crates/compact-v2/blockzilla-compact-v2-reader/src/reader/pipeline_tests.rs": "900be07e5f6ae2dc6d6ff166b1d8d19ec16f2159c05ad7db4821a9ab895527f5",
+      "/Users/augustin/Developement/ferno/blockzilla-v1/crates/compact-v2/blockzilla-compact-v2-reader/src/compact_query/indexed_tokens.rs": "b0c4cbfd78c68f48f438a6cf213f722995f1121a85cffc2ed9cc152f2ebd260c",
+      "/Users/augustin/Developement/ferno/blockzilla-v1/crates/archive-v3/blockzilla-archive-v3-reader/src/lib.rs": "bf7565095edf65335942d26310ec6f39eba35aa730ce4ff7817b6a0d5a31e40d",
+      "/Users/augustin/Developement/ferno/blockzilla-v1/crates/archive-v3/blockzilla-archive-v3-reader/src/indexer_v3_query.rs": "02b5e3acbe69a97eea99946a8673d248128274fdd8acdb12c4c66dc930f3706e",
+      "/Users/augustin/Developement/ferno/blockzilla-v1/crates/archive-v3/blockzilla-archive-v3-reader/src/indexer_v3_candidates.rs": "0b96eae28b9c0058a686a2a772d42c52d17281ab74b2094c33711b1d41a85895",
+      "/Users/augustin/Developement/ferno/blockzilla-v1/crates/archive-v3/blockzilla-archive-v3-reader/src/indexer_v3_registry.rs": "1b74bd6aeb56865537cb17a618496548dbbf881d0154581ab0fe877db05e3410",
+      "/Users/augustin/Developement/ferno/blockzilla-v1/crates/archive-v3/blockzilla-archive-v3-reader/src/canonical.rs": "85dcb36c24ba3936374eabddd4b295a48a22588189257344b6f691fe83ce550a",
+      "/Users/augustin/Developement/ferno/blockzilla-v1/crates/archive-v3/blockzilla-archive-v3-reader/src/container.rs": "6cc390b1d517f8d909536093d19cae68aaa1e6cd62453245f13ca614c74415c6",
+      "/Users/augustin/Developement/ferno/blockzilla-v1/crates/archive-v3/blockzilla-archive-v3-reader/src/indexer_v3_query/network_input.rs": "153837c156bfd06e608bf8e1cbf850f1c0dee0a4b3eecaafad68622446408f97",
+      "/Users/augustin/Developement/ferno/blockzilla-v1/crates/archive-v3/blockzilla-archive-v3-reader/src/engine/standalone_v2.rs": "a2e3f3d4e6475b52682b0dbfd7e2c315ef9c4f6683f437f3d563679cb9f4332d",
+      "/Users/augustin/Developement/ferno/blockzilla-v1/crates/archive-v3/blockzilla-archive-v3-reader/src/engine/standalone_directory_v3.rs": "af03b8b69c0689b20545bd94117465bb0296d44a2a32d1121da8a547e944fd1d",
+      "/Users/augustin/Developement/ferno/blockzilla-v1/crates/archive-v3/blockzilla-archive-v3-reader/src/engine/standalone_account_postings.rs": "4d553fadfd208a25f7b393694e664551178c789d8a82101ea0025b64f4a17999",
+      "/Users/augustin/Developement/ferno/blockzilla-v1/crates/archive-v3/blockzilla-archive-v3-reader/src/engine/standalone_account_postings/block_group_role_summary_canary.rs": "db259e859817c1388061c41efd7da50f40db62c176b30b5cc084fd85d5404392",
+      "/Users/augustin/Developement/ferno/blockzilla-v1/crates/archive-v3/blockzilla-archive-v3-reader/src/engine/standalone_account_postings/block_group_measurement.rs": "4de84b555660e5f97583a76e0fa63d8c8300a64fe65ab7bdf8a7a037a5a6c520",
+      "/Users/augustin/Developement/ferno/blockzilla-v1/bench/reader-profile/src/main.rs": "6c26b388977939ab9bdc45335018ba4b5268d4c7517462c460dbed4204d7ff06"
+    },
+    "command": [
+      "cargo",
+      "build",
+      "--offline",
+      "--locked",
+      "--release",
+      "--target",
+      "x86_64-unknown-linux-musl",
+      "--jobs",
+      "4",
+      "-p",
+      "blockzilla-reader-profile",
+      "--bin",
+      "blockzilla-reader-profile"
+    ],
+    "started": 1788949161.2076008,
+    "state": "PASS",
+    "elapsed_s": 181.08358216285706,
+    "exit_code": 0,
+    "binary_sha256": "b7714fd8db5b0bfc6d849b7c7073d183d036583aa3f5d440e5bc8e44e78890b5"
+  },
+  "validation": {
+    "library_tests_passed": 142,
+    "public_api_tests_passed": 3,
+    "example_and_profile_check": "PASS",
+    "strict_clippy": "Fails on six pre-existing chunks_exact warnings; no warnings in the new input module.",
+    "post_build_changes": "Added explicit signature-vector capacity guard and strengthened the fixture to verify worker reduction under a smaller byte budget. No default configuration or valid data-path scheduling changed."
+  },
+  "final_source_sha256": {
+    "crates/compact-v2/blockzilla-compact-v2-reader/src/signed_message.rs": "45869103fbbbca08f1145b57b76f985fe7242a69f2fd5353f17ddd1761199b98",
+    "crates/compact-v2/blockzilla-compact-v2-reader/src/http_cache.rs": "59d88762886cf2501ab4e10e005e530729020990eb3708a0efa49774d5acb261",
+    "crates/compact-v2/blockzilla-compact-v2-reader/src/archive_integrity.rs": "3b4c0657f10ce9b6cb570be7e778f992612dcac0ed6158541c07de9e7aa8b13e",
+    "crates/compact-v2/blockzilla-compact-v2-reader/src/error.rs": "cbfa3d13a9669081a349955ae4f23d5b91903556de5bc20466c46623c75b8795",
+    "crates/compact-v2/blockzilla-compact-v2-reader/src/source_decode.rs": "292f38522361e63403b5c55724d7e2a5df1d8bcd16a5a40b8fad1a4af9753cfa",
+    "crates/compact-v2/blockzilla-compact-v2-reader/src/lib.rs": "94ee502fff2164a648da4ddd08728f40f5237a10aeb27c82f971b34a60bb51bb",
+    "crates/compact-v2/blockzilla-compact-v2-reader/src/manifest.rs": "d53ec040d42e982f11ac95315f4be26d39b2a3d3efc299bb857b826d6c09e733",
+    "crates/compact-v2/blockzilla-compact-v2-reader/src/query_keys.rs": "e1b13fa4cdea9f30ed7cc4895de382da065312db5d30b891aa3b4d2409240cba",
+    "crates/compact-v2/blockzilla-compact-v2-reader/src/metadata_schema.rs": "626aebc04dbe6f848de0e0e9b6cc2fb5bbe9298e08739f47e45ad22aaa8a1bb2",
+    "crates/compact-v2/blockzilla-compact-v2-reader/src/descriptor.rs": "136b33e4186dbaa5eaba3bc698edffc97b2d7e4ea7ba5757a1be42c540886de7",
+    "crates/compact-v2/blockzilla-compact-v2-reader/src/account_references.rs": "03a183bddb9757efc6df0b183f3469d100489f1405b16917d6769a2110bd3598",
+    "crates/compact-v2/blockzilla-compact-v2-reader/src/archive_signatures.rs": "dcf4aa1cefa8ffb4444133bbb4c033fa9e56c73b369d242d84e0b7380f72b0c0",
+    "crates/compact-v2/blockzilla-compact-v2-reader/src/compact_query.rs": "5b5901b665f53398b443809515a59c03fb7a98346d185b5e4427cb31a56c52ae",
+    "crates/compact-v2/blockzilla-compact-v2-reader/src/poh.rs": "5b9e1d537188274f0b224931e12b113e3cf48ea681eff9131107e8b88dac5777",
+    "crates/compact-v2/blockzilla-compact-v2-reader/src/source.rs": "ef70652217a4d7502affaf07dc46a5206375e3152e95423a744b4f27376424ae",
+    "crates/compact-v2/blockzilla-compact-v2-reader/src/metadata_projection.rs": "666839bea8f9d7b407893c6fbd021951150a029de20d3be5136e2a168e547c6c",
+    "crates/compact-v2/blockzilla-compact-v2-reader/src/message_schema.rs": "5e3ef053fe38c9b7d8bd69f2cf0972ca905f777741e9c55252a6f551eb33e2a4",
+    "crates/compact-v2/blockzilla-compact-v2-reader/src/message_projection.rs": "b70b0a1ca0ae2806c93c67e7fd1b7032f1a3a6ef603ca4b5b5ba99a631e3be3c",
+    "crates/compact-v2/blockzilla-compact-v2-reader/src/http.rs": "7fe91f6991cd0c02a8c44c35f22b579de1630b8de63df05ea5ed1e2d69a810d5",
+    "crates/compact-v2/blockzilla-compact-v2-reader/src/archive.rs": "222027998161199afb67386abe9b439ddb5a779ed11a745d62c62b905e7c6aaf",
+    "crates/compact-v2/blockzilla-compact-v2-reader/src/blockhash.rs": "3173355764924c87b5c501f1d0f068072b10f605a62c8a6a7ea7a556b6fdaee7",
+    "crates/compact-v2/blockzilla-compact-v2-reader/src/count_projection.rs": "4015740976e941937fe634bb8bffef76fa7099a80f4ef64e9c3513b3d40099e3",
+    "crates/compact-v2/blockzilla-compact-v2-reader/src/reader.rs": "c3a0e467464bd1a05106661ec520bc4064e46814d617b9f595794594b5a0882c",
+    "crates/compact-v2/blockzilla-compact-v2-reader/src/reader/pipeline_tests.rs": "900be07e5f6ae2dc6d6ff166b1d8d19ec16f2159c05ad7db4821a9ab895527f5",
+    "crates/compact-v2/blockzilla-compact-v2-reader/src/compact_query/indexed_tokens.rs": "b0c4cbfd78c68f48f438a6cf213f722995f1121a85cffc2ed9cc152f2ebd260c",
+    "crates/archive-v3/blockzilla-archive-v3-reader/src/lib.rs": "bf7565095edf65335942d26310ec6f39eba35aa730ce4ff7817b6a0d5a31e40d",
+    "crates/archive-v3/blockzilla-archive-v3-reader/src/indexer_v3_query.rs": "ecc2abac06fc9f29b205795b0f55b136d3eafd793ebc308bf085d31b6bbf98eb",
+    "crates/archive-v3/blockzilla-archive-v3-reader/src/indexer_v3_candidates.rs": "0b96eae28b9c0058a686a2a772d42c52d17281ab74b2094c33711b1d41a85895",
+    "crates/archive-v3/blockzilla-archive-v3-reader/src/indexer_v3_registry.rs": "1b74bd6aeb56865537cb17a618496548dbbf881d0154581ab0fe877db05e3410",
+    "crates/archive-v3/blockzilla-archive-v3-reader/src/canonical.rs": "85dcb36c24ba3936374eabddd4b295a48a22588189257344b6f691fe83ce550a",
+    "crates/archive-v3/blockzilla-archive-v3-reader/src/container.rs": "6cc390b1d517f8d909536093d19cae68aaa1e6cd62453245f13ca614c74415c6",
+    "crates/archive-v3/blockzilla-archive-v3-reader/src/indexer_v3_query/network_input.rs": "153837c156bfd06e608bf8e1cbf850f1c0dee0a4b3eecaafad68622446408f97",
+    "crates/archive-v3/blockzilla-archive-v3-reader/src/engine/standalone_v2.rs": "a2e3f3d4e6475b52682b0dbfd7e2c315ef9c4f6683f437f3d563679cb9f4332d",
+    "crates/archive-v3/blockzilla-archive-v3-reader/src/engine/standalone_directory_v3.rs": "af03b8b69c0689b20545bd94117465bb0296d44a2a32d1121da8a547e944fd1d",
+    "crates/archive-v3/blockzilla-archive-v3-reader/src/engine/standalone_account_postings.rs": "4d553fadfd208a25f7b393694e664551178c789d8a82101ea0025b64f4a17999",
+    "crates/archive-v3/blockzilla-archive-v3-reader/src/engine/standalone_account_postings/block_group_role_summary_canary.rs": "db259e859817c1388061c41efd7da50f40db62c176b30b5cc084fd85d5404392",
+    "crates/archive-v3/blockzilla-archive-v3-reader/src/engine/standalone_account_postings/block_group_measurement.rs": "4de84b555660e5f97583a76e0fa63d8c8300a64fe65ab7bdf8a7a037a5a6c520",
+    "bench/reader-profile/src/main.rs": "6c26b388977939ab9bdc45335018ba4b5268d4c7517462c460dbed4204d7ff06"
+  },
+  "verified_at_utc": "2026-09-09T10:35:26.091560+00:00"
+}

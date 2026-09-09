@@ -159,6 +159,8 @@ pub struct CompactV2ParallelRegistryReceipt {
 /// projection required by the common query SDK.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct CompactV2ParallelScanConfig {
+    /// Remote compressed window; None selects the legacy download batches.
+    pub network_input: Option<crate::NetworkInputConfig>,
     /// Parallel zstd-decode and canonical-projection workers.
     pub workers: usize,
     /// Largest complete registry that can be shared by all workers. Zero
@@ -172,6 +174,11 @@ impl CompactV2ParallelScanConfig {
     pub const fn new(workers: usize) -> Self {
         Self {
             workers,
+            network_input: Some(crate::NetworkInputConfig {
+                workers: 8,
+                range_bytes: 32 * 1024 * 1024,
+                max_buffer_bytes: 256 * 1024 * 1024,
+            }),
             max_full_registry_bytes: DEFAULT_COMPACT_V2_FULL_REGISTRY_BYTES,
         }
     }
@@ -714,7 +721,7 @@ impl<S: RangeSource> CompactV2InstructionSource<S> {
             requested_workers: config.workers,
             effective_workers: pipeline.effective_workers,
             max_active_workers: pipeline.max_active_workers,
-            compressed_buffer_count: parallel.compressed_buffer_count,
+            compressed_buffer_count: pipeline.input_buffer_count,
             max_projected_block_bytes: max_projected_block_bytes.load(Ordering::Relaxed),
             max_projected_batch_bytes: max_projected_batch_bytes.load(Ordering::Relaxed),
             registry: registry_receipt,
@@ -2257,6 +2264,7 @@ fn compact_v2_parallel_reader_config(
         )));
     }
     Ok(OrderedParallelBlockConfig {
+        network_input: config.network_input,
         decode_workers: config.workers,
         compressed_buffer_count: config
             .workers

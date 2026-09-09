@@ -59,6 +59,8 @@ pub struct CarArchiveOptions {
     pub http_window_chunks: usize,
     /// Bytes in each HTTP range except the final range.
     pub http_chunk_bytes: usize,
+    /// Recycle HTTP body vectors. Experimental; disabled by default.
+    pub reuse_http_body_buffers: bool,
 }
 
 impl Default for CarArchiveOptions {
@@ -69,6 +71,7 @@ impl Default for CarArchiveOptions {
             http_workers: http.workers,
             http_window_chunks: http.window_chunks,
             http_chunk_bytes: http.chunk_bytes,
+            reuse_http_body_buffers: http.reuse_body_buffers,
         }
     }
 }
@@ -87,6 +90,7 @@ impl CarArchiveOptions {
             workers: self.http_workers,
             window_chunks: self.http_window_chunks,
             chunk_bytes: self.http_chunk_bytes,
+            reuse_body_buffers: self.reuse_http_body_buffers,
             allow_http: self.allow_insecure_http,
             ..CarHttpOptions::default()
         };
@@ -1253,6 +1257,7 @@ mod tests {
         assert_eq!(options.http_workers, expected.workers);
         assert_eq!(options.http_window_chunks, expected.window_chunks);
         assert_eq!(options.http_chunk_bytes, expected.chunk_bytes);
+        assert!(!options.reuse_http_body_buffers);
         assert_eq!(
             options.http_body_window_bytes().unwrap(),
             expected.body_window_bytes().unwrap()
@@ -1265,12 +1270,14 @@ mod tests {
             http_workers: 2,
             http_window_chunks: 4,
             http_chunk_bytes: 1 << 20,
+            reuse_http_body_buffers: true,
             ..CarArchiveOptions::default()
         };
         let http = options.validated_http_options().unwrap();
         assert_eq!(http.workers, 2);
         assert_eq!(http.window_chunks, 4);
         assert_eq!(http.chunk_bytes, 1 << 20);
+        assert!(http.reuse_body_buffers);
         assert_eq!(options.http_body_window_bytes().unwrap(), 4 << 20);
     }
 

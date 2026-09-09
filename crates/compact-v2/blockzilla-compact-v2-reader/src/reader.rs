@@ -128,6 +128,26 @@ pub const MAX_ORDERED_PARALLEL_RETAINED_DECOMPRESSED_BYTES: usize = 1024 * 1024 
 
 static NEXT_READER_ID: AtomicU64 = AtomicU64::new(1);
 
+/// Network download geometry, independent of decoded-block admission limits.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct NetworkInputConfig {
+    pub workers: usize,
+    /// Target range size; must not exceed `max_buffer_bytes`.
+    pub range_bytes: usize,
+    /// Includes free, downloading, queued and decoder-held compressed buffers.
+    pub max_buffer_bytes: usize,
+}
+
+impl Default for NetworkInputConfig {
+    fn default() -> Self {
+        Self {
+            workers: 8,
+            range_bytes: 32 * 1024 * 1024,
+            max_buffer_bytes: 256 * 1024 * 1024,
+        }
+    }
+}
+
 /// Bounded resources for monotonic block I/O with parallel borrowed decoding.
 ///
 /// Local input reads frame-aligned ranges serially. Remote input uses bounded
@@ -136,6 +156,8 @@ static NEXT_READER_ID: AtomicU64 = AtomicU64::new(1);
 /// publishes owned projection results in exact block-index order.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct OrderedParallelBlockConfig {
+    /// Opt-in remote input window. Local sources keep their existing read plan.
+    pub network_input: Option<NetworkInputConfig>,
     /// Target compressed bytes in one frame-aligned read. The reader's
     /// admitted `prefetch_bytes` option is an additional upper bound. One
     /// frame is always admitted when it alone is larger than this target.
@@ -162,6 +184,7 @@ pub struct OrderedParallelBlockConfig {
 impl Default for OrderedParallelBlockConfig {
     fn default() -> Self {
         Self {
+            network_input: None,
             compressed_batch_target_bytes: DEFAULT_PREFETCH_BYTES,
             uncompressed_batch_budget_bytes: DEFAULT_MAX_BLOCK_BYTES,
             max_blocks_per_batch: 8_192,
@@ -179,6 +202,10 @@ impl Default for OrderedParallelBlockConfig {
 /// message, metadata, or transaction loops.
 #[derive(Debug, Default, Clone, Copy, PartialEq, Eq)]
 pub struct OrderedParallelBlockStats {
+    pub input_workers: usize,
+    pub input_buffer_count: usize,
+    /// Reserved compressed capacity for the remote window, zero for legacy input.
+    pub input_buffer_capacity_bytes: usize,
     pub block_count: u64,
     pub batch_count: u64,
     /// Distinct private workers that decoded at least one block.
@@ -1536,16 +1563,38 @@ impl<S: RangeSource> ArchiveReader<S> {
         if range.is_empty() {
             return Ok(OrderedParallelBlockStats::default());
         }
-        let plans = ordered_parallel_batch_plans(
+        let source_concurrency = self.source.recommended_read_concurrency();
+        let remote = config.network_input.filter(|_| source_concurrency > 1);
+        let mut plans = ordered_parallel_batch_plans(
             &self.index.rows,
             range.clone(),
             config
                 .compressed_batch_target_bytes
-                .min(self.options.prefetch_bytes),
+                .min(self.options.prefetch_bytes)
+                .min(remote.map_or(usize::MAX, |network| network.range_bytes)),
             config.uncompressed_batch_budget_bytes,
             config.max_blocks_per_batch,
         )
         .map_err(E::from)?;
+        let (input_workers, buffer_count, buffer_capacity) = if let Some(remote) = remote {
+            plans =
+                coalesce_network_plans(&plans, remote.range_bytes.min(self.options.prefetch_bytes))
+                    .map_err(E::from)?;
+            let capacity = plans.iter().map(|p| p.compressed_len).max().unwrap_or(0);
+            if capacity > remote.max_buffer_bytes {
+                return Err(E::from(Error::InvalidManifest(
+                    "one compressed frame exceeds the network input byte budget".into(),
+                )));
+            }
+            let count = remote.workers.min(remote.max_buffer_bytes / capacity);
+            (count, count, capacity)
+        } else {
+            (
+                source_concurrency.clamp(1, config.compressed_buffer_count.min(8)),
+                config.compressed_buffer_count,
+                0,
+            )
+        };
         let workers: Vec<_> = (0..config.decode_workers)
             .map(|worker| {
                 make_worker_state(worker).map(|caller| OrderedParallelWorker {
@@ -1559,13 +1608,13 @@ impl<S: RangeSource> ArchiveReader<S> {
                 })
             })
             .collect::<std::result::Result<_, E>>()?;
-        let (free_sender, free_receiver) = sync_channel(config.compressed_buffer_count);
-        for _ in 0..config.compressed_buffer_count {
+        let (free_sender, free_receiver) = sync_channel(buffer_count);
+        for _ in 0..buffer_count {
             free_sender
-                .send(Some(Vec::new()))
+                .send(Some(Vec::with_capacity(buffer_capacity)))
                 .expect("the new recycled-buffer channel has a receiver");
         }
-        let (ready_sender, ready_receiver) = sync_channel(config.compressed_buffer_count);
+        let (ready_sender, ready_receiver) = sync_channel(buffer_count);
         let window = OrderedRollingWindow::<Output, E>::new(range.clone(), config, free_sender);
         let active_workers = AtomicUsize::new(0);
         let max_active_workers = AtomicUsize::new(0);
@@ -1677,10 +1726,6 @@ impl<S: RangeSource> ArchiveReader<S> {
                         window: &window,
                         armed: true,
                     };
-                    let input_workers = self
-                        .source
-                        .recommended_read_concurrency()
-                        .clamp(1, config.compressed_buffer_count.min(8));
                     let result = if input_workers == 1 {
                         produce_ordered_compressed_batches(
                             self,
@@ -1789,6 +1834,9 @@ impl<S: RangeSource> ArchiveReader<S> {
                     "ordered block producer stopped before the requested range was complete".into(),
                 )));
             }
+            stats.input_workers = input_workers;
+            stats.input_buffer_count = buffer_count;
+            stats.input_buffer_capacity_bytes = buffer_count * buffer_capacity;
             stats.block_count = (range.end - range.start) as u64;
             stats.batch_count = dispatch_stats.batch_count;
             stats.max_blocks_per_batch = dispatch_stats.max_blocks_per_batch;
@@ -2137,6 +2185,19 @@ fn validate_ordered_parallel_config(config: OrderedParallelBlockConfig) -> Resul
             "ordered parallel block limits and worker counts must be non-zero".into(),
         ));
     }
+    if let Some(network) = config.network_input
+        && (!(1..=16).contains(&network.workers)
+            || network.range_bytes == 0
+            || network.range_bytes > MAX_GATEWAY_RANGE_BYTES
+            || network.range_bytes > network.max_buffer_bytes
+            || network.max_buffer_bytes == 0
+            || network.max_buffer_bytes > 1024 * 1024 * 1024)
+    {
+        return Err(Error::InvalidManifest(
+            "invalid network input workers, range, or byte budget (range must fit the budget)"
+                .into(),
+        ));
+    }
     if config.decode_workers > MAX_ORDERED_PARALLEL_DECODE_WORKERS {
         return Err(Error::InvalidManifest(format!(
             "ordered parallel decode_workers {} exceeds the {MAX_ORDERED_PARALLEL_DECODE_WORKERS} worker limit",
@@ -2256,6 +2317,44 @@ fn ordered_parallel_batch_plans(
         start = end;
     }
     Ok(plans)
+}
+
+// Merge already validated decode plans without enlarging the rolling output
+// window. Frames remain indivisible and adjacent; no unselected gap is fetched.
+fn coalesce_network_plans(
+    plans: &[OrderedParallelBatchPlan],
+    target: usize,
+) -> Result<Vec<OrderedParallelBatchPlan>> {
+    let mut merged: Vec<OrderedParallelBatchPlan> = Vec::with_capacity(plans.len());
+    for plan in plans {
+        if let Some(last) = merged.last_mut() {
+            let bytes = last
+                .compressed_len
+                .checked_add(plan.compressed_len)
+                .ok_or(Error::Overflow("network compressed range"))?;
+            if last.row_end == plan.row_start
+                && last
+                    .compressed_offset
+                    .checked_add(last.compressed_len as u64)
+                    == Some(plan.compressed_offset)
+                && bytes <= target
+            {
+                last.row_end = plan.row_end;
+                last.compressed_len = bytes;
+                last.declared_uncompressed_bytes = last
+                    .declared_uncompressed_bytes
+                    .checked_add(plan.declared_uncompressed_bytes)
+                    .ok_or(Error::Overflow("network declared bytes"))?;
+                last.transaction_count = last
+                    .transaction_count
+                    .checked_add(plan.transaction_count)
+                    .ok_or(Error::Overflow("network transaction count"))?;
+                continue;
+            }
+        }
+        merged.push(*plan);
+    }
+    Ok(merged)
 }
 
 struct OrderedReadyBatch {
@@ -2860,9 +2959,12 @@ fn dispatch_ordered_compressed_batches<Output, E>(
         });
         // Logical groups retain the existing batch statistics. They no longer
         // impose a completion or delivery barrier between adjacent groups.
-        for group_start in (expected.row_start..expected.row_end).step_by(4 * config.decode_workers)
+        for group_start in (expected.row_start..expected.row_end)
+            .step_by(config.max_blocks_per_batch.min(4 * config.decode_workers))
         {
-            let group_end = (group_start + 4 * config.decode_workers).min(expected.row_end);
+            let group_end = (group_start
+                + config.max_blocks_per_batch.min(4 * config.decode_workers))
+            .min(expected.row_end);
             stats.max_blocks_per_batch = stats.max_blocks_per_batch.max(group_end - group_start);
             stats.max_transactions_per_batch = stats.max_transactions_per_batch.max(
                 rows[group_start..group_end]

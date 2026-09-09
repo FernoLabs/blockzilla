@@ -733,4 +733,176 @@ mod incremental_pipeline_regressions {
             assert!(error.to_string().contains("panic"));
         });
     }
+
+    #[test]
+    fn network_window_coalesces_reads_without_expanding_decode_admission() {
+        assert!(
+            validate_ordered_parallel_config(OrderedParallelBlockConfig {
+                network_input: Some(NetworkInputConfig {
+                    range_bytes: 32 * 1024 * 1024,
+                    max_buffer_bytes: 16 * 1024 * 1024,
+                    ..NetworkInputConfig::default()
+                }),
+                ..OrderedParallelBlockConfig::default()
+            })
+            .is_err(),
+            "reject ranges larger than the input budget before starting workers"
+        );
+        #[derive(Clone)]
+        struct Remote {
+            inner: LocalRangeSource,
+            calls: Arc<Mutex<Vec<(u64, usize)>>>,
+            active: Arc<AtomicUsize>,
+            first_offset: u64,
+            started: Arc<(Mutex<bool>, Condvar)>,
+            fail_later: bool,
+        }
+        impl RangeSource for Remote {
+            fn recommended_read_concurrency(&self) -> usize {
+                8
+            }
+            fn size(&self, object: &str) -> SourceResult<Option<u64>> {
+                self.inner.size(object)
+            }
+            fn read_range(
+                &self,
+                object: &str,
+                offset: u64,
+                length: usize,
+            ) -> SourceResult<Vec<u8>> {
+                self.inner.read_range(object, offset, length)
+            }
+            fn read_range_into(
+                &self,
+                object: &str,
+                offset: u64,
+                length: usize,
+                bytes: &mut Vec<u8>,
+            ) -> SourceResult<()> {
+                if object != BLOCKS_FILE {
+                    return self.inner.read_range_into(object, offset, length, bytes);
+                }
+                self.active.fetch_add(1, Ordering::SeqCst);
+                self.calls.lock().unwrap().push((offset, length));
+                let (lock, changed) = &*self.started;
+                if offset == self.first_offset {
+                    let (ready, timeout) = changed
+                        .wait_timeout_while(lock.lock().unwrap(), DEADLOCK_GUARD, |ready| !*ready)
+                        .unwrap();
+                    assert!(
+                        *ready && !timeout.timed_out(),
+                        "later input never overlapped the first range"
+                    );
+                } else {
+                    *lock.lock().unwrap() = true;
+                    changed.notify_all();
+                }
+                let result = if self.fail_later && offset != self.first_offset {
+                    Err(SourceError::Protocol(
+                        "injected network window failure".into(),
+                    ))
+                } else {
+                    self.inner.read_range_into(object, offset, length, bytes)
+                };
+                self.active.fetch_sub(1, Ordering::SeqCst);
+                result
+            }
+        }
+        for (fail_later, stop_sink) in [(false, false), (true, false), (false, true)] {
+            with_completion_watchdog(move || {
+                let fixture = Fixture::parallel_blocks(96);
+                let local = ArchiveReader::open(fixture.source()).unwrap();
+                let selected = 3..93;
+                let first = local.index().rows[selected.start].compressed_offset;
+                let target = local
+                    .index()
+                    .rows
+                    .iter()
+                    .map(|r| r.compressed_len as usize)
+                    .max()
+                    .unwrap()
+                    * 3;
+                let source = Remote {
+                    inner: fixture.source(),
+                    calls: Arc::new(Mutex::new(Vec::new())),
+                    active: Arc::new(AtomicUsize::new(0)),
+                    first_offset: first,
+                    started: Arc::new((Mutex::new(false), Condvar::new())),
+                    fail_later,
+                };
+                let archive = ArchiveReader::open_with_options(
+                    source.clone(),
+                    OpenOptions {
+                        hash_verification: HashVerification::SizesOnly,
+                        ..OpenOptions::default()
+                    },
+                )
+                .unwrap();
+                let mut consumed = Vec::new();
+                let result: Result<_> = archive.process_borrowed_blocks_parallel_ordered(
+                    selected.clone(),
+                    OrderedParallelBlockConfig {
+                        network_input: Some(NetworkInputConfig {
+                            workers: 8,
+                            range_bytes: target,
+                            max_buffer_bytes: 2 * target,
+                        }),
+                        decode_workers: 4,
+                        max_blocks_per_batch: 1,
+                        uncompressed_batch_budget_bytes: 1,
+                        ..OrderedParallelBlockConfig::default()
+                    },
+                    |_| Ok(()),
+                    |_, row, _| Ok(row),
+                    |row, output| {
+                        assert_eq!(row, output);
+                        consumed.push(row);
+                        if stop_sink {
+                            return Err(Error::InvalidIndex("sink stopped".into()));
+                        }
+                        Ok(())
+                    },
+                );
+                assert_eq!(
+                    source.active.load(Ordering::SeqCst),
+                    0,
+                    "input thread escaped cancellation/join"
+                );
+                assert!(!consumed.is_empty());
+                assert_eq!(
+                    consumed,
+                    (selected.start..selected.start + consumed.len()).collect::<Vec<_>>()
+                );
+                if fail_later || stop_sink {
+                    assert!(result.is_err());
+                    return;
+                }
+                let stats = result.unwrap();
+                assert_eq!(consumed, selected.clone().collect::<Vec<_>>());
+                assert_eq!(
+                    stats.max_in_flight_blocks, 1,
+                    "oversized decoded blocks must run alone"
+                );
+                assert!(stats.input_buffer_capacity_bytes <= 2 * target);
+                assert!(stats.input_workers >= 2 && stats.input_workers < 8);
+                let mut reads = source.calls.lock().unwrap().clone();
+                reads.sort_unstable();
+                assert!(
+                    reads.len() < selected.len() / 2,
+                    "network reads did not combine decode jobs"
+                );
+                let mut next = first;
+                for (offset, bytes) in reads {
+                    assert_eq!(offset, next);
+                    assert!(bytes <= target);
+                    next += bytes as u64;
+                }
+                let last = archive.index().rows[selected.end - 1];
+                assert_eq!(
+                    next,
+                    last.compressed_offset + u64::from(last.compressed_len)
+                );
+            });
+        }
+    }
 }

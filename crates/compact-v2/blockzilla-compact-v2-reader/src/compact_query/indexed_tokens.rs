@@ -422,7 +422,7 @@ impl<S: RangeSource> CompactV2InstructionSource<S> {
             requested_workers: config.workers,
             effective_workers: pipeline.effective_workers,
             max_active_workers: pipeline.max_active_workers,
-            compressed_buffer_count: parallel.compressed_buffer_count,
+            compressed_buffer_count: pipeline.input_buffer_count,
             max_projected_block_bytes: max_projected_block_bytes.load(Ordering::Relaxed),
             max_projected_batch_bytes: max_projected_batch_bytes.load(Ordering::Relaxed),
             registry: registry_receipt,

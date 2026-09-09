@@ -77,6 +77,23 @@ The [CAR decode probe](../../../bench/reader-profile/README-car-decode.md)
 compares owned metadata with a visitor that consumes all known fields. It also
 provides separate allocation counts and bounded HTTP concurrency tests.
 
+## Network input buffers
+
+The HTTP reader can reuse each consumed range-body vector for a later download.
+The default window holds eight 32 MiB bodies, with four concurrent requests.
+Only bytes beyond a vector's previous length are initialized; a successful
+response overwrites its full range before publication. Failed or incomplete
+responses never publish stale bytes. Range and identity checks remain active.
+
+The body window includes queued, downloading, completed, and consumer-held
+vectors. It does not bound HTTP/TLS memory, parser buffers, or decoder state.
+`CarHttpOptions::reuse_body_buffers` defaults to false. Set it to true to
+test buffer reuse, or set `CarArchiveOptions::reuse_http_body_buffers` when
+using the archive API. `CarHttpStats` reports
+body-vector growth count and cumulative added capacity. These counters exclude
+other allocations. Repeated epoch-900 tests reduced large allocations but
+did not improve throughput or peak RSS, so reuse remains experimental.
+
 ## Features
 
 - `zstd-native` enables `.car.zst` reading through the native `zstd` crate.

@@ -181,6 +181,7 @@ fn arguments_from(values: impl IntoIterator<Item = String>) -> Result<Arguments,
         http_workers: http_workers.parse()?,
         http_window_chunks: http_window_chunks.parse()?,
         http_chunk_bytes: http_chunk_bytes.parse()?,
+        ..CarArchiveOptions::default()
     };
     let _ = options.http_body_window_bytes()?;
     Ok(Arguments {

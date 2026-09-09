@@ -1,0 +1,8 @@
+{
+  "state": "RUNNING",
+  "current": "user-program-index",
+  "completed": 0,
+  "total": 3,
+  "checked_at": 1788955890.341867,
+  "progress": "[car/network/epoch-900/user-program-index] progress=scan blocks=201175 transactions=221332331 elapsed_s=1584.8 blocks_s=126.9 tps=139655.5 eta_s=1817.3"
+}

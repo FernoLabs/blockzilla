@@ -108,7 +108,7 @@ pub use reader::{
     HashVerification, IndeterminateReason, MAX_ORDERED_PARALLEL_BLOCKS_PER_BATCH,
     MAX_ORDERED_PARALLEL_COMPRESSED_BUFFERS, MAX_ORDERED_PARALLEL_DECODE_WORKERS,
     MAX_ORDERED_PARALLEL_RETAINED_DECOMPRESSED_BYTES, MAX_ORDERED_PARALLEL_TRANSACTIONS_PER_BATCH,
-    MAX_ORDERED_PARALLEL_UNCOMPRESSED_BATCH_BYTES, MetadataState, OpenOptions,
+    MAX_ORDERED_PARALLEL_UNCOMPRESSED_BATCH_BYTES, MetadataState, NetworkInputConfig, OpenOptions,
     OrderedParallelBlockConfig, OrderedParallelBlockStats, ProgramInvocationMatch,
     PubkeyReferenceMatch, RecycledBlockScratch, RecycledBlockStats, ScanIterator, ScannedBlock,
     ScannedTransaction, SelectorIndeterminateReason, SelectorOutcome, SignatureReference,

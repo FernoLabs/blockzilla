@@ -941,6 +941,17 @@ name = "blockzilla-dex-parser"
 version = "0.2.0"
 
 [[package]]
+name = "blockzilla-download-only"
+version = "0.2.0"
+dependencies = [
+ "anyhow",
+ "blake3",
+ "clap 4.6.6",
+ "reqwest 0.13.4",
+ "serde_json",
+]
+
+[[package]]
 name = "blockzilla-dump"
 version = "0.2.0"
 dependencies = [

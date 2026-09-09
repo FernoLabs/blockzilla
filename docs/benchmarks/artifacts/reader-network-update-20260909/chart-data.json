@@ -1,0 +1,209 @@
+{
+  "source_sha256": {
+    "v2-reader-window-20260909.json": "4550bf5bb52064cffd2ce1d5267e4c5f5d4319acfcce163a55ed99da8bb74bc8",
+    "v3-reader-window-20260909.json": "8494a55117f3cf8e436a1e5c5ce2d2a36080f7397f850ff60b57e41eba1b935f",
+    "car-reader-window-20260909.json": "c8d99bfb047b5e04fa211870163c7888a9844436ccfba7d17fc6a351f7a2e4ee"
+  },
+  "groups": [
+    {
+      "format": "v2",
+      "workload": "count",
+      "legacy": true,
+      "blocks_per_run": 32768,
+      "runs": 2,
+      "case_names": [
+        "02-network-count-legacy",
+        "05-network-count-legacy"
+      ],
+      "tps": 503043.59570246225,
+      "mbs": 62.98861065250836
+    },
+    {
+      "format": "v2",
+      "workload": "count",
+      "legacy": false,
+      "blocks_per_run": 32768,
+      "runs": 2,
+      "case_names": [
+        "03-network-count-window",
+        "04-network-count-window"
+      ],
+      "tps": 1195941.9261517422,
+      "mbs": 149.74988448901604
+    },
+    {
+      "format": "v2",
+      "workload": "transactions",
+      "legacy": true,
+      "blocks_per_run": 8192,
+      "runs": 2,
+      "case_names": [
+        "06-network-transactions-legacy",
+        "09-network-transactions-legacy"
+      ],
+      "tps": 366398.38148419786,
+      "mbs": 70.34290515628643
+    },
+    {
+      "format": "v2",
+      "workload": "transactions",
+      "legacy": false,
+      "blocks_per_run": 8192,
+      "runs": 2,
+      "case_names": [
+        "07-network-transactions-window",
+        "08-network-transactions-window"
+      ],
+      "tps": 651084.8444114702,
+      "mbs": 124.99836727883255
+    },
+    {
+      "format": "v2",
+      "workload": "usdc",
+      "legacy": true,
+      "blocks_per_run": 8192,
+      "runs": 1,
+      "case_names": [
+        "10-network-usdc-legacy"
+      ],
+      "tps": 561363.1308051309,
+      "mbs": 126.41251764980505
+    },
+    {
+      "format": "v2",
+      "workload": "usdc",
+      "legacy": false,
+      "blocks_per_run": 8192,
+      "runs": 1,
+      "case_names": [
+        "11-network-usdc-window"
+      ],
+      "tps": 1001212.9184729352,
+      "mbs": 225.46162863625653
+    },
+    {
+      "format": "v3",
+      "workload": "count",
+      "legacy": true,
+      "blocks_per_run": 32768,
+      "runs": 2,
+      "case_names": [
+        "02-network-count-legacy",
+        "05-network-count-legacy"
+      ],
+      "tps": 200371.65843355132,
+      "mbs": 12.549781846553527
+    },
+    {
+      "format": "v3",
+      "workload": "count",
+      "legacy": false,
+      "blocks_per_run": 32768,
+      "runs": 2,
+      "case_names": [
+        "03-network-count-window",
+        "04-network-count-window"
+      ],
+      "tps": 2615330.0649550045,
+      "mbs": 163.80471184652382
+    },
+    {
+      "format": "v3",
+      "workload": "transactions",
+      "legacy": true,
+      "blocks_per_run": 8192,
+      "runs": 2,
+      "case_names": [
+        "06-network-transactions-legacy",
+        "09-network-transactions-legacy"
+      ],
+      "tps": 485486.19913089357,
+      "mbs": 46.5640522593193
+    },
+    {
+      "format": "v3",
+      "workload": "transactions",
+      "legacy": false,
+      "blocks_per_run": 8192,
+      "runs": 2,
+      "case_names": [
+        "07-network-transactions-window",
+        "08-network-transactions-window"
+      ],
+      "tps": 1585552.5926375769,
+      "mbs": 152.07384662147695
+    },
+    {
+      "format": "v3",
+      "workload": "usdc",
+      "legacy": true,
+      "blocks_per_run": 8192,
+      "runs": 1,
+      "case_names": [
+        "10-network-usdc-legacy"
+      ],
+      "tps": 172228.26739039505,
+      "mbs": 24.020189279733234
+    },
+    {
+      "format": "v3",
+      "workload": "usdc",
+      "legacy": false,
+      "blocks_per_run": 8192,
+      "runs": 1,
+      "case_names": [
+        "11-network-usdc-window"
+      ],
+      "tps": 593685.5247717019,
+      "mbs": 82.79964081232649
+    }
+  ],
+  "car": [
+    {
+      "label": "4 workers / current",
+      "reuse": false,
+      "workers": 4,
+      "runs": 2,
+      "case_names": [
+        "00-network-w4-legacy",
+        "05-network-w4-legacy"
+      ],
+      "tps": 178148.61016695303,
+      "mbs": 196.5584538735594,
+      "mean_scan_seconds": 50.1032929285
+    },
+    {
+      "label": "4 workers / reuse",
+      "reuse": true,
+      "workers": 4,
+      "runs": 2,
+      "case_names": [
+        "01-network-w4-reuse",
+        "04-network-w4-reuse"
+      ],
+      "tps": 145545.03301549,
+      "mbs": 161.13276935459865,
+      "mean_scan_seconds": 61.326943387
+    },
+    {
+      "label": "8 workers / reuse",
+      "reuse": true,
+      "workers": 8,
+      "runs": 2,
+      "case_names": [
+        "02-network-w8-reuse",
+        "03-network-w8-reuse"
+      ],
+      "tps": 196722.609619914,
+      "mbs": 218.90071048802724,
+      "mean_scan_seconds": 45.3726799235
+    }
+  ],
+  "definitions": {
+    "tps": "Total transactions / combined scan seconds; setup excluded.",
+    "v2_v3_mbs": "Source bytes / combined scan seconds / 1e6; can include registry reads.",
+    "car_mbs": "Received HTTP body bytes / combined scan seconds / 1e6; includes read-ahead.",
+    "scope": "Epoch 900 prefixes. CAR fully decodes transactions and metadata. V2/V3 identities do not.",
+    "usdc": "V2 indexed and V3 standard are distinct workloads; one run per setting."
+  }
+}

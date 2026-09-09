@@ -83,7 +83,11 @@ pub const INDEXER_V3_PARALLEL_DECLARED_DECODED_BYTE_LIMIT: u64 = 256 << 20;
 pub const INDEXER_V3_PARALLEL_TRANSACTION_LIMIT: u64 = 100_000;
 /// Maximum semantic buffer capacity retained by one worker between jobs.
 pub const INDEXER_V3_PARALLEL_RETAINED_WORKSPACE_LIMIT: usize = 16 << 20;
-/// Shared compressed input, including queued and consumer-held groups.
+mod network_input;
+/// Remote input settings shared with V2; V3 targets the sum of selected planes and signatures.
+pub use blockzilla_compact_v2_reader::NetworkInputConfig as IndexerV3NetworkInputConfig;
+
+/// Previous input schedule: queued, active and consumer-held groups.
 const NETWORK_INPUT_BYTE_LIMIT: usize = 64 << 20;
 /// Keep download grouping independent from four-block decode admission.
 const NETWORK_INPUT_GROUP_BYTES: usize = 16 << 20;
@@ -218,6 +222,11 @@ pub struct IndexerV3SelectiveScanReceipt {
 /// Measured worker, job, and ordered-result-window data for one V3 scan.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq, serde::Serialize)]
 pub struct IndexerV3ParallelScanStats {
+    /// Remote loader count; zero for the local per-job path.
+    pub input_workers: usize,
+    /// Fixed reserved slot capacity for concurrent input, the credit ceiling
+    /// for legacy input, or zero for local per-job input.
+    pub input_buffer_capacity_bytes: usize,
     pub requested_workers: usize,
     pub effective_workers: usize,
     /// Maximum number of worker jobs active at the same time, including I/O.
@@ -307,6 +316,7 @@ pub type IndexerV3InstructionSourceResult<T> =
 /// exact selected message reconstruction needs them. Retained sidecars have no
 /// digest binding to the V3 ledger candidate.
 pub struct IndexerV3InstructionSource {
+    network_input: Option<IndexerV3NetworkInputConfig>,
     reader: Arc<Reader>,
     identity: SourceIdentity,
     scope: IndexerV3SourceScope,
@@ -1008,11 +1018,22 @@ impl IndexerV3InstructionSource {
 
         Ok(Self {
             reader: Arc::new(reader),
+            network_input: Some(IndexerV3NetworkInputConfig::default()),
             identity,
             scope,
             meter,
             context: ExactContext::new(shared_source, registry_entries, sidecars, message_schema),
         })
+    }
+
+    /// Configure concurrent remote input. None selects the previous input schedule.
+    pub fn set_network_input_config(
+        &mut self,
+        config: Option<IndexerV3NetworkInputConfig>,
+    ) -> blockzilla_model::Result<()> {
+        network_input::validate(config)?;
+        self.network_input = config;
+        Ok(())
     }
 
     pub const fn scope(&self) -> IndexerV3SourceScope {
@@ -1084,6 +1105,7 @@ impl IndexerV3InstructionSource {
     fn fork_for_parallel_scan(&self) -> Self {
         Self {
             reader: Arc::clone(&self.reader),
+            network_input: self.network_input,
             identity: self.identity.clone(),
             scope: self.scope,
             meter: Arc::clone(&self.meter),
@@ -2030,6 +2052,7 @@ impl IndexerV3InstructionSource {
         .then(|| Arc::clone(&self.context.source));
         let mut jobs = ParallelInputJobs::new(
             jobs,
+            self.network_input,
             self.context.source.recommended_read_concurrency() > 1,
             signature_source,
         )?;
@@ -2594,6 +2617,8 @@ impl IndexerV3InstructionSource {
                 };
             }
             totals.parallel = IndexerV3ParallelScanStats {
+                input_workers: jobs.input_workers,
+                input_buffer_capacity_bytes: jobs.input_buffer_capacity_bytes,
                 requested_workers: workers.get(),
                 effective_workers: worker_seen.into_iter().filter(|seen| *seen).count(),
                 max_active_workers: worker_activity.peak(),
@@ -3768,6 +3793,8 @@ fn validate_parallel_job_output(
 /// pool consumes shared compressed planes. One byte budget includes queued,
 /// active and consumer-held input. Sparse gaps are never filled.
 struct ParallelInputJobs {
+    input_workers: usize,
+    input_buffer_capacity_bytes: usize,
     local: Option<ParallelScanJobPlan>,
     receiver: Option<mpsc::Receiver<blockzilla_model::Result<VecDeque<ParallelScanJob>>>>,
     pending: VecDeque<ParallelScanJob>,
@@ -3810,29 +3837,34 @@ fn network_signature_bytes(
     Ok(bytes)
 }
 
-fn load_network_signatures(
+fn load_network_signatures_reusing(
     reader: &Reader,
     source: Option<&Arc<dyn RangeSource>>,
     range: Range<usize>,
+    reusable: Option<SignatureBatch>,
 ) -> IndexerV3InstructionSourceResult<Option<SignatureBatch>> {
     let Some(source) = source else {
         return Ok(None);
     };
     let bytes = network_signature_bytes(reader, range.clone(), true)
         .map_err(IndexerV3InstructionSourceError::Reader)?;
+    let capacity_limit = reusable.as_ref().map_or(bytes + SIGNATURE_BYTES, |batch| {
+        batch.signatures.capacity().saturating_mul(SIGNATURE_BYTES)
+    });
     let mut scan = SelectedBlockSignatureReader::for_contiguous_range(
         reader,
         Arc::clone(source),
         true,
         range.clone(),
     )?;
+    scan.batch = reusable;
     scan.load_batch()?;
     let batch = scan.batch.take().ok_or_else(|| {
         IndexerV3InstructionSourceError::Invalid("prefetched signature batch missing".into())
     })?;
     if batch.block_range != range
-        || batch.signatures.capacity().saturating_mul(SIGNATURE_BYTES)
-            > bytes.saturating_add(SIGNATURE_BYTES)
+        || batch.signatures.len().saturating_mul(SIGNATURE_BYTES) != bytes
+        || batch.signatures.capacity().saturating_mul(SIGNATURE_BYTES) > capacity_limit
     {
         return Err(IndexerV3InstructionSourceError::Invalid(
             "prefetched signature batch exceeds its range or byte credit".into(),
@@ -3843,6 +3875,18 @@ fn load_network_signatures(
 
 impl ParallelInputJobs {
     fn new(
+        plan: ParallelScanJobPlan,
+        config: Option<IndexerV3NetworkInputConfig>,
+        remote: bool,
+        signatures: Option<Arc<dyn RangeSource>>,
+    ) -> blockzilla_model::Result<Self> {
+        if let Some(config) = config.filter(|_| remote) {
+            return Self::concurrent(plan, config, signatures);
+        }
+        Self::legacy(plan, remote, signatures)
+    }
+
+    fn legacy(
         mut plan: ParallelScanJobPlan,
         remote: bool,
         signature_source: Option<Arc<dyn RangeSource>>,
@@ -3850,6 +3894,8 @@ impl ParallelInputJobs {
         let cancelled = Arc::new(AtomicBool::new(false));
         if !remote {
             return Ok(Self {
+                input_workers: 0,
+                input_buffer_capacity_bytes: 0,
                 local: Some(plan),
                 receiver: None,
                 pending: VecDeque::new(),
@@ -3978,10 +4024,11 @@ impl ParallelInputJobs {
                                                 "cannot create V3 plane reader: {e}"
                                             ))
                                         })?;
-                                    let signatures = load_network_signatures(
+                                    let signatures = load_network_signatures_reusing(
                                         &reader,
                                         signature_source.as_ref(),
                                         start..end,
+                                        None,
                                     );
                                     // Always join, including when the signature read fails.
                                     let semantic = semantic
@@ -4025,6 +4072,8 @@ impl ParallelInputJobs {
                 QueryError::InvalidStream(format!("cannot create V3 input producer: {e}"))
             })?;
         Ok(Self {
+            input_workers: 1,
+            input_buffer_capacity_bytes: NETWORK_INPUT_BYTE_LIMIT,
             local: None,
             receiver: Some(receiver),
             pending: VecDeque::new(),
@@ -7783,6 +7832,9 @@ mod tests {
             remote: bool,
             reads: Arc<Mutex<(usize, usize)>>,
             fail: Arc<AtomicBool>,
+            gate: Option<Arc<(Mutex<usize>, std::sync::Condvar)>>,
+            buffers:
+                Arc<Mutex<std::collections::HashMap<String, std::collections::HashSet<usize>>>>,
         }
         impl RangeSource for RemoteFixture {
             fn recommended_read_concurrency(&self) -> usize {
@@ -7805,7 +7857,32 @@ mod tests {
                 offset: u64,
                 bytes: &mut [u8],
             ) -> blockzilla_source::SourceResult<()> {
+                if object == Object::TransactionDirectory.file_name()
+                    && let Some(gate) = &self.gate
+                {
+                    let (lock, changed) = &**gate;
+                    let mut reads = lock.lock().unwrap();
+                    *reads += 1;
+                    changed.notify_all();
+                    if *reads == 1 {
+                        let (reads, timeout) = changed
+                            .wait_timeout_while(reads, std::time::Duration::from_secs(10), |n| {
+                                *n < 2
+                            })
+                            .unwrap();
+                        assert!(
+                            *reads >= 2 && !timeout.timed_out(),
+                            "V3 input reads did not overlap"
+                        );
+                    }
+                }
                 if object != INDEX_FILE {
+                    self.buffers
+                        .lock()
+                        .unwrap()
+                        .entry(object.to_owned())
+                        .or_default()
+                        .insert(bytes.as_ptr() as usize);
                     let mut reads = self.reads.lock().unwrap();
                     reads.0 += 1;
                     reads.1 += bytes.len();
@@ -7837,12 +7914,15 @@ mod tests {
         for sparse in [false, true] {
             let mut outputs = Vec::new();
             let mut reads = Vec::new();
-            for remote in [false, true] {
+            for (remote, legacy) in [(false, false), (true, false), (true, true)] {
                 let transport = RemoteFixture {
                     inner: LocalRangeSource::new(fixture.directory.path()),
                     remote,
                     reads: Arc::new(Mutex::new((0, 0))),
                     fail: Arc::new(AtomicBool::new(false)),
+                    gate: (remote && !legacy && !sparse)
+                        .then(|| Arc::new((Mutex::new(0), std::sync::Condvar::new()))),
+                    buffers: Default::default(),
                 };
                 let mut source = IndexerV3InstructionSource::open_operator_trusted_source(
                     Arc::new(transport.clone()),
@@ -7851,6 +7931,17 @@ mod tests {
                     "test-parallel-delay-first",
                 )
                 .unwrap();
+                source
+                    .set_network_input_config(if legacy {
+                        None
+                    } else {
+                        Some(IndexerV3NetworkInputConfig {
+                            workers: 8,
+                            range_bytes: 8192,
+                            max_buffer_bytes: 24576,
+                        })
+                    })
+                    .unwrap();
                 *transport.reads.lock().unwrap() = (0, 0);
                 let mut blocks = Vec::new();
                 let mut sink = OwnedBlockSink {
@@ -7877,11 +7968,26 @@ mod tests {
                         .unwrap();
                     assert_eq!(result.parallel.blocks_per_job_limit, 4);
                     assert_eq!(result.parallel.effective_workers, 12);
+                    if remote && !legacy {
+                        assert!((2..=3).contains(&result.parallel.input_workers));
+                        assert!(result.parallel.input_buffer_capacity_bytes <= 24576);
+                        assert!(
+                            transport
+                                .buffers
+                                .lock()
+                                .unwrap()
+                                .values()
+                                .all(|pointers| pointers.len() <= 3),
+                            "input vectors were not reused"
+                        );
+                    }
                 }
                 outputs.push(blocks);
                 reads.push(*transport.reads.lock().unwrap());
             }
             assert_eq!(outputs[0], outputs[1]);
+            assert_eq!(outputs[0], outputs[2]);
+            assert_eq!(reads[0].1, reads[2].1);
             assert_eq!(
                 reads[0].1, reads[1].1,
                 "prefetch must not read extra payload bytes"
@@ -7901,6 +8007,8 @@ mod tests {
                 remote: true,
                 reads: Arc::new(Mutex::new((0, 0))),
                 fail: Arc::new(AtomicBool::new(false)),
+                gate: None,
+                buffers: Default::default(),
             };
             let mut source = IndexerV3InstructionSource::open_operator_trusted_source(
                 Arc::new(transport.clone()),
@@ -7909,6 +8017,13 @@ mod tests {
                 "input-errors",
             )
             .unwrap();
+            source
+                .set_network_input_config(Some(IndexerV3NetworkInputConfig {
+                    workers: 3,
+                    range_bytes: 8192,
+                    max_buffer_bytes: 65536,
+                }))
+                .unwrap();
             transport.fail.store(fail_input, Ordering::Release);
             struct StopSink;
             impl BlockSink for StopSink {

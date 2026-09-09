@@ -114,13 +114,25 @@ registry cache for later jobs. A dense registry image has one shared
 allocation. The ordered merge moves each owned canonical block. It does not
 make a second copy of all canonical transactions.
 
-For remote sources that opt into concurrent input, a separate producer groups
-up to 128 adjacent selected blocks and 16 MiB of stored planes. Four-block
-decode jobs share the compressed input. A 64 MiB budget covers queued,
-active, and consumer-held prefetched buffers. Input can overlap decoding;
-plane reads within each group remain sequential. Sparse gaps are not filled.
-Sparse or oversized jobs use the existing per-job read path. Local input is
-unchanged. See the [network input design](../../../docs/design/network-reader-window.md).
+Remote input uses up to eight download workers. Each group contains up to
+32 MiB of selected stored planes and signatures, with a maximum of 8,192
+adjacent blocks. Four-block decode jobs borrow the same input. A 256 MiB limit
+covers the reserved semantic and signature buffer capacities across all input
+slots, including waiting and consumer-held slots. Per-plane capacity maxima
+can reduce the input worker count so the slots fit the budget. Plane reads
+within one group remain sequential; several groups download at the same time.
+The loader reuses a slot only after all input and semantic references return.
+Sparse gaps are not filled. Sparse or oversized jobs use the existing per-job
+read path and its separate limits. Local input is unchanged.
+
+`set_network_input_config(Some(IndexerV3NetworkInputConfig { .. }))` changes
+this window. The range target must fit the byte budget and cannot exceed
+32 MiB; at most 16 workers and a 1 GiB budget are accepted. If the per-plane
+maxima do not fit even one slot, reduce the range target. Set the option to
+`None` to use the previous single-producer, 128-block / 16 MiB grouping and
+64 MiB input budget. Receipts report the input worker count and reserved
+capacity. See the [V3 input design](../../../docs/design/v3-concurrent-input.md)
+and [measured epoch 900 comparison](../../../docs/benchmarks/v3-reader-window-20260909.md).
 
 Each processing worker retains at most 16 MiB of semantic workspace between
 jobs; it releases larger buffers after a job. These limits do not bound total

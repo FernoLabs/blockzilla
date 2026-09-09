@@ -1,5 +1,13 @@
 # Network read windows for Compact V2 and Archive V3
 
+## Current input windows — 9 September 2026
+
+The new [V2 input window](v2-concurrent-input.md) and
+[V3 input window](v3-concurrent-input.md) replace the small download groups
+listed below. Both use reusable input buffers with a 256 MiB capacity budget.
+The sections below record the earlier designs and measurements.
+
+
 ## Measured next step — 8 September 2026
 
 The monitored prefix run passed all eight local/network output checks. CPU use

@@ -53,6 +53,7 @@ members = [
     "examples/read-archive-v3",
     "examples/token-api",
     "bench/reader-profile",
+    "bench/download-only",
     "bench/archive-v3-measure",
 ]
 

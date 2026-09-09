@@ -1,0 +1,56 @@
+{
+  "verified_at_utc": "2026-09-09T12:14:01.665682+00:00",
+  "base_commit": "6d58237427305257c6a5f45f1a49a3c61be35d72",
+  "source_sha256": {
+    "Cargo.lock": "e5ea71fafd4a51b333a23b7df54e8eacf5483aeddaa96339fe193cec4a731db6",
+    "Cargo.toml": "f18f8b3c40d424a2ba1a2524fb8f9f92acc31e4a9465f2244507466342b2b430",
+    "bench/download-only/Cargo.toml": "d9f63e78b5b0ff6352d5c113139d1d54cfd1156bc0fe278eb5796fcc40b18a23",
+    "bench/download-only/src/main.rs": "dc8db363a8e167a4dc556388d5bc50215828ae93206f6c82b3abdf7236de036c",
+    "bench/reader-profile/src/bin/car-decode-reference.rs": "cb12842df63a1c3c1a0d005e0341d540006f3f71dbb2f018fc4ef59c94056392",
+    "bench/reader-profile/src/main.rs": "6c26b388977939ab9bdc45335018ba4b5268d4c7517462c460dbed4204d7ff06",
+    "crates/archive-v3/blockzilla-archive-v3-reader/src/engine/standalone_v2.rs": "a2e3f3d4e6475b52682b0dbfd7e2c315ef9c4f6683f437f3d563679cb9f4332d",
+    "crates/archive-v3/blockzilla-archive-v3-reader/src/indexer_v3_query.rs": "ecc2abac06fc9f29b205795b0f55b136d3eafd793ebc308bf085d31b6bbf98eb",
+    "crates/archive-v3/blockzilla-archive-v3-reader/src/indexer_v3_query/network_input.rs": "153837c156bfd06e608bf8e1cbf850f1c0dee0a4b3eecaafad68622446408f97",
+    "crates/archive-v3/blockzilla-archive-v3-reader/src/lib.rs": "bf7565095edf65335942d26310ec6f39eba35aa730ce4ff7817b6a0d5a31e40d",
+    "crates/compact-v2/blockzilla-compact-v2-reader/src/compact_query.rs": "5b5901b665f53398b443809515a59c03fb7a98346d185b5e4427cb31a56c52ae",
+    "crates/compact-v2/blockzilla-compact-v2-reader/src/compact_query/indexed_tokens.rs": "b0c4cbfd78c68f48f438a6cf213f722995f1121a85cffc2ed9cc152f2ebd260c",
+    "crates/compact-v2/blockzilla-compact-v2-reader/src/lib.rs": "94ee502fff2164a648da4ddd08728f40f5237a10aeb27c82f971b34a60bb51bb",
+    "crates/compact-v2/blockzilla-compact-v2-reader/src/reader.rs": "c3a0e467464bd1a05106661ec520bc4064e46814d617b9f595794594b5a0882c",
+    "crates/compact-v2/blockzilla-compact-v2-reader/src/reader/pipeline_tests.rs": "900be07e5f6ae2dc6d6ff166b1d8d19ec16f2159c05ad7db4821a9ab895527f5",
+    "crates/old-faithful/of-car-reader/src/archive.rs": "86be1a905ae365ada3c5773b171448665fb5d3943df14ece951cadf89af33fb9",
+    "crates/old-faithful/of-car-reader/src/query_sdk_http.rs": "62ea0e986ee983e601cedfd3a061d449fa6a975e99f8b2bf8e6e994a14c7c528",
+    "examples/read-car/src/bin/read-car-transactions.rs": "e82e9d6fcfb97f89cd3a4a11484385e92616e132affe5e4e51003ef12864b5c6"
+  },
+  "tests": {
+    "v2_library_http": 234,
+    "v2_public_api": 6,
+    "v3_library": 142,
+    "v3_public_api": 3,
+    "car_library": 135,
+    "car_doctests": 5,
+    "download_probe": 2,
+    "reader_profile": 3,
+    "car_probe": 5,
+    "total_distinct_tests": 535
+  },
+  "checks": {
+    "reader_examples_and_profile": "PASS",
+    "format": "PASS",
+    "diff_whitespace": "PASS",
+    "production_v2_http2_probe_feature": "DISABLED"
+  },
+  "benchmark_evidence": [
+    "v2-reader-window-20260909.json",
+    "v3-reader-window-20260909.json",
+    "car-reader-window-20260909.json"
+  ],
+  "scope": "V2/V3 gains are accepted prefix comparisons. Three missing full-epoch CAR network examples are still running and excluded from performance acceptance. CAR body reuse remains disabled by default.",
+  "log_sha256": {
+    "reader-tests.log": "0c5c339fabab62b8bd8dc911964116b7e9c02bb4db4c4b1126d735487f20b7af",
+    "fmt.log": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+    "v2-http-tests.log": "f476bf658415bf4d3c276d1bb3fffe3fc7b57bef339c5d1da6833cea8bbb034b",
+    "example-check.log": "953af9d6080f7d0e0d010acddb26c7d48fd7d45e6332be78f1f85c36751c9572",
+    "probe-tests.log": "a7d2854d872e447107ce1a1521ee937150a0141fdd30062f643cd41682f7527c",
+    "production-features.log": "84ebc056cc28449bc045784ab471622843b54d1317d2ab238238f6686179c837"
+  }
+}

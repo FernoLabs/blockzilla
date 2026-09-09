@@ -173,7 +173,10 @@ projection.
 
 The V2 reader uses a bounded rolling window. Input reads, worker processing,
 and ordered output overlap. It publishes a completed prefix without waiting
-for all later blocks in a fixed group. See the
+for all later blocks in a fixed group. Network input uses eight download workers,
+32 MiB range targets, and reusable compressed buffers within a 256 MiB capacity
+budget. This budget excludes decoded data, registries, HTTP memory, and output.
+See the [network input design](../../docs/design/v2-concurrent-input.md), the
 [pipeline design](../../docs/design/reader-pipeline-rolling-window.md) and the
 [epoch 300 comparison](../../docs/benchmarks/epoch-300-rolling-pipeline-2026-09-06.md).
 

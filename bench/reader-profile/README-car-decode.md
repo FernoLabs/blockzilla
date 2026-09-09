@@ -58,6 +58,17 @@ default `--metadata-mode owned` preserves the previous output representation.
 The visitor mode measures a streaming consumer; it does not produce a retained
 metadata object for the application.
 
+This probe recycles range bodies within the fixed eight-buffer window.
+The public SDK leaves this experimental mode disabled by default because the
+repeated CAR tests did not show a speed gain. The probe enables it explicitly
+so both modes can be compared in one binary. Use
+`--legacy-http-buffers` to allocate a fresh body for each range in the same
+executable. Receipts report `reuse_http_buffers`, `body_buffer_allocations`,
+and `body_buffer_allocated_bytes`. The last two values cover body-vector
+capacity growth only, not all HTTP or decoder allocations. Successful reads
+overwrite all bytes before they reach the parser; incomplete retries preserve
+capacity without publishing partial data.
+
 Use `--http-workers 8` to test more concurrent requests. Both four and eight
 workers share the same eight-chunk, 256 MiB HTTP body window. This flag changes
 the probe only; the SDK default remains four workers.

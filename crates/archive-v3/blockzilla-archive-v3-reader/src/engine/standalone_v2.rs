@@ -2974,11 +2974,97 @@ impl Reader {
         }))
     }
 
+    pub(crate) fn semantic_input_capacities(
+        &self,
+        range: Range<usize>,
+        selection: SemanticPlaneSelection,
+    ) -> Result<[usize; OBJECT_COUNT]> {
+        ensure!(
+            range.start < range.end && range.end <= self.rows.len(),
+            "input range outside archive"
+        );
+        let mut capacities = [0usize; OBJECT_COUNT];
+        for row in &self.rows[range] {
+            for object in SEMANTIC_OBJECTS
+                .into_iter()
+                .filter(|object| selection.includes(*object))
+            {
+                capacities[object.index()] = capacities[object.index()]
+                    .checked_add(row.locators[object.index()].stored_len as usize)
+                    .context("input plane capacity overflow")?;
+            }
+        }
+        Ok(capacities)
+    }
+
+    pub(crate) fn allocate_semantic_input(
+        &self,
+        capacities: [usize; OBJECT_COUNT],
+        permit: blockzilla_source::input_budget::InputPermit,
+    ) -> Result<Arc<PrefetchedSemanticBatch>> {
+        let mut planes: [SemanticStoredPlane; OBJECT_COUNT] =
+            array::from_fn(|_| Default::default());
+        for (plane, capacity) in planes.iter_mut().zip(capacities) {
+            plane.bytes.try_reserve_exact(capacity)?;
+        }
+        ensure!(
+            planes.iter().map(|p| p.bytes.capacity()).sum::<usize>() <= permit.bytes(),
+            "input allocation exceeds credit"
+        );
+        Ok(Arc::new(PrefetchedSemanticBatch {
+            batch: SemanticStoredBatch {
+                block_range: 0..0,
+                selection: SemanticPlaneSelection::FULL,
+                planes,
+                stored_bytes: 0,
+            },
+            _permit: permit,
+        }))
+    }
+
+    pub(crate) fn prefetch_semantic_input_reusing(
+        &self,
+        range: Range<usize>,
+        selection: SemanticPlaneSelection,
+        previous: Arc<PrefetchedSemanticBatch>,
+    ) -> Result<Arc<PrefetchedSemanticBatch>> {
+        let previous =
+            Arc::try_unwrap(previous).map_err(|_| anyhow::anyhow!("input buffer still shared"))?;
+        let required = self.semantic_input_capacities(range.clone(), selection)?;
+        ensure!(
+            previous
+                .batch
+                .planes
+                .iter()
+                .zip(required)
+                .all(|(p, n)| p.bytes.capacity() >= n),
+            "input buffer would exceed reserved plane capacity"
+        );
+        let batch = self.load_semantic_stored_planes(range, selection, previous.batch.planes)?;
+        Ok(Arc::new(PrefetchedSemanticBatch {
+            batch,
+            _permit: previous._permit,
+        }))
+    }
+
     fn load_semantic_stored_batch(
         &self,
         block_range: Range<usize>,
         selection: SemanticPlaneSelection,
         reusable: Option<SemanticStoredBatch>,
+    ) -> Result<SemanticStoredBatch> {
+        let planes = match reusable {
+            Some(batch) => batch.into_reusable_planes()?,
+            None => array::from_fn(|_| Default::default()),
+        };
+        self.load_semantic_stored_planes(block_range, selection, planes)
+    }
+
+    fn load_semantic_stored_planes(
+        &self,
+        block_range: Range<usize>,
+        selection: SemanticPlaneSelection,
+        mut planes: [SemanticStoredPlane; OBJECT_COUNT],
     ) -> Result<SemanticStoredBatch> {
         ensure!(
             block_range.start < block_range.end && block_range.end <= self.rows.len(),
@@ -2986,10 +3072,6 @@ impl Reader {
         );
         let first = &self.rows[block_range.start];
         let last = &self.rows[block_range.end - 1];
-        let mut planes = match reusable {
-            Some(batch) => batch.into_reusable_planes()?,
-            None => array::from_fn(|_| Default::default()),
-        };
         for plane in &mut planes {
             plane.offset = 0;
             // Retain initialized bytes for the next source read. The helper

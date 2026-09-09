@@ -70,6 +70,9 @@ struct Args {
     /// HTTP concurrency; the total body window stays at eight 32 MiB chunks.
     #[arg(long, default_value_t = 4)]
     http_workers: usize,
+    /// Allocate each HTTP range body separately for a controlled comparison.
+    #[arg(long)]
+    legacy_http_buffers: bool,
     /// Count Rust allocations in a separate System allocator diagnostic run.
     #[arg(long)]
     allocations: bool,
@@ -334,6 +337,7 @@ fn main() -> Result<()> {
     let input: Box<dyn Read> = if let Some(url) = &args.url {
         let session = CarHttpSession::new(CarHttpOptions {
             workers: args.http_workers,
+            reuse_body_buffers: !args.legacy_http_buffers,
             ..CarHttpOptions::default()
         })?;
         if args.operator_trusted {
@@ -379,7 +383,7 @@ fn main() -> Result<()> {
                 .map_or(r[1] == 0, |actual| actual.tx == r[1])
         });
     let tx = rows.iter().map(|r| r.tx).sum::<u64>();
-    let http = transport.map(|h| { let s = h.snapshot(); json!({"get_requests":s.get_requests,"body_bytes":s.get_body_bytes_received,"bytes_delivered":s.bytes_delivered,"incomplete_body_retries":s.incomplete_body_retries,"workers_finished":s.workers_finished}) });
+    let http = transport.map(|h| { let s = h.snapshot(); json!({"body_buffer_allocations":s.body_buffer_allocations,"body_buffer_allocated_bytes":s.body_buffer_allocated_bytes,"get_requests":s.get_requests,"body_bytes":s.get_body_bytes_received,"bytes_delivered":s.bytes_delivered,"incomplete_body_retries":s.incomplete_body_retries,"workers_finished":s.workers_finished}) });
     let allocation_counts = allocations.map(|s| json!({
         "calls": s.allocation_calls, "requested_bytes": s.allocation_bytes,
         "buckets": s.size_buckets.iter().zip(allocation::BUCKET_UPPER_BOUNDS).map(|(b, upper)| json!({"max_bytes": upper, "calls": b.allocation_calls, "requested_bytes": b.allocation_bytes})).collect::<Vec<_>>(),
@@ -387,7 +391,7 @@ fn main() -> Result<()> {
     }));
     let receipt = json!({"schema":"blockzilla-car-decode-reference-v1", "valid":valid, "epoch":epoch,
         "allocator": if cfg!(feature="reference-mimalloc") {"mimalloc"} else {"system"},
-        "workers":args.workers, "metadata_mode":format!("{:?}",args.metadata_mode), "http_workers":args.http_workers, "http_body_window_bytes":8*32*1024*1024, "allocations":allocation_counts, "setup_seconds":setup_s, "scan_seconds":scan_s,
+        "workers":args.workers, "metadata_mode":format!("{:?}",args.metadata_mode), "http_workers":args.http_workers,"reuse_http_buffers":!args.legacy_http_buffers, "http_body_window_bytes":8*32*1024*1024, "allocations":allocation_counts, "setup_seconds":setup_s, "scan_seconds":scan_s,
         "transactions":tx, "blocks":expected.len(), "physical_blocks":rows.len(),
         "scan_tps": if valid {Some(tx as f64 / scan_s)} else {None},
         "votes":rows.iter().map(|r|r.votes).sum::<u64>(),"failed":rows.iter().map(|r|r.failed).sum::<u64>(),

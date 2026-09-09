@@ -86,6 +86,11 @@ struct Args {
     /// Explicit diagnostic override; the SDK's normal limit remains unchanged.
     #[arg(long, default_value_t = 1024)]
     registry_mib: u64,
+    /// Use the previous V2 input schedule for controlled comparisons.
+    #[arg(long)]
+    v2_legacy_input: bool,
+    #[arg(long)]
+    v3_legacy_input: bool,
     #[arg(long, default_value = "5LikTUsx695BHRipWoRrn6YmTQEcPrvbR8YaHxdSRQo8")]
     wallet: String,
 }
@@ -220,6 +225,9 @@ fn main() -> Result<()> {
                 IndexerV3Archive::open_local(args.archive_root.as_ref().unwrap(), args.epoch)?
             };
             archive.set_full_registry_limit(registry_bytes);
+            if args.v3_legacy_input {
+                archive.set_network_input_config(None)?;
+            }
             Archive::V3(archive)
         }
     };
@@ -279,8 +287,11 @@ fn main() -> Result<()> {
         let started = Instant::now();
         let (scan, stages): (ScanReceipt, _) = match &mut archive {
             Archive::V2(a) => {
-                let config = CompactV2ParallelScanConfig::new(args.workers.get())
+                let mut config = CompactV2ParallelScanConfig::new(args.workers.get())
                     .with_full_registry_limit(registry_bytes);
+                if args.v2_legacy_input {
+                    config.network_input = None;
+                }
                 let r = if let Some(indexed) = &mut indexed_sink {
                     a.scan_token_balances_indexed_parallel(&request, indexed, config)?
                 } else {
@@ -290,6 +301,9 @@ fn main() -> Result<()> {
                 (
                     r.scan,
                     json!({
+                        "input_workers":p.input_workers,
+                        "input_buffer_count":p.input_buffer_count,
+                        "input_buffer_capacity_bytes":p.input_buffer_capacity_bytes,
                         "read_s":p.producer_read_wall_time.as_secs_f64(),
                         "input_wait_s":p.coordinator_wait_for_ready_batch_time.as_secs_f64(),
                         "decode_sum_s":p.worker_decompress_decode_sum_time.as_secs_f64(),

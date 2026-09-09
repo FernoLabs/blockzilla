@@ -1,6 +1,6 @@
 # From CAR to V3: read less data, then keep the decoder supplied
 
-8 September 2026. Our accepted benchmark covers 132 local tests across 11
+Updated 9 September 2026. Our accepted full benchmark covers 132 local tests across 11
 epochs, plus nine network tests at epoch 900. V3 won 31 of the 44 local test
 comparisons. V2 won 13. The V3 results below are for our frozen standalone
 prototype, not the canonical Archive V3 format intended to replace V2.
@@ -41,26 +41,31 @@ reader decodes the complete epoch at that speed.
 
 ![Measured local winners](artifacts/all-samples-reader-20260908/winner-matrix.png)
 
-The network test shows the next problem. CAR count reached 206.49 MB/s of
-HTTP response bodies. V2 count reached 24.17 MB/s; V3 count reached 6.75 MB/s.
-V3 transferred less data but took longer. V2 has one download producer. V3
-makes many small range requests tied to decode jobs. The decoders need a
-better supply of input.
+The first full network test showed that less data alone was insufficient.
+V2 count received 24.17 MB/s and V3 count 6.75 MB/s, including setup. Input
+requests did not keep the decoders supplied.
 
-Jetstreamer provides a useful design example: long HTTP streams, or a
-separate download buffer filled while the current buffer is processed. Our
-CAR reader already has bounded concurrent range downloads. The proposed
-V2/V3 change will combine adjacent selected ranges and download ahead of
-the decode workers, while preserving index filtering, shared buffers,
-ordered output and a fixed memory limit. **This change is not implemented;
-no network speed increase has been measured yet.**
+The new network schedule combines adjacent ranges and downloads them ahead
+of decode work. It reuses input buffers within a 256 MiB budget. In repeated
+epoch-900 prefix tests, scan throughput rose **2.38× for V2 count** and
+**13.05× for V3 count**. Transaction identity scans improved **1.78×** and
+**3.27×**, respectively. These measurements exclude startup and are separate
+from the full-epoch results above. Peak process memory increased.
 
-The Jetstreamer reference passed both small correctness checks, but its
-full-epoch attempt failed with block-read timeouts. It has no accepted
-full-epoch speed result. Its full transaction decoding also differs from
-our SDK count projection.
+![Latest network scan TPS](artifacts/reader-network-update-20260909/network-prefix-tps.png)
 
-These are single-pass results with uncontrolled OS/CDN caches. The NAS also
+CAR already had concurrent range reads. Reusing its large download buffers
+removed about 97% of their allocation requests, but did not establish a speed
+gain or reduce peak memory. That option remains disabled. Fewer allocations
+help only when they reduce a cost that limits the workload.
+
+The earlier accepted Jetstreamer comparison remains the reference; it was
+not rerun for this change. Both adapters used mimalloc and 12 workers. Our
+CAR probe reached 196,616 total TPS on our gateway, versus 63,496 for
+Jetstreamer, with different metadata conversion costs and higher memory use.
+Neither result is equivalent to the V2/V3 identity-only scan.
+
+The original full suite has one pass per case; OS/CDN caches were uncontrolled. The NAS also
 ran a CPU compaction job; its effect is unknown. Epoch-0 USDC and Pump.fun
 outputs agree across readers but contain incomplete historical data. We
 retain those limits and every failed attempt instead of correcting times
