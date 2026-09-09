@@ -60,6 +60,9 @@ transaction iterators, raw entry scanning, rewards, and feature flags:
 - `compact-index` enables compact Old Faithful index parsing.
 - `query-sdk` enables `CarInstructionSource` and the common ordered query API.
 - `query-sdk-http` adds the bounded concurrent HTTPS stream for that adapter.
+  It retries an incomplete response body at most twice, checks the same file
+  identity and exact range on every attempt, and counts retry bytes. It never
+  delivers a partial range to the decoder.
 - `archive` adds `archive::CarArchive`, fixed sample object discovery, local
   raw/zstd selection, HTTP source checks, and the common ordered query API.
   It includes native zstd support.

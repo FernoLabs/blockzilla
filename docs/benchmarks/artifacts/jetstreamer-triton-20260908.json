@@ -1,0 +1,125 @@
+{
+  "state": "PASS",
+  "accepted_prefix": true,
+  "full_epoch_started": false,
+  "upstream_version": "0.7.0",
+  "upstream_commit": "cffaf3d891b3cbe45a46dd963d6d3571b2aa1a24",
+  "binary_sha256": "5a0a17b53e85a2de48caae864d69a0d1baa295e7ba25d892dd4c822d8c527a87",
+  "http_base": "https://files.old-faithful.net/",
+  "index_base": "https://files.old-faithful.net/",
+  "epoch": 900,
+  "workers": 12,
+  "expected_blocks": 8192,
+  "expected_transactions": 8925832,
+  "completed_blocks": 8192,
+  "completed_transactions": 8925832,
+  "completed_rows_match_plan": true,
+  "scan_seconds": 471.002003111,
+  "scan_transactions_s": 18950.730444975343,
+  "errors": [],
+  "verification": {
+    "status": "PASS",
+    "epoch": 900,
+    "blocks": 8192,
+    "transactions": 8925832,
+    "plan_parity": "EXACT_ORDERED_ROWS",
+    "processing_workers": 12,
+    "scan_seconds": 471.002003111,
+    "scan_transactions_s": 18950.730444975343,
+    "sampled_statistics_used_for_acceptance": false,
+    "retry_scope": "Reported firehose errors rejected; lower-level retries and reconnects are not counted"
+  },
+  "process_user_cpu_seconds": 1908.839243,
+  "process_system_cpu_seconds": 2969.147281,
+  "mean_cpu_cores": 10.356615241082988,
+  "system_share_of_cpu_percent": 60.86829609699841,
+  "sampled_peak_rss_mib": 53.0703125,
+  "kernel_peak_rss_mib": 106.32421875,
+  "process_disk_read_bytes": 0,
+  "host_received_bytes": {
+    "lo": 362490,
+    "eth1": 1227210,
+    "eth0": 9846696140
+  },
+  "network_body_bytes": null,
+  "source_checks": {
+    "epoch-900.car": {
+      "bytes": 527045598158,
+      "content_checks": [
+        {
+          "start": 0,
+          "end": 65535,
+          "sha256": "5141dbea7fe2724e52ff1b08991150275b86e5c34b21714931e569f1fa0f1bae"
+        },
+        {
+          "start": 263522799079,
+          "end": 263522864614,
+          "sha256": "df4f3e42414a9e272e864f545bad77b95b4afcf5b8b325ee141fc06904f777a4"
+        },
+        {
+          "start": 527045532622,
+          "end": 527045598157,
+          "sha256": "3ad15a721ca63e7fec39fe4fef0e70091b5bbe639c5118f88fda169d5642f35c"
+        }
+      ]
+    },
+    "epoch-900-slot-ranges.raw": {
+      "bytes": 5184000,
+      "content_checks": [
+        {
+          "start": 0,
+          "end": 5183999,
+          "sha256": "b9551b93bd720c221c7d1a605452bd9a676e326344ef56371a03ad44e32c1056"
+        }
+      ]
+    }
+  },
+  "source_checks_unchanged": true,
+  "source_checks_match_our_mirror": true,
+  "source_check_limit": "Full slot-index hash and three 64-KiB CAR range hashes, plus object lengths. No Triton ETag was provided; whole-CAR identity and per-request version pinning are not established.",
+  "processes": {
+    "checked_at": 1788880503.1537719,
+    "supervisor_exists": false,
+    "readers": [
+      {
+        "pid": 2883890,
+        "exists": false
+      }
+    ]
+  },
+  "runtime_sha256": "6a375b758cb9b2547cb9a6607ef70ac7b3168197c3e682caabbbb1b4fd3fbeba",
+  "raw_receipts_sha256": {
+    "control/jetstreamer-triton-20260908T150549Z/status.json": "436ae8349b76cd9f78b3a65d6ecd4c104cbd1f9689fe441f66600a5e2b5b55df",
+    "control/jetstreamer-triton-20260908T150549Z/launch.json": "487111331fe1614a3b897551ec18ae0658e4996803b37a62ba789245115bae95",
+    "control/jetstreamer-triton-20260908T150549Z/supervisor.log": "ca8c19d44cb99602a459fdc281fead3c4ff16fbf697b99d78a497e525eea7dbc",
+    "control/jetstreamer-triton-20260908T150549Z/archive-before.json": "917bcb60f6185c7a363b95d63631cb1366885aaab6e5a005e6db3c4becdf01f4",
+    "control/jetstreamer-triton-20260908T150549Z/http-before.json": "7feac7afe92758c8fee8ac6b3a081a06032ff5b252a0abd95d5d3225e861bb4f",
+    "control/jetstreamer-triton-20260908T150549Z/host-before.json": "3a73d5eaab9a2db87750d20c6f3a27d8ab483e600121adbecd259910d001a20f",
+    "control/jetstreamer-triton-20260908T150549Z/comparison-http-before.json": "7feac7afe92758c8fee8ac6b3a081a06032ff5b252a0abd95d5d3225e861bb4f",
+    "control/jetstreamer-triton-20260908T150549Z/prefix-8192-workers12-http-after.json": "7feac7afe92758c8fee8ac6b3a081a06032ff5b252a0abd95d5d3225e861bb4f",
+    "results/jetstreamer-triton-20260908T150549Z/prefix-8192-workers12/report.json": "ec38ca09a1dcc24c48a52085308c673f3fb7b55453b609997140c2bcdf1581ec",
+    "results/jetstreamer-triton-20260908T150549Z/prefix-8192-workers12/process.json": "2e1ccf02cdf9ec4e9fa9669c7f1fa161959b331319d1cde753e693a6ebbf0952",
+    "results/jetstreamer-triton-20260908T150549Z/prefix-8192-workers12/verification.json": "a336776692c7fe23212f62f7f045ae47447f4ce8c0434e84cc88f08569497a38",
+    "results/jetstreamer-triton-20260908T150549Z/prefix-8192-workers12/resources.jsonl": "4576ee350dd644680095e1338f20c1c89fe6d3442be693d808e449d42a9024ef",
+    "results/jetstreamer-triton-20260908T150549Z/prefix-8192-workers12/stdout.log": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+    "results/jetstreamer-triton-20260908T150549Z/prefix-8192-workers12/stderr.log": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+    "results/jetstreamer-triton-20260908T150549Z/prefix-plan.json": "76c77bc6ef1277d138a498b8a441f3095b9c416571a9fafe4c6f28ae8c16d396",
+    "process-finished.json": "07312b927276fe98a5e5673cdcd687367221dc556151bcff4f04abaca49df895"
+  },
+  "related_issue": "https://github.com/anza-xyz/jetstreamer/issues/69",
+  "post_run_source_check": {
+    "checked_at": 1788880531.407812,
+    "archive_unchanged": true,
+    "index_sha256": "4488c7cf2750c0a7fe11ae798b9d960ed72a0a9e904aa336a30c35198697d55d"
+  },
+  "previous_failure_slot": {
+    "slot": 388805945,
+    "transactions": 1223,
+    "matched": true
+  },
+  "preflight_attempt": {
+    "control": "jetstreamer-triton-20260908T150337Z",
+    "reader_started": false,
+    "failure": "Full-index request returned valid HTTP 200, while the check required HTTP 206. Corrected to full GET before the benchmark."
+  }
+}

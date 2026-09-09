@@ -357,10 +357,18 @@ impl TransactionProjectionScratch {
 
 #[derive(Debug)]
 struct ParallelScanJob {
-    prefetched: Option<Arc<PrefetchedSemanticBatch>>,
+    prefetched: Option<Arc<PrefetchedScanInput>>,
     id: usize,
     blocks: ParallelScanJobBlocks,
     resources: ParallelScanJobResources,
+}
+
+/// Signatures and semantic planes share the same input credit. Drop signature
+/// storage before the semantic owner releases that credit.
+#[derive(Debug)]
+struct PrefetchedScanInput {
+    signatures: Option<SignatureBatch>,
+    semantic: Arc<PrefetchedSemanticBatch>,
 }
 
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
@@ -1759,6 +1767,7 @@ impl IndexerV3InstructionSource {
             block_ordinals,
         )
         .map_err(source_error)?;
+        signature_scan.prefetched = job.prefetched;
 
         let selected_len = signature_scan.selected_blocks.len();
         let mut selected_index = 0_usize;
@@ -2016,8 +2025,14 @@ impl IndexerV3InstructionSource {
         let result_channel_activity = Arc::new(ParallelResultChannelActivity::default());
         let owned_payload_tracker = Arc::new(ParallelOwnedPayloadTracker::default());
         let cancelled = Arc::new(AtomicBool::new(false));
-        let mut jobs =
-            ParallelInputJobs::new(jobs, self.context.source.recommended_read_concurrency() > 1)?;
+        let signature_source = (self.context.sidecars.signatures_size.is_some()
+            && request_needs_signature_bytes(&request))
+        .then(|| Arc::clone(&self.context.source));
+        let mut jobs = ParallelInputJobs::new(
+            jobs,
+            self.context.source.recommended_read_concurrency() > 1,
+            signature_source,
+        )?;
         let mut next_job = jobs.next_job()?;
         #[cfg(test)]
         let initial_worker_barrier = self
@@ -2083,7 +2098,12 @@ impl IndexerV3InstructionSource {
                                 {
                                     barrier.wait();
                                 }
-                                semantic_workspace.set_prefetched(work.job.prefetched.clone());
+                                semantic_workspace.set_prefetched(
+                                    work.job
+                                        .prefetched
+                                        .as_ref()
+                                        .map(|input| Arc::clone(&input.semantic)),
+                                );
                                 let result = source.decode_parallel_job(
                                     &request,
                                     work.job,
@@ -3755,8 +3775,78 @@ struct ParallelInputJobs {
     cancelled: Arc<AtomicBool>,
 }
 
+fn network_signature_bytes(
+    reader: &Reader,
+    range: Range<usize>,
+    enabled: bool,
+) -> anyhow::Result<usize> {
+    if !enabled {
+        return Ok(0);
+    }
+    let mut end = None;
+    let mut bytes = 0_usize;
+    for ordinal in range {
+        let row = reader
+            .block(ordinal)
+            .ok_or_else(|| anyhow::anyhow!("signature input block outside archive"))?;
+        validate_signature_row(row).map_err(|e| anyhow::anyhow!(e))?;
+        anyhow::ensure!(
+            end.is_none_or(|previous| previous == row.first_signature_ordinal),
+            "signature input ordinals are not contiguous"
+        );
+        end = Some(
+            row.first_signature_ordinal
+                .checked_add(u64::from(row.signature_count))
+                .ok_or_else(|| anyhow::anyhow!("signature ordinal overflow"))?,
+        );
+        bytes = bytes
+            .checked_add(
+                (row.signature_count as usize)
+                    .checked_mul(SIGNATURE_BYTES)
+                    .ok_or_else(|| anyhow::anyhow!("signature size overflow"))?,
+            )
+            .ok_or_else(|| anyhow::anyhow!("signature input size overflow"))?;
+    }
+    Ok(bytes)
+}
+
+fn load_network_signatures(
+    reader: &Reader,
+    source: Option<&Arc<dyn RangeSource>>,
+    range: Range<usize>,
+) -> IndexerV3InstructionSourceResult<Option<SignatureBatch>> {
+    let Some(source) = source else {
+        return Ok(None);
+    };
+    let bytes = network_signature_bytes(reader, range.clone(), true)
+        .map_err(IndexerV3InstructionSourceError::Reader)?;
+    let mut scan = SelectedBlockSignatureReader::for_contiguous_range(
+        reader,
+        Arc::clone(source),
+        true,
+        range.clone(),
+    )?;
+    scan.load_batch()?;
+    let batch = scan.batch.take().ok_or_else(|| {
+        IndexerV3InstructionSourceError::Invalid("prefetched signature batch missing".into())
+    })?;
+    if batch.block_range != range
+        || batch.signatures.capacity().saturating_mul(SIGNATURE_BYTES)
+            > bytes.saturating_add(SIGNATURE_BYTES)
+    {
+        return Err(IndexerV3InstructionSourceError::Invalid(
+            "prefetched signature batch exceeds its range or byte credit".into(),
+        ));
+    }
+    Ok(Some(batch))
+}
+
 impl ParallelInputJobs {
-    fn new(mut plan: ParallelScanJobPlan, remote: bool) -> blockzilla_model::Result<Self> {
+    fn new(
+        mut plan: ParallelScanJobPlan,
+        remote: bool,
+        signature_source: Option<Arc<dyn RangeSource>>,
+    ) -> blockzilla_model::Result<Self> {
         let cancelled = Arc::new(AtomicBool::new(false));
         if !remote {
             return Ok(Self {
@@ -3796,6 +3886,18 @@ impl ParallelInputJobs {
                         let mut bytes = if contiguous {
                             reader
                                 .semantic_input_bytes(start..end, selection)
+                                .and_then(|bytes| {
+                                    network_signature_bytes(
+                                        &reader,
+                                        start..end,
+                                        signature_source.is_some(),
+                                    )
+                                    .and_then(|signatures| {
+                                        bytes.checked_add(signatures).ok_or_else(|| {
+                                            anyhow::anyhow!("network input byte overflow")
+                                        })
+                                    })
+                                })
                                 .map_err(|e| {
                                     source_error(IndexerV3InstructionSourceError::Reader(e))
                                 })?
@@ -3819,9 +3921,21 @@ impl ParallelInputJobs {
                             }
                             let more = reader
                                 .semantic_input_bytes(end..candidate_end, selection)
+                                .and_then(|bytes| {
+                                    network_signature_bytes(
+                                        &reader,
+                                        end..candidate_end,
+                                        signature_source.is_some(),
+                                    )
+                                    .and_then(|signatures| {
+                                        bytes.checked_add(signatures).ok_or_else(|| {
+                                            anyhow::anyhow!("network input byte overflow")
+                                        })
+                                    })
+                                })
                                 .map_err(|e| {
-                                source_error(IndexerV3InstructionSourceError::Reader(e))
-                            })?;
+                                    source_error(IndexerV3InstructionSourceError::Reader(e))
+                                })?;
                             if more > NETWORK_INPUT_GROUP_BYTES - bytes {
                                 break;
                             }
@@ -3832,14 +3946,60 @@ impl ParallelInputJobs {
                         }
                         if contiguous && bytes <= NETWORK_INPUT_GROUP_BYTES {
                             // Vec's small-allocation minimum is also charged.
-                            let Some(permit) = budget.acquire(bytes + 8 * Object::ALL.len()) else {
+                            let Some(permit) =
+                                budget.acquire(bytes + SIGNATURE_BYTES + 8 * Object::ALL.len())
+                            else {
                                 return Ok(());
                             };
-                            let batch = reader
-                                .prefetch_semantic_input(start..end, selection, permit)
-                                .map_err(|e| {
-                                    source_error(IndexerV3InstructionSourceError::Reader(e))
-                                })?;
+                            let batch = if signature_source.is_none() {
+                                Arc::new(PrefetchedScanInput {
+                                    signatures: None,
+                                    semantic: reader
+                                        .prefetch_semantic_input(start..end, selection, permit)
+                                        .map_err(|e| {
+                                            source_error(IndexerV3InstructionSourceError::Reader(e))
+                                        })?,
+                                })
+                            } else {
+                                thread::scope(|scope| {
+                                    // One bounded signature request overlaps the semantic
+                                    // plane reads. Both allocations were charged above.
+                                    let semantic = thread::Builder::new()
+                                        .name("blockzilla-v3-planes".into())
+                                        .spawn_scoped(scope, || {
+                                            reader.prefetch_semantic_input(
+                                                start..end,
+                                                selection,
+                                                permit,
+                                            )
+                                        })
+                                        .map_err(|e| {
+                                            QueryError::InvalidStream(format!(
+                                                "cannot create V3 plane reader: {e}"
+                                            ))
+                                        })?;
+                                    let signatures = load_network_signatures(
+                                        &reader,
+                                        signature_source.as_ref(),
+                                        start..end,
+                                    );
+                                    // Always join, including when the signature read fails.
+                                    let semantic = semantic
+                                        .join()
+                                        .map_err(|_| {
+                                            QueryError::InvalidStream(
+                                                "V3 plane reader panicked".into(),
+                                            )
+                                        })?
+                                        .map_err(|e| {
+                                            source_error(IndexerV3InstructionSourceError::Reader(e))
+                                        })?;
+                                    Ok::<_, QueryError>(Arc::new(PrefetchedScanInput {
+                                        signatures: signatures.map_err(source_error)?,
+                                        semantic,
+                                    }))
+                                })?
+                            };
                             for job in &mut group {
                                 job.prefetched = Some(Arc::clone(&batch));
                             }
@@ -4657,8 +4817,10 @@ pub(crate) struct SelectedBlockSignatureReader<'a> {
     selected_blocks: ParallelScanJobBlocks,
     next_selected: usize,
     batch: Option<SignatureBatch>,
+    prefetched: Option<Arc<PrefetchedScanInput>>,
 }
 
+#[derive(Debug)]
 struct SignatureBatch {
     block_range: Range<usize>,
     first_signature_ordinal: u64,
@@ -4734,6 +4896,7 @@ impl<'a> SelectedBlockSignatureReader<'a> {
             selected_blocks,
             next_selected: 0,
             batch: None,
+            prefetched: None,
         })
     }
 
@@ -4758,10 +4921,11 @@ impl<'a> SelectedBlockSignatureReader<'a> {
             self.next_selected += 1;
             return Ok(None);
         }
-        if self
-            .batch
-            .as_ref()
-            .is_none_or(|batch| !batch.block_range.contains(&block_ordinal))
+        if self.prefetched.is_none()
+            && self
+                .batch
+                .as_ref()
+                .is_none_or(|batch| !batch.block_range.contains(&block_ordinal))
         {
             self.load_batch()?;
         }
@@ -4770,9 +4934,17 @@ impl<'a> SelectedBlockSignatureReader<'a> {
                 "V3 signature block {block_ordinal} disappeared"
             ))
         })?;
-        let batch = self.batch.as_ref().ok_or_else(|| {
-            IndexerV3InstructionSourceError::Invalid("V3 signature batch is missing".into())
-        })?;
+        let batch = self
+            .prefetched
+            .as_ref()
+            .and_then(|input| input.signatures.as_ref())
+            .or(self.batch.as_ref())
+            .filter(|batch| batch.block_range.contains(&block_ordinal))
+            .ok_or_else(|| {
+                IndexerV3InstructionSourceError::Invalid(
+                    "V3 signature batch is missing or outside its range".into(),
+                )
+            })?;
         let row_end = row
             .first_signature_ordinal
             .checked_add(u64::from(row.signature_count))
@@ -7646,14 +7818,22 @@ mod tests {
                 self.inner.read_range_into_slice(object, offset, bytes)
             }
         }
-        let fixture = Fixture::build(&[], raw_parallel_blocks(800), None, false, 2_000);
+        let signatures = (0..800)
+            .map(|ordinal| [((ordinal % 251) + 1) as u8; 64])
+            .collect::<Vec<_>>();
+        let fixture = Fixture::build(
+            &[],
+            raw_parallel_blocks(800),
+            Some(&signatures),
+            false,
+            2_000,
+        );
         let request = ScanRequest::all()
             .allow_unverified_source()
             .allow_incomplete_instructions()
             .allow_incomplete_cpi()
             .allow_unknown_execution()
-            .without_instruction_data()
-            .without_primary_signatures();
+            .without_instruction_data();
         for sparse in [false, true] {
             let mut outputs = Vec::new();
             let mut reads = Vec::new();

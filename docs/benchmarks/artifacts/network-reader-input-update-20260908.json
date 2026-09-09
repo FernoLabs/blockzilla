@@ -1,0 +1,64 @@
+{
+  "schema": "blockzilla-network-input-update-v1",
+  "status": "MEASURED_V2_REJECTED_V3_RETAINED",
+  "control": "/Users/augustin/Developement/ferno/blockzilla-v1/target/nas-validation/network-readers-round-20260908T163830Z",
+  "git_base": "c427b815cf1f59292bdc47c3764bec77e6058ed8",
+  "source_sha256": {
+    "crates/old-faithful/of-car-reader/src/query_sdk_http.rs": "210a33df56bf3daaae17cff3a7c8ce8f2798eb777c2a11dd6bef96e3756134cc",
+    "crates/compact-v2/blockzilla-compact-v2-reader/src/compact_query.rs": "01f6a2fd977f2c7aa68b02e65496ab0a79b88942e844a7214c7d6cb3ebbe23ed",
+    "crates/archive-v3/blockzilla-archive-v3-reader/src/indexer_v3_query.rs": "6331d5aebe96b7e06c253421d1dcf492238aac60b2ca483cdc9912eac9bc9a69",
+    "bench/reader-profile/src/bin/car-decode-reference.rs": "92c94f6d509e9d6076d1115fca25b0a6f8b4abe02656f0503d4ed4e0af55f949",
+    "bench/reader-profile/Cargo.toml": "2c0a4914bac976b543e383ea790d16a9747ce2e0f9058493b5695aa9245892fa",
+    "Cargo.lock": "3ff6245b9715a35f820dd55b013cb127b150a7c95c46dd14da3ad711bc060134"
+  },
+  "linux_binaries": {
+    "bin/v2-v3-old": "d084943c3d897e9fbae1a8a8d536fe9c77ac7b50b727b4c63301889005d342d2",
+    "bin/v2-v3": "bd07ff486c1f48aee0a902db9352f7d33207681f0278d6a1f089584c72d7d2a7",
+    "bin/car-system": "90f5ef3632ef020d1e9d2ff48a3fbd82414461cd00ae80fe3e21691a39ecc30d",
+    "bin/car-mimalloc": "fafc278aad922365988ada1f20abc364fc80d7b01ec441fb1cd1010d8eadaca8",
+    "bin/jetstreamer-system": "5a0a17b53e85a2de48caae864d69a0d1baa295e7ba25d892dd4c822d8c527a87",
+    "bin/jetstreamer-mimalloc": "24657a499074f86e61784738e6e30de101c51ee6d3e777df8f7e86f0a7961efc"
+  },
+  "runtime_sha256": "aefcf785f28552b87ac45e867e23dd6ecaa37542f6c4f140abcb134cb8dede72",
+  "validation": {
+    "reader_tests": {
+      "car": 159,
+      "v2": 234,
+      "v3": 142
+    },
+    "car_http_after_error_chain_change": 27,
+    "car_real_fixture_one_vs_twelve_workers": "PASS with system and mimalloc builds, epochs 157 and 822",
+    "v2_final_empty_large_window_regression": "PASS",
+    "rustfmt": "PASS",
+    "diff_check": "PASS",
+    "clippy": "completed; existing warnings remain"
+  },
+  "performance": "Measured results in network-reader-comparison-20260909.json; source hashes here describe the tested candidate before V2 was restored.",
+  "jetstreamer_mimalloc_reference": {
+    "command": [
+      "cargo",
+      "build",
+      "--release",
+      "--offline",
+      "--locked",
+      "--target",
+      "x86_64-unknown-linux-musl",
+      "--manifest-path",
+      "/Users/augustin/Developement/ferno/blockzilla-v1/target/nas-validation/network-readers-round-20260908T163024Z/jetstreamer-normal-mimalloc/Cargo.toml",
+      "--jobs",
+      "4"
+    ],
+    "elapsed_s": 36.82778225000948,
+    "exit_code": 0,
+    "change": "Original ordinary reference adapter plus mimalloc only; no HTTP instrumentation or rseek patch",
+    "source_sha256": {
+      "src/main.rs": "7d152d2e3ab81d0ab7074e7e47f123eede095baef919a7bfe924e8c756a5b446",
+      "Cargo.toml": "6adafc86565588b704c9092b39db1b38434be2d2b4a55ca3eb0b60d0078834b0",
+      "Cargo.lock": "c4924867a7abd65626b82a9fd83a3e073010455ac7dac76c2d9e4645137aafbf"
+    },
+    "binary_sha256": "24657a499074f86e61784738e6e30de101c51ee6d3e777df8f7e86f0a7961efc"
+  },
+  "initial_status": "NAS_BLOCKED_NOT_BENCHMARKED",
+  "initial_blocker": "SSH 192.168.1.46:22 returns Network is unreachable. No new remote reader or transport diagnostic launched.",
+  "resolution": "NAS access restored. All 16 runs passed. V2 experiment removed after no performance gain; V3 retained. See network-reader-comparison-20260909.json."
+}

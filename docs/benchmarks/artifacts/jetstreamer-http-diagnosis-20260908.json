@@ -1,0 +1,442 @@
+{
+  "schema": "blockzilla-jetstreamer-http-diagnosis-v1",
+  "diagnostic_only": true,
+  "http": {
+    "state": "FAILED",
+    "diagnostic_only": true,
+    "control": "jetstreamer-http-diagnostic-20260908T152057Z",
+    "expected_blocks": 8192,
+    "expected_transactions": 8925832,
+    "cases": [
+      {
+        "label": "prefix-8192-workers12",
+        "binary_sha256": "f542388593d28b2b0d78c3c4d9b55ada62435321f63d0f0864853a9c41a5c8be",
+        "diagnostic_build": "rseek-response-and-error-chain-v1",
+        "verification": {
+          "status": "FAIL",
+          "error": "Reader process did not exit successfully"
+        },
+        "blocks": 5524,
+        "transactions": 6008087,
+        "exact_ordered_rows": false,
+        "elapsed_s": 319.816089967,
+        "diagnostic_tps": null,
+        "user_cpu_s": 1296.544983,
+        "system_cpu_s": 2066.208547,
+        "mean_cpu_cores": 10.514647747544483,
+        "system_cpu_share_percent": 61.44394849538676,
+        "peak_rss_mib": 106.3125,
+        "sampled_peak_rss_mib": 54.14453125,
+        "syscall_samples": {
+          "running": 3457,
+          "202": 740,
+          "281": 74,
+          "11": 3,
+          "-1": 2,
+          "9": 4
+        },
+        "wait_samples": {
+          "0": 3541,
+          "futex_do_wait": 664,
+          "do_epoll_wait": 69,
+          "__vm_munmap": 3,
+          "vm_mmap_pgoff": 3
+        },
+        "errors": [
+          "upstream retry invalidates sample: slot=388807994 Error reading until block: reqwest::Error { kind: Decode, source: hyper::Error(Body, Custom { kind: UnexpectedEof, error: IncompleteBody }) }"
+        ],
+        "http_response_log_count": 23,
+        "response_statuses": {
+          "206": 23
+        },
+        "body_error_logs": [
+          "RSEEK_DIAG error id=19 start=8870428740 body_bytes=538714044 elapsed_s=318.612110 detail=reqwest::Error { kind: Decode, source: hyper::Error(Body, Custom { kind: UnexpectedEof, error: IncompleteBody }) }"
+        ],
+        "http_body_bytes_delivered_to_reader": 6495481967,
+        "response_stream_end_logs": 23,
+        "http_source_unchanged": true
+      }
+    ],
+    "processes": {
+      "checked_at": 1788881562.1994624,
+      "supervisor_exists": false,
+      "readers": [
+        {
+          "pid": 2886277,
+          "exists": false
+        }
+      ]
+    },
+    "raw_receipts_sha256": {
+      "control/jetstreamer-http-diagnostic-20260908T152057Z/status.json": "e179b9e0b62f7a80519a6d6b37dd62ea901035c41f8a35175475dba5aa7d5163",
+      "control/jetstreamer-http-diagnostic-20260908T152057Z/launch.json": "cdfdb2e333c157a5dcf0eb0f640ea739bba317cd431a895c4f2c175f9ea675d9",
+      "control/jetstreamer-http-diagnostic-20260908T152057Z/supervisor.log": "69fa7c02a14203f7f140d47891f9d8da26ee255194e91c15512f0ce79627527e",
+      "control/jetstreamer-http-diagnostic-20260908T152057Z/archive-before.json": "917bcb60f6185c7a363b95d63631cb1366885aaab6e5a005e6db3c4becdf01f4",
+      "control/jetstreamer-http-diagnostic-20260908T152057Z/http-before.json": "e30a27819e06d6bec21429df5b10006986a9800708f8d28bb5145e14af04f1d7",
+      "control/jetstreamer-http-diagnostic-20260908T152057Z/host-before.json": "6b7420028078a45368117a36609e211724a335b3e2d9b904fa3c47454cfe6d4e",
+      "control/jetstreamer-http-diagnostic-20260908T152057Z/prefix-8192-workers12-http-after.json": "e30a27819e06d6bec21429df5b10006986a9800708f8d28bb5145e14af04f1d7",
+      "results/jetstreamer-http-diagnostic-20260908T152057Z/prefix-8192-workers12/report.json": "40281e34e69f5eb857d9c6d01b624d71d81b212563e53a13f4def69d48ba63e5",
+      "results/jetstreamer-http-diagnostic-20260908T152057Z/prefix-8192-workers12/process.json": "2188433db7db688f791a64117a7f6f43bd1977874fd83c26ed982c4fae0f122a",
+      "results/jetstreamer-http-diagnostic-20260908T152057Z/prefix-8192-workers12/verification.json": "2892d32b90d4cec27e8f7546eaf666453689b19fca55455e942c28e01c949f00",
+      "results/jetstreamer-http-diagnostic-20260908T152057Z/prefix-8192-workers12/resources.jsonl": "550a6f0ea688310794a543c9e27689d5c42c8309f49beabd96053c2d9daf2340",
+      "results/jetstreamer-http-diagnostic-20260908T152057Z/prefix-8192-workers12/stdout.log": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+      "results/jetstreamer-http-diagnostic-20260908T152057Z/prefix-8192-workers12/stderr.log": "e0163ffcb16ddbc9977e8e70d42eb9e0d59a5cb84bc02d0e1e778413b581606f",
+      "results/jetstreamer-http-diagnostic-20260908T152057Z/prefix-plan.json": "76c77bc6ef1277d138a498b8a441f3095b9c416571a9fafe4c6f28ae8c16d396",
+      "process-finished.json": "ee6710ed762c0f832137894fb7bc8d78f3652f3fbc88ea7b095a82c5cd55566c"
+    }
+  },
+  "failed_request_gateway": {
+    "cf_ray": "a37ef7ad091a57ed",
+    "range": "bytes=8870428740-527045598157",
+    "method": "GET",
+    "url": "https://blockzilla-archive-samples-v1.cheron-augustin.workers.dev/car/900/epoch-900.car",
+    "outcome": "canceled",
+    "worker_cpu_ms": 1,
+    "worker_wall_ms": 262,
+    "event_timestamp": 1788881143879,
+    "exceptions": [],
+    "logs": []
+  },
+  "allocator": {
+    "state": "PASS",
+    "diagnostic_only": true,
+    "control": "jetstreamer-http-diagnostic-20260908T152057Z-allocator-abba",
+    "expected_blocks": 512,
+    "expected_transactions": 545576,
+    "cases": [
+      {
+        "label": "a1-musl",
+        "binary_sha256": "f542388593d28b2b0d78c3c4d9b55ada62435321f63d0f0864853a9c41a5c8be",
+        "diagnostic_build": "rseek-response-and-error-chain-v1",
+        "verification": {
+          "status": "PASS",
+          "epoch": 900,
+          "blocks": 512,
+          "transactions": 545576,
+          "plan_parity": "EXACT_ORDERED_ROWS",
+          "processing_workers": 12,
+          "scan_seconds": 27.039999951,
+          "scan_transactions_s": 20176.627255497588,
+          "sampled_statistics_used_for_acceptance": false,
+          "retry_scope": "Reported firehose errors rejected; lower-level retries and reconnects are not counted"
+        },
+        "blocks": 512,
+        "transactions": 545576,
+        "exact_ordered_rows": true,
+        "elapsed_s": 27.039999951,
+        "diagnostic_tps": 20176.627255497588,
+        "user_cpu_s": 99.765644,
+        "system_cpu_s": 153.142898,
+        "mean_cpu_cores": 9.353126570203521,
+        "system_cpu_share_percent": 60.55267915782773,
+        "peak_rss_mib": 106.1796875,
+        "sampled_peak_rss_mib": 51.453125,
+        "syscall_samples": {
+          "running": 253,
+          "281": 13,
+          "202": 148,
+          "9": 5,
+          "11": 1,
+          "-1": 1
+        },
+        "wait_samples": {
+          "0": 259,
+          "do_epoll_wait": 13,
+          "futex_do_wait": 143,
+          "vm_mmap_pgoff": 5,
+          "__vm_munmap": 1
+        },
+        "errors": [],
+        "http_response_log_count": 23,
+        "response_statuses": {
+          "206": 23
+        },
+        "body_error_logs": [],
+        "http_body_bytes_delivered_to_reader": 602270056,
+        "response_stream_end_logs": 23,
+        "http_source_unchanged": true
+      },
+      {
+        "label": "b1-mimalloc",
+        "binary_sha256": "b870afbb88f7ca7a2f4d7cba25a07517788c33ba668cfb9987d3507eaa0ed31a",
+        "diagnostic_build": "rseek-response-and-error-chain-mimalloc-v1",
+        "verification": {
+          "status": "PASS",
+          "epoch": 900,
+          "blocks": 512,
+          "transactions": 545576,
+          "plan_parity": "EXACT_ORDERED_ROWS",
+          "processing_workers": 12,
+          "scan_seconds": 9.72174393,
+          "scan_transactions_s": 56119.14939627503,
+          "sampled_statistics_used_for_acceptance": false,
+          "retry_scope": "Reported firehose errors rejected; lower-level retries and reconnects are not counted"
+        },
+        "blocks": 512,
+        "transactions": 545576,
+        "exact_ordered_rows": true,
+        "elapsed_s": 9.72174393,
+        "diagnostic_tps": 56119.14939627503,
+        "user_cpu_s": 12.398937,
+        "system_cpu_s": 22.806773,
+        "mean_cpu_cores": 3.6213368973194084,
+        "system_cpu_share_percent": 64.78146016654685,
+        "peak_rss_mib": 193.0078125,
+        "sampled_peak_rss_mib": 184.8828125,
+        "syscall_samples": {
+          "running": 30,
+          "202": 179,
+          "281": 4,
+          "9": 2,
+          "-1": 2
+        },
+        "wait_samples": {
+          "0": 36,
+          "futex_do_wait": 176,
+          "do_epoll_wait": 4,
+          "__vm_munmap": 1
+        },
+        "errors": [],
+        "http_response_log_count": 23,
+        "response_statuses": {
+          "206": 23
+        },
+        "body_error_logs": [],
+        "http_body_bytes_delivered_to_reader": 602310750,
+        "response_stream_end_logs": 23,
+        "http_source_unchanged": true
+      },
+      {
+        "label": "b2-mimalloc",
+        "binary_sha256": "b870afbb88f7ca7a2f4d7cba25a07517788c33ba668cfb9987d3507eaa0ed31a",
+        "diagnostic_build": "rseek-response-and-error-chain-mimalloc-v1",
+        "verification": {
+          "status": "PASS",
+          "epoch": 900,
+          "blocks": 512,
+          "transactions": 545576,
+          "plan_parity": "EXACT_ORDERED_ROWS",
+          "processing_workers": 12,
+          "scan_seconds": 9.575702193,
+          "scan_transactions_s": 56975.03838400752,
+          "sampled_statistics_used_for_acceptance": false,
+          "retry_scope": "Reported firehose errors rejected; lower-level retries and reconnects are not counted"
+        },
+        "blocks": 512,
+        "transactions": 545576,
+        "exact_ordered_rows": true,
+        "elapsed_s": 9.575702193,
+        "diagnostic_tps": 56975.03838400752,
+        "user_cpu_s": 12.36996,
+        "system_cpu_s": 23.257864,
+        "mean_cpu_cores": 3.7206487087750646,
+        "system_cpu_share_percent": 65.28005751908957,
+        "peak_rss_mib": 209.96484375,
+        "sampled_peak_rss_mib": 197.97265625,
+        "syscall_samples": {
+          "running": 42,
+          "202": 159,
+          "-1": 2,
+          "281": 4,
+          "9": 1
+        },
+        "wait_samples": {
+          "0": 42,
+          "futex_do_wait": 161,
+          "do_epoll_wait": 5
+        },
+        "errors": [],
+        "http_response_log_count": 23,
+        "response_statuses": {
+          "206": 23
+        },
+        "body_error_logs": [],
+        "http_body_bytes_delivered_to_reader": 602261800,
+        "response_stream_end_logs": 23,
+        "http_source_unchanged": true
+      },
+      {
+        "label": "a2-musl",
+        "binary_sha256": "f542388593d28b2b0d78c3c4d9b55ada62435321f63d0f0864853a9c41a5c8be",
+        "diagnostic_build": "rseek-response-and-error-chain-v1",
+        "verification": {
+          "status": "PASS",
+          "epoch": 900,
+          "blocks": 512,
+          "transactions": 545576,
+          "plan_parity": "EXACT_ORDERED_ROWS",
+          "processing_workers": 12,
+          "scan_seconds": 27.504936097,
+          "scan_transactions_s": 19835.56689882681,
+          "sampled_statistics_used_for_acceptance": false,
+          "retry_scope": "Reported firehose errors rejected; lower-level retries and reconnects are not counted"
+        },
+        "blocks": 512,
+        "transactions": 545576,
+        "exact_ordered_rows": true,
+        "elapsed_s": 27.504936097,
+        "diagnostic_tps": 19835.56689882681,
+        "user_cpu_s": 100.009555,
+        "system_cpu_s": 160.258282,
+        "mean_cpu_cores": 9.462586500187788,
+        "system_cpu_share_percent": 61.57437040520685,
+        "peak_rss_mib": 106.1796875,
+        "sampled_peak_rss_mib": 50.13671875,
+        "syscall_samples": {
+          "running": 264,
+          "202": 198,
+          "281": 11,
+          "9": 1
+        },
+        "wait_samples": {
+          "0": 275,
+          "futex_do_wait": 187,
+          "do_epoll_wait": 12
+        },
+        "errors": [],
+        "http_response_log_count": 23,
+        "response_statuses": {
+          "206": 23
+        },
+        "body_error_logs": [],
+        "http_body_bytes_delivered_to_reader": 602254702,
+        "response_stream_end_logs": 23,
+        "http_source_unchanged": true
+      }
+    ],
+    "processes": {
+      "checked_at": 1788881765.558578,
+      "supervisor_exists": false,
+      "readers": [
+        {
+          "pid": 2887636,
+          "exists": false
+        },
+        {
+          "pid": 2887702,
+          "exists": false
+        },
+        {
+          "pid": 2887752,
+          "exists": false
+        },
+        {
+          "pid": 2887799,
+          "exists": false
+        }
+      ]
+    },
+    "raw_receipts_sha256": {
+      "control/jetstreamer-http-diagnostic-20260908T152057Z-allocator-abba/status.json": "a948f09933c510a7cb83421828c606ec54f7bfae45f301eff2b803399c562d8d",
+      "control/jetstreamer-http-diagnostic-20260908T152057Z-allocator-abba/launch.json": "023c22ba1665c9917bc65503e149d3ab368d310451324b12383e564b7d51fe56",
+      "control/jetstreamer-http-diagnostic-20260908T152057Z-allocator-abba/supervisor.log": "ddd5ea64e1e3c6e2104dc3ff568e9eec2111e4a9bda0260cae1dc80a60a7701c",
+      "control/jetstreamer-http-diagnostic-20260908T152057Z-allocator-abba/archive-before.json": "917bcb60f6185c7a363b95d63631cb1366885aaab6e5a005e6db3c4becdf01f4",
+      "control/jetstreamer-http-diagnostic-20260908T152057Z-allocator-abba/http-before.json": "e30a27819e06d6bec21429df5b10006986a9800708f8d28bb5145e14af04f1d7",
+      "control/jetstreamer-http-diagnostic-20260908T152057Z-allocator-abba/host-before.json": "d02b7f098664a4cf9385f198f8b24145b54207c2363c0552cce41578b146de3a",
+      "control/jetstreamer-http-diagnostic-20260908T152057Z-allocator-abba/a1-musl-http-after.json": "e30a27819e06d6bec21429df5b10006986a9800708f8d28bb5145e14af04f1d7",
+      "control/jetstreamer-http-diagnostic-20260908T152057Z-allocator-abba/b1-mimalloc-http-after.json": "e30a27819e06d6bec21429df5b10006986a9800708f8d28bb5145e14af04f1d7",
+      "control/jetstreamer-http-diagnostic-20260908T152057Z-allocator-abba/b2-mimalloc-http-after.json": "e30a27819e06d6bec21429df5b10006986a9800708f8d28bb5145e14af04f1d7",
+      "control/jetstreamer-http-diagnostic-20260908T152057Z-allocator-abba/a2-musl-http-after.json": "e30a27819e06d6bec21429df5b10006986a9800708f8d28bb5145e14af04f1d7",
+      "results/jetstreamer-http-diagnostic-20260908T152057Z-allocator-abba/a1-musl/report.json": "8dcd745b3ad7e58209c4b4e8d0a33fa8160a8f07d5b744cd52afb19e6414f8f3",
+      "results/jetstreamer-http-diagnostic-20260908T152057Z-allocator-abba/a1-musl/process.json": "fe5e17189336a7747e4af22cdd35cd55134f7c456af6e25b26572c52cc3b221f",
+      "results/jetstreamer-http-diagnostic-20260908T152057Z-allocator-abba/a1-musl/verification.json": "ef279971fe6d9bca6e8375184f25a7393aa471c061865ddce6c86eb4f8f72f6d",
+      "results/jetstreamer-http-diagnostic-20260908T152057Z-allocator-abba/a1-musl/resources.jsonl": "521d23eb76b22432d8d93264c3ee5beb35ebd504f661b07dc8d21269da488944",
+      "results/jetstreamer-http-diagnostic-20260908T152057Z-allocator-abba/a1-musl/stdout.log": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+      "results/jetstreamer-http-diagnostic-20260908T152057Z-allocator-abba/a1-musl/stderr.log": "8db59e966400d604b0da5fb04e68a52931974dff0b883b52780c7d0d75f5aecf",
+      "results/jetstreamer-http-diagnostic-20260908T152057Z-allocator-abba/b1-mimalloc/report.json": "f2b19a3d223264b871eebc4a3b989daca680905b296fa54e4afd8a37603508bb",
+      "results/jetstreamer-http-diagnostic-20260908T152057Z-allocator-abba/b1-mimalloc/process.json": "bd9d8e7b52457f06b22dba06c83bc261d53744036bad137a4d5f3a0bf9e29960",
+      "results/jetstreamer-http-diagnostic-20260908T152057Z-allocator-abba/b1-mimalloc/verification.json": "25ff15f169a640550465b37953dc58dc8f0de1cf957b65fe38eef8a0bd224d46",
+      "results/jetstreamer-http-diagnostic-20260908T152057Z-allocator-abba/b1-mimalloc/resources.jsonl": "be266a6880e8f78378b93937f578bb82b9d3819bf94090aa5143049e3c3d75a6",
+      "results/jetstreamer-http-diagnostic-20260908T152057Z-allocator-abba/b1-mimalloc/stdout.log": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+      "results/jetstreamer-http-diagnostic-20260908T152057Z-allocator-abba/b1-mimalloc/stderr.log": "f75843e568561b750431349ca15ef754c813f88402e6ca82540fa9023a438233",
+      "results/jetstreamer-http-diagnostic-20260908T152057Z-allocator-abba/b2-mimalloc/report.json": "ca139d0c889cabea1f10778b44e8856f9b7355f62dab75f957aa97c8eda621c3",
+      "results/jetstreamer-http-diagnostic-20260908T152057Z-allocator-abba/b2-mimalloc/process.json": "2d546136a24efc7ec65f09628accf4bf769bab1b949fc1ebf7b38c237c7d493a",
+      "results/jetstreamer-http-diagnostic-20260908T152057Z-allocator-abba/b2-mimalloc/verification.json": "04043874e2b32313b7cff3dd3ce3b899342d87f1bfd1f5df4501a42206de26b3",
+      "results/jetstreamer-http-diagnostic-20260908T152057Z-allocator-abba/b2-mimalloc/resources.jsonl": "e4b8d9bbc2dcb1400947c58357c40168927d50a864332fdf0bae96c1f0ee727f",
+      "results/jetstreamer-http-diagnostic-20260908T152057Z-allocator-abba/b2-mimalloc/stdout.log": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+      "results/jetstreamer-http-diagnostic-20260908T152057Z-allocator-abba/b2-mimalloc/stderr.log": "193150e6391b2a721d2d27ed453668ada0182e63e6adf9d99fbc3f422b0ebbf5",
+      "results/jetstreamer-http-diagnostic-20260908T152057Z-allocator-abba/a2-musl/report.json": "768a954852e7e975e5b9f505f990a2fc48535fb6dbe83e6a6ee52733a6a3c4f6",
+      "results/jetstreamer-http-diagnostic-20260908T152057Z-allocator-abba/a2-musl/process.json": "126edcbd66b6c21d96d6bb6259646f8a1d254846f0c16de257a25cfb64b59f70",
+      "results/jetstreamer-http-diagnostic-20260908T152057Z-allocator-abba/a2-musl/verification.json": "ec912b8578fcefc120d65ae1a5bbe9b49da9e6cc3b898df2cd883f13e38b1251",
+      "results/jetstreamer-http-diagnostic-20260908T152057Z-allocator-abba/a2-musl/resources.jsonl": "a6769173831aa6e864e20d96362c0c5054d12236f7b2e1a255c771f15eef9f75",
+      "results/jetstreamer-http-diagnostic-20260908T152057Z-allocator-abba/a2-musl/stdout.log": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+      "results/jetstreamer-http-diagnostic-20260908T152057Z-allocator-abba/a2-musl/stderr.log": "185fc439e92e609bee21e13ffdb917880eca79cbb9819b5748c384f9c930ed27",
+      "results/jetstreamer-http-diagnostic-20260908T152057Z-allocator-abba/prefix-plan.json": "b64eb0060aa901c688e21f6358e025613f0c1715d91b9f720ca3011881e43ed2",
+      "process-finished.json": "de1e67051e7bfd28d7e8fb7140ec37bef330741034e0f2ee3f47d9ee2a6c9ca2"
+    }
+  },
+  "allocator_summary": {
+    "musl_mean_s": 27.272468024,
+    "mimalloc_mean_s": 9.6487230615,
+    "elapsed_speedup": 2.826536511636618,
+    "musl_mean_cpu_s": 256.5881895,
+    "mimalloc_mean_cpu_s": 35.416767,
+    "musl_mean_system_cpu_s": 156.70059,
+    "mimalloc_mean_system_cpu_s": 23.032318500000002
+  },
+  "post_run_source_check": {
+    "checked_at": 1788881853.6253078,
+    "controls": [
+      {
+        "control": "jetstreamer-http-diagnostic-20260908T152057Z",
+        "archive_unchanged": true
+      },
+      {
+        "control": "jetstreamer-http-diagnostic-20260908T152057Z-allocator-abba",
+        "archive_unchanged": true
+      }
+    ],
+    "source_index_sha256": "4488c7cf2750c0a7fe11ae798b9d960ed72a0a9e904aa336a30c35198697d55d"
+  },
+  "sdk_http_tests": {
+    "command": "cargo test -p blockzilla-source-http --lib --offline --locked",
+    "passed": 20
+  },
+  "limitations": [
+    "Incomplete HTTP body reproduced; initiating close in Worker/R2/CDN/network/client remains unknown.",
+    "Allocator comparison identifies build cost, not a fix for stream truncation.",
+    "512-block instrumented results do not replace the normal 8192-block Triton baseline.",
+    "Higher memory use with mimalloc is part of the result."
+  ],
+  "builds": {
+    "http": {
+      "command": [
+        "cargo",
+        "build",
+        "--release",
+        "--offline",
+        "--target",
+        "x86_64-unknown-linux-musl",
+        "--manifest-path",
+        "/Users/augustin/Developement/ferno/blockzilla-v1/target/nas-validation/jetstreamer-http-diagnostic-20260908T152057Z/adapter/Cargo.toml",
+        "--jobs",
+        "4"
+      ],
+      "started_at": 1788880880.3010979,
+      "diagnostic_only": true,
+      "exit_code": 0,
+      "elapsed_s": 43.97491925000213,
+      "binary_sha256": "f542388593d28b2b0d78c3c4d9b55ada62435321f63d0f0864853a9c41a5c8be"
+    },
+    "allocator": {
+      "command": [
+        "cargo",
+        "build",
+        "--release",
+        "--offline",
+        "--target",
+        "x86_64-unknown-linux-musl",
+        "--manifest-path",
+        "/Users/augustin/Developement/ferno/blockzilla-v1/target/nas-validation/jetstreamer-http-diagnostic-20260908T152057Z/allocator-adapter/Cargo.toml",
+        "--jobs",
+        "4"
+      ],
+      "started_at": 1788881236.540684,
+      "diagnostic_only": true,
+      "exit_code": 0,
+      "elapsed_s": 42.33836108294781,
+      "binary_sha256": "b870afbb88f7ca7a2f4d7cba25a07517788c33ba668cfb9987d3507eaa0ed31a"
+    }
+  },
+  "gateway_log_sha256": "21489ea1178f7b5a410ecb4ce0fcdc536212b605f2e351ab683cfde4e5f367bc"
+}

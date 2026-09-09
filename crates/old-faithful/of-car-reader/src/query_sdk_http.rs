@@ -186,6 +186,8 @@ pub struct CarHttpStats {
     pub get_requests: u64,
     pub get_responses: u64,
     pub get_body_bytes_received: u64,
+    /// Retries of incomplete bodies; partial bytes are included above.
+    pub incomplete_body_retries: u64,
     pub chunks_scheduled: u64,
     pub chunks_fetched: u64,
     pub chunks_delivered: u64,
@@ -201,6 +203,7 @@ struct SharedStats {
     get_requests: AtomicU64,
     get_responses: AtomicU64,
     get_body_bytes_received: AtomicU64,
+    incomplete_body_retries: AtomicU64,
     chunks_scheduled: AtomicU64,
     chunks_fetched: AtomicU64,
     chunks_delivered: AtomicU64,
@@ -224,6 +227,7 @@ impl CarHttpStatsHandle {
             get_requests: self.inner.get_requests.load(Ordering::Relaxed),
             get_responses: self.inner.get_responses.load(Ordering::Relaxed),
             get_body_bytes_received: self.inner.get_body_bytes_received.load(Ordering::Relaxed),
+            incomplete_body_retries: self.inner.incomplete_body_retries.load(Ordering::Relaxed),
             chunks_scheduled: self.inner.chunks_scheduled.load(Ordering::Relaxed),
             chunks_fetched: self.inner.chunks_fetched.load(Ordering::Relaxed),
             chunks_delivered: self.inner.chunks_delivered.load(Ordering::Relaxed),
@@ -374,7 +378,11 @@ impl TerminalError {
         };
         Self {
             kind,
-            message: error.to_string(),
+            // Preserve the nested transport cause (for example IncompleteBody).
+            message: match &error {
+                CarHttpError::BodyRead(source) => format!("{error}; transport: {source:?}"),
+                _ => error.to_string(),
+            },
         }
     }
 
@@ -1112,6 +1120,7 @@ fn worker_loop(context: WorkerContext) {
             context.total_length,
             task,
             &context.stats,
+            &context.cancel,
         );
         if context
             .result_tx
@@ -1130,7 +1139,46 @@ fn fetch_range(
     total_length: u64,
     task: ChunkTask,
     stats: &SharedStats,
+    cancel: &AtomicBool,
 ) -> Result<Vec<u8>, CarHttpError> {
+    let mut body = Vec::new();
+    for attempt in 0..=2 {
+        match fetch_range_attempt(
+            client,
+            url,
+            validation,
+            total_length,
+            task,
+            stats,
+            &mut body,
+        ) {
+            Ok(()) => return Ok(body),
+            Err(error) => {
+                let incomplete = matches!(
+                    error,
+                    CarHttpError::BodyRead(_) | CarHttpError::ShortBody { .. }
+                );
+                if !incomplete || attempt == 2 || cancel.load(Ordering::Acquire) {
+                    return Err(error);
+                }
+                // Discard the partial range. Every attempt repeats all identity
+                // and range checks before its bytes can enter the ordered stream.
+                add_counter(&stats.incomplete_body_retries, 1, "incomplete_body_retries")?;
+            }
+        }
+    }
+    unreachable!("bounded retry loop always returns")
+}
+
+fn fetch_range_attempt(
+    client: &Client,
+    url: &Url,
+    validation: &RangeValidation,
+    total_length: u64,
+    task: ChunkTask,
+    stats: &SharedStats,
+    body: &mut Vec<u8>,
+) -> Result<(), CarHttpError> {
     let range = format!("bytes={}-{}", task.start, task.end);
     add_counter(&stats.get_requests, 1, "get_requests")?;
     let mut request = client
@@ -1193,33 +1241,27 @@ fn fetch_range(
         });
     }
 
-    let mut body = Vec::new();
+    body.clear();
     body.try_reserve_exact(expected)
         .map_err(|_| CarHttpError::ArithmeticOverflow("range body allocation"))?;
-    let mut scratch = [0u8; 64 << 10];
-    while body.len() < expected {
-        let remaining = expected - body.len();
-        let read_len = remaining.min(scratch.len());
+    body.resize(expected, 0);
+    let mut filled = 0;
+    while filled < expected {
         let count = response
-            .read(&mut scratch[..read_len])
+            .read(&mut body[filled..])
             .map_err(CarHttpError::BodyRead)?;
         if count == 0 {
-            break;
+            return Err(CarHttpError::ShortBody {
+                expected,
+                actual: filled,
+            });
         }
-        let count_u64 = u64::try_from(count)
-            .map_err(|_| CarHttpError::ArithmeticOverflow("received byte count"))?;
         add_counter(
             &stats.get_body_bytes_received,
-            count_u64,
+            count as u64,
             "get_body_bytes_received",
         )?;
-        body.extend_from_slice(&scratch[..count]);
-    }
-    if body.len() < expected {
-        return Err(CarHttpError::ShortBody {
-            expected,
-            actual: body.len(),
-        });
+        filled += count;
     }
     let mut extra = [0u8; 1];
     let extra_count = response.read(&mut extra).map_err(CarHttpError::BodyRead)?;
@@ -1228,7 +1270,7 @@ fn fetch_range(
         return Err(CarHttpError::LongBody { expected });
     }
     add_counter(&stats.chunks_fetched, 1, "chunks_fetched")?;
-    Ok(body)
+    Ok(())
 }
 
 fn require_status(
@@ -1349,7 +1391,7 @@ fn add_counter(counter: &AtomicU64, delta: u64, label: &'static str) -> Result<(
 mod tests {
     use std::{
         collections::HashMap,
-        io::{Read as _, Write as _},
+        io::Write as _,
         net::{SocketAddr, TcpListener, TcpStream},
         sync::{
             Arc, Mutex,
@@ -1374,6 +1416,8 @@ mod tests {
         MissingGetEtag,
         BadContentRange,
         ShortBody,
+        ShortBodyOnce,
+        ShortThenChangedEtag,
         RedirectHead,
         OperatorTrusted,
         OperatorTrustedChangedTotalLength,
@@ -1416,6 +1460,7 @@ mod tests {
         requests: AtomicUsize,
         redirected_requests: AtomicUsize,
         active_gets: AtomicUsize,
+        get_attempts: AtomicUsize,
         max_active_gets: AtomicUsize,
         max_if_match_headers: AtomicUsize,
         completion_order: Mutex<Vec<u64>>,
@@ -1640,6 +1685,7 @@ mod tests {
         if_match_headers: usize,
     ) {
         let _active = ActiveGet::start(state);
+        let attempt = state.get_attempts.fetch_add(1, Ordering::Relaxed);
         let operator_trusted = mode.is_operator_trusted();
         state
             .max_if_match_headers
@@ -1705,7 +1751,11 @@ mod tests {
         let body = if matches!(
             mode,
             ServerMode::ShortBody | ServerMode::OperatorTrustedShortBody
-        ) {
+        ) || (attempt == 0
+            && matches!(
+                mode,
+                ServerMode::ShortBodyOnce | ServerMode::ShortThenChangedEtag
+            )) {
             &expected_body[..expected_body.len().saturating_sub(1)]
         } else {
             expected_body
@@ -1724,6 +1774,9 @@ mod tests {
             ("Content-Length", expected_body.len().to_string()),
         ];
         match mode {
+            ServerMode::ShortThenChangedEtag if attempt > 0 => {
+                response_headers.push(("ETag", "\"fixture-v2\"".into()));
+            }
             ServerMode::ChangedGetEtag => {
                 response_headers.push(("ETag", "\"fixture-v2\"".into()));
             }
@@ -1834,6 +1887,7 @@ mod tests {
                 get_requests: 6,
                 get_responses: 6,
                 get_body_bytes_received: expected.len() as u64,
+                incomplete_body_retries: 0,
                 chunks_scheduled: 6,
                 chunks_fetched: 6,
                 chunks_delivered: 6,
@@ -1937,6 +1991,7 @@ mod tests {
                 get_requests: 1,
                 get_responses: 1,
                 get_body_bytes_received: expected.len() as u64,
+                incomplete_body_retries: 0,
                 chunks_scheduled: 1,
                 chunks_fetched: 1,
                 chunks_delivered: 1,
@@ -2103,11 +2158,44 @@ mod tests {
         let server = TestServer::start(fixture_data(16), ServerMode::ShortBody);
         let mut stream = CarHttpStream::open(&server.url, fixture_options()).unwrap();
         let error = stream.read_to_end(&mut Vec::new()).unwrap_err();
+        assert_eq!(stream.stats().get_requests, 3);
+        assert_eq!(stream.stats().incomplete_body_retries, 2);
+        assert_eq!(stream.stats().bytes_delivered, 0);
         let message = error.to_string();
         assert!(
             message.contains("body") || message.contains("request"),
             "unexpected error: {message}"
         );
+    }
+
+    #[test]
+    fn incomplete_range_retries_without_publishing_partial_bytes() {
+        let expected = fixture_data(16);
+        let server = TestServer::start(expected.clone(), ServerMode::ShortBodyOnce);
+        let mut stream = CarHttpStream::open(&server.url, fixture_options()).unwrap();
+        let stats = stream.stats_handle();
+        let mut actual = Vec::new();
+        stream.read_to_end(&mut actual).unwrap();
+        drop(stream);
+        assert_eq!(actual, expected);
+        let stats = stats.snapshot();
+        assert_eq!(stats.get_requests, 2);
+        assert_eq!(stats.incomplete_body_retries, 1);
+        assert_eq!(stats.get_body_bytes_received, 31);
+        assert_eq!(stats.bytes_delivered, 16);
+        assert_eq!(stats.chunks_fetched, 1);
+    }
+
+    #[test]
+    fn incomplete_range_retry_still_rejects_changed_identity() {
+        let server = TestServer::start(fixture_data(16), ServerMode::ShortThenChangedEtag);
+        let mut stream = CarHttpStream::open(&server.url, fixture_options()).unwrap();
+        let mut actual = Vec::new();
+        let error = stream.read_to_end(&mut actual).unwrap_err();
+        assert!(error.to_string().contains("ETag changed"));
+        assert!(actual.is_empty());
+        assert_eq!(stream.stats().incomplete_body_retries, 1);
+        assert_eq!(stream.stats().get_requests, 2);
     }
 
     #[test]

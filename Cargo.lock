@@ -1145,12 +1145,15 @@ name = "blockzilla-reader-profile"
 version = "0.2.0"
 dependencies = [
  "anyhow",
+ "blake3",
  "blockzilla-archive-v3-reader",
  "blockzilla-compact-v2-reader",
  "blockzilla-example-workloads",
  "blockzilla-model",
  "bs58",
  "clap 4.6.6",
+ "mimalloc",
+ "of-car-reader",
  "pprof",
  "serde_json",
 ]

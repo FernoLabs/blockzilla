@@ -1,5 +1,25 @@
 # Epoch 900 network reader pilot
 
+> **9 September completed results:** all 16 runs passed. V3 improved; the V2 candidate was rejected and removed. See the [full results and comparison limits](network-reader-comparison-20260909.md).
+
+> **Follow-up diagnosis:** a detailed mirror run reproduced an incomplete HTTP body.
+> A separate allocator test found substantial overhead in our Jetstreamer build.
+> See the [diagnosis and limits](network-reader-diagnosis-20260908.md); original baseline measurements remain unchanged.
+
+> **Selected baseline:** use the [epoch 900 network reference](network-reference-baseline-20260908.md)
+> for future reader work. Jetstreamer and SDK workloads have separate acceptance rules.
+
+> **8 September, Triton comparison:** the same Jetstreamer executable and 12 workers
+> passed the 8,192-block test from Triton: 8,925,832 transactions in 471.0 seconds
+> (18,951 TPS), with no reported firehose error. This is an accepted prefix,
+> not a full-epoch result. See the [Triton report](jetstreamer-triton-20260908.md).
+
+> **8 September, Jetstreamer retry:** the new 8,192-block check stopped after
+> 346.4 seconds on an HTTP response-body read error. It completed 6,020 blocks
+> and 6,546,976 callbacks; the full epoch was not started. No new Jetstreamer
+> speed result is accepted. See the [retry report](jetstreamer-epoch900-retry-20260908.md).
+
+
 Updated on 8 September 2026. The local matrix and all nine SDK network cases
 passed acceptance. Both Jetstreamer correctness checks passed; its full run
 failed. The selected network scope remains epoch 900.

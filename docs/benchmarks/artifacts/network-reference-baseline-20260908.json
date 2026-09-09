@@ -1,0 +1,126 @@
+{
+  "schema": "blockzilla-network-reference-baseline-v1",
+  "selected_on": "2026-09-08",
+  "epoch": 900,
+  "blocks": 8192,
+  "transactions": 8925832,
+  "workers": 12,
+  "scope": "First 8192 canonical blocks; full epoch not accepted for Jetstreamer",
+  "jetstreamer": {
+    "artifact": "artifacts/jetstreamer-triton-20260908.json",
+    "sha256": "3398116852d2ea43601d73b93d16b748d608d42a03f19980dba90ec0c775a151",
+    "workload": "Decoded transactions and status metadata, block callbacks, exact ordered counts; no signature verification",
+    "http_base": "https://files.old-faithful.net/",
+    "binary_sha256": "5a0a17b53e85a2de48caae864d69a0d1baa295e7ba25d892dd4c822d8c527a87",
+    "firehose_call_s": 471.002003111,
+    "transactions_s": 18950.730444975343,
+    "allocator_caveat": "Original Linux musl default-allocator build; a separate 512-block A/B/B/A diagnostic found about 2.83x throughput with mimalloc, at higher RSS. The accepted original baseline is unchanged."
+  },
+  "sdk": {
+    "artifact": "artifacts/network-profile-20260908/acceptance.json",
+    "sha256": "025b8d0c3e8362f6fcc88c1b888a9fc3ff1082621422fa4dbb112d8e8e9ed797",
+    "workload": "Transaction identities serialized to SHA-256 and discarded",
+    "expected_output_sha256": "54531e48c946cb66c0c148d7339fdbb11511cffaaec9bc9c5a33f650a10d3685",
+    "cases": [
+      {
+        "label": "v2-network-normal",
+        "profiled": false,
+        "setup_s": 26.642394478,
+        "scan_s": 28.447817585,
+        "total_s": 55.090370455,
+        "scan_tps": 313761.5732148966,
+        "total_tps": 162021.63692638397,
+        "scan_http_mb_s": 60.23744017901611,
+        "setup_transport": {
+          "cache_downloads": 3,
+          "cache_hits": 0,
+          "cache_read_bytes": 22456718,
+          "cache_read_calls": 2,
+          "get_requests": 29,
+          "head_requests": 21,
+          "incomplete_body_retries": 0,
+          "network_body_bytes": 912008526,
+          "server_error_retries": 0
+        },
+        "scan_transport": {
+          "cache_downloads": 0,
+          "cache_hits": 0,
+          "cache_read_bytes": 0,
+          "cache_read_calls": 0,
+          "get_requests": 156,
+          "head_requests": 0,
+          "incomplete_body_retries": 0,
+          "network_body_bytes": 1713623710,
+          "server_error_retries": 0
+        },
+        "total_transport": {
+          "cache_downloads": 3,
+          "cache_hits": 0,
+          "cache_read_bytes": 22456718,
+          "cache_read_calls": 2,
+          "get_requests": 185,
+          "head_requests": 21,
+          "incomplete_body_retries": 0,
+          "network_body_bytes": 2625632236,
+          "server_error_retries": 0
+        },
+        "exit_peak_rss_mib": 138.1875,
+        "cpu_cores_mean_normal_only": 0.2769231877368032
+      },
+      {
+        "label": "v3-network-normal",
+        "profiled": false,
+        "setup_s": 4.472677055,
+        "scan_s": 35.161852538,
+        "total_s": 39.634646541,
+        "scan_tps": 253849.87865339874,
+        "total_tps": 225202.76523134086,
+        "scan_http_mb_s": 24.347301811666565,
+        "setup_transport": {
+          "cache_downloads": 1,
+          "cache_hits": 0,
+          "cache_read_bytes": 107100848,
+          "cache_read_calls": 5,
+          "get_requests": 15,
+          "head_requests": 38,
+          "incomplete_body_retries": 0,
+          "network_body_bytes": 107101552,
+          "server_error_retries": 0
+        },
+        "scan_transport": {
+          "cache_downloads": 0,
+          "cache_hits": 0,
+          "cache_read_bytes": 0,
+          "cache_read_calls": 0,
+          "get_requests": 2176,
+          "head_requests": 0,
+          "incomplete_body_retries": 0,
+          "network_body_bytes": 856096236,
+          "server_error_retries": 0
+        },
+        "total_transport": {
+          "cache_downloads": 1,
+          "cache_hits": 0,
+          "cache_read_bytes": 107100848,
+          "cache_read_calls": 5,
+          "get_requests": 2191,
+          "head_requests": 38,
+          "incomplete_body_retries": 0,
+          "network_body_bytes": 963197788,
+          "server_error_retries": 0
+        },
+        "exit_peak_rss_mib": 198.63671875,
+        "cpu_cores_mean_normal_only": 0.2563463758782306
+      }
+    ]
+  },
+  "comparison_rules": [
+    "Compare each reader with its own unchanged workload, source, output and normal build.",
+    "Do not divide SDK TPS by Jetstreamer TPS as a format speedup: decode work and sources differ.",
+    "Report setup, scan and total separately when available; Jetstreamer currently reports one firehose-call time.",
+    "Retain failures and enforce complete exact output checks.",
+    "CPU profiles and instrumented builds are diagnostic only.",
+    "Repeat affected cases to distinguish an improvement from network and CDN variance."
+  ],
+  "diagnostic_report": "network-reader-diagnosis-20260908.md"
+}

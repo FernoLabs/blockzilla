@@ -1,4 +1,24 @@
 # Archive readers: accepted local and network comparison
+
+> **9 September completed results:** all 16 runs passed. V3 improved; the V2 candidate was rejected and removed. See the [full results and comparison limits](network-reader-comparison-20260909.md).
+
+> **Follow-up diagnosis:** a detailed mirror run reproduced an incomplete HTTP body.
+> A separate allocator test found substantial overhead in our Jetstreamer build.
+> See the [diagnosis and limits](network-reader-diagnosis-20260908.md); original baseline measurements remain unchanged.
+
+> **Selected baseline:** use the [epoch 900 network reference](network-reference-baseline-20260908.md)
+> for future reader work. Jetstreamer and SDK workloads have separate acceptance rules.
+
+> **8 September, Triton comparison:** the same Jetstreamer executable and 12 workers
+> passed the 8,192-block test from Triton: 8,925,832 transactions in 471.0 seconds
+> (18,951 TPS), with no reported firehose error. This is an accepted prefix,
+> not a full-epoch result. See the [Triton report](jetstreamer-triton-20260908.md).
+
+> **8 September, Jetstreamer retry:** the new 8,192-block check stopped after
+> 346.4 seconds on an HTTP response-body read error. It completed 6,020 blocks
+> and 6,546,976 callbacks; the full epoch was not started. No new Jetstreamer
+> speed result is accepted. See the [retry report](jetstreamer-epoch900-retry-20260908.md).
+
 > **8 September, monitored CPU profiles:** all eight V2/V3 local/network
 > diagnostic runs passed exact transaction-identity hashes. Network scan rates
 > were 313,762 TPS / 60.24 MB/s for V2 and 253,850 TPS / 24.35 MB/s for V3.

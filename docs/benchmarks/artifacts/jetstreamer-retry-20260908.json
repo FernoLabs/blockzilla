@@ -1,0 +1,71 @@
+{
+  "state": "FAILED",
+  "accepted_for_speed_comparison": false,
+  "full_epoch_started": false,
+  "upstream_version": "0.7.0",
+  "upstream_commit": "cffaf3d891b3cbe45a46dd963d6d3571b2aa1a24",
+  "binary_sha256": "5a0a17b53e85a2de48caae864d69a0d1baa295e7ba25d892dd4c822d8c527a87",
+  "epoch": 900,
+  "workers": 12,
+  "expected_blocks": 8192,
+  "expected_transactions": 8925832,
+  "completed_blocks": 6020,
+  "completed_transactions": 6546976,
+  "partial_rows_match_plan": true,
+  "scan_seconds_before_failure": 346.387747328,
+  "errors": [
+    "upstream retry invalidates sample: slot=388805945 Error reading until block: error decoding response body"
+  ],
+  "process_user_cpu_seconds": 1350.501207,
+  "process_system_cpu_seconds": 2246.663122,
+  "mean_cpu_cores": 10.384790907727428,
+  "system_share_of_cpu_percent": 62.456505083396195,
+  "sampled_peak_rss_mib": 52.125,
+  "kernel_peak_rss_mib": 109.54296875,
+  "process_disk_read_bytes": 0,
+  "host_received_bytes": {
+    "lo": 281124,
+    "eth1": 740655,
+    "eth0": 7194833467
+  },
+  "network_body_bytes": null,
+  "source_http_unchanged": true,
+  "processes": {
+    "checked_at": 1788872986.9590542,
+    "supervisor_exists": false,
+    "readers": [
+      {
+        "pid": 2866822,
+        "exists": false
+      }
+    ]
+  },
+  "raw_receipts_sha256": {
+    "control/jetstreamer-retry-20260908T125915Z/status.json": "e47ba7f072dac1b2b5916240610d57c270fc1e006a1260cad6a51871cd6fedad",
+    "control/jetstreamer-retry-20260908T125915Z/launch.json": "51c6db2eb24ff7fb126b6c0dd434fa3aa2d58c0d8250c34ee70592d3acc4d420",
+    "control/jetstreamer-retry-20260908T125915Z/supervisor.log": "69fa7c02a14203f7f140d47891f9d8da26ee255194e91c15512f0ce79627527e",
+    "control/jetstreamer-retry-20260908T125915Z/archive-before.json": "917bcb60f6185c7a363b95d63631cb1366885aaab6e5a005e6db3c4becdf01f4",
+    "control/jetstreamer-retry-20260908T125915Z/http-before.json": "e30a27819e06d6bec21429df5b10006986a9800708f8d28bb5145e14af04f1d7",
+    "control/jetstreamer-retry-20260908T125915Z/host-before.json": "374fc8b7bc2b364a61913a4ce72348d401ba7afeb91cb26b543b6fd72caa9d86",
+    "control/jetstreamer-retry-20260908T125915Z/prefix-8192-workers12-http-after.json": "e30a27819e06d6bec21429df5b10006986a9800708f8d28bb5145e14af04f1d7",
+    "results/jetstreamer-retry-20260908T125915Z/prefix-8192-workers12/report.json": "e8c4f24e0adb8cbc4d28f67e2e079f5bb5c09a878b3c79f253bc675690ee7ad9",
+    "results/jetstreamer-retry-20260908T125915Z/prefix-8192-workers12/process.json": "a5aa58a65cfb5616feef07b6ac6439318c95840ecf449018d743be5d3cac1d47",
+    "results/jetstreamer-retry-20260908T125915Z/prefix-8192-workers12/verification.json": "2892d32b90d4cec27e8f7546eaf666453689b19fca55455e942c28e01c949f00",
+    "results/jetstreamer-retry-20260908T125915Z/prefix-8192-workers12/resources.jsonl": "1fb3811d19b10397c8440d395238a4b46b80a572006fa32959d64991c984abba",
+    "results/jetstreamer-retry-20260908T125915Z/prefix-8192-workers12/stdout.log": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+    "results/jetstreamer-retry-20260908T125915Z/prefix-8192-workers12/stderr.log": "28730dc0f921c5ad3c79cdaae8732610065b770218d7edb06a316fc7e95438d6",
+    "results/jetstreamer-retry-20260908T125915Z/prefix-plan.json": "76c77bc6ef1277d138a498b8a441f3095b9c416571a9fafe4c6f28ae8c16d396",
+    "full-plan-sha256.txt": "176b26a058d3d581a88715ae22a48861751347882b4c32327bbf89e8a64ecb28",
+    "process-finished.json": "856813e9b3c7a780b2649023b4a5124fa5dbfee0abbab6bd0097b2f45a7d5688"
+  },
+  "post_run_source_check": {
+    "checked_at": 1788873082.7786424,
+    "local_source_identities_unchanged": true,
+    "source_index_sha256": "4488c7cf2750c0a7fe11ae798b9d960ed72a0a9e904aa336a30c35198697d55d"
+  },
+  "gateway_observation": {
+    "slow_or_error_events_observed": 0,
+    "scope": "R2 head/get return time; excludes body stream completion",
+    "log_sha256": "199509caebcbb71a9d0944500be64936934194e6d3cd5822b3a3e22e90a01e2d"
+  }
+}

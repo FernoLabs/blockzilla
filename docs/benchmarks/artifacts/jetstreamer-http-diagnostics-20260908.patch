@@ -1,0 +1,82 @@
+--- rseek-0.4.0/src/lib.rs
++++ rseek-0.4.0/src/lib.rs
+@@ -3,6 +3,15 @@
+ 
+ use std::io::{Error as IoError, ErrorKind, Result as IoResult};
+ use std::pin::Pin;
++use std::sync::{Arc, atomic::{AtomicU64, Ordering}};
++use std::time::Instant;
++static NEXT_REQUEST: AtomicU64 = AtomicU64::new(1);
++struct Trace { id: u64, start: u64, bytes: AtomicU64, began: Instant }
++impl Drop for Trace {
++    fn drop(&mut self) {
++        eprintln!("RSEEK_DIAG end id={} start={} body_bytes={} elapsed_s={:.6}", self.id, self.start, self.bytes.load(Ordering::Relaxed), self.began.elapsed().as_secs_f64());
++    }
++}
+ use std::task::{Context, Poll};
+ 
+ use bytes::Bytes;
+@@ -30,6 +39,8 @@
+     init_fetch: Option<Pin<Box<dyn futures::Future<Output = IoResult<Response>> + Send + Sync>>>,
+     // Once the response is ready, this yields chunks
+     reader: Option<SReader>,
++    request_id: u64,
++    request_start: u64,
+ }
+ 
+ // Allow using AsyncReadExt and AsyncSeekExt
+@@ -47,6 +58,8 @@
+             position: 0,
+             init_fetch: None,
+             reader: None,
++            request_id: 0,
++            request_start: 0,
+         };
+         // try to determine length, ignore failures
+         if let Ok(sz) = s.fetch_file_size().await {
+@@ -64,7 +77,7 @@
+         let resp = req
+             .send()
+             .await
+-            .map_err(|e| IoError::other(e.to_string()))?;
++            .map_err(|e| IoError::other(format!("{e:?}")))?;
+         if resp.status() != reqwest::StatusCode::PARTIAL_CONTENT {
+             // Range not supported
+             return Err(IoError::new(
+@@ -84,6 +97,8 @@
+     }
+ 
+     fn schedule_fetch(&mut self, pos: u64) {
++        self.request_id = NEXT_REQUEST.fetch_add(1, Ordering::Relaxed);
++        self.request_start = pos;
+         self.reader = None;
+         let mut builder = (self.factory)();
+         if let Some(sz) = self.file_size {
+@@ -96,7 +111,7 @@
+             builder
+                 .send()
+                 .await
+-                .map_err(|e| IoError::other(e.to_string()))
++                .map_err(|e| IoError::other(format!("{e:?}")))
+         };
+         self.init_fetch = Some(Box::pin(fut));
+     }
+@@ -135,9 +150,15 @@
+         if let Some(fut) = &mut this.init_fetch {
+             match fut.as_mut().poll(cx) {
+                 Poll::Ready(Ok(resp)) => {
+-                    let stream = resp
+-                        .bytes_stream()
+-                        .map_err(|e| IoError::other(e.to_string()));
++                    eprintln!("RSEEK_DIAG response id={} start={} status={} version={:?} content_length={:?} content_range={:?} encoding={:?} cf_ray={:?}", this.request_id, this.request_start, resp.status().as_u16(), resp.version(), resp.headers().get("content-length"), resp.headers().get("content-range"), resp.headers().get("content-encoding"), resp.headers().get("cf-ray"));
++                    let trace = Arc::new(Trace { id: this.request_id, start: this.request_start, bytes: AtomicU64::new(0), began: Instant::now() });
++                    let good = Arc::clone(&trace);
++                    let stream = resp.bytes_stream()
++                        .map_ok(move |chunk| { good.bytes.fetch_add(chunk.len() as u64, Ordering::Relaxed); chunk })
++                        .map_err(move |e| {
++                            eprintln!("RSEEK_DIAG error id={} start={} body_bytes={} elapsed_s={:.6} detail={:?}", trace.id, trace.start, trace.bytes.load(Ordering::Relaxed), trace.began.elapsed().as_secs_f64(), e);
++                            IoError::other(format!("{e:?}"))
++                        });
+                     this.reader = Some(StreamReader::new(Box::pin(stream)));
+                     this.init_fetch = None;
+                     // Recurse into reader
