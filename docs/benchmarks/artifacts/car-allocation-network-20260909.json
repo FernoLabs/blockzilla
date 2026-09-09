@@ -1,0 +1,911 @@
+{
+  "schema": "blockzilla-car-allocation-report-v1",
+  "control": "target/nas-validation/car-allocation-20260909T073008Z",
+  "status_sha256": "bc7a0c1135a1fadfccce8329e823fa92f765b390472440e0a962fc7cc3ef96b6",
+  "source_before": {
+    "bytes": 527045598158,
+    "etag": "\"d98e61b8827c6c211f889dd2bf8577a8-3927\""
+  },
+  "source_after": {
+    "bytes": 527045598158,
+    "etag": "\"d98e61b8827c6c211f889dd2bf8577a8-3927\""
+  },
+  "all_cases_valid": true,
+  "all_digests_match_previous_committed_reference": true,
+  "blocks": 2048,
+  "transactions": 2208720,
+  "cases": [
+    {
+      "label": "s-owned-a",
+      "binary_sha256": "1741fe420b9fbbf8e7f867cfe43acf6f237ac32f072a3ce7f0daa5f5847fdaa6",
+      "usage": {
+        "ru_utime": 119.560147,
+        "ru_stime": 139.587143,
+        "ru_maxrss": 348068,
+        "ru_nvcsw": 9296302,
+        "ru_nivcsw": 268299
+      },
+      "receipt": {
+        "allocations": null,
+        "allocator": "system",
+        "blocks": 2048,
+        "epoch": 900,
+        "failed": 92314,
+        "http": {
+          "body_bytes": 2650800128,
+          "bytes_delivered": 2390753280,
+          "get_requests": 79,
+          "incomplete_body_retries": 0,
+          "workers_finished": 4
+        },
+        "http_body_window_bytes": 268435456,
+        "http_workers": 4,
+        "identity": {
+          "bytes": 527045598158,
+          "etag": "\"d98e61b8827c6c211f889dd2bf8577a8-3927\"",
+          "operator_trusted": false,
+          "url": "https://blockzilla-archive-samples-v1.cheron-augustin.workers.dev/car/900/epoch-900.car"
+        },
+        "metadata_mode": "Owned",
+        "physical_blocks": 2048,
+        "scan_seconds": 24.823415116,
+        "scan_tps": 88977.28171883826,
+        "schema": "blockzilla-car-decode-reference-v1",
+        "setup_seconds": 0.142538103,
+        "signature_verification": false,
+        "transactions": 2208720,
+        "valid": true,
+        "votes": 1633196,
+        "workers": 12,
+        "block_transaction_rows_sha256": "7536d66a43b201a238ad7b64ba39e7d454f3455f9f00f4c3925a49a4ef67dcbf",
+        "block_decode_digests_sha256": "8ead91e24401e597a2defe0eeb5f769cabfac5a089e2820ab684b5133afb1e8b"
+      }
+    },
+    {
+      "label": "s-visitor-a",
+      "binary_sha256": "1741fe420b9fbbf8e7f867cfe43acf6f237ac32f072a3ce7f0daa5f5847fdaa6",
+      "usage": {
+        "ru_utime": 14.660439,
+        "ru_stime": 6.46171,
+        "ru_maxrss": 346208,
+        "ru_nvcsw": 469359,
+        "ru_nivcsw": 7295
+      },
+      "receipt": {
+        "allocations": null,
+        "allocator": "system",
+        "blocks": 2048,
+        "epoch": 900,
+        "failed": 92314,
+        "http": {
+          "body_bytes": 2650800128,
+          "bytes_delivered": 2390753280,
+          "get_requests": 79,
+          "incomplete_body_retries": 0,
+          "workers_finished": 4
+        },
+        "http_body_window_bytes": 268435456,
+        "http_workers": 4,
+        "identity": {
+          "bytes": 527045598158,
+          "etag": "\"d98e61b8827c6c211f889dd2bf8577a8-3927\"",
+          "operator_trusted": false,
+          "url": "https://blockzilla-archive-samples-v1.cheron-augustin.workers.dev/car/900/epoch-900.car"
+        },
+        "metadata_mode": "Visitor",
+        "physical_blocks": 2048,
+        "scan_seconds": 15.130333805,
+        "scan_tps": 145979.59492936646,
+        "schema": "blockzilla-car-decode-reference-v1",
+        "setup_seconds": 0.149130034,
+        "signature_verification": false,
+        "transactions": 2208720,
+        "valid": true,
+        "votes": 1633196,
+        "workers": 12,
+        "block_transaction_rows_sha256": "7536d66a43b201a238ad7b64ba39e7d454f3455f9f00f4c3925a49a4ef67dcbf",
+        "block_decode_digests_sha256": "8ead91e24401e597a2defe0eeb5f769cabfac5a089e2820ab684b5133afb1e8b"
+      }
+    },
+    {
+      "label": "s-visitor-b",
+      "binary_sha256": "1741fe420b9fbbf8e7f867cfe43acf6f237ac32f072a3ce7f0daa5f5847fdaa6",
+      "usage": {
+        "ru_utime": 14.97787,
+        "ru_stime": 6.37103,
+        "ru_maxrss": 280492,
+        "ru_nvcsw": 514880,
+        "ru_nivcsw": 6253
+      },
+      "receipt": {
+        "allocations": null,
+        "allocator": "system",
+        "blocks": 2048,
+        "epoch": 900,
+        "failed": 92314,
+        "http": {
+          "body_bytes": 2550136832,
+          "bytes_delivered": 2390753280,
+          "get_requests": 76,
+          "incomplete_body_retries": 0,
+          "workers_finished": 4
+        },
+        "http_body_window_bytes": 268435456,
+        "http_workers": 4,
+        "identity": {
+          "bytes": 527045598158,
+          "etag": "\"d98e61b8827c6c211f889dd2bf8577a8-3927\"",
+          "operator_trusted": false,
+          "url": "https://blockzilla-archive-samples-v1.cheron-augustin.workers.dev/car/900/epoch-900.car"
+        },
+        "metadata_mode": "Visitor",
+        "physical_blocks": 2048,
+        "scan_seconds": 13.998416851,
+        "scan_tps": 157783.556777152,
+        "schema": "blockzilla-car-decode-reference-v1",
+        "setup_seconds": 0.113613738,
+        "signature_verification": false,
+        "transactions": 2208720,
+        "valid": true,
+        "votes": 1633196,
+        "workers": 12,
+        "block_transaction_rows_sha256": "7536d66a43b201a238ad7b64ba39e7d454f3455f9f00f4c3925a49a4ef67dcbf",
+        "block_decode_digests_sha256": "8ead91e24401e597a2defe0eeb5f769cabfac5a089e2820ab684b5133afb1e8b"
+      }
+    },
+    {
+      "label": "s-owned-b",
+      "binary_sha256": "1741fe420b9fbbf8e7f867cfe43acf6f237ac32f072a3ce7f0daa5f5847fdaa6",
+      "usage": {
+        "ru_utime": 126.013321,
+        "ru_stime": 142.615604,
+        "ru_maxrss": 350068,
+        "ru_nvcsw": 8336567,
+        "ru_nivcsw": 272952
+      },
+      "receipt": {
+        "allocations": null,
+        "allocator": "system",
+        "blocks": 2048,
+        "epoch": 900,
+        "failed": 92314,
+        "http": {
+          "body_bytes": 2650800128,
+          "bytes_delivered": 2390753280,
+          "get_requests": 79,
+          "incomplete_body_retries": 0,
+          "workers_finished": 4
+        },
+        "http_body_window_bytes": 268435456,
+        "http_workers": 4,
+        "identity": {
+          "bytes": 527045598158,
+          "etag": "\"d98e61b8827c6c211f889dd2bf8577a8-3927\"",
+          "operator_trusted": false,
+          "url": "https://blockzilla-archive-samples-v1.cheron-augustin.workers.dev/car/900/epoch-900.car"
+        },
+        "metadata_mode": "Owned",
+        "physical_blocks": 2048,
+        "scan_seconds": 24.586767024,
+        "scan_tps": 89833.68971788733,
+        "schema": "blockzilla-car-decode-reference-v1",
+        "setup_seconds": 0.110646051,
+        "signature_verification": false,
+        "transactions": 2208720,
+        "valid": true,
+        "votes": 1633196,
+        "workers": 12,
+        "block_transaction_rows_sha256": "7536d66a43b201a238ad7b64ba39e7d454f3455f9f00f4c3925a49a4ef67dcbf",
+        "block_decode_digests_sha256": "8ead91e24401e597a2defe0eeb5f769cabfac5a089e2820ab684b5133afb1e8b"
+      }
+    },
+    {
+      "label": "m-owned-a",
+      "binary_sha256": "971e763cdb2668aa5753daaae1e22fbc2a6ae89267aa60f7f7d894314c29901d",
+      "usage": {
+        "ru_utime": 15.443705,
+        "ru_stime": 4.036931,
+        "ru_maxrss": 379132,
+        "ru_nvcsw": 267308,
+        "ru_nivcsw": 1222
+      },
+      "receipt": {
+        "allocations": null,
+        "allocator": "mimalloc",
+        "blocks": 2048,
+        "epoch": 900,
+        "failed": 92314,
+        "http": {
+          "body_bytes": 2650800128,
+          "bytes_delivered": 2390753280,
+          "get_requests": 79,
+          "incomplete_body_retries": 0,
+          "workers_finished": 4
+        },
+        "http_body_window_bytes": 268435456,
+        "http_workers": 4,
+        "identity": {
+          "bytes": 527045598158,
+          "etag": "\"d98e61b8827c6c211f889dd2bf8577a8-3927\"",
+          "operator_trusted": false,
+          "url": "https://blockzilla-archive-samples-v1.cheron-augustin.workers.dev/car/900/epoch-900.car"
+        },
+        "metadata_mode": "Owned",
+        "physical_blocks": 2048,
+        "scan_seconds": 18.009476527,
+        "scan_tps": 122642.09882439744,
+        "schema": "blockzilla-car-decode-reference-v1",
+        "setup_seconds": 0.138623338,
+        "signature_verification": false,
+        "transactions": 2208720,
+        "valid": true,
+        "votes": 1633196,
+        "workers": 12,
+        "block_transaction_rows_sha256": "7536d66a43b201a238ad7b64ba39e7d454f3455f9f00f4c3925a49a4ef67dcbf",
+        "block_decode_digests_sha256": "8ead91e24401e597a2defe0eeb5f769cabfac5a089e2820ab684b5133afb1e8b"
+      }
+    },
+    {
+      "label": "m-visitor-a",
+      "binary_sha256": "971e763cdb2668aa5753daaae1e22fbc2a6ae89267aa60f7f7d894314c29901d",
+      "usage": {
+        "ru_utime": 12.377734,
+        "ru_stime": 3.082154,
+        "ru_maxrss": 387340,
+        "ru_nvcsw": 222495,
+        "ru_nivcsw": 441
+      },
+      "receipt": {
+        "allocations": null,
+        "allocator": "mimalloc",
+        "blocks": 2048,
+        "epoch": 900,
+        "failed": 92314,
+        "http": {
+          "body_bytes": 2583691264,
+          "bytes_delivered": 2390753280,
+          "get_requests": 77,
+          "incomplete_body_retries": 0,
+          "workers_finished": 4
+        },
+        "http_body_window_bytes": 268435456,
+        "http_workers": 4,
+        "identity": {
+          "bytes": 527045598158,
+          "etag": "\"d98e61b8827c6c211f889dd2bf8577a8-3927\"",
+          "operator_trusted": false,
+          "url": "https://blockzilla-archive-samples-v1.cheron-augustin.workers.dev/car/900/epoch-900.car"
+        },
+        "metadata_mode": "Visitor",
+        "physical_blocks": 2048,
+        "scan_seconds": 10.22179959,
+        "scan_tps": 216079.36846666352,
+        "schema": "blockzilla-car-decode-reference-v1",
+        "setup_seconds": 0.111371257,
+        "signature_verification": false,
+        "transactions": 2208720,
+        "valid": true,
+        "votes": 1633196,
+        "workers": 12,
+        "block_transaction_rows_sha256": "7536d66a43b201a238ad7b64ba39e7d454f3455f9f00f4c3925a49a4ef67dcbf",
+        "block_decode_digests_sha256": "8ead91e24401e597a2defe0eeb5f769cabfac5a089e2820ab684b5133afb1e8b"
+      }
+    },
+    {
+      "label": "m-visitor-b",
+      "binary_sha256": "971e763cdb2668aa5753daaae1e22fbc2a6ae89267aa60f7f7d894314c29901d",
+      "usage": {
+        "ru_utime": 12.656367,
+        "ru_stime": 3.398695,
+        "ru_maxrss": 404932,
+        "ru_nvcsw": 245448,
+        "ru_nivcsw": 541
+      },
+      "receipt": {
+        "allocations": null,
+        "allocator": "mimalloc",
+        "blocks": 2048,
+        "epoch": 900,
+        "failed": 92314,
+        "http": {
+          "body_bytes": 2550136832,
+          "bytes_delivered": 2390753280,
+          "get_requests": 76,
+          "incomplete_body_retries": 0,
+          "workers_finished": 4
+        },
+        "http_body_window_bytes": 268435456,
+        "http_workers": 4,
+        "identity": {
+          "bytes": 527045598158,
+          "etag": "\"d98e61b8827c6c211f889dd2bf8577a8-3927\"",
+          "operator_trusted": false,
+          "url": "https://blockzilla-archive-samples-v1.cheron-augustin.workers.dev/car/900/epoch-900.car"
+        },
+        "metadata_mode": "Visitor",
+        "physical_blocks": 2048,
+        "scan_seconds": 11.033070014,
+        "scan_tps": 200190.88043466848,
+        "schema": "blockzilla-car-decode-reference-v1",
+        "setup_seconds": 0.123915685,
+        "signature_verification": false,
+        "transactions": 2208720,
+        "valid": true,
+        "votes": 1633196,
+        "workers": 12,
+        "block_transaction_rows_sha256": "7536d66a43b201a238ad7b64ba39e7d454f3455f9f00f4c3925a49a4ef67dcbf",
+        "block_decode_digests_sha256": "8ead91e24401e597a2defe0eeb5f769cabfac5a089e2820ab684b5133afb1e8b"
+      }
+    },
+    {
+      "label": "m-owned-b",
+      "binary_sha256": "971e763cdb2668aa5753daaae1e22fbc2a6ae89267aa60f7f7d894314c29901d",
+      "usage": {
+        "ru_utime": 15.224937,
+        "ru_stime": 3.499561,
+        "ru_maxrss": 376464,
+        "ru_nvcsw": 271617,
+        "ru_nivcsw": 698
+      },
+      "receipt": {
+        "allocations": null,
+        "allocator": "mimalloc",
+        "blocks": 2048,
+        "epoch": 900,
+        "failed": 92314,
+        "http": {
+          "body_bytes": 2650800128,
+          "bytes_delivered": 2390753280,
+          "get_requests": 79,
+          "incomplete_body_retries": 0,
+          "workers_finished": 4
+        },
+        "http_body_window_bytes": 268435456,
+        "http_workers": 4,
+        "identity": {
+          "bytes": 527045598158,
+          "etag": "\"d98e61b8827c6c211f889dd2bf8577a8-3927\"",
+          "operator_trusted": false,
+          "url": "https://blockzilla-archive-samples-v1.cheron-augustin.workers.dev/car/900/epoch-900.car"
+        },
+        "metadata_mode": "Owned",
+        "physical_blocks": 2048,
+        "scan_seconds": 20.690946353,
+        "scan_tps": 106748.1381623589,
+        "schema": "blockzilla-car-decode-reference-v1",
+        "setup_seconds": 0.121757521,
+        "signature_verification": false,
+        "transactions": 2208720,
+        "valid": true,
+        "votes": 1633196,
+        "workers": 12,
+        "block_transaction_rows_sha256": "7536d66a43b201a238ad7b64ba39e7d454f3455f9f00f4c3925a49a4ef67dcbf",
+        "block_decode_digests_sha256": "8ead91e24401e597a2defe0eeb5f769cabfac5a089e2820ab684b5133afb1e8b"
+      }
+    },
+    {
+      "label": "m-visitor-eight-a",
+      "binary_sha256": "971e763cdb2668aa5753daaae1e22fbc2a6ae89267aa60f7f7d894314c29901d",
+      "usage": {
+        "ru_utime": 12.42462,
+        "ru_stime": 3.147025,
+        "ru_maxrss": 539296,
+        "ru_nvcsw": 264720,
+        "ru_nivcsw": 375
+      },
+      "receipt": {
+        "allocations": null,
+        "allocator": "mimalloc",
+        "blocks": 2048,
+        "epoch": 900,
+        "failed": 92314,
+        "http": {
+          "body_bytes": 2650800128,
+          "bytes_delivered": 2390753280,
+          "get_requests": 79,
+          "incomplete_body_retries": 0,
+          "workers_finished": 8
+        },
+        "http_body_window_bytes": 268435456,
+        "http_workers": 8,
+        "identity": {
+          "bytes": 527045598158,
+          "etag": "\"d98e61b8827c6c211f889dd2bf8577a8-3927\"",
+          "operator_trusted": false,
+          "url": "https://blockzilla-archive-samples-v1.cheron-augustin.workers.dev/car/900/epoch-900.car"
+        },
+        "metadata_mode": "Visitor",
+        "physical_blocks": 2048,
+        "scan_seconds": 12.603421705,
+        "scan_tps": 175247.64716265598,
+        "schema": "blockzilla-car-decode-reference-v1",
+        "setup_seconds": 0.108704467,
+        "signature_verification": false,
+        "transactions": 2208720,
+        "valid": true,
+        "votes": 1633196,
+        "workers": 12,
+        "block_transaction_rows_sha256": "7536d66a43b201a238ad7b64ba39e7d454f3455f9f00f4c3925a49a4ef67dcbf",
+        "block_decode_digests_sha256": "8ead91e24401e597a2defe0eeb5f769cabfac5a089e2820ab684b5133afb1e8b"
+      }
+    },
+    {
+      "label": "m-visitor-eight-b",
+      "binary_sha256": "971e763cdb2668aa5753daaae1e22fbc2a6ae89267aa60f7f7d894314c29901d",
+      "usage": {
+        "ru_utime": 12.842049,
+        "ru_stime": 2.930537,
+        "ru_maxrss": 467712,
+        "ru_nvcsw": 259960,
+        "ru_nivcsw": 501
+      },
+      "receipt": {
+        "allocations": null,
+        "allocator": "mimalloc",
+        "blocks": 2048,
+        "epoch": 900,
+        "failed": 92314,
+        "http": {
+          "body_bytes": 2650800128,
+          "bytes_delivered": 2390753280,
+          "get_requests": 79,
+          "incomplete_body_retries": 0,
+          "workers_finished": 8
+        },
+        "http_body_window_bytes": 268435456,
+        "http_workers": 8,
+        "identity": {
+          "bytes": 527045598158,
+          "etag": "\"d98e61b8827c6c211f889dd2bf8577a8-3927\"",
+          "operator_trusted": false,
+          "url": "https://blockzilla-archive-samples-v1.cheron-augustin.workers.dev/car/900/epoch-900.car"
+        },
+        "metadata_mode": "Visitor",
+        "physical_blocks": 2048,
+        "scan_seconds": 20.35321873,
+        "scan_tps": 108519.44497331111,
+        "schema": "blockzilla-car-decode-reference-v1",
+        "setup_seconds": 0.136163303,
+        "signature_verification": false,
+        "transactions": 2208720,
+        "valid": true,
+        "votes": 1633196,
+        "workers": 12,
+        "block_transaction_rows_sha256": "7536d66a43b201a238ad7b64ba39e7d454f3455f9f00f4c3925a49a4ef67dcbf",
+        "block_decode_digests_sha256": "8ead91e24401e597a2defe0eeb5f769cabfac5a089e2820ab684b5133afb1e8b"
+      }
+    },
+    {
+      "label": "s-owned-alloc",
+      "binary_sha256": "1741fe420b9fbbf8e7f867cfe43acf6f237ac32f072a3ce7f0daa5f5847fdaa6",
+      "usage": {
+        "ru_utime": 125.424218,
+        "ru_stime": 139.29178,
+        "ru_maxrss": 353196,
+        "ru_nvcsw": 8628644,
+        "ru_nivcsw": 252160
+      },
+      "receipt": {
+        "allocations": {
+          "buckets": [
+            {
+              "calls": 60206631,
+              "max_bytes": 64,
+              "requested_bytes": 2101952151
+            },
+            {
+              "calls": 5153808,
+              "max_bytes": 256,
+              "requested_bytes": 575990519
+            },
+            {
+              "calls": 669111,
+              "max_bytes": 1024,
+              "requested_bytes": 321865699
+            },
+            {
+              "calls": 75375,
+              "max_bytes": 4096,
+              "requested_bytes": 215167394
+            },
+            {
+              "calls": 287202,
+              "max_bytes": 65536,
+              "requested_bytes": 4762211201
+            },
+            {
+              "calls": 8901,
+              "max_bytes": null,
+              "requested_bytes": 4512810681
+            }
+          ],
+          "calls": 66401028,
+          "includes_c_zstd_allocations": false,
+          "requested_bytes": 12489997645,
+          "timing_is_instrumented": true
+        },
+        "allocator": "system",
+        "blocks": 2048,
+        "epoch": 900,
+        "failed": 92314,
+        "http": {
+          "body_bytes": 2650800128,
+          "bytes_delivered": 2390753280,
+          "get_requests": 79,
+          "incomplete_body_retries": 0,
+          "workers_finished": 4
+        },
+        "http_body_window_bytes": 268435456,
+        "http_workers": 4,
+        "identity": {
+          "bytes": 527045598158,
+          "etag": "\"d98e61b8827c6c211f889dd2bf8577a8-3927\"",
+          "operator_trusted": false,
+          "url": "https://blockzilla-archive-samples-v1.cheron-augustin.workers.dev/car/900/epoch-900.car"
+        },
+        "metadata_mode": "Owned",
+        "physical_blocks": 2048,
+        "scan_seconds": 24.550965364,
+        "scan_tps": 89964.6904817327,
+        "schema": "blockzilla-car-decode-reference-v1",
+        "setup_seconds": 0.10953971,
+        "signature_verification": false,
+        "transactions": 2208720,
+        "valid": true,
+        "votes": 1633196,
+        "workers": 12,
+        "block_transaction_rows_sha256": "7536d66a43b201a238ad7b64ba39e7d454f3455f9f00f4c3925a49a4ef67dcbf",
+        "block_decode_digests_sha256": "8ead91e24401e597a2defe0eeb5f769cabfac5a089e2820ab684b5133afb1e8b"
+      }
+    },
+    {
+      "label": "s-visitor-alloc",
+      "binary_sha256": "1741fe420b9fbbf8e7f867cfe43acf6f237ac32f072a3ce7f0daa5f5847fdaa6",
+      "usage": {
+        "ru_utime": 15.345548,
+        "ru_stime": 6.556771,
+        "ru_maxrss": 314684,
+        "ru_nvcsw": 477761,
+        "ru_nivcsw": 5761
+      },
+      "receipt": {
+        "allocations": {
+          "buckets": [
+            {
+              "calls": 2277683,
+              "max_bytes": 64,
+              "requested_bytes": 60404936
+            },
+            {
+              "calls": 19436,
+              "max_bytes": 256,
+              "requested_bytes": 2823135
+            },
+            {
+              "calls": 26112,
+              "max_bytes": 1024,
+              "requested_bytes": 15974280
+            },
+            {
+              "calls": 74152,
+              "max_bytes": 4096,
+              "requested_bytes": 293527716
+            },
+            {
+              "calls": 376736,
+              "max_bytes": 65536,
+              "requested_bytes": 7003360464
+            },
+            {
+              "calls": 6413,
+              "max_bytes": null,
+              "requested_bytes": 3640293595
+            }
+          ],
+          "calls": 2780532,
+          "includes_c_zstd_allocations": false,
+          "requested_bytes": 11016384126,
+          "timing_is_instrumented": true
+        },
+        "allocator": "system",
+        "blocks": 2048,
+        "epoch": 900,
+        "failed": 92314,
+        "http": {
+          "body_bytes": 2583691264,
+          "bytes_delivered": 2390753280,
+          "get_requests": 77,
+          "incomplete_body_retries": 0,
+          "workers_finished": 4
+        },
+        "http_body_window_bytes": 268435456,
+        "http_workers": 4,
+        "identity": {
+          "bytes": 527045598158,
+          "etag": "\"d98e61b8827c6c211f889dd2bf8577a8-3927\"",
+          "operator_trusted": false,
+          "url": "https://blockzilla-archive-samples-v1.cheron-augustin.workers.dev/car/900/epoch-900.car"
+        },
+        "metadata_mode": "Visitor",
+        "physical_blocks": 2048,
+        "scan_seconds": 14.221501402,
+        "scan_tps": 155308.49644956496,
+        "schema": "blockzilla-car-decode-reference-v1",
+        "setup_seconds": 0.113788898,
+        "signature_verification": false,
+        "transactions": 2208720,
+        "valid": true,
+        "votes": 1633196,
+        "workers": 12,
+        "block_transaction_rows_sha256": "7536d66a43b201a238ad7b64ba39e7d454f3455f9f00f4c3925a49a4ef67dcbf",
+        "block_decode_digests_sha256": "8ead91e24401e597a2defe0eeb5f769cabfac5a089e2820ab684b5133afb1e8b"
+      }
+    }
+  ],
+  "groups": {
+    "s-owned": {
+      "mean_setup_s": 0.126592077,
+      "mean_scan_s": 24.70509107,
+      "mean_total_s": 24.831683147,
+      "scan_tps": 89403.43485242614,
+      "total_tps": 88947.65557874972,
+      "scan_body_MBps": 107.29772743962607,
+      "mean_cpu_s": 263.8881075,
+      "rss_MiB_range": [
+        339.91015625,
+        341.86328125
+      ]
+    },
+    "s-visitor": {
+      "mean_setup_s": 0.131371886,
+      "mean_scan_s": 14.564375328,
+      "mean_total_s": 14.695747214,
+      "scan_tps": 151652.23020267388,
+      "total_tps": 150296.54279136268,
+      "scan_body_MBps": 178.54994954713925,
+      "mean_cpu_s": 21.2355245,
+      "rss_MiB_range": [
+        273.91796875,
+        338.09375
+      ]
+    },
+    "m-owned": {
+      "mean_setup_s": 0.1301904295,
+      "mean_scan_s": 19.350211440000002,
+      "mean_total_s": 19.4804018695,
+      "scan_tps": 114144.48916223313,
+      "total_tps": 113381.6445264479,
+      "scan_body_MBps": 136.9907577609395,
+      "mean_cpu_s": 19.102567,
+      "rss_MiB_range": [
+        367.640625,
+        370.24609375
+      ]
+    },
+    "m-visitor": {
+      "mean_setup_s": 0.117643471,
+      "mean_scan_s": 10.627434802,
+      "mean_total_s": 10.745078273,
+      "scan_tps": 207831.90310274463,
+      "total_tps": 205556.43652685377,
+      "scan_body_MBps": 241.53656040467328,
+      "mean_cpu_s": 15.757475,
+      "rss_MiB_range": [
+        378.26171875,
+        395.44140625
+      ]
+    },
+    "m-visitor-eight": {
+      "mean_setup_s": 0.122433885,
+      "mean_scan_s": 16.4783202175,
+      "mean_total_s": 16.600754102499998,
+      "scan_tps": 134037.93413689925,
+      "total_tps": 133049.37753805876,
+      "scan_body_MBps": 160.86591915994245,
+      "mean_cpu_s": 15.6721155,
+      "rss_MiB_range": [
+        456.75,
+        526.65625
+      ]
+    }
+  },
+  "final_validation": {
+    "control": "target/nas-validation/car-allocation-final-20260909",
+    "status_sha256": "340d3ea580133c9e1e3e44445a8bd5a81fb74bedbb210dcd3fbf7fc70054a32f",
+    "all_cases_valid": true,
+    "all_digests_match_previous_committed_reference": true,
+    "change_from_timed_candidate": "Added malformed reward/log test and conditional unused-code warning suppression; decode implementation unchanged.",
+    "cases": [
+      {
+        "label": "final-system-visitor",
+        "binary_sha256": "40283c6be83d71cbf694833a9ab7ec1d7835b3f7d8a5bbefb071a9a2301bb1fd",
+        "usage": {
+          "ru_utime": 14.852344,
+          "ru_stime": 5.062173,
+          "ru_maxrss": 348416,
+          "ru_nvcsw": 494003,
+          "ru_nivcsw": 5877
+        },
+        "receipt": {
+          "allocations": null,
+          "allocator": "system",
+          "blocks": 2048,
+          "epoch": 900,
+          "failed": 92314,
+          "http": {
+            "body_bytes": 2550136832,
+            "bytes_delivered": 2390753280,
+            "get_requests": 76,
+            "incomplete_body_retries": 0,
+            "workers_finished": 4
+          },
+          "http_body_window_bytes": 268435456,
+          "http_workers": 4,
+          "identity": {
+            "bytes": 527045598158,
+            "etag": "\"d98e61b8827c6c211f889dd2bf8577a8-3927\"",
+            "operator_trusted": false,
+            "url": "https://blockzilla-archive-samples-v1.cheron-augustin.workers.dev/car/900/epoch-900.car"
+          },
+          "metadata_mode": "Visitor",
+          "physical_blocks": 2048,
+          "scan_seconds": 12.140213965,
+          "scan_tps": 181934.190481955,
+          "schema": "blockzilla-car-decode-reference-v1",
+          "setup_seconds": 0.137816119,
+          "signature_verification": false,
+          "transactions": 2208720,
+          "valid": true,
+          "votes": 1633196,
+          "workers": 12
+        }
+      },
+      {
+        "label": "final-mimalloc-visitor",
+        "binary_sha256": "9d3a18a360f6d5cedeb11d7a4406d5ca6d4a17e8005aa680f2817bf5edd556ac",
+        "usage": {
+          "ru_utime": 12.441505,
+          "ru_stime": 2.185891,
+          "ru_maxrss": 483684,
+          "ru_nvcsw": 220048,
+          "ru_nivcsw": 545
+        },
+        "receipt": {
+          "allocations": null,
+          "allocator": "mimalloc",
+          "blocks": 2048,
+          "epoch": 900,
+          "failed": 92314,
+          "http": {
+            "body_bytes": 2550136832,
+            "bytes_delivered": 2390753280,
+            "get_requests": 76,
+            "incomplete_body_retries": 0,
+            "workers_finished": 4
+          },
+          "http_body_window_bytes": 268435456,
+          "http_workers": 4,
+          "identity": {
+            "bytes": 527045598158,
+            "etag": "\"d98e61b8827c6c211f889dd2bf8577a8-3927\"",
+            "operator_trusted": false,
+            "url": "https://blockzilla-archive-samples-v1.cheron-augustin.workers.dev/car/900/epoch-900.car"
+          },
+          "metadata_mode": "Visitor",
+          "physical_blocks": 2048,
+          "scan_seconds": 12.360713143,
+          "scan_tps": 178688.71920636884,
+          "schema": "blockzilla-car-decode-reference-v1",
+          "setup_seconds": 0.112221461,
+          "signature_verification": false,
+          "transactions": 2208720,
+          "valid": true,
+          "votes": 1633196,
+          "workers": 12
+        }
+      }
+    ]
+  },
+  "final_build": {
+    "control": "target/nas-validation/network-readers-round-20260909T073356Z",
+    "builds": [
+      {
+        "label": "v2-v3",
+        "command": [
+          "cargo",
+          "build",
+          "--release",
+          "--offline",
+          "--locked",
+          "--target",
+          "x86_64-unknown-linux-musl",
+          "-p",
+          "blockzilla-reader-profile",
+          "--bin",
+          "blockzilla-reader-profile",
+          "--jobs",
+          "4"
+        ],
+        "elapsed_s": 2.154324958915822,
+        "exit_code": 0,
+        "sha256": "d4bfdc70b8c0599b9eb82cf851cdd49082031574ece51bb7b545852c96cf951f"
+      },
+      {
+        "label": "car-system",
+        "command": [
+          "cargo",
+          "build",
+          "--release",
+          "--offline",
+          "--locked",
+          "--target",
+          "x86_64-unknown-linux-musl",
+          "-p",
+          "blockzilla-reader-profile",
+          "--bin",
+          "car-decode-reference",
+          "--jobs",
+          "4",
+          "--features",
+          "car-reference"
+        ],
+        "elapsed_s": 66.96400616609026,
+        "exit_code": 0,
+        "sha256": "40283c6be83d71cbf694833a9ab7ec1d7835b3f7d8a5bbefb071a9a2301bb1fd"
+      },
+      {
+        "label": "car-mimalloc",
+        "command": [
+          "cargo",
+          "build",
+          "--release",
+          "--offline",
+          "--locked",
+          "--target",
+          "x86_64-unknown-linux-musl",
+          "-p",
+          "blockzilla-reader-profile",
+          "--bin",
+          "car-decode-reference",
+          "--jobs",
+          "4",
+          "--features",
+          "reference-mimalloc"
+        ],
+        "elapsed_s": 48.18854241701774,
+        "exit_code": 0,
+        "sha256": "9d3a18a360f6d5cedeb11d7a4406d5ca6d4a17e8005aa680f2817bf5edd556ac"
+      }
+    ],
+    "source_sha256": {
+      "Cargo.lock": "b87219c015143e4b781143892f4f994d71b96e628415f674d1e7b0c334b63192",
+      "bench/reader-profile/Cargo.toml": "66c5979381620a1787db9336f717534a92d51439226dcba1802759e7c199f91c",
+      "bench/reader-profile/src/bin/car-decode-reference.rs": "6b8825d35bdf894c43117eb6ac93ca31d604ab7262cedc60730791e282f4ce4c",
+      "crates/old-faithful/of-car-reader/src/convert_metadata.rs": "de087a4d45c646ed794cf253def61df252f65cd681105fc2a4c50777e6b8627b",
+      "crates/old-faithful/of-car-reader/src/metadata_decoder.rs": "32d78521dfe6bec0ff6f243da02c87a9df53954e08288d4c5ce6c26b6dfedae7",
+      "bench/reader-profile/src/bin/car-decode-reference/metadata_visit.rs": "8fdc89791670b73f163de78f43114f606764b5d076b3e3ab313769330bb443d9"
+    }
+  },
+  "tests": {
+    "car_reader": 133,
+    "probe": 5,
+    "logs_sha256": {
+      "/tmp/car-allocation-sdk-tests-allowed.log": "2dcd9dfc628f82ea8f14791c05f92fbf5d0ae4065edd8d1fcd8ea6c1d921c400",
+      "/tmp/car-allocation-probe-final-tests.log": "1df11d1c7c5e402723f0fea6f9fa0fd2042e5f6653176a0f779fa1422c91c6ac",
+      "/tmp/car-allocation-final-fmt.log": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+    }
+  },
+  "control_sha256": {
+    "target/nas-validation/car-allocation-20260909T073008Z/run.py": "33496495bd5ed4015f185cb6f284a200176d54d6999f71a9dcee9d7b33b0510d",
+    "target/nas-validation/car-allocation-20260909T073008Z/prefix-plan.json": "0723481c852e46c0396eb8290750146d1e479ceb70a201362657d652f749713a",
+    "target/nas-validation/car-allocation-20260909T073008Z/manifest.json": "e8f20491d3deea2f141d7d04a118fd7191915231688f304c23b024956ebc2c3d",
+    "/tmp/network-capacity-20260909.py": "618fa644d7ecf63644d7ddbb13b140ac93d75f5d496f7a835b5b03a30f5997ed"
+  },
+  "transport_probe": {
+    "control": "/volume2/blockzilla-bench/control/network-capacity-20260909",
+    "receipt_sha256": "9e596b9ed9685bc78727bab17c90ebe41adc069105ce80bd24526072c344a2fd",
+    "nic": "eth0",
+    "nic_link_Mbps": 10000,
+    "all_resolved_source_addresses_route_via": "eth0"
+  }
+}

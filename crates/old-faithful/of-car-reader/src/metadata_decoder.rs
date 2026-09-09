@@ -543,8 +543,8 @@ pub fn decode_rewards_into(
 fn decode_bincode_rewards(rewards_bytes: &[u8], out: &mut Rewards) -> Result<(), String> {
     if let Ok(rewards) = wincode::deserialize::<Vec<StoredExtendedReward>>(rewards_bytes) {
         out.rewards = rewards
-            .iter()
-            .map(crate::convert_metadata::stored_reward_to_proto)
+            .into_iter()
+            .map(crate::convert_metadata::stored_reward_into_proto)
             .collect();
         return Ok(());
     }
@@ -552,8 +552,8 @@ fn decode_bincode_rewards(rewards_bytes: &[u8], out: &mut Rewards) -> Result<(),
     let stored_rewards = wincode::deserialize::<Vec<StoredConfirmedBlockReward>>(rewards_bytes)
         .map_err(|err| err.to_string())?;
     out.rewards = stored_rewards
-        .iter()
-        .map(crate::convert_metadata::stored_confirmed_block_reward_to_proto)
+        .into_iter()
+        .map(crate::convert_metadata::stored_confirmed_block_reward_into_proto)
         .collect();
     Ok(())
 }

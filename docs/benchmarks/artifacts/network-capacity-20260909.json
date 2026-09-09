@@ -1,0 +1,1509 @@
+{
+  "schema": "blockzilla-transport-capacity-v1",
+  "client": "Python http.client/OpenSSL HTTP/1.1; reusable 1 MiB buffer per connection; no decoder or hash",
+  "total_bytes_per_case": 268435456,
+  "range_bytes": 16777216,
+  "cases": [
+    {
+      "source": "mirror-car",
+      "url": "https://blockzilla-archive-samples-v1.cheron-augustin.workers.dev/car/900/epoch-900.car",
+      "concurrency": 1,
+      "seconds": 4.7665887830080464,
+      "MBps": 56.31605079022544,
+      "cpu_seconds": 0.365350257,
+      "process_peak_rss_kib": 23932,
+      "requests": [
+        {
+          "index": 0,
+          "bytes": 16777216,
+          "header_s": 0.4155240440159105,
+          "seconds": 0.6376164879766293,
+          "http_version": 11
+        },
+        {
+          "index": 1,
+          "bytes": 16777216,
+          "header_s": 0.13462518400046974,
+          "seconds": 0.3176066859741695,
+          "http_version": 11
+        },
+        {
+          "index": 2,
+          "bytes": 16777216,
+          "header_s": 0.11915206804405898,
+          "seconds": 0.2822883530170657,
+          "http_version": 11
+        },
+        {
+          "index": 3,
+          "bytes": 16777216,
+          "header_s": 0.12029222800629213,
+          "seconds": 0.25481236301129684,
+          "http_version": 11
+        },
+        {
+          "index": 4,
+          "bytes": 16777216,
+          "header_s": 0.09724935400299728,
+          "seconds": 0.2256286710035056,
+          "http_version": 11
+        },
+        {
+          "index": 5,
+          "bytes": 16777216,
+          "header_s": 0.12516781798331067,
+          "seconds": 0.21769144694553688,
+          "http_version": 11
+        },
+        {
+          "index": 6,
+          "bytes": 16777216,
+          "header_s": 0.1424331979942508,
+          "seconds": 0.24961690697818995,
+          "http_version": 11
+        },
+        {
+          "index": 7,
+          "bytes": 16777216,
+          "header_s": 0.11857298598624766,
+          "seconds": 0.255224074004218,
+          "http_version": 11
+        },
+        {
+          "index": 8,
+          "bytes": 16777216,
+          "header_s": 0.2685598300304264,
+          "seconds": 0.41984858200885355,
+          "http_version": 11
+        },
+        {
+          "index": 9,
+          "bytes": 16777216,
+          "header_s": 0.3180033360258676,
+          "seconds": 0.475337878044229,
+          "http_version": 11
+        },
+        {
+          "index": 10,
+          "bytes": 16777216,
+          "header_s": 0.10398449801141396,
+          "seconds": 0.23931608902057633,
+          "http_version": 11
+        },
+        {
+          "index": 11,
+          "bytes": 16777216,
+          "header_s": 0.11444885696982965,
+          "seconds": 0.2117688309517689,
+          "http_version": 11
+        },
+        {
+          "index": 12,
+          "bytes": 16777216,
+          "header_s": 0.11126623797463253,
+          "seconds": 0.2461790349916555,
+          "http_version": 11
+        },
+        {
+          "index": 13,
+          "bytes": 16777216,
+          "header_s": 0.09663857001578435,
+          "seconds": 0.23987806198420003,
+          "http_version": 11
+        },
+        {
+          "index": 14,
+          "bytes": 16777216,
+          "header_s": 0.12865617603529245,
+          "seconds": 0.21249159600120038,
+          "http_version": 11
+        },
+        {
+          "index": 15,
+          "bytes": 16777216,
+          "header_s": 0.14117019798140973,
+          "seconds": 0.22083546197973192,
+          "http_version": 11
+        }
+      ]
+    },
+    {
+      "source": "mirror-car",
+      "url": "https://blockzilla-archive-samples-v1.cheron-augustin.workers.dev/car/900/epoch-900.car",
+      "concurrency": 4,
+      "seconds": 3.1120997670223005,
+      "MBps": 86.25541470248002,
+      "cpu_seconds": 0.7249298500000001,
+      "process_peak_rss_kib": 30044,
+      "requests": [
+        {
+          "index": 0,
+          "bytes": 16777216,
+          "header_s": 0.2010050549870357,
+          "seconds": 0.5191450410056859,
+          "http_version": 11
+        },
+        {
+          "index": 4,
+          "bytes": 16777216,
+          "header_s": 0.17277145700063556,
+          "seconds": 0.6058714120299555,
+          "http_version": 11
+        },
+        {
+          "index": 8,
+          "bytes": 16777216,
+          "header_s": 0.36520850501256064,
+          "seconds": 0.8358187910052948,
+          "http_version": 11
+        },
+        {
+          "index": 12,
+          "bytes": 16777216,
+          "header_s": 0.23089221603004262,
+          "seconds": 1.0587992370128632,
+          "http_version": 11
+        },
+        {
+          "index": 1,
+          "bytes": 16777216,
+          "header_s": 0.28049303794978186,
+          "seconds": 0.7767398029682226,
+          "http_version": 11
+        },
+        {
+          "index": 5,
+          "bytes": 16777216,
+          "header_s": 0.20115542295388877,
+          "seconds": 0.6602881349972449,
+          "http_version": 11
+        },
+        {
+          "index": 9,
+          "bytes": 16777216,
+          "header_s": 0.12253234599484131,
+          "seconds": 0.629920908017084,
+          "http_version": 11
+        },
+        {
+          "index": 13,
+          "bytes": 16777216,
+          "header_s": 0.11432100902311504,
+          "seconds": 0.9505503000109456,
+          "http_version": 11
+        },
+        {
+          "index": 2,
+          "bytes": 16777216,
+          "header_s": 0.20581453200429678,
+          "seconds": 0.4487676850403659,
+          "http_version": 11
+        },
+        {
+          "index": 6,
+          "bytes": 16777216,
+          "header_s": 0.13134497596183792,
+          "seconds": 0.47709656099323183,
+          "http_version": 11
+        },
+        {
+          "index": 10,
+          "bytes": 16777216,
+          "header_s": 0.13424932601628825,
+          "seconds": 0.3393324649659917,
+          "http_version": 11
+        },
+        {
+          "index": 14,
+          "bytes": 16777216,
+          "header_s": 0.13325678097316995,
+          "seconds": 0.45706389198312536,
+          "http_version": 11
+        },
+        {
+          "index": 3,
+          "bytes": 16777216,
+          "header_s": 0.19888244505273178,
+          "seconds": 0.38559970300411806,
+          "http_version": 11
+        },
+        {
+          "index": 7,
+          "bytes": 16777216,
+          "header_s": 0.13795961602590978,
+          "seconds": 0.34573948301840574,
+          "http_version": 11
+        },
+        {
+          "index": 11,
+          "bytes": 16777216,
+          "header_s": 0.14851074700709432,
+          "seconds": 0.36836240004049614,
+          "http_version": 11
+        },
+        {
+          "index": 15,
+          "bytes": 16777216,
+          "header_s": 0.12420521001331508,
+          "seconds": 0.3133177420240827,
+          "http_version": 11
+        }
+      ]
+    },
+    {
+      "source": "mirror-car",
+      "url": "https://blockzilla-archive-samples-v1.cheron-augustin.workers.dev/car/900/epoch-900.car",
+      "concurrency": 8,
+      "seconds": 1.637370131968055,
+      "MBps": 163.94305157951737,
+      "cpu_seconds": 1.717642464,
+      "process_peak_rss_kib": 37724,
+      "requests": [
+        {
+          "index": 0,
+          "bytes": 16777216,
+          "header_s": 0.14877375098876655,
+          "seconds": 0.3402238329872489,
+          "http_version": 11
+        },
+        {
+          "index": 8,
+          "bytes": 16777216,
+          "header_s": 0.14631173701491207,
+          "seconds": 0.3404412280069664,
+          "http_version": 11
+        },
+        {
+          "index": 1,
+          "bytes": 16777216,
+          "header_s": 0.1574876550002955,
+          "seconds": 0.6252943180152215,
+          "http_version": 11
+        },
+        {
+          "index": 9,
+          "bytes": 16777216,
+          "header_s": 0.12197474198183045,
+          "seconds": 0.5778231869917363,
+          "http_version": 11
+        },
+        {
+          "index": 2,
+          "bytes": 16777216,
+          "header_s": 0.19559179100906476,
+          "seconds": 0.38846880302298814,
+          "http_version": 11
+        },
+        {
+          "index": 10,
+          "bytes": 16777216,
+          "header_s": 0.1265512090176344,
+          "seconds": 0.2817969240131788,
+          "http_version": 11
+        },
+        {
+          "index": 3,
+          "bytes": 16777216,
+          "header_s": 0.20508216199232265,
+          "seconds": 0.4734246979933232,
+          "http_version": 11
+        },
+        {
+          "index": 11,
+          "bytes": 16777216,
+          "header_s": 0.14593856397550553,
+          "seconds": 0.32045615097740665,
+          "http_version": 11
+        },
+        {
+          "index": 4,
+          "bytes": 16777216,
+          "header_s": 0.20357479201629758,
+          "seconds": 0.7056069229729474,
+          "http_version": 11
+        },
+        {
+          "index": 12,
+          "bytes": 16777216,
+          "header_s": 0.12144893303047866,
+          "seconds": 0.6437100300099701,
+          "http_version": 11
+        },
+        {
+          "index": 5,
+          "bytes": 16777216,
+          "header_s": 0.17652394500328228,
+          "seconds": 0.8761977489921264,
+          "http_version": 11
+        },
+        {
+          "index": 13,
+          "bytes": 16777216,
+          "header_s": 0.1246280669583939,
+          "seconds": 0.5532877480145544,
+          "http_version": 11
+        },
+        {
+          "index": 6,
+          "bytes": 16777216,
+          "header_s": 0.13349812099477276,
+          "seconds": 0.6018668869510293,
+          "http_version": 11
+        },
+        {
+          "index": 14,
+          "bytes": 16777216,
+          "header_s": 0.12206448201322928,
+          "seconds": 0.6424404100398533,
+          "http_version": 11
+        },
+        {
+          "index": 7,
+          "bytes": 16777216,
+          "header_s": 0.4388268419425003,
+          "seconds": 0.8355840729782358,
+          "http_version": 11
+        },
+        {
+          "index": 15,
+          "bytes": 16777216,
+          "header_s": 0.1307799220085144,
+          "seconds": 0.3871742059709504,
+          "http_version": 11
+        }
+      ]
+    },
+    {
+      "source": "mirror-car",
+      "url": "https://blockzilla-archive-samples-v1.cheron-augustin.workers.dev/car/900/epoch-900.car",
+      "concurrency": 8,
+      "seconds": 2.035814406001009,
+      "MBps": 131.8565460627097,
+      "cpu_seconds": 1.7257868820000004,
+      "process_peak_rss_kib": 37724,
+      "requests": [
+        {
+          "index": 0,
+          "bytes": 16777216,
+          "header_s": 0.18554592796135694,
+          "seconds": 0.39961002400377765,
+          "http_version": 11
+        },
+        {
+          "index": 8,
+          "bytes": 16777216,
+          "header_s": 0.11868746503023431,
+          "seconds": 0.29426832403987646,
+          "http_version": 11
+        },
+        {
+          "index": 1,
+          "bytes": 16777216,
+          "header_s": 0.166252099967096,
+          "seconds": 0.3223960349569097,
+          "http_version": 11
+        },
+        {
+          "index": 9,
+          "bytes": 16777216,
+          "header_s": 0.1160421340027824,
+          "seconds": 0.27768485801061615,
+          "http_version": 11
+        },
+        {
+          "index": 2,
+          "bytes": 16777216,
+          "header_s": 0.1526238220394589,
+          "seconds": 0.6268701440421864,
+          "http_version": 11
+        },
+        {
+          "index": 10,
+          "bytes": 16777216,
+          "header_s": 0.15501268103253096,
+          "seconds": 0.6977580870152451,
+          "http_version": 11
+        },
+        {
+          "index": 3,
+          "bytes": 16777216,
+          "header_s": 0.19956202898174524,
+          "seconds": 1.0554706630064175,
+          "http_version": 11
+        },
+        {
+          "index": 11,
+          "bytes": 16777216,
+          "header_s": 0.10448113601887599,
+          "seconds": 0.7746746169868857,
+          "http_version": 11
+        },
+        {
+          "index": 4,
+          "bytes": 16777216,
+          "header_s": 0.1618666790309362,
+          "seconds": 0.3207818240043707,
+          "http_version": 11
+        },
+        {
+          "index": 12,
+          "bytes": 16777216,
+          "header_s": 0.11415186600061134,
+          "seconds": 0.29011553997406736,
+          "http_version": 11
+        },
+        {
+          "index": 5,
+          "bytes": 16777216,
+          "header_s": 0.16779495996888727,
+          "seconds": 0.6404743489692919,
+          "http_version": 11
+        },
+        {
+          "index": 13,
+          "bytes": 16777216,
+          "header_s": 0.1566436379798688,
+          "seconds": 0.7029960930231027,
+          "http_version": 11
+        },
+        {
+          "index": 6,
+          "bytes": 16777216,
+          "header_s": 0.147891943983268,
+          "seconds": 0.9922176789841615,
+          "http_version": 11
+        },
+        {
+          "index": 14,
+          "bytes": 16777216,
+          "header_s": 0.11675282096257433,
+          "seconds": 0.8024438039865345,
+          "http_version": 11
+        },
+        {
+          "index": 7,
+          "bytes": 16777216,
+          "header_s": 1.178029123984743,
+          "seconds": 1.309416567964945,
+          "http_version": 11
+        },
+        {
+          "index": 15,
+          "bytes": 16777216,
+          "header_s": 0.3109830350149423,
+          "seconds": 0.4268336220411584,
+          "http_version": 11
+        }
+      ]
+    },
+    {
+      "source": "mirror-car",
+      "url": "https://blockzilla-archive-samples-v1.cheron-augustin.workers.dev/car/900/epoch-900.car",
+      "concurrency": 4,
+      "seconds": 2.6836017110035755,
+      "MBps": 100.02805367850742,
+      "cpu_seconds": 0.7520851459999998,
+      "process_peak_rss_kib": 37724,
+      "requests": [
+        {
+          "index": 0,
+          "bytes": 16777216,
+          "header_s": 0.1310797170153819,
+          "seconds": 0.2681716980296187,
+          "http_version": 11
+        },
+        {
+          "index": 4,
+          "bytes": 16777216,
+          "header_s": 0.10834954696474597,
+          "seconds": 0.23277144297026098,
+          "http_version": 11
+        },
+        {
+          "index": 8,
+          "bytes": 16777216,
+          "header_s": 0.11419624800328165,
+          "seconds": 0.2848406789707951,
+          "http_version": 11
+        },
+        {
+          "index": 12,
+          "bytes": 16777216,
+          "header_s": 0.11895866901613772,
+          "seconds": 0.26275255100335926,
+          "http_version": 11
+        },
+        {
+          "index": 1,
+          "bytes": 16777216,
+          "header_s": 0.15607313497457653,
+          "seconds": 0.6685671989689581,
+          "http_version": 11
+        },
+        {
+          "index": 5,
+          "bytes": 16777216,
+          "header_s": 0.11678695899900049,
+          "seconds": 0.6192831929656677,
+          "http_version": 11
+        },
+        {
+          "index": 9,
+          "bytes": 16777216,
+          "header_s": 0.1318525400129147,
+          "seconds": 0.6494837260106578,
+          "http_version": 11
+        },
+        {
+          "index": 13,
+          "bytes": 16777216,
+          "header_s": 0.11546816199552268,
+          "seconds": 0.6482594129629433,
+          "http_version": 11
+        },
+        {
+          "index": 2,
+          "bytes": 16777216,
+          "header_s": 0.1458883360028267,
+          "seconds": 0.5905504610273056,
+          "http_version": 11
+        },
+        {
+          "index": 6,
+          "bytes": 16777216,
+          "header_s": 0.1767471510102041,
+          "seconds": 0.6128023429773748,
+          "http_version": 11
+        },
+        {
+          "index": 10,
+          "bytes": 16777216,
+          "header_s": 0.1903578060446307,
+          "seconds": 0.707579470006749,
+          "http_version": 11
+        },
+        {
+          "index": 14,
+          "bytes": 16777216,
+          "header_s": 0.13036680803634226,
+          "seconds": 0.6677217690157704,
+          "http_version": 11
+        },
+        {
+          "index": 3,
+          "bytes": 16777216,
+          "header_s": 0.18614650302333757,
+          "seconds": 0.5147868220228702,
+          "http_version": 11
+        },
+        {
+          "index": 7,
+          "bytes": 16777216,
+          "header_s": 0.13592344900825992,
+          "seconds": 0.5322099279728718,
+          "http_version": 11
+        },
+        {
+          "index": 11,
+          "bytes": 16777216,
+          "header_s": 0.13062543200794607,
+          "seconds": 0.48607747501228005,
+          "http_version": 11
+        },
+        {
+          "index": 15,
+          "bytes": 16777216,
+          "header_s": 0.1537459190003574,
+          "seconds": 0.4841404380276799,
+          "http_version": 11
+        }
+      ]
+    },
+    {
+      "source": "mirror-car",
+      "url": "https://blockzilla-archive-samples-v1.cheron-augustin.workers.dev/car/900/epoch-900.car",
+      "concurrency": 1,
+      "seconds": 4.955849210033193,
+      "MBps": 54.16538006373323,
+      "cpu_seconds": 0.3597809129999998,
+      "process_peak_rss_kib": 37724,
+      "requests": [
+        {
+          "index": 0,
+          "bytes": 16777216,
+          "header_s": 0.18208295298973098,
+          "seconds": 0.3487397529534064,
+          "http_version": 11
+        },
+        {
+          "index": 1,
+          "bytes": 16777216,
+          "header_s": 0.10228346200892702,
+          "seconds": 0.24044549698010087,
+          "http_version": 11
+        },
+        {
+          "index": 2,
+          "bytes": 16777216,
+          "header_s": 0.08569770498434082,
+          "seconds": 0.26852438098285347,
+          "http_version": 11
+        },
+        {
+          "index": 3,
+          "bytes": 16777216,
+          "header_s": 0.1004569529904984,
+          "seconds": 0.25328158400952816,
+          "http_version": 11
+        },
+        {
+          "index": 4,
+          "bytes": 16777216,
+          "header_s": 0.09712764999130741,
+          "seconds": 0.23681433399906382,
+          "http_version": 11
+        },
+        {
+          "index": 5,
+          "bytes": 16777216,
+          "header_s": 0.10022259899415076,
+          "seconds": 0.27450902498094365,
+          "http_version": 11
+        },
+        {
+          "index": 6,
+          "bytes": 16777216,
+          "header_s": 0.11251000099582598,
+          "seconds": 0.435946294979658,
+          "http_version": 11
+        },
+        {
+          "index": 7,
+          "bytes": 16777216,
+          "header_s": 0.11095905996626243,
+          "seconds": 0.42000900994753465,
+          "http_version": 11
+        },
+        {
+          "index": 8,
+          "bytes": 16777216,
+          "header_s": 0.1036289989715442,
+          "seconds": 0.3370329389581457,
+          "http_version": 11
+        },
+        {
+          "index": 9,
+          "bytes": 16777216,
+          "header_s": 0.13775873300619423,
+          "seconds": 0.420859464968089,
+          "http_version": 11
+        },
+        {
+          "index": 10,
+          "bytes": 16777216,
+          "header_s": 0.12045162002323195,
+          "seconds": 0.45160351402591914,
+          "http_version": 11
+        },
+        {
+          "index": 11,
+          "bytes": 16777216,
+          "header_s": 0.13448912400053814,
+          "seconds": 0.27406773500842974,
+          "http_version": 11
+        },
+        {
+          "index": 12,
+          "bytes": 16777216,
+          "header_s": 0.10007864201907068,
+          "seconds": 0.21459241502452642,
+          "http_version": 11
+        },
+        {
+          "index": 13,
+          "bytes": 16777216,
+          "header_s": 0.10675999103114009,
+          "seconds": 0.2582038980326615,
+          "http_version": 11
+        },
+        {
+          "index": 14,
+          "bytes": 16777216,
+          "header_s": 0.09717629000078887,
+          "seconds": 0.26717821398051456,
+          "http_version": 11
+        },
+        {
+          "index": 15,
+          "bytes": 16777216,
+          "header_s": 0.11093021597480401,
+          "seconds": 0.23528875497868285,
+          "http_version": 11
+        }
+      ]
+    },
+    {
+      "source": "triton-car",
+      "url": "https://files.old-faithful.net/900/epoch-900.car",
+      "concurrency": 1,
+      "seconds": 5.359510232985485,
+      "MBps": 50.08581835479947,
+      "cpu_seconds": 0.35452582300000035,
+      "process_peak_rss_kib": 37724,
+      "requests": [
+        {
+          "index": 0,
+          "bytes": 16777216,
+          "header_s": 0.09207212302135304,
+          "seconds": 0.4009892729809508,
+          "http_version": 11
+        },
+        {
+          "index": 1,
+          "bytes": 16777216,
+          "header_s": 0.05401372298365459,
+          "seconds": 0.2118098700302653,
+          "http_version": 11
+        },
+        {
+          "index": 2,
+          "bytes": 16777216,
+          "header_s": 0.06292733602458611,
+          "seconds": 0.2075806549983099,
+          "http_version": 11
+        },
+        {
+          "index": 3,
+          "bytes": 16777216,
+          "header_s": 0.058318677998613566,
+          "seconds": 0.21197181998286396,
+          "http_version": 11
+        },
+        {
+          "index": 4,
+          "bytes": 16777216,
+          "header_s": 0.18940427899360657,
+          "seconds": 0.33847673394484445,
+          "http_version": 11
+        },
+        {
+          "index": 5,
+          "bytes": 16777216,
+          "header_s": 0.06851228600135073,
+          "seconds": 0.20376275305170566,
+          "http_version": 11
+        },
+        {
+          "index": 6,
+          "bytes": 16777216,
+          "header_s": 0.06258317199535668,
+          "seconds": 0.20294909499352798,
+          "http_version": 11
+        },
+        {
+          "index": 7,
+          "bytes": 16777216,
+          "header_s": 0.06587336998200044,
+          "seconds": 0.23061343096196651,
+          "http_version": 11
+        },
+        {
+          "index": 8,
+          "bytes": 16777216,
+          "header_s": 0.4059696579934098,
+          "seconds": 0.5959581049974076,
+          "http_version": 11
+        },
+        {
+          "index": 9,
+          "bytes": 16777216,
+          "header_s": 0.19478376099141315,
+          "seconds": 0.41917231801198795,
+          "http_version": 11
+        },
+        {
+          "index": 10,
+          "bytes": 16777216,
+          "header_s": 0.06446226697880775,
+          "seconds": 0.30586468701949343,
+          "http_version": 11
+        },
+        {
+          "index": 11,
+          "bytes": 16777216,
+          "header_s": 0.09553387900814414,
+          "seconds": 0.42087503999937326,
+          "http_version": 11
+        },
+        {
+          "index": 12,
+          "bytes": 16777216,
+          "header_s": 0.3453791430220008,
+          "seconds": 0.5802732600132003,
+          "http_version": 11
+        },
+        {
+          "index": 13,
+          "bytes": 16777216,
+          "header_s": 0.13307383301435038,
+          "seconds": 0.36843671498354524,
+          "http_version": 11
+        },
+        {
+          "index": 14,
+          "bytes": 16777216,
+          "header_s": 0.07361091300845146,
+          "seconds": 0.3853901530383155,
+          "http_version": 11
+        },
+        {
+          "index": 15,
+          "bytes": 16777216,
+          "header_s": 0.0722501440322958,
+          "seconds": 0.2512629490229301,
+          "http_version": 11
+        }
+      ]
+    },
+    {
+      "source": "triton-car",
+      "url": "https://files.old-faithful.net/900/epoch-900.car",
+      "concurrency": 4,
+      "seconds": 1.0942077100044116,
+      "MBps": 245.32403998407003,
+      "cpu_seconds": 0.7304237699999998,
+      "process_peak_rss_kib": 37724,
+      "requests": [
+        {
+          "index": 0,
+          "bytes": 16777216,
+          "header_s": 0.08832724700914696,
+          "seconds": 0.24064647499471903,
+          "http_version": 11
+        },
+        {
+          "index": 4,
+          "bytes": 16777216,
+          "header_s": 0.04893234197515994,
+          "seconds": 0.17491590400459245,
+          "http_version": 11
+        },
+        {
+          "index": 8,
+          "bytes": 16777216,
+          "header_s": 0.08415269904071465,
+          "seconds": 0.21837915101787075,
+          "http_version": 11
+        },
+        {
+          "index": 12,
+          "bytes": 16777216,
+          "header_s": 0.08917032100725919,
+          "seconds": 0.3117386279627681,
+          "http_version": 11
+        },
+        {
+          "index": 1,
+          "bytes": 16777216,
+          "header_s": 0.07578635500976816,
+          "seconds": 0.21000469202408567,
+          "http_version": 11
+        },
+        {
+          "index": 5,
+          "bytes": 16777216,
+          "header_s": 0.06523622997337952,
+          "seconds": 0.1880924589931965,
+          "http_version": 11
+        },
+        {
+          "index": 9,
+          "bytes": 16777216,
+          "header_s": 0.07950309198349714,
+          "seconds": 0.25217159203020856,
+          "http_version": 11
+        },
+        {
+          "index": 13,
+          "bytes": 16777216,
+          "header_s": 0.09999463299755007,
+          "seconds": 0.3188800410134718,
+          "http_version": 11
+        },
+        {
+          "index": 2,
+          "bytes": 16777216,
+          "header_s": 0.0891115190461278,
+          "seconds": 0.20348373102024198,
+          "http_version": 11
+        },
+        {
+          "index": 6,
+          "bytes": 16777216,
+          "header_s": 0.06965524103725329,
+          "seconds": 0.27767005300847813,
+          "http_version": 11
+        },
+        {
+          "index": 10,
+          "bytes": 16777216,
+          "header_s": 0.07547728501958773,
+          "seconds": 0.267821746005211,
+          "http_version": 11
+        },
+        {
+          "index": 14,
+          "bytes": 16777216,
+          "header_s": 0.1099477069801651,
+          "seconds": 0.2790267409873195,
+          "http_version": 11
+        },
+        {
+          "index": 3,
+          "bytes": 16777216,
+          "header_s": 0.044593409984372556,
+          "seconds": 0.13285808003274724,
+          "http_version": 11
+        },
+        {
+          "index": 7,
+          "bytes": 16777216,
+          "header_s": 0.0695419569965452,
+          "seconds": 0.20577341498574242,
+          "http_version": 11
+        },
+        {
+          "index": 11,
+          "bytes": 16777216,
+          "header_s": 0.08073007903294638,
+          "seconds": 0.22029869200196117,
+          "http_version": 11
+        },
+        {
+          "index": 15,
+          "bytes": 16777216,
+          "header_s": 0.08747282798867673,
+          "seconds": 0.23698784899897873,
+          "http_version": 11
+        }
+      ]
+    },
+    {
+      "source": "triton-car",
+      "url": "https://files.old-faithful.net/900/epoch-900.car",
+      "concurrency": 8,
+      "seconds": 0.8871025450062007,
+      "MBps": 302.5980000971857,
+      "cpu_seconds": 1.8760875409999995,
+      "process_peak_rss_kib": 37724,
+      "requests": [
+        {
+          "index": 0,
+          "bytes": 16777216,
+          "header_s": 0.04995276703266427,
+          "seconds": 0.14176755701191723,
+          "http_version": 11
+        },
+        {
+          "index": 8,
+          "bytes": 16777216,
+          "header_s": 0.08728928898926824,
+          "seconds": 0.23169762000907212,
+          "http_version": 11
+        },
+        {
+          "index": 1,
+          "bytes": 16777216,
+          "header_s": 0.36519281496293843,
+          "seconds": 0.5335404069628567,
+          "http_version": 11
+        },
+        {
+          "index": 9,
+          "bytes": 16777216,
+          "header_s": 0.05598231195472181,
+          "seconds": 0.1862725659739226,
+          "http_version": 11
+        },
+        {
+          "index": 2,
+          "bytes": 16777216,
+          "header_s": 0.1121997120208107,
+          "seconds": 0.2545310140121728,
+          "http_version": 11
+        },
+        {
+          "index": 10,
+          "bytes": 16777216,
+          "header_s": 0.07279796298826113,
+          "seconds": 0.22502378898207098,
+          "http_version": 11
+        },
+        {
+          "index": 3,
+          "bytes": 16777216,
+          "header_s": 0.042501186951994896,
+          "seconds": 0.1441047209664248,
+          "http_version": 11
+        },
+        {
+          "index": 11,
+          "bytes": 16777216,
+          "header_s": 0.06924675300251693,
+          "seconds": 0.22958571295021102,
+          "http_version": 11
+        },
+        {
+          "index": 4,
+          "bytes": 16777216,
+          "header_s": 0.15116028598276898,
+          "seconds": 0.29526281799189746,
+          "http_version": 11
+        },
+        {
+          "index": 12,
+          "bytes": 16777216,
+          "header_s": 0.12554864503908902,
+          "seconds": 0.2664608129998669,
+          "http_version": 11
+        },
+        {
+          "index": 5,
+          "bytes": 16777216,
+          "header_s": 0.11494634102564305,
+          "seconds": 0.30490397597895935,
+          "http_version": 11
+        },
+        {
+          "index": 13,
+          "bytes": 16777216,
+          "header_s": 0.07660765195032582,
+          "seconds": 0.22549363394500688,
+          "http_version": 11
+        },
+        {
+          "index": 6,
+          "bytes": 16777216,
+          "header_s": 0.12993894604733214,
+          "seconds": 0.2689753680024296,
+          "http_version": 11
+        },
+        {
+          "index": 14,
+          "bytes": 16777216,
+          "header_s": 0.07744076498784125,
+          "seconds": 0.23608788702404127,
+          "http_version": 11
+        },
+        {
+          "index": 7,
+          "bytes": 16777216,
+          "header_s": 0.09373864199733362,
+          "seconds": 0.23368456296157092,
+          "http_version": 11
+        },
+        {
+          "index": 15,
+          "bytes": 16777216,
+          "header_s": 0.08605665696086362,
+          "seconds": 0.3068697839626111,
+          "http_version": 11
+        }
+      ]
+    },
+    {
+      "source": "triton-car",
+      "url": "https://files.old-faithful.net/900/epoch-900.car",
+      "concurrency": 8,
+      "seconds": 1.111884095997084,
+      "MBps": 241.4239550384791,
+      "cpu_seconds": 1.783241704,
+      "process_peak_rss_kib": 37852,
+      "requests": [
+        {
+          "index": 0,
+          "bytes": 16777216,
+          "header_s": 0.0638470149715431,
+          "seconds": 0.16927796899108216,
+          "http_version": 11
+        },
+        {
+          "index": 8,
+          "bytes": 16777216,
+          "header_s": 0.06792401900747791,
+          "seconds": 0.20872379303909838,
+          "http_version": 11
+        },
+        {
+          "index": 1,
+          "bytes": 16777216,
+          "header_s": 0.04981156095163897,
+          "seconds": 0.1426590649643913,
+          "http_version": 11
+        },
+        {
+          "index": 9,
+          "bytes": 16777216,
+          "header_s": 0.06029261101502925,
+          "seconds": 0.17476780497236177,
+          "http_version": 11
+        },
+        {
+          "index": 2,
+          "bytes": 16777216,
+          "header_s": 0.32112479401985183,
+          "seconds": 0.45023307600058615,
+          "http_version": 11
+        },
+        {
+          "index": 10,
+          "bytes": 16777216,
+          "header_s": 0.08222004899289459,
+          "seconds": 0.2625538859865628,
+          "http_version": 11
+        },
+        {
+          "index": 3,
+          "bytes": 16777216,
+          "header_s": 0.5092187070404179,
+          "seconds": 0.6529660840169527,
+          "http_version": 11
+        },
+        {
+          "index": 11,
+          "bytes": 16777216,
+          "header_s": 0.12738564802566543,
+          "seconds": 0.34271872200770304,
+          "http_version": 11
+        },
+        {
+          "index": 4,
+          "bytes": 16777216,
+          "header_s": 0.07283416599966586,
+          "seconds": 0.2577568110427819,
+          "http_version": 11
+        },
+        {
+          "index": 12,
+          "bytes": 16777216,
+          "header_s": 0.08977433998370543,
+          "seconds": 0.2743166089639999,
+          "http_version": 11
+        },
+        {
+          "index": 5,
+          "bytes": 16777216,
+          "header_s": 0.06962676101829857,
+          "seconds": 0.2821901100105606,
+          "http_version": 11
+        },
+        {
+          "index": 13,
+          "bytes": 16777216,
+          "header_s": 0.11462722299620509,
+          "seconds": 0.2713601749856025,
+          "http_version": 11
+        },
+        {
+          "index": 6,
+          "bytes": 16777216,
+          "header_s": 0.1395003809593618,
+          "seconds": 0.26029874000232667,
+          "http_version": 11
+        },
+        {
+          "index": 14,
+          "bytes": 16777216,
+          "header_s": 0.09009083401178941,
+          "seconds": 0.23019883601227775,
+          "http_version": 11
+        },
+        {
+          "index": 7,
+          "bytes": 16777216,
+          "header_s": 0.06908198999008164,
+          "seconds": 0.1864333149860613,
+          "http_version": 11
+        },
+        {
+          "index": 15,
+          "bytes": 16777216,
+          "header_s": 0.09078155504539609,
+          "seconds": 0.3016127730370499,
+          "http_version": 11
+        }
+      ]
+    },
+    {
+      "source": "triton-car",
+      "url": "https://files.old-faithful.net/900/epoch-900.car",
+      "concurrency": 4,
+      "seconds": 1.4523790149833076,
+      "MBps": 184.82465887396836,
+      "cpu_seconds": 0.7087636750000001,
+      "process_peak_rss_kib": 37852,
+      "requests": [
+        {
+          "index": 0,
+          "bytes": 16777216,
+          "header_s": 0.10094355302862823,
+          "seconds": 0.26151533104712144,
+          "http_version": 11
+        },
+        {
+          "index": 4,
+          "bytes": 16777216,
+          "header_s": 0.10172698099631816,
+          "seconds": 0.2287425950053148,
+          "http_version": 11
+        },
+        {
+          "index": 8,
+          "bytes": 16777216,
+          "header_s": 0.09836368699325249,
+          "seconds": 0.2915127080050297,
+          "http_version": 11
+        },
+        {
+          "index": 12,
+          "bytes": 16777216,
+          "header_s": 0.1512866450357251,
+          "seconds": 0.32456867303699255,
+          "http_version": 11
+        },
+        {
+          "index": 1,
+          "bytes": 16777216,
+          "header_s": 0.0845773610053584,
+          "seconds": 0.22187365900026634,
+          "http_version": 11
+        },
+        {
+          "index": 5,
+          "bytes": 16777216,
+          "header_s": 0.09073996602091938,
+          "seconds": 0.20447259600041434,
+          "http_version": 11
+        },
+        {
+          "index": 9,
+          "bytes": 16777216,
+          "header_s": 0.1053217810112983,
+          "seconds": 0.2646206460194662,
+          "http_version": 11
+        },
+        {
+          "index": 13,
+          "bytes": 16777216,
+          "header_s": 0.16041656502056867,
+          "seconds": 0.3650055439793505,
+          "http_version": 11
+        },
+        {
+          "index": 2,
+          "bytes": 16777216,
+          "header_s": 0.05567564198281616,
+          "seconds": 0.15223807701840997,
+          "http_version": 11
+        },
+        {
+          "index": 6,
+          "bytes": 16777216,
+          "header_s": 0.10775810101768002,
+          "seconds": 0.23908481100806966,
+          "http_version": 11
+        },
+        {
+          "index": 10,
+          "bytes": 16777216,
+          "header_s": 0.1279197409749031,
+          "seconds": 0.33094675798201934,
+          "http_version": 11
+        },
+        {
+          "index": 14,
+          "bytes": 16777216,
+          "header_s": 0.1371613479568623,
+          "seconds": 0.35693441797047853,
+          "http_version": 11
+        },
+        {
+          "index": 3,
+          "bytes": 16777216,
+          "header_s": 0.4957753809867427,
+          "seconds": 0.6303279809653759,
+          "http_version": 11
+        },
+        {
+          "index": 7,
+          "bytes": 16777216,
+          "header_s": 0.05210124998120591,
+          "seconds": 0.16514918598113582,
+          "http_version": 11
+        },
+        {
+          "index": 11,
+          "bytes": 16777216,
+          "header_s": 0.07261499797459692,
+          "seconds": 0.2186935229692608,
+          "http_version": 11
+        },
+        {
+          "index": 15,
+          "bytes": 16777216,
+          "header_s": 0.14224210398970172,
+          "seconds": 0.33707360102562234,
+          "http_version": 11
+        }
+      ]
+    },
+    {
+      "source": "triton-car",
+      "url": "https://files.old-faithful.net/900/epoch-900.car",
+      "concurrency": 1,
+      "seconds": 3.7146638929843903,
+      "MBps": 72.26372660712968,
+      "cpu_seconds": 0.24632496300000106,
+      "process_peak_rss_kib": 37852,
+      "requests": [
+        {
+          "index": 0,
+          "bytes": 16777216,
+          "header_s": 0.07251073699444532,
+          "seconds": 0.25138757698005065,
+          "http_version": 11
+        },
+        {
+          "index": 1,
+          "bytes": 16777216,
+          "header_s": 0.053560600033961236,
+          "seconds": 0.22818073304370046,
+          "http_version": 11
+        },
+        {
+          "index": 2,
+          "bytes": 16777216,
+          "header_s": 0.05580398195888847,
+          "seconds": 0.24200941796880215,
+          "http_version": 11
+        },
+        {
+          "index": 3,
+          "bytes": 16777216,
+          "header_s": 0.025100625993218273,
+          "seconds": 0.1942465670290403,
+          "http_version": 11
+        },
+        {
+          "index": 4,
+          "bytes": 16777216,
+          "header_s": 0.08692918694578111,
+          "seconds": 0.2051391099812463,
+          "http_version": 11
+        },
+        {
+          "index": 5,
+          "bytes": 16777216,
+          "header_s": 0.05127455695765093,
+          "seconds": 0.1580975819961168,
+          "http_version": 11
+        },
+        {
+          "index": 6,
+          "bytes": 16777216,
+          "header_s": 0.09966934897238389,
+          "seconds": 0.22140807699179277,
+          "http_version": 11
+        },
+        {
+          "index": 7,
+          "bytes": 16777216,
+          "header_s": 0.04730508098145947,
+          "seconds": 0.1706025919993408,
+          "http_version": 11
+        },
+        {
+          "index": 8,
+          "bytes": 16777216,
+          "header_s": 0.08760444400832057,
+          "seconds": 0.31026417203247547,
+          "http_version": 11
+        },
+        {
+          "index": 9,
+          "bytes": 16777216,
+          "header_s": 0.08139603200834244,
+          "seconds": 0.2042756259907037,
+          "http_version": 11
+        },
+        {
+          "index": 10,
+          "bytes": 16777216,
+          "header_s": 0.06672663101926446,
+          "seconds": 0.1937673800275661,
+          "http_version": 11
+        },
+        {
+          "index": 11,
+          "bytes": 16777216,
+          "header_s": 0.04731752601219341,
+          "seconds": 0.22582967998459935,
+          "http_version": 11
+        },
+        {
+          "index": 12,
+          "bytes": 16777216,
+          "header_s": 0.09452238696394488,
+          "seconds": 0.306178763974458,
+          "http_version": 11
+        },
+        {
+          "index": 13,
+          "bytes": 16777216,
+          "header_s": 0.1233163780416362,
+          "seconds": 0.30841389403212816,
+          "http_version": 11
+        },
+        {
+          "index": 14,
+          "bytes": 16777216,
+          "header_s": 0.058691648999229074,
+          "seconds": 0.23671773599926382,
+          "http_version": 11
+        },
+        {
+          "index": 15,
+          "bytes": 16777216,
+          "header_s": 0.059762583987321705,
+          "seconds": 0.24174957297509536,
+          "http_version": 11
+        }
+      ]
+    }
+  ],
+  "valid": true,
+  "mirror-car": {
+    "before": {
+      "bytes": 527045598158,
+      "etag": "\"d98e61b8827c6c211f889dd2bf8577a8-3927\"",
+      "last_modified": "Wed, 02 Sep 2026 00:12:15 GMT"
+    },
+    "after": {
+      "bytes": 527045598158,
+      "etag": "\"d98e61b8827c6c211f889dd2bf8577a8-3927\"",
+      "last_modified": "Wed, 02 Sep 2026 00:12:15 GMT"
+    }
+  },
+  "triton-car": {
+    "before": {
+      "bytes": 527045598158,
+      "etag": null,
+      "last_modified": null
+    },
+    "after": {
+      "bytes": 527045598158,
+      "etag": null,
+      "last_modified": null
+    }
+  }
+}

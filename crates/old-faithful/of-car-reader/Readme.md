@@ -52,6 +52,31 @@ transaction iterators, raw entry scanning, rewards, and feature flags:
 
 <https://docs.rs/of-car-reader>
 
+## Allocation choices
+
+For streaming metadata scans, use `TxMetadataIter::next_metadata_visit` with a
+`TransactionStatusMetaVisitor`. Enable only the fields the application needs.
+Protobuf strings and byte fields borrow the input or reusable zstd buffer;
+callbacks do not need a vector of logs, balances, or instructions. Consume
+borrowed values before the next iterator step. The iterator reports missing
+metadata separately and returns an owned decoder result for legacy metadata.
+Its existing continuation restrictions still apply.
+
+The generated borrowed metadata view still allocates vectors for repeated
+fields. Use the visitor when the application does not need to retain a complete
+metadata object. A full visitor must also decode `reward_raw` submessages;
+that callback alone does not decode their fields.
+
+`VersionedTransactionReuse` keeps transaction decode buffers between calls.
+Return them with `recycle_transaction` after use. Keys and signatures borrow
+input bytes; instruction and lookup payloads use reusable owned buffers. This
+is not a completely zero-copy transaction representation. Legacy metadata
+conversion moves payload buffers into its result instead of cloning them.
+
+The [CAR decode probe](../../../bench/reader-profile/README-car-decode.md)
+compares owned metadata with a visitor that consumes all known fields. It also
+provides separate allocation counts and bounded HTTP concurrency tests.
+
 ## Features
 
 - `zstd-native` enables `.car.zst` reading through the native `zstd` crate.

@@ -13,12 +13,13 @@ required-features = ["car-reference"]
 
 [features]
 frame-profiler = ["pprof/frame-pointer"]
-car-reference = ["dep:of-car-reader", "dep:blake3"]
+car-reference = ["dep:of-car-reader", "dep:blake3", "dep:quick-protobuf"]
 reference-mimalloc = ["car-reference", "dep:mimalloc"]
 
 [dependencies]
 of-car-reader = { path = "../../crates/old-faithful/of-car-reader", default-features = false, features = ["query-sdk-http", "zstd-native"], optional = true }
 blake3 = { version = "1.8.7", optional = true }
+quick-protobuf = { version = "0.8.1", optional = true }
 mimalloc = { version = "0.1.52", optional = true }
 anyhow = "1.0.104"
 blockzilla-compact-v2-reader = { path = "../../crates/compact-v2/blockzilla-compact-v2-reader", features = ["http"] }

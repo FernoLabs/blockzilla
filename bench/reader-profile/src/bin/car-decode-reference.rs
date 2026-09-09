@@ -1,12 +1,20 @@
 //! Full CAR transaction/metadata decode probe. This is a benchmark adapter,
 //! not a new public SDK path. See README-car-decode.md for comparison limits.
 use anyhow::{Context, Result, ensure};
-use clap::Parser;
+use clap::{Parser, ValueEnum};
+#[path = "../allocation.rs"]
+// The mimalloc build rejects counters; keep the shared receipt types available.
+#[cfg_attr(feature = "reference-mimalloc", allow(dead_code))]
+mod allocation;
+#[path = "car-decode-reference/metadata_visit.rs"]
+mod metadata_visit;
+use metadata_visit::FullMetadataVisitor;
 use of_car_reader::{
     CarBlockReader, LosslessBlockReadLimits, OrderedLosslessCarBlock,
     confirmed_block::{Rewards, TransactionStatusMeta},
     metadata_decoder::{
         ZstdReusableDecoder, decode_rewards_from_frame, decode_transaction_status_meta_from_frame,
+        slot_uses_protobuf_metadata, visit_protobuf_transaction_status_meta,
     },
     query_sdk_http::{CarHttpOptions, CarHttpSession},
     short_vec::decode_shortu16_len,
@@ -31,6 +39,17 @@ use std::{
 #[global_allocator]
 static ALLOCATOR: mimalloc::MiMalloc = mimalloc::MiMalloc;
 
+#[cfg(not(feature = "reference-mimalloc"))]
+#[global_allocator]
+static SYSTEM_ALLOCATOR: allocation::Allocator = allocation::Allocator;
+
+#[derive(Clone, Copy, Debug, Default, ValueEnum)]
+enum MetadataMode {
+    #[default]
+    Owned,
+    Visitor,
+}
+
 #[derive(Parser)]
 struct Args {
     #[arg(long, required_unless_present = "file", conflicts_with = "file")]
@@ -45,6 +64,15 @@ struct Args {
     plan: PathBuf,
     #[arg(long, default_value_t = 12)]
     workers: usize,
+    /// Decode all protobuf metadata fields through borrowed callbacks.
+    #[arg(long, value_enum, default_value_t = MetadataMode::Owned)]
+    metadata_mode: MetadataMode,
+    /// HTTP concurrency; the total body window stays at eight 32 MiB chunks.
+    #[arg(long, default_value_t = 4)]
+    http_workers: usize,
+    /// Count Rust allocations in a separate System allocator diagnostic run.
+    #[arg(long)]
+    allocations: bool,
     /// New output file. Never overwrites an earlier receipt.
     #[arg(long)]
     output: PathBuf,
@@ -67,15 +95,15 @@ struct Decoder {
     rewards: Rewards,
 }
 impl Decoder {
-    fn decode(&mut self, raw: &OrderedLosslessCarBlock) -> Result<Row> {
+    fn decode(&mut self, raw: &OrderedLosslessCarBlock, mode: MetadataMode) -> Result<Row> {
         let slot = raw.block.as_ref().context("terminal block missing")?.slot;
         let mut votes = 0;
         let mut failed = 0;
         let mut digest = blake3::Hasher::new();
-        let vote_key: [u8; 32] = bs58::decode("Vote111111111111111111111111111111111111111")
-            .into_vec()?
-            .try_into()
-            .unwrap();
+        const VOTE_KEY: [u8; 32] = [
+            7, 97, 72, 29, 53, 116, 116, 187, 124, 77, 118, 36, 235, 211, 189, 179, 216, 53, 94,
+            115, 209, 16, 67, 252, 13, 163, 83, 128, 0, 0, 0, 0,
+        ];
         for (index, raw_tx) in raw.transactions.iter().enumerate() {
             ensure!(
                 raw_tx.slot == slot && raw_tx.index == Some(index as u64),
@@ -89,19 +117,33 @@ impl Decoder {
                 .transaction
                 .deserialize_transaction(&raw_tx.data.data)?;
             ensure!(!tx.signatures.is_empty(), "transaction has no signature");
-            decode_transaction_status_meta_from_frame(
-                slot,
-                &raw_tx.metadata.data,
-                &mut self.metadata,
-                &mut self.zstd,
-            )?;
+            let is_failed =
+                if matches!(mode, MetadataMode::Visitor) && slot_uses_protobuf_metadata(slot) {
+                    let mut visitor = FullMetadataVisitor::default();
+                    let bytes = if self.zstd.decompress_if_zstd(&raw_tx.metadata.data)? {
+                        self.zstd.output()
+                    } else {
+                        &raw_tx.metadata.data
+                    };
+                    visit_protobuf_transaction_status_meta(bytes, &mut visitor)?;
+                    visitor.finish()?
+                } else {
+                    decode_transaction_status_meta_from_frame(
+                        slot,
+                        &raw_tx.metadata.data,
+                        &mut self.metadata,
+                        &mut self.zstd,
+                    )?;
+                    std::hint::black_box(&self.metadata);
+                    self.metadata.err.is_some()
+                };
             let vote = match &tx.message {
                 VersionedMessage::Legacy(m)
                     if (1..=2).contains(&tx.signatures.len()) && m.instructions.len() == 1 =>
                 {
                     m.account_keys
                         .get(m.instructions[0].program_id_index as usize)
-                        .is_some_and(|key| **key == vote_key)
+                        .is_some_and(|key| **key == VOTE_KEY)
                 }
                 _ => false,
             };
@@ -117,10 +159,9 @@ impl Decoder {
             digest.update(&(index as u64).to_le_bytes());
             digest.update(tx.signatures[0]);
             digest.update(hash.finalize().as_bytes());
-            digest.update(&[u8::from(vote), u8::from(self.metadata.err.is_some())]);
+            digest.update(&[u8::from(vote), u8::from(is_failed)]);
             votes += u64::from(vote);
-            failed += u64::from(self.metadata.err.is_some());
-            std::hint::black_box(&self.metadata);
+            failed += u64::from(is_failed);
             self.transaction.recycle_transaction(tx);
         }
         if let Some(rewards) = &raw.rewards {
@@ -149,7 +190,7 @@ impl Decoder {
     }
 }
 
-fn scan(input: impl Read, end_slot: u64, workers: usize) -> Result<Vec<Row>> {
+fn scan(input: impl Read, end_slot: u64, workers: usize, mode: MetadataMode) -> Result<Vec<Row>> {
     ensure!((1..=12).contains(&workers), "workers must be 1..=12");
     let mut reader = CarBlockReader::with_capacity(input, 8 << 20);
     reader.skip_header_bounded(1 << 20)?;
@@ -190,7 +231,7 @@ fn scan(input: impl Read, end_slot: u64, workers: usize) -> Result<Vec<Row>> {
                     if cancel.load(Ordering::Acquire) {
                         break;
                     }
-                    let result = decoder.decode(&block);
+                    let result = decoder.decode(&block, mode);
                     block.clear();
                     if block.data_buffer_pool_stats().retained_capacity > 16 << 20 {
                         block.release_reusable_data_buffers();
@@ -259,6 +300,14 @@ fn scan(input: impl Read, end_slot: u64, workers: usize) -> Result<Vec<Row>> {
 fn main() -> Result<()> {
     let args = Args::parse();
     ensure!((1..=12).contains(&args.workers), "workers must be 1..=12");
+    ensure!(
+        (1..=8).contains(&args.http_workers),
+        "http-workers must be 1..=8"
+    );
+    ensure!(
+        !args.allocations || !cfg!(feature = "reference-mimalloc"),
+        "allocation counters require the System build"
+    );
     let plan: Value = serde_json::from_reader(File::open(&args.plan)?)?;
     let epoch = plan["epoch"].as_u64().context("plan epoch")?;
     let end = plan["end_slot_exclusive"].as_u64().context("plan end")?;
@@ -283,7 +332,10 @@ fn main() -> Result<()> {
     let mut transport = None;
     let mut identity = json!(null);
     let input: Box<dyn Read> = if let Some(url) = &args.url {
-        let session = CarHttpSession::new(CarHttpOptions::default())?;
+        let session = CarHttpSession::new(CarHttpOptions {
+            workers: args.http_workers,
+            ..CarHttpOptions::default()
+        })?;
         if args.operator_trusted {
             let stream = session.open_operator_trusted(url)?;
             identity = json!({"url": stream.identity().normalized_url, "bytes": stream.identity().content_length, "operator_trusted": true});
@@ -300,7 +352,11 @@ fn main() -> Result<()> {
     };
     let setup_s = started.elapsed().as_secs_f64();
     let scan_start = Instant::now();
-    let result = scan(input, end, args.workers);
+    if args.allocations {
+        allocation::start();
+    }
+    let result = scan(input, end, args.workers, args.metadata_mode);
+    let allocations = args.allocations.then(allocation::stop);
     let scan_s = scan_start.elapsed().as_secs_f64();
     let rows = match result {
         Ok(rows) => rows,
@@ -324,9 +380,14 @@ fn main() -> Result<()> {
         });
     let tx = rows.iter().map(|r| r.tx).sum::<u64>();
     let http = transport.map(|h| { let s = h.snapshot(); json!({"get_requests":s.get_requests,"body_bytes":s.get_body_bytes_received,"bytes_delivered":s.bytes_delivered,"incomplete_body_retries":s.incomplete_body_retries,"workers_finished":s.workers_finished}) });
+    let allocation_counts = allocations.map(|s| json!({
+        "calls": s.allocation_calls, "requested_bytes": s.allocation_bytes,
+        "buckets": s.size_buckets.iter().zip(allocation::BUCKET_UPPER_BOUNDS).map(|(b, upper)| json!({"max_bytes": upper, "calls": b.allocation_calls, "requested_bytes": b.allocation_bytes})).collect::<Vec<_>>(),
+        "timing_is_instrumented": true, "includes_c_zstd_allocations": false,
+    }));
     let receipt = json!({"schema":"blockzilla-car-decode-reference-v1", "valid":valid, "epoch":epoch,
         "allocator": if cfg!(feature="reference-mimalloc") {"mimalloc"} else {"system"},
-        "workers":args.workers, "setup_seconds":setup_s, "scan_seconds":scan_s,
+        "workers":args.workers, "metadata_mode":format!("{:?}",args.metadata_mode), "http_workers":args.http_workers, "http_body_window_bytes":8*32*1024*1024, "allocations":allocation_counts, "setup_seconds":setup_s, "scan_seconds":scan_s,
         "transactions":tx, "blocks":expected.len(), "physical_blocks":rows.len(),
         "scan_tps": if valid {Some(tx as f64 / scan_s)} else {None},
         "votes":rows.iter().map(|r|r.votes).sum::<u64>(),"failed":rows.iter().map(|r|r.failed).sum::<u64>(),
@@ -346,9 +407,10 @@ mod tests {
     fn real_car_decode_is_identical_with_one_and_twelve_workers() {
         for bytes in [include_bytes!("../../../../crates/old-faithful/of-car-reader/benches/fixtures/epoch-157-biggest.car").as_slice(),
             include_bytes!("../../../../crates/old-faithful/of-car-reader/benches/fixtures/epoch-822-biggest.car").as_slice()] {
-            let one = scan(bytes, u64::MAX, 1).unwrap();
-            let twelve = scan(bytes, u64::MAX, 12).unwrap();
+            let one = scan(bytes, u64::MAX, 1, MetadataMode::Owned).unwrap();
+            let twelve = scan(bytes, u64::MAX, 12, MetadataMode::Owned).unwrap();
             assert!(!one.is_empty()); assert_eq!(one, twelve);
+            assert_eq!(one, scan(bytes, u64::MAX, 12, MetadataMode::Visitor).unwrap());
         }
     }
 }

@@ -49,6 +49,26 @@ A second build with `--features reference-mimalloc` changes only this probe's
 allocator. Keep both binaries and their hashes. The normal V2/V3 profile binary
 and the public readers keep their existing allocators.
 
+Use `--metadata-mode visitor` to decode protobuf transaction metadata through
+the SDK's borrowed callbacks. Every known field is requested, including nested
+instructions, token balances, and transaction rewards. Strings and byte fields
+borrow the decompression buffer. The probe consumes them before reusing that
+buffer. Legacy metadata and block rewards still use the owned decoder. The
+default `--metadata-mode owned` preserves the previous output representation.
+The visitor mode measures a streaming consumer; it does not produce a retained
+metadata object for the application.
+
+Use `--http-workers 8` to test more concurrent requests. Both four and eight
+workers share the same eight-chunk, 256 MiB HTTP body window. This flag changes
+the probe only; the SDK default remains four workers.
+
+Use `--allocations` with the System build for a separate allocation diagnostic.
+It counts Rust allocation and reallocation requests during the scan, including
+HTTP activity, with counts by requested size. It does not count C zstd
+allocations, and requested bytes are not retained memory. Shared counters add
+overhead, so do not use these runs as speed measurements. This option is
+rejected by the mimalloc build.
+
 ## Acceptance and comparison limits
 
 Accept performance only if the receipt is valid and all expected rows match.

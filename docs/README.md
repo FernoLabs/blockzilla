@@ -147,3 +147,5 @@ output, and production deployment configuration do not belong here.
 - [Epoch900 network reader pilot](benchmarks/network-reader-epoch900-pilot.md)
 
 Latest reader diagnostic: [epoch 900 network CPU profiles and resource use](benchmarks/epoch900-network-profile-20260908.md).
+
+Latest allocation pass: [CAR metadata allocations and network capacity](benchmarks/car-allocation-network-20260909.md).

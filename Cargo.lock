@@ -1155,6 +1155,7 @@ dependencies = [
  "mimalloc",
  "of-car-reader",
  "pprof",
+ "quick-protobuf",
  "serde_json",
 ]
 
