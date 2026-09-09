@@ -3,7 +3,7 @@
 mod allocation;
 
 use anyhow::{Context, Result, ensure};
-use blockzilla_archive_v3_reader::IndexerV3Archive;
+use blockzilla_archive_v3_reader::{IndexerV3Archive, IndexerV3CacheProfile, IndexerV3OpenOptions};
 use blockzilla_compact_v2_reader::archive::{
     CompactV2Archive, CompactV2LocalDescriptor, CompactV2ParallelScanConfig,
 };
@@ -91,6 +91,9 @@ struct Args {
     v2_legacy_input: bool,
     #[arg(long)]
     v3_legacy_input: bool,
+    /// Download the sealed V3 signature sidecar once, then read it locally.
+    #[arg(long, requires = "origin")]
+    v3_cache_signatures: bool,
     #[arg(long, default_value = "5LikTUsx695BHRipWoRrn6YmTQEcPrvbR8YaHxdSRQo8")]
     wallet: String,
 }
@@ -220,7 +223,20 @@ fn main() -> Result<()> {
         }),
         Format::V3 => {
             let mut archive = if let Some(origin) = &args.origin {
-                IndexerV3Archive::open(origin, args.epoch, args.cache_root.as_ref().unwrap())?
+                let options = IndexerV3OpenOptions {
+                    cache_profile: if args.v3_cache_signatures {
+                        IndexerV3CacheProfile::SignatureLocal
+                    } else {
+                        IndexerV3CacheProfile::Streaming
+                    },
+                    ..IndexerV3OpenOptions::default()
+                };
+                IndexerV3Archive::open_with_options(
+                    origin,
+                    args.epoch,
+                    args.cache_root.as_ref().unwrap(),
+                    options,
+                )?
             } else {
                 IndexerV3Archive::open_local(args.archive_root.as_ref().unwrap(), args.epoch)?
             };

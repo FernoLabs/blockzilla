@@ -72,6 +72,7 @@ pub use indexer_v3_query::{
 };
 pub use indexer_v3_registry::IndexerV3RegistryIndex;
 
+use blockzilla_archive_v2::ARCHIVE_V2_SIGNATURES_FILE;
 pub use blockzilla_model::{
     ArchiveFormat, ArchiveInstructionSource, ArchiveInstructionSourceExt, ArchiveIoSnapshot,
     BlockSink, BlockView, Error as QueryError, FnBlockSink, InstructionDataRequirement,
@@ -80,7 +81,9 @@ pub use blockzilla_model::{
     TokenBalanceSide, TransactionView,
 };
 use blockzilla_source::{RangeSource, SourceError, SourceResult};
-use blockzilla_source_cache::{CachedHttpRangeSource, create_http_cache_directory};
+use blockzilla_source_cache::{
+    CachedHttpRangeSource, HttpRangeCacheOptions, create_http_cache_directory,
+};
 use blockzilla_source_http::{
     HttpObjectIdentity, HttpObjectPathLayout, HttpRangeSource, HttpRangeSourceOptions,
 };
@@ -92,6 +95,10 @@ use url::Url;
 const OBJECT_SET_BINDING_DOMAIN: &[u8] = b"blockzilla.indexer-v3.object-set.v1\0";
 const CACHE_NAMESPACE_DOMAIN: &[u8] = b"blockzilla.indexer-v3.cache-namespace.v1\0";
 const MAINNET_ARCHIVE_SLOTS_PER_EPOCH: u64 = 432_000;
+const SIGNATURE_CACHE_DOWNLOAD_RANGE_BYTES: usize = 64 << 20;
+const SIGNATURE_CACHE_DOWNLOAD_CONCURRENCY: usize = 16;
+const SIGNATURE_CACHE_MAX_OBJECT_BYTES: u64 = 48 << 30;
+const SIGNATURE_CACHE_MAX_TOTAL_BYTES: u64 = 56 << 30;
 /// Default memory limit for automatic dense-query registry loading.
 pub const DEFAULT_INDEXER_V3_FULL_REGISTRY_BYTES: u64 = 1 << 30;
 const TRANSACTION_DIRECTORY_OBJECT: &str = "archive-v2-standalone-transaction-directory.wincode";
@@ -135,6 +142,10 @@ pub enum IndexerV3CacheProfile {
     /// Cache only the block index and small reverse control objects. Candidate
     /// transaction-directory rows and semantic planes stay as bounded reads.
     Selective,
+    /// Cache the block index and complete signature sidecar for one sealed
+    /// epoch. The first open downloads the signature object. Later opens read
+    /// signature windows from the local cache.
+    SignatureLocal,
 }
 
 impl IndexerV3CacheProfile {
@@ -148,6 +159,20 @@ impl IndexerV3CacheProfile {
                 ADAPTIVE_V3_CONTROL_FILE,
                 ADAPTIVE_V3_COVERAGE_FILE,
             ],
+            Self::SignatureLocal => vec![index, ARCHIVE_V2_SIGNATURES_FILE],
+        }
+    }
+
+    fn cache_options(self) -> HttpRangeCacheOptions {
+        match self {
+            Self::SignatureLocal => HttpRangeCacheOptions {
+                download_range_bytes: SIGNATURE_CACHE_DOWNLOAD_RANGE_BYTES,
+                max_cached_object_bytes: SIGNATURE_CACHE_MAX_OBJECT_BYTES,
+                max_configured_cache_bytes: SIGNATURE_CACHE_MAX_TOTAL_BYTES,
+            },
+            Self::Streaming | Self::Sequential | Self::Selective => {
+                HttpRangeCacheOptions::default()
+            }
         }
     }
 }
@@ -510,8 +535,18 @@ impl IndexerV3Archive {
             .join(format!("epoch-{epoch}"))
             .join(&binding);
         create_http_cache_directory(&candidate_cache).map_err(Error::RangeSource)?;
-        let cache = CachedHttpRangeSource::open(http, &candidate_cache, &cached_objects)
-            .map_err(Error::RangeSource)?;
+        let cache = CachedHttpRangeSource::with_parallel_options(
+            http,
+            &candidate_cache,
+            &cached_objects,
+            options.cache_profile.cache_options(),
+            if options.cache_profile == IndexerV3CacheProfile::SignatureLocal {
+                SIGNATURE_CACHE_DOWNLOAD_CONCURRENCY
+            } else {
+                1
+            },
+        )
+        .map_err(Error::RangeSource)?;
 
         let first_slot = archive_first_slot(epoch)?;
         let shared: Arc<dyn RangeSource> = Arc::new(cache.clone());
@@ -557,8 +592,8 @@ impl IndexerV3Archive {
 
     /// Exact payload bytes in the selected persistent cache profile.
     ///
-    /// The cache validates the runtime object lengths against its 8 GiB
-    /// per-object and 16 GiB aggregate disk limits before a body download.
+    /// The cache validates runtime object lengths against the selected
+    /// profile's disk limits before a body download.
     pub const fn cached_source_size_bytes(&self) -> u64 {
         self.cached_source_size_bytes
     }
@@ -1585,6 +1620,7 @@ mod tests {
                 50,
                 "\"v\"",
             ),
+            present("https://a/signatures.bin", 400, "\"s\""),
         ];
         let streaming = IndexerV3OpenOptions::default()
             .cache_profile
@@ -1607,6 +1643,17 @@ mod tests {
             .unwrap(),
             220
         );
+        assert_eq!(
+            selected_object_size(
+                &objects,
+                &IndexerV3CacheProfile::SignatureLocal.cached_objects(ledger[0], ledger[1]),
+            )
+            .unwrap(),
+            500
+        );
+        let options = IndexerV3CacheProfile::SignatureLocal.cache_options();
+        assert_eq!(options.download_range_bytes, 64 << 20);
+        assert!(options.max_cached_object_bytes > 32_380_385_536);
     }
 
     #[test]

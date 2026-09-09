@@ -12,6 +12,7 @@ use std::{
         Arc,
         atomic::{AtomicU64, Ordering},
     },
+    thread,
     time::{SystemTime, UNIX_EPOCH},
 };
 
@@ -20,7 +21,9 @@ use rustix::fs::{AtFlags, Mode, OFlags};
 use blockzilla_source::{RangeSource, SourceError, SourceResult, validate_object_name};
 use blockzilla_source_http::{HttpObjectIdentity, HttpRangeSource, HttpRangeSourceStats};
 
-pub const MAX_HTTP_CACHE_DOWNLOAD_RANGE_BYTES: usize = 32 << 20;
+pub const DEFAULT_HTTP_CACHE_DOWNLOAD_RANGE_BYTES: usize = 32 << 20;
+pub const MAX_HTTP_CACHE_DOWNLOAD_RANGE_BYTES: usize = 64 << 20;
+pub const MAX_HTTP_CACHE_DOWNLOAD_CONCURRENCY: usize = 64;
 pub const DEFAULT_HTTP_CACHE_MAX_OBJECT_BYTES: u64 = 8 << 30;
 pub const DEFAULT_HTTP_CACHE_MAX_TOTAL_BYTES: u64 = 16 << 30;
 const MAX_CACHED_OBJECTS: usize = 8;
@@ -100,11 +103,17 @@ pub struct HttpRangeCacheOptions {
 impl Default for HttpRangeCacheOptions {
     fn default() -> Self {
         Self {
-            download_range_bytes: MAX_HTTP_CACHE_DOWNLOAD_RANGE_BYTES,
+            download_range_bytes: DEFAULT_HTTP_CACHE_DOWNLOAD_RANGE_BYTES,
             max_cached_object_bytes: DEFAULT_HTTP_CACHE_MAX_OBJECT_BYTES,
             max_configured_cache_bytes: DEFAULT_HTTP_CACHE_MAX_TOTAL_BYTES,
         }
     }
+}
+
+#[derive(Clone, Copy)]
+struct ColdDownloadOptions {
+    cache: HttpRangeCacheOptions,
+    concurrency: usize,
 }
 
 /// The complete cache work known after identity HEAD requests and before any
@@ -198,6 +207,24 @@ impl CachedHttpRangeSource {
         Self::with_options_and_plan_reporter(http, cache_root, objects, options, |_| {})
     }
 
+    /// Open the cache and use concurrent range requests for each cold object.
+    pub fn with_parallel_options(
+        http: HttpRangeSource,
+        cache_root: impl AsRef<Path>,
+        objects: &[&str],
+        options: HttpRangeCacheOptions,
+        download_concurrency: usize,
+    ) -> SourceResult<Self> {
+        Self::with_options_and_plan_reporter_inner(
+            http,
+            cache_root,
+            objects,
+            options,
+            download_concurrency,
+            |_| {},
+        )
+    }
+
     /// Open the cache and report all planned cold bytes before the first body
     /// GET. Every configured object has completed its fresh identity HEAD when
     /// `report_plan` runs.
@@ -208,7 +235,25 @@ impl CachedHttpRangeSource {
         options: HttpRangeCacheOptions,
         report_plan: impl FnOnce(HttpRangeCachePlan),
     ) -> SourceResult<Self> {
-        validate_options(objects, options)?;
+        Self::with_options_and_plan_reporter_inner(
+            http,
+            cache_root,
+            objects,
+            options,
+            1,
+            report_plan,
+        )
+    }
+
+    fn with_options_and_plan_reporter_inner(
+        http: HttpRangeSource,
+        cache_root: impl AsRef<Path>,
+        objects: &[&str],
+        options: HttpRangeCacheOptions,
+        download_concurrency: usize,
+        report_plan: impl FnOnce(HttpRangeCachePlan),
+    ) -> SourceResult<Self> {
+        validate_options(objects, options, download_concurrency)?;
         let directory = CacheDirectory::open_existing(cache_root.as_ref())?;
         let http_before = http.stats();
         let counters = Arc::new(CacheCounters::default());
@@ -296,7 +341,10 @@ impl CachedHttpRangeSource {
                     &planned.object,
                     &planned.identity,
                     &planned.header,
-                    options,
+                    ColdDownloadOptions {
+                        cache: options,
+                        concurrency: download_concurrency,
+                    },
                     counters.as_ref(),
                 )?,
             };
@@ -494,7 +542,11 @@ impl RangeSource for CachedHttpRangeSource {
     }
 }
 
-fn validate_options(objects: &[&str], options: HttpRangeCacheOptions) -> SourceResult<()> {
+fn validate_options(
+    objects: &[&str],
+    options: HttpRangeCacheOptions,
+    download_concurrency: usize,
+) -> SourceResult<()> {
     if objects.is_empty() || objects.len() > MAX_CACHED_OBJECTS {
         return Err(protocol(format!(
             "HTTP range cache requires 1..={MAX_CACHED_OBJECTS} objects"
@@ -505,6 +557,11 @@ fn validate_options(objects: &[&str], options: HttpRangeCacheOptions) -> SourceR
     {
         return Err(protocol(format!(
             "cache download range must be 1..={MAX_HTTP_CACHE_DOWNLOAD_RANGE_BYTES} bytes"
+        )));
+    }
+    if download_concurrency == 0 || download_concurrency > MAX_HTTP_CACHE_DOWNLOAD_CONCURRENCY {
+        return Err(protocol(format!(
+            "cache download concurrency must be 1..={MAX_HTTP_CACHE_DOWNLOAD_CONCURRENCY}"
         )));
     }
     if options.max_cached_object_bytes == 0 {
@@ -549,7 +606,7 @@ fn download_entry(
     object: &str,
     identity: &HttpObjectIdentity,
     header: &[u8],
-    options: HttpRangeCacheOptions,
+    options: ColdDownloadOptions,
     counters: &CacheCounters,
 ) -> SourceResult<CacheEntry> {
     let final_name = final_name(http.epoch(), object);
@@ -564,39 +621,27 @@ fn download_entry(
     temporary
         .write_all(header)
         .map_err(|source| cache_io(object, source))?;
-    let mut offset = 0_u64;
-    while offset < identity.length {
-        let remaining = identity.length - offset;
-        let length =
-            usize::try_from(remaining.min(options.download_range_bytes as u64)).map_err(|_| {
-                protocol(format!(
-                    "cache range length does not fit usize for {object}"
-                ))
-            })?;
-        let bytes = http.read_range(object, offset, length)?;
-        if bytes.len() != length {
-            return Err(SourceError::ShortRead {
-                object: object.to_owned(),
-                expected: length,
-                actual: bytes.len(),
-            });
-        }
-        temporary
-            .write_all(&bytes)
-            .map_err(|source| cache_io(object, source))?;
-        counters
-            .cold_network_body_bytes
-            .fetch_add(bytes.len() as u64, Ordering::Relaxed);
-        offset = offset
-            .checked_add(bytes.len() as u64)
-            .ok_or_else(|| protocol(format!("cache download offset overflow for {object}")))?;
-    }
-    temporary
-        .sync_all()
-        .map_err(|source| cache_io(object, source))?;
     let expected_file_length = (header.len() as u64)
         .checked_add(identity.length)
         .ok_or_else(|| protocol(format!("cache file length overflow for {object}")))?;
+    temporary
+        .set_len(expected_file_length)
+        .map_err(|source| cache_io(object, source))?;
+    download_object_ranges(
+        http,
+        object,
+        identity.length,
+        header.len() as u64,
+        &temporary,
+        options.cache,
+        options.concurrency,
+    )?;
+    counters
+        .cold_network_body_bytes
+        .fetch_add(identity.length, Ordering::Relaxed);
+    temporary
+        .sync_all()
+        .map_err(|source| cache_io(object, source))?;
     if temporary
         .metadata()
         .map_err(|source| cache_io(object, source))?
@@ -624,6 +669,80 @@ fn download_entry(
     let entry = validate_cache_file(http, object, identity, file)?;
     counters.downloads.fetch_add(1, Ordering::Relaxed);
     Ok(entry)
+}
+
+fn download_object_ranges(
+    http: &HttpRangeSource,
+    object: &str,
+    object_length: u64,
+    payload_offset: u64,
+    destination: &File,
+    options: HttpRangeCacheOptions,
+    download_concurrency: usize,
+) -> SourceResult<()> {
+    let range_bytes = options.download_range_bytes as u64;
+    let next_offset = AtomicU64::new(0);
+    thread::scope(|scope| {
+        let mut workers = Vec::with_capacity(download_concurrency);
+        for _ in 0..download_concurrency {
+            workers.push(scope.spawn(|| -> SourceResult<()> {
+                let mut bytes = Vec::with_capacity(options.download_range_bytes);
+                loop {
+                    let offset = next_offset.fetch_add(range_bytes, Ordering::Relaxed);
+                    if offset >= object_length {
+                        return Ok(());
+                    }
+                    let length = usize::try_from((object_length - offset).min(range_bytes))
+                        .map_err(|_| {
+                            protocol(format!(
+                                "cache range length does not fit usize for {object}"
+                            ))
+                        })?;
+                    http.read_range_into(object, offset, length, &mut bytes)?;
+                    if bytes.len() != length {
+                        return Err(SourceError::ShortRead {
+                            object: object.to_owned(),
+                            expected: length,
+                            actual: bytes.len(),
+                        });
+                    }
+                    let file_offset = payload_offset.checked_add(offset).ok_or_else(|| {
+                        protocol(format!("cache file offset overflow for {object}"))
+                    })?;
+                    write_all_at(destination, &bytes, file_offset, object)?;
+                }
+            }));
+        }
+        let mut result = Ok(());
+        for worker in workers {
+            let worker_result = worker
+                .join()
+                .map_err(|_| protocol(format!("cache download worker panicked for {object}")))?;
+            if result.is_ok() {
+                result = worker_result;
+            }
+        }
+        result
+    })
+}
+
+fn write_all_at(file: &File, mut bytes: &[u8], mut offset: u64, object: &str) -> SourceResult<()> {
+    while !bytes.is_empty() {
+        let written = file
+            .write_at(bytes, offset)
+            .map_err(|source| cache_io(object, source))?;
+        if written == 0 {
+            return Err(cache_io(
+                object,
+                io::Error::new(io::ErrorKind::WriteZero, "write cache range"),
+            ));
+        }
+        bytes = &bytes[written..];
+        offset = offset
+            .checked_add(written as u64)
+            .ok_or_else(|| protocol(format!("cache write offset overflow for {object}")))?;
+    }
+    Ok(())
 }
 
 #[derive(Debug)]
@@ -1453,11 +1572,12 @@ mod tests {
             max_configured_cache_bytes: 2048,
         };
         let mut cold_plan = None;
-        let cold = CachedHttpRangeSource::with_options_and_plan_reporter(
+        let cold = CachedHttpRangeSource::with_options_and_plan_reporter_inner(
             server.source(),
             directory.path(),
             &["sidecar.bin"],
             options,
+            3,
             |plan| {
                 assert_eq!(
                     server
@@ -1582,7 +1702,7 @@ mod tests {
     }
 
     #[test]
-    fn cache_range_configuration_cannot_exceed_thirty_two_mib() {
+    fn cache_range_configuration_cannot_exceed_sixty_four_mib() {
         let server = TestServer::start([("sidecar.bin", vec![1], "\"sidecar-v1\"")]);
         let directory = cache_tempdir();
         let error = CachedHttpRangeSource::with_options(

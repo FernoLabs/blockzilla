@@ -52,9 +52,9 @@ parity before applications migrate to a canonical shared interface.
 
 All operations below describe the frozen standalone prototype.
 
-## Sequential scan
+## Ordered scan
 
-`IndexerV3Archive::open` selects the sequential profile:
+`IndexerV3Archive::open` selects the streaming profile:
 
 ```rust,no_run
 use std::num::NonZeroU32;
@@ -89,6 +89,31 @@ Opening a short scan no longer downloads the complete transaction directory.
 Call `open_with_options` with `cache_profile: IndexerV3CacheProfile::Sequential`
 to retain the previous whole-directory cache policy for repeated full scans.
 `Selective` retains the reverse-index sidecar policy for targeted queries.
+`SignatureLocal` caches the complete `signatures.bin` object for a sealed
+epoch. Its first open uses 16 concurrent 64 MiB range requests. Later opens
+read signature windows from the local cache. This profile permits one cache
+object up to 48 GiB and a total cache set up to 56 GiB. Use it for repeated
+scans or full-epoch work that returns transaction signatures.
+
+```rust,no_run
+use blockzilla_archive_v3_reader::{
+    IndexerV3Archive, IndexerV3CacheProfile, IndexerV3OpenOptions,
+};
+
+# fn main() -> Result<(), Box<dyn std::error::Error>> {
+let archive = IndexerV3Archive::open_with_options(
+    "https://archive.example",
+    900,
+    "/data/blockzilla-v3-cache",
+    IndexerV3OpenOptions {
+        cache_profile: IndexerV3CacheProfile::SignatureLocal,
+        ..IndexerV3OpenOptions::default()
+    },
+)?;
+# drop(archive);
+# Ok(())
+# }
+```
 
 ## Parallel scan
 
@@ -391,8 +416,8 @@ required V3 ledger objects and retained sidecars by exact URL, length, and
 strong ETag. It also records absence for optional sidecars. This trust level is
 `object-set-bound`. It does not claim a published complete-epoch manifest.
 
-Both cache profiles use this full object-set binding. The selective profile's
-smaller cache does not mean that fewer objects are bound.
+All cache profiles use this full object-set binding. A smaller cache does not
+mean that fewer objects are bound.
 
 The local split path has a different trust boundary. It anchors and checks the
 two local roots and reports `operator-trusted`. It does not create a network
