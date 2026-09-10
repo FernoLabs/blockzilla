@@ -247,6 +247,7 @@ class RunnerTests(unittest.TestCase):
                 attempt = Path(result["attempt"])
                 self.assertTrue((attempt / "output.bin").exists())
                 self.assertIn(str(attempt / "cache"), json.loads((attempt / "command.json").read_text()))
+                self.assertEqual((attempt / "cache").stat().st_mode & 0o777, 0o700)
 
     def test_order_and_scope(self):
         jobs = matrix.plan(SimpleNamespace(mode="both", workloads=matrix.WORKLOADS))

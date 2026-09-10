@@ -346,6 +346,8 @@ def run_one(args, job, sizes, results):
                 if job["format"] == "indexer-v3" and args.v3_cache_signatures
                 else attempt / "cache"
             )
+            cache_root.mkdir(parents=True, exist_ok=True, mode=0o700)
+            cache_root.chmod(0o700)
             command += ["--cache-root", str(cache_root)]
             if job["format"] == "indexer-v3" and args.v3_cache_signatures:
                 command += ["--cache-signatures"]
