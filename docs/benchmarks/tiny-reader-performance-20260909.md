@@ -3,7 +3,8 @@
 We tested Compact V2, Index V3, and CAR on Solana epoch 900. The main test
 contains 24 cases: four examples, three formats, and disk or network input. Each
 case used 12 reader workers on the same NAS. Total time includes setup and
-output. All sizes use decimal units.
+output. We ran all four V3 network cases again on September 10 with the new
+signature cache. All sizes use decimal units.
 
 ![Reader completion time](artifacts/tiny-reader-report-20260909/completion-time.png)
 
@@ -37,14 +38,15 @@ data to decode and has no query index.
 
 | Example | Compact V2 | Index V3 | Raw CAR |
 | --- | ---: | ---: | ---: |
-| Count / CPI | **41m 56s · 189K** | 71m 55s · 110K | 42m 32s · 187K |
-| USDC | **40m 31s · 196K** | 59m 06s · 134K | 68m 04s · 117K |
-| Pump.fun | **35m 51s · 221K** | 110m 05s · 72K | 65m 28s · 121K |
-| User-program index | 32m 42s · 243K | **15s · 31.78M** | 61m 10s · 130K |
+| Count / CPI | 41m 56s · 189K | **3m 26s · 2.31M** | 42m 32s · 187K |
+| USDC | 40m 31s · 196K | **2m 44s · 2.90M** | 68m 04s · 117K |
+| Pump.fun | **35m 51s · 221K** | 36m 58s · 215K | 65m 28s · 121K |
+| User-program index | 32m 42s · 243K | **8.55s · 55.66M** | 61m 10s · 130K |
 
-V2 is the fastest network reader for the three scan queries. V3 is much faster
-when its index can answer the query. These full-epoch network runs were made
-before the new V3 signature cache.
+V3 is fastest for three network queries. V2 remains 3.1% faster for Pump.fun.
+Compared with the first full V3 run, the new reader is 20.92 times faster for
+Count / CPI, 21.57 times faster for USDC, 2.98 times faster for Pump.fun, and
+1.75 times faster for the user-program query.
 
 ## CAR reader and Jetstreamer
 
@@ -63,15 +65,15 @@ less peak memory.
 
 ## Latest V3 network change
 
-V3 can now download the 32.38 GB signature file once and reuse it from disk.
-The first download took 73.93 seconds at 438 MB/s. On a 32,768-block
-transaction scan, reuse reduced time from 31.43 to 11.40 seconds and increased
-speed from 1.13M to 3.13M TPS. Pump.fun improved by 12.4%. This cache helps
-repeated scans of a sealed epoch.
+V3 downloads the 32.38 GB signature file once and reuses it from disk. The
+first download took 73.93 seconds at 438 MB/s. The four full tests used this
+warm cache. The source inventory did not change during the tests. All result
+counts, output sizes, and output hashes match the earlier accepted V3 run.
 
 A NAS compaction job used some CPU during part of the benchmark. It did not use
 the SSD. Small CPU differences can therefore be test noise.
 
 [Full 24-case data](artifacts/reader-speed-summary-20260909/data.json) ·
 [CAR and Jetstreamer verification](artifacts/car-jetstreamer-common-output-20260909.json) ·
+[Full optimized V3 verification](artifacts/v3-network-signature-cache-full-20260910.json) ·
 [V3 signature-cache test](v3-signature-cache-20260909.md)

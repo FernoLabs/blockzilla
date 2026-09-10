@@ -19,6 +19,7 @@ OUTPUT = ARTIFACTS / "tiny-reader-report-20260909"
 OUTPUT.mkdir(exist_ok=True)
 EXAMPLE_SOURCE = ARTIFACTS / "reader-speed-summary-20260909" / "data.json"
 EQUAL_SOURCE = ARTIFACTS / "car-jetstreamer-common-output-20260909.json"
+V3_SOURCE = ARTIFACTS / "v3-network-signature-cache-full-20260910.json"
 
 
 def load(path):
@@ -37,8 +38,10 @@ def save_chart(fig, path):
 
 examples, examples_sha = load(EXAMPLE_SOURCE)
 equal, equal_sha = load(EQUAL_SOURCE)
+v3, v3_sha = load(V3_SOURCE)
 assert len(examples["cases"]) == 24 and not examples["missing_cases"]
 assert equal["state"] == "PASS" and equal["independently_rehashed"]
+assert v3["state"] == "PASS" and v3["prior_outputs_match"]
 
 workloads = ["slot-hours", "usdc", "pumpfun", "user-program-index"]
 workload_names = ["Count / CPI", "USDC", "Pump.fun", "Program index"]
@@ -49,16 +52,22 @@ lookup = {
     (row["mode"], row["format"], row["workload"]): row
     for row in examples["cases"]
 }
+v3_lookup = {row["workload"]: row for row in v3["cases"]}
 network = []
 for workload in workloads:
     for fmt in formats:
         row = lookup[("network", fmt, workload)]
+        total_seconds = float(row["total_s"])
+        total_tps = float(row["total_tps"])
+        if fmt == "indexer-v3":
+            total_seconds = float(v3_lookup[workload]["total_seconds"])
+            total_tps = float(v3_lookup[workload]["total_tps"])
         network.append(
             {
                 "workload": workload,
                 "format": fmt,
-                "total_seconds": float(row["total_s"]),
-                "total_tps": float(row["total_tps"]),
+                "total_seconds": total_seconds,
+                "total_tps": total_tps,
             }
         )
 
@@ -144,6 +153,7 @@ result = {
     "source_sha256": {
         str(EXAMPLE_SOURCE.relative_to(ARTIFACTS)): examples_sha,
         str(EQUAL_SOURCE.relative_to(ARTIFACTS)): equal_sha,
+        str(V3_SOURCE.relative_to(ARTIFACTS)): v3_sha,
     },
     "network_full_epoch": network,
     "equal_output": {

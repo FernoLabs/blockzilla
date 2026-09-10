@@ -2,7 +2,8 @@
   "schema": "blockzilla-tiny-reader-report-v1",
   "source_sha256": {
     "reader-speed-summary-20260909/data.json": "787cc8bb714b2fd0cf2e4b1cb58917cd9971878811a1fd0dc23cd680260fca5f",
-    "car-jetstreamer-common-output-20260909.json": "1105b3084e8b26991755eb9d480a95bc712c7b78771844e7b5312b466e65af54"
+    "car-jetstreamer-common-output-20260909.json": "1105b3084e8b26991755eb9d480a95bc712c7b78771844e7b5312b466e65af54",
+    "v3-network-signature-cache-full-20260910.json": "bc29458a8bc421f0d3433fcbeff86afe02b7db73a6b8371b1724da4943a4bdb8"
   },
   "network_full_epoch": [
     {
@@ -14,8 +15,8 @@
     {
       "workload": "slot-hours",
       "format": "indexer-v3",
-      "total_seconds": 4315.462298,
-      "total_tps": 110307.258
+      "total_seconds": 206.277016,
+      "total_tps": 2307706.506
     },
     {
       "workload": "slot-hours",
@@ -32,8 +33,8 @@
     {
       "workload": "usdc",
       "format": "indexer-v3",
-      "total_seconds": 3545.643967,
-      "total_tps": 134256.799
+      "total_seconds": 164.374529,
+      "total_tps": 2895988.903
     },
     {
       "workload": "usdc",
@@ -50,8 +51,8 @@
     {
       "workload": "pumpfun",
       "format": "indexer-v3",
-      "total_seconds": 6605.37075,
-      "total_tps": 72066.63
+      "total_seconds": 2217.998308,
+      "total_tps": 214620.006
     },
     {
       "workload": "pumpfun",
@@ -68,8 +69,8 @@
     {
       "workload": "user-program-index",
       "format": "indexer-v3",
-      "total_seconds": 14.980894,
-      "total_tps": 31775594.511
+      "total_seconds": 8.552729,
+      "total_tps": 55657888.506
     },
     {
       "workload": "user-program-index",
