@@ -82,6 +82,13 @@ rejected by the mimalloc build.
 
 ## Acceptance and comparison limits
 
+For an equal-output application test, use `--export NEW_BIN` with the default
+owned metadata mode and the independent Jetstreamer export adapter. Both paths
+write the same ordered transaction fields with the same output implementation.
+See [the common export contract](../car-export/README.md). Its `total_seconds`
+includes export finalization and file sync; `scan_seconds` does not include the
+final ordered copy. Old count-only receipts do not establish this new parity.
+
 Accept performance only if the receipt is valid and all expected rows match.
 Compare vote and failed-status totals with the sum of the Jetstreamer worker
 counters. Compare per-block decode digests across our one-worker, twelve-worker,

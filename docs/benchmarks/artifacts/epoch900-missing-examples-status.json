@@ -1,8 +1,8 @@
 {
-  "state": "RUNNING",
-  "current": "user-program-index",
-  "completed": 0,
+  "state": "PASS",
+  "current": "usdc",
+  "completed": 3,
   "total": 3,
-  "checked_at": 1788955890.341867,
-  "progress": "[car/network/epoch-900/user-program-index] progress=scan blocks=201175 transactions=221332331 elapsed_s=1584.8 blocks_s=126.9 tps=139655.5 eta_s=1817.3"
+  "checked_at": 1788966004.7528186,
+  "progress": "[car/network/epoch-900/usdc] progress=scan blocks=431858 transactions=476026811 elapsed_s=4082.2 blocks_s=105.8 tps=116610.8 eta_s=0.0"
 }

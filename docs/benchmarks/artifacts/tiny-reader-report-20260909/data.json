@@ -1,0 +1,105 @@
+{
+  "schema": "blockzilla-tiny-reader-report-v1",
+  "source_sha256": {
+    "reader-speed-summary-20260909/data.json": "787cc8bb714b2fd0cf2e4b1cb58917cd9971878811a1fd0dc23cd680260fca5f",
+    "car-jetstreamer-common-output-20260909.json": "1105b3084e8b26991755eb9d480a95bc712c7b78771844e7b5312b466e65af54"
+  },
+  "network_full_epoch": [
+    {
+      "workload": "slot-hours",
+      "format": "compact-v2",
+      "total_seconds": 2515.875198,
+      "total_tps": 189209.231
+    },
+    {
+      "workload": "slot-hours",
+      "format": "indexer-v3",
+      "total_seconds": 4315.462298,
+      "total_tps": 110307.258
+    },
+    {
+      "workload": "slot-hours",
+      "format": "car",
+      "total_seconds": 2552.404642,
+      "total_tps": 186501.311
+    },
+    {
+      "workload": "usdc",
+      "format": "compact-v2",
+      "total_seconds": 2431.192484,
+      "total_tps": 195799.721
+    },
+    {
+      "workload": "usdc",
+      "format": "indexer-v3",
+      "total_seconds": 3545.643967,
+      "total_tps": 134256.799
+    },
+    {
+      "workload": "usdc",
+      "format": "car",
+      "total_seconds": 4084.153584,
+      "total_tps": 116554.581
+    },
+    {
+      "workload": "pumpfun",
+      "format": "compact-v2",
+      "total_seconds": 2151.124755,
+      "total_tps": 221292.052
+    },
+    {
+      "workload": "pumpfun",
+      "format": "indexer-v3",
+      "total_seconds": 6605.37075,
+      "total_tps": 72066.63
+    },
+    {
+      "workload": "pumpfun",
+      "format": "car",
+      "total_seconds": 3927.783388,
+      "total_tps": 121194.772
+    },
+    {
+      "workload": "user-program-index",
+      "format": "compact-v2",
+      "total_seconds": 1962.236784,
+      "total_tps": 242593.97
+    },
+    {
+      "workload": "user-program-index",
+      "format": "indexer-v3",
+      "total_seconds": 14.980894,
+      "total_tps": 31775594.511
+    },
+    {
+      "workload": "user-program-index",
+      "format": "car",
+      "total_seconds": 3669.656024,
+      "total_tps": 129719.736
+    }
+  ],
+  "equal_output": {
+    "blocks": 8192,
+    "transactions": 8925832,
+    "output_sha256": "bf9b07fbda244bb1e5c5d07059db8489133e544d1ade482808936eceb01fd035",
+    "output_bytes": 2300383008,
+    "readers": [
+      {
+        "reader": "car",
+        "mean_total_seconds": 79.581734871,
+        "total_tps": 112159.30407232954,
+        "output_bytes": 2300383008,
+        "peak_rss_mib_min": 436.04296875,
+        "peak_rss_mib_max": 458.20703125
+      },
+      {
+        "reader": "jetstreamer",
+        "mean_total_seconds": 144.699731434,
+        "total_tps": 61685.20087455189,
+        "output_bytes": 2300383008,
+        "peak_rss_mib_min": 242.81640625,
+        "peak_rss_mib_max": 283.69140625
+      }
+    ]
+  }
+}

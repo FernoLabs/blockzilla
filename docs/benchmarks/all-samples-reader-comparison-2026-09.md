@@ -1,6 +1,6 @@
 # Reader speeds: Jetstreamer, CAR, V2 and V3
 
-**Epoch 900: 21/24 example measurements available.** The missing CAR network tests are running.
+**Epoch 900: 24/24 example measurements available.** All file and network examples are covered.
 
 ## Network examples: compare time to finish
 

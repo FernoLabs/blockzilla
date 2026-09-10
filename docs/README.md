@@ -142,7 +142,8 @@ output, and production deployment configuration do not belong here.
 
 - [User-program-index naming and compatibility](design/user-program-index-naming.md)
 
-- [Accepted all-sample reader report](benchmarks/all-samples-reader-comparison-2026-09.md)
+- [Reader performance summary: disk, network, and Jetstreamer](benchmarks/tiny-reader-performance-20260909.md)
+- [Accepted all-sample reader details](benchmarks/all-samples-reader-comparison-2026-09.md)
 - [CAR to V3: short format story](benchmarks/from-car-to-v3-accepted-results-20260908.md)
 - [Epoch900 network reader pilot](benchmarks/network-reader-epoch900-pilot.md)
 
