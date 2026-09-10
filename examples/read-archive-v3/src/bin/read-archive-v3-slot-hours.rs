@@ -3,24 +3,17 @@ use blockzilla_example_workloads::ProgressSink;
 use std::{error::Error, io, time::Instant};
 
 use blockzilla_archive_v3_reader::{
-    ArchiveInstructionSource, BlockSink, BlockView, IndexerV3Archive, QueryError, QueryResult,
-    ScanRequest,
+    ArchiveInstructionSource, BlockSink, BlockView, QueryError, QueryResult, ScanRequest,
 };
-use blockzilla_read_archive_v3::{RunTiming, WorkloadSource, count_arguments, finish_count};
+use blockzilla_read_archive_v3::{RunTiming, count_arguments, finish_count, open_workload_archive};
 
 const SLOTS_PER_APPROXIMATE_HOUR: u64 = 9_000;
 
 fn main() -> Result<(), Box<dyn Error>> {
     let args = count_arguments("read-archive-v3-slot-hours")?;
     let started = Instant::now();
-    let mut archive = match &args.source {
-        WorkloadSource::Network { origin, cache_root } => {
-            IndexerV3Archive::open(origin, args.epoch, cache_root)?
-        }
-        WorkloadSource::LocalArchive { archive_root } => {
-            IndexerV3Archive::open_local(archive_root, args.epoch)?
-        }
-    };
+    let mut archive =
+        open_workload_archive(&args.source, args.epoch, args.cache_signatures, false)?;
     let timing = RunTiming::after_open(started, &archive);
 
     let identity = archive.identity();

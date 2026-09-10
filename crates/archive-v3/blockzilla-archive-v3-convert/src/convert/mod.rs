@@ -4370,6 +4370,7 @@ pub fn run(options: ConvertOptions) -> Result<()> {
         .saturating_div(16)
         .clamp(1, 512 * 1024 * 1024);
     let reader_config = OrderedParallelBlockConfig {
+        network_input: None,
         compressed_batch_target_bytes: 16 * 1024 * 1024,
         uncompressed_batch_budget_bytes,
         // Match one decode task to each source worker. A larger batch creates

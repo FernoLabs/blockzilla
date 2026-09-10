@@ -11,10 +11,10 @@ use std::{
 };
 
 use blockzilla_archive_v3_reader::{
-    IndexerV3Archive, IndexerV3ParallelScanReceipt, IndexerV3ParallelScanStats,
-    IndexerV3RegistryReadMode, IndexerV3RegistryReadReceipt, IndexerV3TargetedScanReceipt,
-    IndexerV3TransportReceipt, MAX_INDEXER_V3_PARALLEL_WORKERS, ScanIoReceipt, ScanRequest,
-    default_worker_count,
+    IndexerV3Archive, IndexerV3CacheProfile, IndexerV3OpenOptions, IndexerV3ParallelScanReceipt,
+    IndexerV3ParallelScanStats, IndexerV3RegistryReadMode, IndexerV3RegistryReadReceipt,
+    IndexerV3TargetedScanReceipt, IndexerV3TransportReceipt, MAX_INDEXER_V3_PARALLEL_WORKERS,
+    ScanIoReceipt, ScanRequest, default_worker_count,
 };
 pub use blockzilla_example_workloads::ExampleReport;
 use blockzilla_example_workloads::{CoverageReport, FinishedOutput, OutputReport};
@@ -61,6 +61,7 @@ pub struct WorkloadArguments {
     pub target: Option<String>,
     pub output: PathBuf,
     pub threads: NonZeroUsize,
+    pub cache_signatures: bool,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -68,6 +69,7 @@ pub struct CountArguments {
     pub source: WorkloadSource,
     pub epoch: u64,
     pub threads: NonZeroUsize,
+    pub cache_signatures: bool,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -77,12 +79,43 @@ struct BeginnerArguments {
     target: Option<String>,
     output: Option<PathBuf>,
     threads: NonZeroUsize,
+    cache_signatures: bool,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum WorkloadSource {
     Network { origin: String, cache_root: PathBuf },
     LocalArchive { archive_root: PathBuf },
+}
+
+pub fn open_workload_archive(
+    source: &WorkloadSource,
+    epoch: u64,
+    cache_signatures: bool,
+    selective: bool,
+) -> blockzilla_archive_v3_reader::Result<IndexerV3Archive> {
+    match source {
+        WorkloadSource::Network { origin, cache_root } if cache_signatures => {
+            IndexerV3Archive::open_with_options(
+                origin,
+                epoch,
+                cache_root,
+                IndexerV3OpenOptions {
+                    cache_profile: IndexerV3CacheProfile::SignatureLocal,
+                    ..IndexerV3OpenOptions::default()
+                },
+            )
+        }
+        WorkloadSource::Network { origin, cache_root } if selective => {
+            IndexerV3Archive::open_selective(origin, epoch, cache_root)
+        }
+        WorkloadSource::Network { origin, cache_root } => {
+            IndexerV3Archive::open(origin, epoch, cache_root)
+        }
+        WorkloadSource::LocalArchive { archive_root } => {
+            IndexerV3Archive::open_local(archive_root, epoch)
+        }
+    }
 }
 
 /// Parse the beginner flags. With no arguments this scans all of public epoch
@@ -135,6 +168,7 @@ pub fn workload_arguments_from(
         target: parsed.target,
         output: parsed.output.ok_or("the workload output path is missing")?,
         threads: parsed.threads,
+        cache_signatures: parsed.cache_signatures,
     })
 }
 
@@ -152,6 +186,7 @@ pub fn count_arguments_from(
         source: parsed.source,
         epoch: parsed.epoch,
         threads: parsed.threads,
+        cache_signatures: parsed.cache_signatures,
     })
 }
 
@@ -165,7 +200,7 @@ fn flag_arguments(
     let target_usage = target_name.map_or(String::new(), |name| format!(" [--{name} KEY]"));
     let output_usage = default_output.map_or("", |_| " [--output FILE]");
     let usage = format!(
-        "usage: {binary} [--epoch N] [--archive-root DIR | --origin URL] [--cache-root DIR]{output_usage} [--threads N]{target_usage}\n\nSample epochs: 0, 100, 200, ..., 1000. The complete epoch is always scanned."
+        "usage: {binary} [--epoch N] [--archive-root DIR | --origin URL] [--cache-root DIR] [--cache-signatures]{output_usage} [--threads N]{target_usage}\n\nSample epochs: 0, 100, 200, ..., 1000. The complete epoch is always scanned."
     );
     let mut epoch = DEFAULT_SAMPLE_EPOCH;
     let mut origin = DEFAULT_PUBLIC_ORIGIN.to_owned();
@@ -176,6 +211,7 @@ fn flag_arguments(
     let mut target = default_target.map(str::to_owned);
     let mut output = default_output.map(PathBuf::from);
     let mut threads = default_worker_count();
+    let mut cache_signatures = false;
     let target_flag = target_name.map(|name| format!("--{name}"));
     let mut values = values.into_iter();
 
@@ -193,6 +229,7 @@ fn flag_arguments(
                 cache_root = PathBuf::from(next(&mut values)?);
                 cache_was_set = true;
             }
+            "--cache-signatures" => cache_signatures = true,
             "--output" if default_output.is_some() => {
                 output = Some(PathBuf::from(next(&mut values)?));
             }
@@ -220,9 +257,9 @@ fn flag_arguments(
     }
     let source = match archive_root {
         Some(archive_root) => {
-            if origin_was_set || cache_was_set {
+            if origin_was_set || cache_was_set || cache_signatures {
                 return Err(
-                    "--archive-root cannot be combined with --origin or --cache-root".into(),
+                    "--archive-root cannot be combined with --origin, --cache-root, or --cache-signatures".into(),
                 );
             }
             WorkloadSource::LocalArchive { archive_root }
@@ -235,6 +272,7 @@ fn flag_arguments(
         target,
         output,
         threads,
+        cache_signatures,
     })
 }
 
@@ -791,10 +829,39 @@ mod tests {
 
         assert_eq!(parsed.epoch, 900);
         assert_eq!(parsed.output, PathBuf::from("indexer-v3-usdc.bin"));
+        assert!(!parsed.cache_signatures);
         assert!(matches!(
             parsed.source,
             WorkloadSource::Network { ref origin, .. } if origin == DEFAULT_PUBLIC_ORIGIN
         ));
+    }
+
+    #[test]
+    fn beginner_accepts_signature_cache_for_network_only() {
+        let parsed = workload_arguments_from(
+            "read-archive-v3-usdc",
+            None,
+            None,
+            "indexer-v3-usdc.bin",
+            [OsString::from("--cache-signatures")],
+        )
+        .unwrap();
+        assert!(parsed.cache_signatures);
+        assert!(matches!(parsed.source, WorkloadSource::Network { .. }));
+
+        let error = workload_arguments_from(
+            "read-archive-v3-usdc",
+            None,
+            None,
+            "indexer-v3-usdc.bin",
+            [
+                OsString::from("--archive-root"),
+                OsString::from("archive"),
+                OsString::from("--cache-signatures"),
+            ],
+        )
+        .unwrap_err();
+        assert!(error.to_string().contains("--cache-signatures"));
     }
 
     #[test]

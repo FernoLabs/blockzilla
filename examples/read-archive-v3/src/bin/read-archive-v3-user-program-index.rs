@@ -2,10 +2,10 @@ use blockzilla_example_workloads::ReadProgress;
 
 use std::{error::Error, time::Instant};
 
-use blockzilla_archive_v3_reader::{IndexerV3Archive, QueryError, ScanRequest};
+use blockzilla_archive_v3_reader::{QueryError, ScanRequest};
 use blockzilla_example_workloads::{UserProgramIndexSink, user_program_index_scan_request};
 use blockzilla_read_archive_v3::{
-    DEFAULT_USER_PROGRAM_INDEX_WALLET, RunTiming, WorkloadSource, finish_targeted_workload,
+    DEFAULT_USER_PROGRAM_INDEX_WALLET, RunTiming, finish_targeted_workload, open_workload_archive,
     output_file, parse_pubkey, workload_target_arguments,
 };
 
@@ -22,14 +22,12 @@ fn main() -> Result<(), Box<dyn Error>> {
         .ok_or("the User program index wallet is missing")?;
     let wallet = parse_pubkey("wallet", wallet_text)?;
     let started = Instant::now();
-    let mut archive = match &arguments.source {
-        WorkloadSource::Network { origin, cache_root } => {
-            IndexerV3Archive::open_selective(origin, arguments.epoch, cache_root)?
-        }
-        WorkloadSource::LocalArchive { archive_root } => {
-            IndexerV3Archive::open_local(archive_root, arguments.epoch)?
-        }
-    };
+    let mut archive = open_workload_archive(
+        &arguments.source,
+        arguments.epoch,
+        arguments.cache_signatures,
+        true,
+    )?;
     let timing = RunTiming::after_open(started, &archive);
     let request = user_program_index_scan_request(ScanRequest::all()).with_required_signer(wallet);
     let mut sink = UserProgramIndexSink::new(output_file(&arguments.output)?, wallet)?;

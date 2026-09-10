@@ -341,7 +341,14 @@ def run_one(args, job, sizes, results):
     if job["format"] != "car":
         command += ["--threads", str(args.threads)]
         if job["mode"] == "network":
-            command += ["--cache-root", str(attempt / "cache")]
+            cache_root = (
+                args.v3_signature_cache_root
+                if job["format"] == "indexer-v3" and args.v3_cache_signatures
+                else attempt / "cache"
+            )
+            command += ["--cache-root", str(cache_root)]
+            if job["format"] == "indexer-v3" and args.v3_cache_signatures:
+                command += ["--cache-signatures"]
     if job["workload"] != "slot-hours":
         command += ["--output", str(attempt / "output.bin")]
     if canonical_workload(job["workload"]) == "user-program-index":
@@ -440,6 +447,8 @@ def main():
     parser.add_argument("--workloads", default=",".join(WORKLOADS), help="comma-separated; default: all four")
     parser.add_argument("--epochs", default=",".join(map(str, EPOCHS)), help="comma-separated sample epochs; each is read in full")
     parser.add_argument("--car-count-only", action="store_true", help="run all selected V2/V3 examples but only count for CAR")
+    parser.add_argument("--v3-cache-signatures", action="store_true", help="cache sealed V3 signatures for network reads")
+    parser.add_argument("--v3-signature-cache-root", type=Path, help="shared V3 signature cache; default: RESULTS/v3-signature-cache")
     parser.add_argument("--interval", type=float, default=10, help="resource log interval in seconds")
     parser.add_argument("--check-only", action="store_true", help="check files, binaries and HTTP HEADs; do not start readers")
     parser.add_argument("--stop-on-error", action="store_true", help="stop after a reader error; retain all results")
@@ -449,6 +458,8 @@ def main():
         parser.error("invalid format selection")
     args.formats = [fmt for fmt in FORMATS if fmt in args.formats]
     args.workloads = [canonical_workload(w) for w in args.workloads.split(",")]
+    if args.v3_signature_cache_root and not args.v3_cache_signatures:
+        parser.error("--v3-signature-cache-root requires --v3-cache-signatures")
     try:
         args.epochs = [int(epoch) for epoch in args.epochs.split(",")]
     except ValueError:
@@ -462,6 +473,12 @@ def main():
     if args.mode in ("local", "both") and not args.archive_root:
         parser.error("local reads need --archive-root")
     args.bin_dir, args.results_root = args.bin_dir.resolve(), args.results_root.resolve()
+    if args.v3_cache_signatures:
+        args.v3_signature_cache_root = (
+            args.v3_signature_cache_root.resolve()
+            if args.v3_signature_cache_root
+            else args.results_root / "v3-signature-cache"
+        )
     if args.archive_root:
         args.archive_root = args.archive_root.resolve()
     for protected in (args.archive_root, args.bin_dir):

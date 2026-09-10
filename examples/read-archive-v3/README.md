@@ -104,6 +104,7 @@ Use these simple options when needed:
 --archive-root DIR local archive tree; do not use with network options
 --origin URL       another compatible origin; the default bucket is staged
 --cache-root DIR   persistent network cache; default archive-cache/indexer-v3
+--cache-signatures download signatures once for repeated sealed-epoch scans
 --threads N        worker count; default is chosen by the SDK
 --output FILE      USDC, Pump.fun, and User program index only
 --wallet KEY       User program index only
@@ -154,11 +155,13 @@ examples use.
 
 Network scans cache the block index and stream the selected transaction
 directory and payload ranges. They do not download the whole transaction
-directory at startup. The SDK uses concurrent input workers and reusable plane
-and signature buffers within a 256 MiB input capacity budget. The planner can
-reduce the requested eight input workers to fit that budget. It releases
-worker workspace above 16 MiB between jobs. These are buffer limits, not a
-limit on total process memory. See the
+directory at startup. Add `--cache-signatures` to download `signatures.bin`
+once and read it locally during later scans of the same sealed epoch. Keep the
+same `--cache-root` to reuse that file. The SDK uses concurrent input workers
+and reusable plane and signature buffers within a 256 MiB input capacity
+budget. The planner can reduce the requested eight input workers to fit that
+budget. It releases worker workspace above 16 MiB between jobs. These are
+buffer limits, not a limit on total process memory. See the
 [network input design](../../docs/design/v3-concurrent-input.md).
 
 ## Advanced tools
