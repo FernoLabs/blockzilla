@@ -404,6 +404,13 @@
       "compressed_car_bytes": 206321123867,
       "slot_index_bytes": 5184000,
       "comparable_stored_bytes": 206326307867
+    },
+    "car_jetstreamer_equal_output": {
+      "repository_path": "docs/benchmarks/artifacts/car-jetstreamer-common-output-20260909.json",
+      "sha256": "1105b3084e8b26991755eb9d480a95bc712c7b78771844e7b5312b466e65af54",
+      "measurement_date": "2026-09-09",
+      "state": "PASS",
+      "independently_rehashed": true
     }
   },
   "stored_sizes": {
@@ -15950,7 +15957,14 @@
         "mean_total_seconds": 79.581734871,
         "total_tps": 112159.30407232954,
         "peak_rss_mib_min": 436.04296875,
-        "peak_rss_mib_max": 458.20703125
+        "peak_rss_mib_max": 458.20703125,
+        "run_total_seconds": [
+          99.622688462,
+          59.54078128
+        ],
+        "mean_cpu_seconds": 72.7748045,
+        "mean_cpu_cores": 0.9144661726458483,
+        "binary_sha256": "480a40ce494d1fe90e8e94ebc5704217435231f6509801f9dcf608dcdb18f196"
       },
       {
         "reader": "jetstreamer",
@@ -15958,9 +15972,50 @@
         "mean_total_seconds": 144.699731434,
         "total_tps": 61685.20087455189,
         "peak_rss_mib_min": 242.81640625,
-        "peak_rss_mib_max": 283.69140625
+        "peak_rss_mib_max": 283.69140625,
+        "run_total_seconds": [
+          144.476946668,
+          144.9225162
+        ],
+        "mean_cpu_seconds": 598.2935035,
+        "mean_cpu_cores": 4.134724353464967,
+        "binary_sha256": "f2db2fe1abefb3f413b4d53683ee205c82e8cd762a71abc06795d13dc56a2c6e"
       }
-    ]
+    ],
+    "source_repository_path": "docs/benchmarks/artifacts/car-jetstreamer-common-output-20260909.json",
+    "parameters": {
+      "epoch": 900,
+      "start_slot": 388800000,
+      "end_slot_exclusive": 388808198,
+      "canonical_blocks": 8192,
+      "transactions": 8925832,
+      "source_url": "https://blockzilla-archive-samples-v1.cheron-augustin.workers.dev/car/900/epoch-900.car",
+      "raw_car_bytes": 527045598158,
+      "requested_workers": 12,
+      "car_decode_workers": 12,
+      "car_http_workers": 4,
+      "car_http_chunk_bytes": 33554432,
+      "car_http_window_chunks": 8,
+      "car_http_buffer_reuse": false,
+      "jetstreamer_firehose_workers": 12,
+      "jetstreamer_tokio_runtime_threads": 12,
+      "jetstreamer_version": "0.7.0",
+      "allocator": "mimalloc 0.1.52",
+      "metadata_mode": "owned",
+      "signature_verification": false,
+      "smoke_blocks": 64,
+      "timed_runs_per_reader": 2,
+      "run_order": [
+        "car",
+        "jetstreamer",
+        "jetstreamer",
+        "car"
+      ],
+      "fresh_process_per_run": true,
+      "concurrent_readers": 1,
+      "jetstreamer_http_mode": "long HTTP/1.1 ranges from each worker offset to end of CAR",
+      "jetstreamer_reader_buffer_bytes": 8388608
+    }
   },
   "notes": [
     "The NAS ran a CPU compaction job during part of the test. SSD traffic was not shared.",

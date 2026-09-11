@@ -70,14 +70,31 @@ The disk source is 226.1 GB. The network source is 527.1 GB.
 
 ## CAR reader and Jetstreamer
 
-This separate epoch 900 network reference gives both readers the same 8,192 blocks. They produce the same 2.300 GB output file, with the same SHA-256 hash.
+This separate epoch 900 network reference gives both readers the same 8,192 blocks and 8,925,832 transactions. They read the same raw CAR object through the same gateway. They produce the same 2.300 GB output file, with the same SHA-256 hash.
 
-| Reader | Mean time | TPS | Peak memory |
-|---|---:|---:|---:|
-| CAR reader | 79.6 s | 112.2k | 436–458 MiB |
-| Jetstreamer | 144.7 s | 61.7k | 243–284 MiB |
+| Parameter | CAR reader | Jetstreamer |
+|---|---|---|
+| Version | Blockzilla CAR reader; binary `480a40ce494d` | Jetstreamer 0.7.0; binary `f2db2fe1abef` |
+| Processing workers | 12 decode workers | 12 firehose workers on a 12-thread Tokio runtime |
+| HTTP input | 4 closed-range workers; 32 MiB chunks; 8-chunk window | Long HTTP/1.1 ranges from each worker offset to the CAR end; 8 MiB reader buffer |
+| Allocator | mimalloc 0.1.52 | mimalloc 0.1.52 |
+| Timed runs | 2, fresh process for each run | 2, fresh process for each run |
+| Signature verification | Disabled | Disabled |
+
+The runner first checks 64 blocks. It then runs CAR, Jetstreamer, Jetstreamer, and CAR, with one active process at a time. Timing includes decode, canonical output ordering, file writes, and final file sync. The final byte and SHA-256 checks occur after the timer stops.
+
+| Reader | Individual times | Mean time | TPS | Mean CPU time | Mean CPU use | Peak memory |
+|---|---:|---:|---:|---:|---:|---:|
+| CAR reader | 1m 39.6s / 59.5s | 1m 19.6s | 112.2k | 1m 12.8s | 0.91 cores | 436–458 MiB |
+| Jetstreamer | 2m 24.5s / 2m 24.9s | 2m 24.7s | 61.7k | 9m 58.3s | 4.13 cores | 243–284 MiB |
+
+The CAR reader is 1.82 times faster by mean wall time. The requested worker count alone does not show actual CPU use: CAR used about 0.91 CPU cores on average, while Jetstreamer used about 4.13. The two CAR times also vary more than the two Jetstreamer times, so this small sample is a reference result rather than a stable production limit.
+
+Both paths decode transactions and status metadata, classify votes and failures, compute message hashes, and decode rewards. Jetstreamer also creates native Solana metadata objects and uses asynchronous callbacks. The CAR reader retains borrowed transaction fields and protobuf status metadata. These internal costs remain in the result even though the exported bytes match exactly.
 
 This CAR comparison is a full decode adapter test. The V2/V3 examples have different output work and can use indexes, so their TPS values are not directly equal to this CAR test.
+
+[Exact CAR and Jetstreamer receipts](artifacts/car-jetstreamer-common-output-20260909.json)
 
 ## Design notes
 
@@ -91,4 +108,4 @@ The NAS ran another CPU compaction job during part of this test. SSD traffic was
 
 The final data set contains only passing case records. V2 disk and network results come from two completed groups. V3 disk and 40 network results come from the full V3 batch. Its final batch check detected the epoch 300 repair because the repair occurred while the last epoch 1000 case ran. A comparison of all 526 before and after inventory entries found one change: the ETag of the epoch 300 block index. The size and all other entries stayed equal. The four original epoch 300 failures were removed, and a clean four-case run against the repaired inventory passed. Output hashes and counters match across V2, V3, disk, and network for every epoch and example. The separate CAR disk records have passing parity for all 44 cases. The three CAR network example receipts passed and match their disk output. The CAR count case is in the accepted network set, and its block, transaction, instruction, and CPI counters match disk.
 
-[Source data](artifacts/full-v2-v3-reader-20260911/results.json) · SHA-256 `cbdd8742c9842bcf1e1dc39232d1f13c24ce8e9c3e5cb8adb7881424c8ec85dd`
+[Source data](artifacts/full-v2-v3-reader-20260911/results.json) · SHA-256 `0d0563a59e2a6b96f5dcb0b9b3c2318d159d9e964b06116c3335cedd2b270108`

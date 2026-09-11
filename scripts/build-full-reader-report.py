@@ -62,6 +62,18 @@ def duration(seconds):
     return f"{seconds:.1f} s"
 
 
+def precise_duration(seconds):
+    seconds = float(seconds)
+    if seconds >= 3_600:
+        hours = int(seconds // 3_600)
+        minutes = int((seconds % 3_600) // 60)
+        return f"{hours}h {minutes}m"
+    if seconds >= 60:
+        minutes = int(seconds // 60)
+        return f"{minutes}m {seconds % 60:.1f}s"
+    return f"{seconds:.1f}s"
+
+
 def rate(value):
     value = float(value)
     if value >= 1e9:
@@ -278,6 +290,11 @@ for fmt, mode in SERIES:
     )
 
 equal = data["car_jetstreamer_equal_output"]
+equal_parameters = equal["parameters"]
+equal_reader_lookup = {row["reader"]: row for row in equal["readers"]}
+assert equal_parameters["requested_workers"] == 12
+assert equal_parameters["timed_runs_per_reader"] == 2
+assert equal_parameters["concurrent_readers"] == 1
 total_lookup = {(row["format"], row["mode"]): row for row in totals}
 disk_speedup = total_lookup[("compact-v2", "local")]["total_s"] / total_lookup[("indexer-v3", "local")]["total_s"]
 network_speedup = total_lookup[("compact-v2", "network")]["total_s"] / total_lookup[("indexer-v3", "network")]["total_s"]
@@ -356,18 +373,35 @@ lines += [
     "",
     "## CAR reader and Jetstreamer",
     "",
-    f"This separate epoch 900 network reference gives both readers the same {equal['blocks']:,} blocks. They produce the same {equal['output_bytes'] / 1e9:.3f} GB output file, with the same SHA-256 hash.",
+    f"This separate epoch 900 network reference gives both readers the same {equal['blocks']:,} blocks and {equal['transactions']:,} transactions. They read the same raw CAR object through the same gateway. They produce the same {equal['output_bytes'] / 1e9:.3f} GB output file, with the same SHA-256 hash.",
     "",
-    "| Reader | Mean time | TPS | Peak memory |",
-    "|---|---:|---:|---:|",
+    "| Parameter | CAR reader | Jetstreamer |",
+    "|---|---|---|",
+    f"| Version | Blockzilla CAR reader; binary `{equal_reader_lookup['car']['binary_sha256'][:12]}` | Jetstreamer {equal_parameters['jetstreamer_version']}; binary `{equal_reader_lookup['jetstreamer']['binary_sha256'][:12]}` |",
+    f"| Processing workers | {equal_parameters['car_decode_workers']} decode workers | {equal_parameters['jetstreamer_firehose_workers']} firehose workers on a {equal_parameters['jetstreamer_tokio_runtime_threads']}-thread Tokio runtime |",
+    f"| HTTP input | {equal_parameters['car_http_workers']} closed-range workers; {equal_parameters['car_http_chunk_bytes'] / 2**20:.0f} MiB chunks; {equal_parameters['car_http_window_chunks']}-chunk window | Long HTTP/1.1 ranges from each worker offset to the CAR end; {equal_parameters['jetstreamer_reader_buffer_bytes'] / 2**20:.0f} MiB reader buffer |",
+    f"| Allocator | {equal_parameters['allocator']} | {equal_parameters['allocator']} |",
+    f"| Timed runs | {equal_parameters['timed_runs_per_reader']}, fresh process for each run | {equal_parameters['timed_runs_per_reader']}, fresh process for each run |",
+    f"| Signature verification | {'Enabled' if equal_parameters['signature_verification'] else 'Disabled'} | {'Enabled' if equal_parameters['signature_verification'] else 'Disabled'} |",
+    "",
+    "The runner first checks 64 blocks. It then runs CAR, Jetstreamer, Jetstreamer, and CAR, with one active process at a time. Timing includes decode, canonical output ordering, file writes, and final file sync. The final byte and SHA-256 checks occur after the timer stops.",
+    "",
+    "| Reader | Individual times | Mean time | TPS | Mean CPU time | Mean CPU use | Peak memory |",
+    "|---|---:|---:|---:|---:|---:|---:|",
 ]
 for row in equal["readers"]:
     lines.append(
-        f"| {row['name']} | {row['mean_total_seconds']:.1f} s | {rate(row['total_tps'])} | {row['peak_rss_mib_min']:.0f}–{row['peak_rss_mib_max']:.0f} MiB |"
+        f"| {row['name']} | {' / '.join(precise_duration(value) for value in row['run_total_seconds'])} | {precise_duration(row['mean_total_seconds'])} | {rate(row['total_tps'])} | {precise_duration(row['mean_cpu_seconds'])} | {row['mean_cpu_cores']:.2f} cores | {row['peak_rss_mib_min']:.0f}–{row['peak_rss_mib_max']:.0f} MiB |"
     )
 lines += [
     "",
+    f"The CAR reader is {equal['readers'][1]['mean_total_seconds'] / equal['readers'][0]['mean_total_seconds']:.2f} times faster by mean wall time. The requested worker count alone does not show actual CPU use: CAR used about {equal['readers'][0]['mean_cpu_cores']:.2f} CPU cores on average, while Jetstreamer used about {equal['readers'][1]['mean_cpu_cores']:.2f}. The two CAR times also vary more than the two Jetstreamer times, so this small sample is a reference result rather than a stable production limit.",
+    "",
+    "Both paths decode transactions and status metadata, classify votes and failures, compute message hashes, and decode rewards. Jetstreamer also creates native Solana metadata objects and uses asynchronous callbacks. The CAR reader retains borrowed transaction fields and protobuf status metadata. These internal costs remain in the result even though the exported bytes match exactly.",
+    "",
     "This CAR comparison is a full decode adapter test. The V2/V3 examples have different output work and can use indexes, so their TPS values are not directly equal to this CAR test.",
+    "",
+    "[Exact CAR and Jetstreamer receipts](artifacts/car-jetstreamer-common-output-20260909.json)",
     "",
     "## Design notes",
     "",
