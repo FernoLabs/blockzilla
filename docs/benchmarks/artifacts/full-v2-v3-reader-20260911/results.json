@@ -393,6 +393,17 @@
       "state": "PASS",
       "receipt_verified": true,
       "local_baseline_match": true
+    },
+    "car_epoch300_zstd_size": {
+      "repository_path": "docs/benchmarks/epoch-300-car-zstd-level3-2026-09-05-comparison.json",
+      "sha256": "361cccd1915d1060760b0f65186eb3327bfad03c24d5cfc8e03cc2072adf36b2",
+      "measurement_date": "2026-09-05",
+      "status": "PASS",
+      "parity": "MATCH",
+      "compression": "zstd level 3, 12 compression threads",
+      "compressed_car_bytes": 206321123867,
+      "slot_index_bytes": 5184000,
+      "comparable_stored_bytes": 206326307867
     }
   },
   "stored_sizes": {
@@ -15955,7 +15966,8 @@
     "The NAS ran a CPU compaction job during part of the test. SSD traffic was not shared.",
     "The public epoch 300 V3 block index was replaced after its first four network cases failed. The clean retry passed. The inventory comparison proves this was the only public object identity change in the V3 batch.",
     "The historical CAR file baseline has 44 accepted disk cases from 8 September. Epoch 300 uses raw CAR; the other ten epochs use outer zstd.",
-    "The historical CAR network baseline has four accepted epoch 900 cases. It reads the 527.1 GB raw CAR object. The disk baseline reads the 226.1 GB outer-zstd CAR object, so the comparison includes both transport and source encoding."
+    "The historical CAR network baseline has four accepted epoch 900 cases. It reads the 527.1 GB raw CAR object. The disk baseline reads the 226.1 GB outer-zstd CAR object, so the comparison includes both transport and source encoding.",
+    "Comparable stored sizes use zstd CAR for every epoch. Epoch 300 uses the measured zstd level-3 file size plus its slot index; its timed CAR disk case still uses raw CAR."
   ],
   "car_file_cases": [
     {
@@ -19359,5 +19371,46 @@
       "receipt_sha256": "d77a2cd35a9ddb1ba9f43c658c8aed4e39e6765b294212238630afb1f18b92d7",
       "binary_sha256": "0cad67eeb91374f2f423cf60fe2580237048727f0d7e4d474c138f313d445c9b"
     }
-  ]
+  ],
+  "comparable_stored_sizes": {
+    "compact-v2": {
+      "0": 1349296755,
+      "100": 13290221696,
+      "200": 31514963319,
+      "300": 99504005950,
+      "400": 116692476204,
+      "500": 97868479869,
+      "600": 109748890385,
+      "700": 133420376697,
+      "800": 140496178946,
+      "900": 104048790795,
+      "1000": 139038160668
+    },
+    "indexer-v3": {
+      "0": 1466956231,
+      "100": 13044353541,
+      "200": 30564214832,
+      "300": 97003523888,
+      "400": 113079044496,
+      "500": 93977075738,
+      "600": 108504576264,
+      "700": 131601116052,
+      "800": 145921532119,
+      "900": 106322191598,
+      "1000": 140889076138
+    },
+    "car": {
+      "0": 2240009741,
+      "100": 22816776181,
+      "200": 55945022378,
+      "300": 206326307867,
+      "400": 245123920409,
+      "500": 180696928166,
+      "600": 237004373483,
+      "700": 298250628517,
+      "800": 331058964183,
+      "900": 226073750559,
+      "1000": 299444659257
+    }
+  }
 }

@@ -4,7 +4,7 @@ Updated **11 September 2026**. The main test covers all 11 sample epochs, four e
 
 ## Whole test at a glance
 
-The time column is the sum for all four examples over all 11 epochs. TPS is total covered transactions divided by that time. Stored size is the sum of the 11 complete archives. CAR network has only epoch 900 data, so its results are in a separate table.
+The time column is the sum for all four examples over all 11 epochs. TPS is total covered transactions divided by that time. Stored size is the sum of the 11 compressed archives. CAR network has only epoch 900 data, so its results are in a separate table.
 
 | Reader | Input | Total time | Covered TPS | Logical MB/s | Stored size |
 |---|---|---:|---:|---:|---:|
@@ -12,7 +12,7 @@ The time column is the sum for all four examples over all 11 epochs. TPS is tota
 | V2 | Network | 5.01 h | 1.28M | 132.5 | 987.0 GB |
 | V3 | Disk | 52.9 min | 7.25M | 568.4 | 982.4 GB |
 | V3 | Network | 4.67 h | 1.37M | 49.8 | 982.4 GB |
-| CAR | Disk | 12.90 h | 495.6k | 455.8 | 2,407.0 GB |
+| CAR | Disk | 12.90 h | 495.6k | 455.8 | 2,105.0 GB |
 
 Across the complete matrix, V3 used 12.6% less time than V2 from disk and 6.8% less time over the network. V3 finished first in 30 of 44 disk cases and 32 of 44 network cases. The gain depends strongly on the example because V3 can skip most data for some indexed queries.
 
@@ -25,6 +25,8 @@ The CAR disk line uses outer zstd for ten epochs. Epoch 300 uses raw CAR. These 
 ![Logical read speed](artifacts/full-v2-v3-reader-20260911/logical-read-speed.png)
 
 ![Stored size](artifacts/full-v2-v3-reader-20260911/stored-size.png)
+
+The storage graph uses zstd CAR for all epochs. For epoch 300, it uses the measured 206.3 GB zstd level-3 CAR plus its 5.2 MB slot index. The timed CAR disk test used the 508.3 GB raw input, so this adjustment changes only the storage comparison.
 
 ## Workload totals
 
@@ -89,4 +91,4 @@ The NAS ran another CPU compaction job during part of this test. SSD traffic was
 
 The final data set contains only passing case records. V2 disk and network results come from two completed groups. V3 disk and 40 network results come from the full V3 batch. Its final batch check detected the epoch 300 repair because the repair occurred while the last epoch 1000 case ran. A comparison of all 526 before and after inventory entries found one change: the ETag of the epoch 300 block index. The size and all other entries stayed equal. The four original epoch 300 failures were removed, and a clean four-case run against the repaired inventory passed. Output hashes and counters match across V2, V3, disk, and network for every epoch and example. The separate CAR disk records have passing parity for all 44 cases. The three CAR network example receipts passed and match their disk output. The CAR count case is in the accepted network set, and its block, transaction, instruction, and CPI counters match disk.
 
-[Source data](artifacts/full-v2-v3-reader-20260911/results.json) · SHA-256 `276eb96df545acf726006caf699f7e0870cfab66cbd33e4a1ec19afc0e0ef3a4`
+[Source data](artifacts/full-v2-v3-reader-20260911/results.json) · SHA-256 `cbdd8742c9842bcf1e1dc39232d1f13c24ce8e9c3e5cb8adb7881424c8ec85dd`

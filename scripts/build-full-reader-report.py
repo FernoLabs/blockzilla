@@ -92,6 +92,7 @@ data = json.loads(raw)
 rows = data["cases"]
 car_rows = data["car_file_cases"]
 car_network_rows = data["car_network_cases"]
+stored_sizes = data["comparable_stored_sizes"]
 assert data["schema"] == "blockzilla-full-v2-v3-reader-report-v1"
 assert len(rows) == 176
 assert all(row["status"] == "PASS" for row in rows)
@@ -113,6 +114,8 @@ assert all(
     for row in car_network_rows
 )
 assert {row["workload"] for row in car_network_rows} == set(WORKLOADS)
+assert data["stored_sizes"]["car"]["300"] == 508_343_057_180
+assert stored_sizes["car"]["300"] == 206_326_307_867
 
 lookup = {
     (row["format"], row["mode"], int(row["epoch"]), row["workload"]): row
@@ -212,10 +215,16 @@ line_chart(
 fig, ax = plt.subplots(figsize=(12, 5.4))
 fig.subplots_adjust(left=.085, right=.98, top=.78, bottom=.18)
 fig.text(.04, .94, "Stored archive size", fontsize=22, fontweight="bold")
-fig.text(.04, .885, "Complete format size for each sample epoch", fontsize=11, color="#526170")
+fig.text(
+    .04,
+    .885,
+    "Compressed archive size · CAR epoch 300 uses its measured zstd level-3 size",
+    fontsize=11,
+    color="#526170",
+)
 width = 24
 for index, fmt in enumerate(STORED_FORMATS):
-    values = [data["stored_sizes"][fmt][str(epoch)] / 1e9 for epoch in epochs]
+    values = [stored_sizes[fmt][str(epoch)] / 1e9 for epoch in epochs]
     positions = [epoch + (index - 1) * width for epoch in epochs]
     ax.bar(positions, values, width=width, color=COLORS[fmt], label=NAMES[fmt])
 ax.set_xticks(epochs)
@@ -264,7 +273,7 @@ for fmt, mode in SERIES:
             "total_s": total_s,
             "total_tps": total_tx / total_s,
             "scan_source_mb_s": total_source / 1e6 / total_scan_s,
-            "stored_gb": sum(data["stored_sizes"][fmt].values()) / 1e9,
+            "stored_gb": sum(stored_sizes[fmt].values()) / 1e9,
         }
     )
 
@@ -289,7 +298,7 @@ lines = [
     "",
     "## Whole test at a glance",
     "",
-    "The time column is the sum for all four examples over all 11 epochs. TPS is total covered transactions divided by that time. Stored size is the sum of the 11 complete archives. CAR network has only epoch 900 data, so its results are in a separate table.",
+    "The time column is the sum for all four examples over all 11 epochs. TPS is total covered transactions divided by that time. Stored size is the sum of the 11 compressed archives. CAR network has only epoch 900 data, so its results are in a separate table.",
     "",
     "| Reader | Input | Total time | Covered TPS | Logical MB/s | Stored size |",
     "|---|---|---:|---:|---:|---:|",
@@ -311,6 +320,8 @@ lines += [
     "![Logical read speed](artifacts/full-v2-v3-reader-20260911/logical-read-speed.png)",
     "",
     "![Stored size](artifacts/full-v2-v3-reader-20260911/stored-size.png)",
+    "",
+    "The storage graph uses zstd CAR for all epochs. For epoch 300, it uses the measured 206.3 GB zstd level-3 CAR plus its 5.2 MB slot index. The timed CAR disk test used the 508.3 GB raw input, so this adjustment changes only the storage comparison.",
     "",
     "## Workload totals",
     "",
