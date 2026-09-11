@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Build the final V2/V3 report with the accepted CAR file baseline."""
+"""Build the final reader report with accepted V2, V3, and CAR results."""
 
 import hashlib
 import json
@@ -76,6 +76,7 @@ raw = SOURCE.read_bytes()
 data = json.loads(raw)
 rows = data["cases"]
 car_rows = data["car_file_cases"]
+car_network_rows = data["car_network_cases"]
 assert data["schema"] == "blockzilla-full-v2-v3-reader-report-v1"
 assert len(rows) == 176
 assert all(row["status"] == "PASS" for row in rows)
@@ -88,10 +89,19 @@ assert set(key[3] for key in keys) == set(WORKLOADS)
 assert len(car_rows) == 44
 assert all(row["format"] == "car" and row["mode"] == "local" for row in car_rows)
 assert all(row["status"] == "PASS" and row["parity"] == "MATCH" for row in car_rows)
+assert len(car_network_rows) == 4
+assert all(
+    row["format"] == "car"
+    and row["mode"] == "network"
+    and int(row["epoch"]) == 900
+    and row["status"] == "PASS"
+    for row in car_network_rows
+)
+assert {row["workload"] for row in car_network_rows} == set(WORKLOADS)
 
 lookup = {
     (row["format"], row["mode"], int(row["epoch"]), row["workload"]): row
-    for row in rows + car_rows
+    for row in rows + car_rows + car_network_rows
 }
 epochs = list(range(0, 1001, 100))
 
@@ -100,6 +110,7 @@ plt.rcParams.update(
         "font.family": "DejaVu Sans",
         "font.size": 10,
         "text.color": "#1c2735",
+        "svg.hashsalt": "blockzilla-reader-report",
         "svg.fonttype": "none",
     }
 )
@@ -107,7 +118,7 @@ plt.rcParams.update(
 
 def line_chart(metric, stem, title, subtitle, ylabel, log=False):
     fig, axes = plt.subplots(2, 2, figsize=(14, 9.5))
-    fig.subplots_adjust(left=.085, right=.98, top=.84, bottom=.12, hspace=.42, wspace=.24)
+    fig.subplots_adjust(left=.085, right=.98, top=.79, bottom=.10, hspace=.48, wspace=.24)
     fig.text(.04, .96, title, fontsize=22, fontweight="bold")
     fig.text(.04, .915, subtitle, fontsize=11, color="#526170")
     for ax, workload in zip(axes.flat, WORKLOADS):
@@ -123,6 +134,18 @@ def line_chart(metric, stem, title, subtitle, ylabel, log=False):
                 linewidth=1.8,
                 label=f"{NAMES[fmt]} {MODE_NAMES[mode].lower()}",
             )
+        network_car = lookup[("car", "network", 900, workload)]
+        ax.plot(
+            [900],
+            [float(network_car[metric])],
+            color=COLORS["car"],
+            linestyle="none",
+            marker="D",
+            markerfacecolor="white",
+            markeredgewidth=1.8,
+            markersize=6,
+            label="CAR network · epoch 900",
+        )
         ax.set_title(WORKLOAD_NAMES[workload], loc="left", fontweight="bold")
         ax.set_xticks(epochs[::2])
         ax.set_xlabel("Epoch")
@@ -135,7 +158,7 @@ def line_chart(metric, stem, title, subtitle, ylabel, log=False):
             spine.set_visible(False)
         ax.tick_params(length=0)
     handles, labels = axes[0, 0].get_legend_handles_labels()
-    fig.legend(handles, labels, ncol=5, frameon=False, loc="upper left", bbox_to_anchor=(.035, .89))
+    fig.legend(handles, labels, ncol=3, frameon=False, loc="upper left", bbox_to_anchor=(.035, .89))
     save_chart(fig, stem)
 
 
@@ -143,7 +166,7 @@ line_chart(
     "total_s",
     "completion-time",
     "Reader completion time",
-    "All sample epochs · lower is better · CAR is the accepted 8 September disk baseline",
+    "All sample epochs · lower is better · CAR network is available for epoch 900",
     "Seconds · log scale",
     log=True,
 )
@@ -151,7 +174,7 @@ line_chart(
     "total_tps",
     "covered-tps",
     "Reader covered throughput",
-    "All sample epochs · higher is better · index skips count as covered transactions",
+    "All sample epochs · higher is better · CAR network is available for epoch 900",
     "Covered transactions/s · log scale",
     log=True,
 )
@@ -159,7 +182,7 @@ line_chart(
     "scan_source_mb_s",
     "logical-read-speed",
     "Logical source read speed",
-    "Higher means more logical bytes per scan second; it does not always mean a faster query",
+    "Higher means more logical bytes per scan second · CAR network is available for epoch 900",
     "Logical MB/s · log scale",
     log=True,
 )
@@ -240,11 +263,11 @@ for mode in MODES:
 lines = [
     "# Archive reader performance",
     "",
-    "Updated **11 September 2026**. The main test covers all 11 sample epochs, four examples, disk and network input, and both V2 and V3. All 176 cases passed after the stale public epoch 300 index was replaced. The graphs also include 44 accepted CAR file cases from 8 September.",
+    "Updated **11 September 2026**. The main test covers all 11 sample epochs, four examples, disk and network input, and both V2 and V3. All 176 cases passed after the stale public epoch 300 index was replaced. The graphs also include 44 accepted CAR disk cases and four accepted CAR network cases for epoch 900.",
     "",
     "## Whole test at a glance",
     "",
-    "The time column is the sum for all four examples over all 11 epochs. TPS is total covered transactions divided by that time. Stored size is the sum of the 11 complete archives. CAR is a historical disk baseline, so it has no row in the new network matrix.",
+    "The time column is the sum for all four examples over all 11 epochs. TPS is total covered transactions divided by that time. Stored size is the sum of the 11 complete archives. CAR network has only epoch 900 data, so its results are in a separate table.",
     "",
     "| Reader | Input | Total time | Covered TPS | Logical MB/s | Stored size |",
     "|---|---|---:|---:|---:|---:|",
@@ -281,6 +304,23 @@ for workload in WORKLOADS:
         )
 lines += [
     "",
+    "## CAR disk and network at epoch 900",
+    "",
+    "These four network tests read the complete raw CAR object. The disk tests read the outer-zstd CAR object. The output and counters match, but the input size is different. The result therefore includes both network transfer and source encoding effects.",
+    "",
+    "| Example | Disk time | Network time | Disk TPS | Network TPS | Network / disk time |",
+    "|---|---:|---:|---:|---:|---:|",
+]
+for workload in WORKLOADS:
+    disk = lookup[("car", "local", 900, workload)]
+    network = lookup[("car", "network", 900, workload)]
+    lines.append(
+        f"| {WORKLOAD_NAMES[workload]} | {duration(disk['total_s'])} | {duration(network['total_s'])} | {rate(disk['total_tps'])} | {rate(network['total_tps'])} | {float(network['total_s']) / float(disk['total_s']):.2f}× |"
+    )
+lines += [
+    "",
+    f"The disk source is {lookup[('car', 'local', 900, 'slot-hours')]['stored_archive_bytes'] / 1e9:.1f} GB. The network source is {lookup[('car', 'network', 900, 'slot-hours')]['stored_archive_bytes'] / 1e9:.1f} GB.",
+    "",
     "## CAR reader and Jetstreamer",
     "",
     f"This separate epoch 900 network reference gives both readers the same {equal['blocks']:,} blocks. They produce the same {equal['output_bytes'] / 1e9:.3f} GB output file, with the same SHA-256 hash.",
@@ -306,7 +346,7 @@ lines += [
     "",
     "## Acceptance method",
     "",
-    "The final data set contains only passing case records. V2 disk and network results come from two completed groups. V3 disk and 40 network results come from the full V3 batch. Its final batch check detected the epoch 300 repair because the repair occurred while the last epoch 1000 case ran. A comparison of all 526 before and after inventory entries found one change: the ETag of the epoch 300 block index. The size and all other entries stayed equal. The four original epoch 300 failures were removed, and a clean four-case run against the repaired inventory passed. Output hashes and counters match across V2, V3, disk, and network for every epoch and example. The separate CAR file records have passing parity for all 44 cases.",
+    "The final data set contains only passing case records. V2 disk and network results come from two completed groups. V3 disk and 40 network results come from the full V3 batch. Its final batch check detected the epoch 300 repair because the repair occurred while the last epoch 1000 case ran. A comparison of all 526 before and after inventory entries found one change: the ETag of the epoch 300 block index. The size and all other entries stayed equal. The four original epoch 300 failures were removed, and a clean four-case run against the repaired inventory passed. Output hashes and counters match across V2, V3, disk, and network for every epoch and example. The separate CAR disk records have passing parity for all 44 cases. The three CAR network example receipts passed and match their disk output. The CAR count case is in the accepted network set, and its block, transaction, instruction, and CPI counters match disk.",
     "",
     f"[Source data](artifacts/full-v2-v3-reader-20260911/results.json) · SHA-256 `{hashlib.sha256(raw).hexdigest()}`",
     "",

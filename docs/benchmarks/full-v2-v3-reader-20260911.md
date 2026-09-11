@@ -1,10 +1,10 @@
 # Archive reader performance
 
-Updated **11 September 2026**. The main test covers all 11 sample epochs, four examples, disk and network input, and both V2 and V3. All 176 cases passed after the stale public epoch 300 index was replaced. The graphs also include 44 accepted CAR file cases from 8 September.
+Updated **11 September 2026**. The main test covers all 11 sample epochs, four examples, disk and network input, and both V2 and V3. All 176 cases passed after the stale public epoch 300 index was replaced. The graphs also include 44 accepted CAR disk cases and four accepted CAR network cases for epoch 900.
 
 ## Whole test at a glance
 
-The time column is the sum for all four examples over all 11 epochs. TPS is total covered transactions divided by that time. Stored size is the sum of the 11 complete archives. CAR is a historical disk baseline, so it has no row in the new network matrix.
+The time column is the sum for all four examples over all 11 epochs. TPS is total covered transactions divided by that time. Stored size is the sum of the 11 complete archives. CAR network has only epoch 900 data, so its results are in a separate table.
 
 | Reader | Input | Total time | Covered TPS | Logical MB/s | Stored size |
 |---|---|---:|---:|---:|---:|
@@ -53,6 +53,19 @@ Each row combines the 11 epochs. Completion time is the clearest speed compariso
 | User program index | V3 | Network | 50.8 s | 113.18M | 0.0 |
 | User program index | CAR | Disk | 2.92 h | 547.8k | 503.8 |
 
+## CAR disk and network at epoch 900
+
+These four network tests read the complete raw CAR object. The disk tests read the outer-zstd CAR object. The output and counters match, but the input size is different. The result therefore includes both network transfer and source encoding effects.
+
+| Example | Disk time | Network time | Disk TPS | Network TPS | Network / disk time |
+|---|---:|---:|---:|---:|---:|
+| Count / CPI | 13.6 min | 42.5 min | 584.9k | 186.5k | 3.14× |
+| USDC | 29.0 min | 1.13 h | 273.3k | 116.6k | 2.34× |
+| Pump.fun | 17.8 min | 1.09 h | 445.7k | 121.2k | 3.68× |
+| User program index | 16.9 min | 1.02 h | 468.3k | 129.7k | 3.61× |
+
+The disk source is 226.1 GB. The network source is 527.1 GB.
+
 ## CAR reader and Jetstreamer
 
 This separate epoch 900 network reference gives both readers the same 8,192 blocks. They produce the same 2.300 GB output file, with the same SHA-256 hash.
@@ -74,6 +87,6 @@ The NAS ran another CPU compaction job during part of this test. SSD traffic was
 
 ## Acceptance method
 
-The final data set contains only passing case records. V2 disk and network results come from two completed groups. V3 disk and 40 network results come from the full V3 batch. Its final batch check detected the epoch 300 repair because the repair occurred while the last epoch 1000 case ran. A comparison of all 526 before and after inventory entries found one change: the ETag of the epoch 300 block index. The size and all other entries stayed equal. The four original epoch 300 failures were removed, and a clean four-case run against the repaired inventory passed. Output hashes and counters match across V2, V3, disk, and network for every epoch and example. The separate CAR file records have passing parity for all 44 cases.
+The final data set contains only passing case records. V2 disk and network results come from two completed groups. V3 disk and 40 network results come from the full V3 batch. Its final batch check detected the epoch 300 repair because the repair occurred while the last epoch 1000 case ran. A comparison of all 526 before and after inventory entries found one change: the ETag of the epoch 300 block index. The size and all other entries stayed equal. The four original epoch 300 failures were removed, and a clean four-case run against the repaired inventory passed. Output hashes and counters match across V2, V3, disk, and network for every epoch and example. The separate CAR disk records have passing parity for all 44 cases. The three CAR network example receipts passed and match their disk output. The CAR count case is in the accepted network set, and its block, transaction, instruction, and CPI counters match disk.
 
-[Source data](artifacts/full-v2-v3-reader-20260911/results.json) · SHA-256 `14349627328ef4952c69065b0b0b7476798d36e2566e4f359d271ad1cb90a155`
+[Source data](artifacts/full-v2-v3-reader-20260911/results.json) · SHA-256 `276eb96df545acf726006caf699f7e0870cfab66cbd33e4a1ec19afc0e0ef3a4`
