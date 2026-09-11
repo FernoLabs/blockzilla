@@ -32,7 +32,7 @@ WORKLOAD_NAMES = {
     "pumpfun": "Pump.fun",
     "user-program-index": "User program index",
 }
-COLORS = {"compact-v2": "#265eaa", "indexer-v3": "#177765"}
+COLORS = {"compact-v2": "#0072B2", "indexer-v3": "#D55E00"}
 
 
 def save_chart(fig, stem):
