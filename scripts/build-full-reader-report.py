@@ -11,7 +11,7 @@ import matplotlib
 
 matplotlib.use("Agg")
 import matplotlib.pyplot as plt
-from matplotlib.ticker import FuncFormatter
+from matplotlib.ticker import FixedLocator, FuncFormatter
 
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -41,6 +41,7 @@ WORKLOAD_NAMES = {
     "user-program-index": "User program index",
 }
 COLORS = {"compact-v2": "#0072B2", "indexer-v3": "#D55E00", "car": "#4D4D4D"}
+ELAPSED_TICKS = (0.1, 1, 10, 60, 600, 3_600, 21_600)
 
 
 def save_chart(fig, stem):
@@ -70,6 +71,20 @@ def rate(value):
     if value >= 1e3:
         return f"{value / 1e3:.1f}k"
     return f"{value:.0f}"
+
+
+def elapsed_tick(value, _position):
+    """Format a seconds value as a compact, readable duration."""
+    if value < 1:
+        return f"{value * 1_000:g} ms"
+    if value < 60:
+        return f"{value:g} s"
+    if value < 3_600:
+        minutes, seconds = divmod(round(value), 60)
+        return f"{minutes}m {seconds}s" if seconds else f"{minutes} min"
+    hours, remainder = divmod(round(value), 3_600)
+    minutes = remainder // 60
+    return f"{hours}h {minutes}m" if minutes else f"{hours} h"
 
 
 raw = SOURCE.read_bytes()
@@ -116,7 +131,7 @@ plt.rcParams.update(
 )
 
 
-def line_chart(metric, stem, title, subtitle, ylabel, log=False):
+def line_chart(metric, stem, title, subtitle, ylabel, log=False, tick_formatter=None):
     fig, axes = plt.subplots(2, 2, figsize=(14, 9.5))
     fig.subplots_adjust(left=.085, right=.98, top=.79, bottom=.10, hspace=.48, wspace=.24)
     fig.text(.04, .96, title, fontsize=22, fontweight="bold")
@@ -152,6 +167,12 @@ def line_chart(metric, stem, title, subtitle, ylabel, log=False):
         ax.set_ylabel(ylabel)
         if log:
             ax.set_yscale("log")
+        if tick_formatter:
+            lower, upper = ax.get_ylim()
+            ax.yaxis.set_major_locator(
+                FixedLocator([tick for tick in ELAPSED_TICKS if lower <= tick <= upper])
+            )
+            ax.yaxis.set_major_formatter(FuncFormatter(tick_formatter))
         ax.grid(color="#e5e9ee", linewidth=.7)
         ax.set_axisbelow(True)
         for spine in ax.spines.values():
@@ -167,8 +188,9 @@ line_chart(
     "completion-time",
     "Reader completion time",
     "All sample epochs · lower is better · CAR network is available for epoch 900",
-    "Seconds · log scale",
+    "Elapsed time · log scale",
     log=True,
+    tick_formatter=elapsed_tick,
 )
 line_chart(
     "total_tps",
