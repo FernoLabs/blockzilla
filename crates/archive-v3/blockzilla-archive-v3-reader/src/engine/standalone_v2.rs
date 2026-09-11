@@ -2733,7 +2733,8 @@ impl Reader {
             );
             ensure!(
                 object_header.common_identity() == header.common_identity(),
-                "standalone object binding differs from index"
+                "standalone {} binding differs from index",
+                object.name()
             );
             ensure!(
                 object_size == expected_offsets[object.index()],

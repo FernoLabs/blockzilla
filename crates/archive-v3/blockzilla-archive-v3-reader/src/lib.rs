@@ -97,10 +97,15 @@ const CACHE_NAMESPACE_DOMAIN: &[u8] = b"blockzilla.indexer-v3.cache-namespace.v1
 const MAINNET_ARCHIVE_SLOTS_PER_EPOCH: u64 = 432_000;
 const SIGNATURE_CACHE_DOWNLOAD_RANGE_BYTES: usize = 64 << 20;
 const SIGNATURE_CACHE_DOWNLOAD_CONCURRENCY: usize = 16;
-const SIGNATURE_CACHE_MAX_OBJECT_BYTES: u64 = 48 << 30;
-const SIGNATURE_CACHE_MAX_TOTAL_BYTES: u64 = 56 << 30;
+const SIGNATURE_CACHE_MAX_OBJECT_BYTES: u64 = 64 << 30;
+const SIGNATURE_CACHE_MAX_TOTAL_BYTES: u64 = 72 << 30;
 /// Default memory limit for automatic dense-query registry loading.
 pub const DEFAULT_INDEXER_V3_FULL_REGISTRY_BYTES: u64 = 1 << 30;
+/// Default memory limit for automatic dense-query registry loading over HTTP.
+///
+/// Network scans use a larger limit because sparse registry lookups can cause
+/// millions of small range requests. Local scans keep the lower memory limit.
+pub const DEFAULT_INDEXER_V3_NETWORK_FULL_REGISTRY_BYTES: u64 = 3 << 30;
 const TRANSACTION_DIRECTORY_OBJECT: &str = "archive-v2-standalone-transaction-directory.wincode";
 const REGISTRY_INDEX_OBJECT: &str = "registry.mphf";
 const REVERSE_OPTIONAL_OBJECTS: [&str; 4] = [
@@ -573,7 +578,7 @@ impl IndexerV3Archive {
             cached_source_size_bytes,
             transport_kind: IndexerV3TransportKind::HttpCached,
             registry_read_policy: IndexerV3RegistryReadPolicy::with_full_registry_limit(
-                DEFAULT_INDEXER_V3_FULL_REGISTRY_BYTES,
+                DEFAULT_INDEXER_V3_NETWORK_FULL_REGISTRY_BYTES,
             ),
         })
     }
@@ -1653,7 +1658,7 @@ mod tests {
         );
         let options = IndexerV3CacheProfile::SignatureLocal.cache_options();
         assert_eq!(options.download_range_bytes, 64 << 20);
-        assert!(options.max_cached_object_bytes > 32_380_385_536);
+        assert!(options.max_cached_object_bytes > 55_358_094_144);
     }
 
     #[test]

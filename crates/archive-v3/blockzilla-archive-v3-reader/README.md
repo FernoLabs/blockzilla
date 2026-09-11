@@ -277,9 +277,11 @@ posting-read, and fallback work.
 The SDK selects the registry strategy. A query is dense only when it has at
 least 1,000,000 candidate transactions and the candidates contain at least
 half of all requested transactions. If the complete registry is no larger
-than the default 1 GiB memory limit, the SDK loads it with reads of at most
-32 MiB and then uses direct in-memory lookup. A sparse query keeps the bounded
-eight-chunk cache. Applications do not need to select a strategy.
+than the memory limit, the SDK loads it with reads of at most 32 MiB and then
+uses direct in-memory lookup. The default limit is 1 GiB for local input and
+3 GiB for HTTP input. The larger HTTP limit prevents millions of small range
+requests. A sparse query keeps the bounded eight-chunk cache. Applications do
+not need to select a strategy.
 
 Use `set_full_registry_limit(0)` when the host must disable complete-registry
 loading. Lowering the limit immediately releases a retained complete registry

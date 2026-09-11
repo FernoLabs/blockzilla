@@ -5,10 +5,11 @@ use std::{
 
 use blockzilla_archive_v3_reader::{
     ArchiveInstructionSource, ArchiveIoSnapshot, BlockView, DEFAULT_INDEXER_V3_FULL_REGISTRY_BYTES,
-    IndexerV3Archive, IndexerV3CandidatePolicy, IndexerV3OpenOptions,
-    IndexerV3ParallelInstructionSource, IndexerV3RegistryReadMode, IndexerV3RegistryReadPolicy,
-    IndexerV3RegistryReadReceipt, IndexerV3TargetedScanReceipt, IndexerV3TransportKind,
-    IndexerV3TransportReceipt, QueryResult, ScanRange, ScanRequest, SourceVerification,
+    DEFAULT_INDEXER_V3_NETWORK_FULL_REGISTRY_BYTES, IndexerV3Archive, IndexerV3CandidatePolicy,
+    IndexerV3OpenOptions, IndexerV3ParallelInstructionSource, IndexerV3RegistryReadMode,
+    IndexerV3RegistryReadPolicy, IndexerV3RegistryReadReceipt, IndexerV3TargetedScanReceipt,
+    IndexerV3TransportKind, IndexerV3TransportReceipt, QueryResult, ScanRange, ScanRequest,
+    SourceVerification,
 };
 
 fn ignore_block(_: BlockView<'_>) -> QueryResult<()> {
@@ -58,6 +59,10 @@ fn short_network_entry_points_have_stable_signatures() {
     assert_eq!(
         default_registry_policy.max_full_registry_bytes(),
         1_073_741_824
+    );
+    assert_eq!(
+        DEFAULT_INDEXER_V3_NETWORK_FULL_REGISTRY_BYTES,
+        3_221_225_472
     );
     let registry_receipt = IndexerV3RegistryReadReceipt {
         mode: IndexerV3RegistryReadMode::SparseChunkCache,
