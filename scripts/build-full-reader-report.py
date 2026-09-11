@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Build the final V2/V3 reader report from a normalized result artifact."""
+"""Build the final V2/V3 report with the accepted CAR file baseline."""
 
 import hashlib
 import json
@@ -23,8 +23,16 @@ REPORT = BENCHMARKS / "full-v2-v3-reader-20260911.md"
 
 FORMATS = ["compact-v2", "indexer-v3"]
 MODES = ["local", "network"]
+SERIES = [
+    ("compact-v2", "local"),
+    ("compact-v2", "network"),
+    ("indexer-v3", "local"),
+    ("indexer-v3", "network"),
+    ("car", "local"),
+]
+STORED_FORMATS = ["compact-v2", "indexer-v3", "car"]
 WORKLOADS = ["slot-hours", "usdc", "pumpfun", "user-program-index"]
-NAMES = {"compact-v2": "V2", "indexer-v3": "V3"}
+NAMES = {"compact-v2": "V2", "indexer-v3": "V3", "car": "CAR"}
 MODE_NAMES = {"local": "Disk", "network": "Network"}
 WORKLOAD_NAMES = {
     "slot-hours": "Count / CPI",
@@ -32,7 +40,7 @@ WORKLOAD_NAMES = {
     "pumpfun": "Pump.fun",
     "user-program-index": "User program index",
 }
-COLORS = {"compact-v2": "#0072B2", "indexer-v3": "#D55E00"}
+COLORS = {"compact-v2": "#0072B2", "indexer-v3": "#D55E00", "car": "#4D4D4D"}
 
 
 def save_chart(fig, stem):
@@ -67,6 +75,7 @@ def rate(value):
 raw = SOURCE.read_bytes()
 data = json.loads(raw)
 rows = data["cases"]
+car_rows = data["car_file_cases"]
 assert data["schema"] == "blockzilla-full-v2-v3-reader-report-v1"
 assert len(rows) == 176
 assert all(row["status"] == "PASS" for row in rows)
@@ -76,8 +85,14 @@ assert set(key[0] for key in keys) == set(FORMATS)
 assert set(key[1] for key in keys) == set(MODES)
 assert set(key[2] for key in keys) == set(range(0, 1001, 100))
 assert set(key[3] for key in keys) == set(WORKLOADS)
+assert len(car_rows) == 44
+assert all(row["format"] == "car" and row["mode"] == "local" for row in car_rows)
+assert all(row["status"] == "PASS" and row["parity"] == "MATCH" for row in car_rows)
 
-lookup = {(row["format"], row["mode"], int(row["epoch"]), row["workload"]): row for row in rows}
+lookup = {
+    (row["format"], row["mode"], int(row["epoch"]), row["workload"]): row
+    for row in rows + car_rows
+}
 epochs = list(range(0, 1001, 100))
 
 plt.rcParams.update(
@@ -96,19 +111,18 @@ def line_chart(metric, stem, title, subtitle, ylabel, log=False):
     fig.text(.04, .96, title, fontsize=22, fontweight="bold")
     fig.text(.04, .915, subtitle, fontsize=11, color="#526170")
     for ax, workload in zip(axes.flat, WORKLOADS):
-        for fmt in FORMATS:
-            for mode in MODES:
-                values = [float(lookup[(fmt, mode, epoch, workload)][metric]) for epoch in epochs]
-                ax.plot(
-                    epochs,
-                    values,
-                    color=COLORS[fmt],
-                    linestyle="-" if mode == "local" else "--",
-                    marker="o",
-                    markersize=3,
-                    linewidth=1.8,
-                    label=f"{NAMES[fmt]} {MODE_NAMES[mode].lower()}",
-                )
+        for fmt, mode in SERIES:
+            values = [float(lookup[(fmt, mode, epoch, workload)][metric]) for epoch in epochs]
+            ax.plot(
+                epochs,
+                values,
+                color=COLORS[fmt],
+                linestyle="-" if mode == "local" else "--",
+                marker="o",
+                markersize=3,
+                linewidth=1.8,
+                label=f"{NAMES[fmt]} {MODE_NAMES[mode].lower()}",
+            )
         ax.set_title(WORKLOAD_NAMES[workload], loc="left", fontweight="bold")
         ax.set_xticks(epochs[::2])
         ax.set_xlabel("Epoch")
@@ -121,7 +135,7 @@ def line_chart(metric, stem, title, subtitle, ylabel, log=False):
             spine.set_visible(False)
         ax.tick_params(length=0)
     handles, labels = axes[0, 0].get_legend_handles_labels()
-    fig.legend(handles, labels, ncol=4, frameon=False, loc="upper left", bbox_to_anchor=(.035, .89))
+    fig.legend(handles, labels, ncol=5, frameon=False, loc="upper left", bbox_to_anchor=(.035, .89))
     save_chart(fig, stem)
 
 
@@ -129,7 +143,7 @@ line_chart(
     "total_s",
     "completion-time",
     "Reader completion time",
-    "All sample epochs · lower is better · total time includes setup, scan, and output",
+    "All sample epochs · lower is better · CAR is the accepted 8 September disk baseline",
     "Seconds · log scale",
     log=True,
 )
@@ -154,15 +168,15 @@ fig, ax = plt.subplots(figsize=(12, 5.4))
 fig.subplots_adjust(left=.085, right=.98, top=.78, bottom=.18)
 fig.text(.04, .94, "Stored archive size", fontsize=22, fontweight="bold")
 fig.text(.04, .885, "Complete format size for each sample epoch", fontsize=11, color="#526170")
-width = 34
-for index, fmt in enumerate(FORMATS):
+width = 24
+for index, fmt in enumerate(STORED_FORMATS):
     values = [data["stored_sizes"][fmt][str(epoch)] / 1e9 for epoch in epochs]
-    positions = [epoch + (index - .5) * width for epoch in epochs]
+    positions = [epoch + (index - 1) * width for epoch in epochs]
     ax.bar(positions, values, width=width, color=COLORS[fmt], label=NAMES[fmt])
 ax.set_xticks(epochs)
 ax.set_xlabel("Epoch")
 ax.set_ylabel("Stored GB")
-ax.legend(frameon=False, ncol=2, loc="upper left")
+ax.legend(frameon=False, ncol=3, loc="upper left")
 ax.grid(axis="y", color="#e5e9ee", linewidth=.7)
 ax.set_axisbelow(True)
 for spine in ax.spines.values():
@@ -172,42 +186,42 @@ save_chart(fig, "stored-size")
 
 aggregate = []
 for workload in WORKLOADS:
-    for fmt in FORMATS:
-        for mode in MODES:
-            selected = [lookup[(fmt, mode, epoch, workload)] for epoch in epochs]
-            total_s = sum(float(row["total_s"]) for row in selected)
-            transactions = sum(int(row["transactions"]) for row in selected)
-            scan_s = sum(float(row["scan_s"]) for row in selected)
-            source_bytes = sum(int(row["scan_source_bytes"]) for row in selected)
-            aggregate.append(
-                {
-                    "workload": workload,
-                    "format": fmt,
-                    "mode": mode,
-                    "total_s": total_s,
-                    "total_tps": transactions / total_s,
-                    "scan_source_mb_s": source_bytes / 1e6 / scan_s,
-                }
-            )
-
-totals = []
-for fmt in FORMATS:
-    for mode in MODES:
-        selected = [row for row in rows if row["format"] == fmt and row["mode"] == mode]
+    for fmt, mode in SERIES:
+        selected = [lookup[(fmt, mode, epoch, workload)] for epoch in epochs]
         total_s = sum(float(row["total_s"]) for row in selected)
-        total_tx = sum(int(row["transactions"]) for row in selected)
-        total_scan_s = sum(float(row["scan_s"]) for row in selected)
-        total_source = sum(int(row["scan_source_bytes"]) for row in selected)
-        totals.append(
+        transactions = sum(int(row["transactions"]) for row in selected)
+        scan_s = sum(float(row["scan_s"]) for row in selected)
+        source_bytes = sum(int(row["scan_source_bytes"]) for row in selected)
+        aggregate.append(
             {
+                "workload": workload,
                 "format": fmt,
                 "mode": mode,
                 "total_s": total_s,
-                "total_tps": total_tx / total_s,
-                "scan_source_mb_s": total_source / 1e6 / total_scan_s,
-                "stored_gb": sum(data["stored_sizes"][fmt].values()) / 1e9,
+                "total_tps": transactions / total_s,
+                "scan_source_mb_s": source_bytes / 1e6 / scan_s,
             }
         )
+
+totals = []
+for fmt, mode in SERIES:
+    selected = [
+        row for row in rows + car_rows if row["format"] == fmt and row["mode"] == mode
+    ]
+    total_s = sum(float(row["total_s"]) for row in selected)
+    total_tx = sum(int(row["transactions"]) for row in selected)
+    total_scan_s = sum(float(row["scan_s"]) for row in selected)
+    total_source = sum(int(row["scan_source_bytes"]) for row in selected)
+    totals.append(
+        {
+            "format": fmt,
+            "mode": mode,
+            "total_s": total_s,
+            "total_tps": total_tx / total_s,
+            "scan_source_mb_s": total_source / 1e6 / total_scan_s,
+            "stored_gb": sum(data["stored_sizes"][fmt].values()) / 1e9,
+        }
+    )
 
 equal = data["car_jetstreamer_equal_output"]
 total_lookup = {(row["format"], row["mode"]): row for row in totals}
@@ -224,13 +238,13 @@ for mode in MODES:
         for workload in WORKLOADS
     )
 lines = [
-    "# V2 and V3 reader performance",
+    "# Archive reader performance",
     "",
-    "Updated **11 September 2026**. The main test covers all 11 sample epochs, four examples, disk and network input, and both V2 and V3. All 176 cases passed after the stale public epoch 300 index was replaced.",
+    "Updated **11 September 2026**. The main test covers all 11 sample epochs, four examples, disk and network input, and both V2 and V3. All 176 cases passed after the stale public epoch 300 index was replaced. The graphs also include 44 accepted CAR file cases from 8 September.",
     "",
     "## Whole test at a glance",
     "",
-    "The time column is the sum for all four examples over all 11 epochs. TPS is total covered transactions divided by that time. Stored size is the sum of the 11 complete archives and repeats for disk and network.",
+    "The time column is the sum for all four examples over all 11 epochs. TPS is total covered transactions divided by that time. Stored size is the sum of the 11 complete archives. CAR is a historical disk baseline, so it has no row in the new network matrix.",
     "",
     "| Reader | Input | Total time | Covered TPS | Logical MB/s | Stored size |",
     "|---|---|---:|---:|---:|---:|",
@@ -242,6 +256,8 @@ for row in totals:
 lines += [
     "",
     f"Across the complete matrix, V3 used {disk_reduction:.1f}% less time than V2 from disk and {network_reduction:.1f}% less time over the network. V3 finished first in {v3_wins['local']} of 44 disk cases and {v3_wins['network']} of 44 network cases. The gain depends strongly on the example because V3 can skip most data for some indexed queries.",
+    "",
+    "The CAR disk line uses outer zstd for ten epochs. Epoch 300 uses raw CAR. These CAR measurements are two to three days older than the V2/V3 measurements, so small differences can include host and cache variation.",
     "",
     "![Completion time](artifacts/full-v2-v3-reader-20260911/completion-time.png)",
     "",
@@ -290,7 +306,7 @@ lines += [
     "",
     "## Acceptance method",
     "",
-    "The final data set contains only passing case records. V2 disk and network results come from two completed groups. V3 disk and 40 network results come from the full V3 batch. Its final batch check detected the epoch 300 repair because the repair occurred while the last epoch 1000 case ran. A comparison of all 526 before and after inventory entries found one change: the ETag of the epoch 300 block index. The size and all other entries stayed equal. The four original epoch 300 failures were removed, and a clean four-case run against the repaired inventory passed. Output hashes and counters match across V2, V3, disk, and network for every epoch and example.",
+    "The final data set contains only passing case records. V2 disk and network results come from two completed groups. V3 disk and 40 network results come from the full V3 batch. Its final batch check detected the epoch 300 repair because the repair occurred while the last epoch 1000 case ran. A comparison of all 526 before and after inventory entries found one change: the ETag of the epoch 300 block index. The size and all other entries stayed equal. The four original epoch 300 failures were removed, and a clean four-case run against the repaired inventory passed. Output hashes and counters match across V2, V3, disk, and network for every epoch and example. The separate CAR file records have passing parity for all 44 cases.",
     "",
     f"[Source data](artifacts/full-v2-v3-reader-20260911/results.json) · SHA-256 `{hashlib.sha256(raw).hexdigest()}`",
     "",
