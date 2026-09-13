@@ -157,10 +157,10 @@ pub fn open_archive(
             .with_context(|| format!("open Archive V2 generation at {}", archive_root.display()))?
     };
 
-    let manifest_epoch = archive.manifest().epoch;
-    if manifest_epoch != epoch {
+    let archive_epoch = archive.epoch();
+    if archive_epoch != epoch {
         anyhow::bail!(
-            "archive at {} is epoch {manifest_epoch}, not requested epoch {epoch}",
+            "archive at {} is epoch {archive_epoch}, not requested epoch {epoch}",
             archive_root.display()
         );
     }
@@ -905,7 +905,7 @@ fn build_dense_index_from_open_reader_to_staging<S: RangeSource>(
         batch_pairs,
         queued_batches,
     } = options;
-    let epoch = archive.manifest().epoch;
+    let epoch = archive.epoch();
     let expected_signer_binding = registry.signer_set_binding(archive);
 
     let (signer_rank, discovery_stats) = match signer_set {
@@ -1446,11 +1446,11 @@ fn finalize_index<S: RangeSource>(
         complete: true,
         omissions: OmissionCounts::default(),
         binding_kind,
-        cluster_id: archive.manifest().cluster_id.clone(),
+        cluster_id: archive.cluster_id().to_string(),
         epoch,
         archive_root: canonical_archive_root.display().to_string(),
-        generation_id: archive.manifest().generation_id.clone(),
-        generation_digest: archive.manifest().generation_digest.clone(),
+        generation_id: archive.generation_label().to_string(),
+        generation_digest: encode_sha256(archive.binding().generation_digest),
         registry: registry.registry_binding.clone(),
         registry_file_identity: registry.registry_identity.clone(),
         registry_index: registry.registry_index_binding.clone(),
