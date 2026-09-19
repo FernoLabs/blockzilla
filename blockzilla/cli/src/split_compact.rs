@@ -41,6 +41,10 @@ use crate::{
 
 const MAX_BLOCKHASHES_PER_EPOCH: usize = 432_000;
 const MESSAGE_VERSION_PREFIX: u8 = 0x80;
+const V1_MAX_ADDRESSES: u8 = 64;
+const V1_MAX_INSTRUCTIONS: u8 = 64;
+const V1_CONFIG_PRIORITY_FEE: u32 = 0b11;
+const V1_CONFIG_KNOWN_BITS: u32 = 0b1_1111;
 const ZSTD_WINDOW_LOG_MAX: u32 = 31;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -1489,6 +1493,27 @@ fn count_transaction_pubkeys_from_bytes(
     counter: &mut impl PubkeySink,
 ) -> Result<()> {
     let mut cursor = TxPubkeyCursor::new(tx_data);
+    let first = cursor.read_u8()?;
+
+    // SIMD-0385 v1 transactions put the versioned message first and carry
+    // the signatures at the tail. Legacy and v0 transactions retain the
+    // ShortU16 signature count + signatures + message envelope.
+    if first == MESSAGE_VERSION_PREFIX | 1 {
+        let signature_count = count_v1_message_pubkeys(&mut cursor, counter)?;
+        cursor.skip(
+            usize::from(signature_count)
+                .checked_mul(64)
+                .context("signature byte count overflow")?,
+        )?;
+        anyhow::ensure!(
+            cursor.is_empty(),
+            "transaction has {} trailing bytes",
+            cursor.remaining()
+        );
+        return Ok(());
+    }
+
+    cursor.position = 0;
     let signature_count = cursor.read_short_len()?;
     cursor.skip(
         signature_count
@@ -1499,13 +1524,18 @@ fn count_transaction_pubkeys_from_bytes(
     let first = cursor.read_u8()?;
     if first & MESSAGE_VERSION_PREFIX != 0 {
         let version = first & !MESSAGE_VERSION_PREFIX;
-        if version != 0 {
-            anyhow::bail!("unsupported transaction message version {version}");
+        match version {
+            0 => {
+                cursor.skip(3)?;
+                count_compiled_message_pubkeys(&mut cursor, counter)?;
+                skip_compiled_instructions(&mut cursor)?;
+                count_address_table_lookup_pubkeys(&mut cursor, counter)?;
+            }
+            1 => {
+                let _ = count_v1_message_pubkeys(&mut cursor, counter)?;
+            }
+            _ => anyhow::bail!("unsupported transaction message version {version}"),
         }
-        cursor.skip(3)?;
-        count_compiled_message_pubkeys(&mut cursor, counter)?;
-        skip_compiled_instructions(&mut cursor)?;
-        count_address_table_lookup_pubkeys(&mut cursor, counter)?;
     } else {
         cursor.skip(2)?;
         count_compiled_message_pubkeys(&mut cursor, counter)?;
@@ -1516,6 +1546,65 @@ fn count_transaction_pubkeys_from_bytes(
         anyhow::bail!("transaction has {} trailing bytes", cursor.remaining());
     }
     Ok(())
+}
+
+fn count_v1_message_pubkeys(
+    cursor: &mut TxPubkeyCursor<'_>,
+    counter: &mut impl PubkeySink,
+) -> Result<u8> {
+    let signature_count = cursor.read_u8()?;
+    cursor.skip(2)?;
+    let config_mask = cursor.read_u32_le()?;
+    cursor.skip(32)?;
+    let instruction_count = cursor.read_u8()?;
+    let address_count = cursor.read_u8()?;
+
+    anyhow::ensure!(
+        instruction_count <= V1_MAX_INSTRUCTIONS,
+        "v1 message exceeds {V1_MAX_INSTRUCTIONS} instructions"
+    );
+    anyhow::ensure!(
+        address_count <= V1_MAX_ADDRESSES,
+        "v1 message exceeds {V1_MAX_ADDRESSES} addresses"
+    );
+    anyhow::ensure!(
+        config_mask & !V1_CONFIG_KNOWN_BITS == 0,
+        "v1 config mask sets unknown bits"
+    );
+    let priority_fee_bits = config_mask & V1_CONFIG_PRIORITY_FEE;
+    anyhow::ensure!(
+        priority_fee_bits == 0 || priority_fee_bits == V1_CONFIG_PRIORITY_FEE,
+        "v1 config mask has partial priority fee bits"
+    );
+
+    for _ in 0..address_count {
+        counter.add32(cursor.take_array::<32>()?);
+    }
+    cursor.skip(
+        usize::try_from(config_mask.count_ones())?
+            .checked_mul(4)
+            .context("v1 config byte count overflow")?,
+    )?;
+
+    let mut payload_lengths = [(0usize, 0usize); V1_MAX_INSTRUCTIONS as usize];
+    for lengths in payload_lengths
+        .iter_mut()
+        .take(usize::from(instruction_count))
+    {
+        cursor.skip(1)?;
+        let accounts = usize::from(cursor.read_u8()?);
+        let data = usize::from(cursor.read_u16_le()?);
+        *lengths = (accounts, data);
+    }
+    for (accounts, data) in payload_lengths
+        .iter()
+        .copied()
+        .take(usize::from(instruction_count))
+    {
+        cursor.skip(accounts)?;
+        cursor.skip(data)?;
+    }
+    Ok(signature_count)
 }
 
 fn count_compiled_message_pubkeys(
@@ -1769,6 +1858,14 @@ impl<'a> TxPubkeyCursor<'a> {
 
     fn read_u8(&mut self) -> Result<u8> {
         Ok(self.take(1)?[0])
+    }
+
+    fn read_u16_le(&mut self) -> Result<u16> {
+        Ok(u16::from_le_bytes(*self.take_array::<2>()?))
+    }
+
+    fn read_u32_le(&mut self) -> Result<u32> {
+        Ok(u32::from_le_bytes(*self.take_array::<4>()?))
     }
 
     fn read_short_len(&mut self) -> Result<usize> {
@@ -2071,4 +2168,36 @@ pub(crate) fn load_blockhash_registry_plain(path: &Path) -> Result<Vec<[u8; 32]>
         hashes.push(hash);
     }
     Ok(hashes)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn fast_pubkey_scan_supports_v1_messages() {
+        let first_key = [1u8; 32];
+        let second_key = [2u8; 32];
+        let mut transaction = vec![MESSAGE_VERSION_PREFIX | 1];
+        transaction.extend_from_slice(&[1, 0, 0]);
+        transaction.extend_from_slice(&0b111u32.to_le_bytes());
+        transaction.extend_from_slice(&[3; 32]);
+        transaction.extend_from_slice(&[1, 2]);
+        transaction.extend_from_slice(&first_key);
+        transaction.extend_from_slice(&second_key);
+        transaction.extend_from_slice(&7u64.to_le_bytes());
+        transaction.extend_from_slice(&8u32.to_le_bytes());
+        transaction.extend_from_slice(&[1, 2]);
+        transaction.extend_from_slice(&3u16.to_le_bytes());
+        transaction.extend_from_slice(&[0, 1]);
+        transaction.extend_from_slice(&[9, 10, 11]);
+        transaction.extend_from_slice(&[0; 64]);
+
+        let mut counter = PubkeyCounter::new(2);
+        count_transaction_pubkeys_from_bytes(&transaction, &mut counter).unwrap();
+
+        assert_eq!(counter.counts.get(&first_key), Some(&1));
+        assert_eq!(counter.counts.get(&second_key), Some(&1));
+        assert_eq!(counter.counts.len(), 2);
+    }
 }
