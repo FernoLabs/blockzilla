@@ -23,6 +23,22 @@ use crate::{
 
 const RPC_X_TOKEN_HEADER: &str = "x-token";
 
+/// Highest transaction message version these `getBlock` clients can decode.
+///
+/// Version 1 is the SIMD-0385 message. Advertising 0 makes the node reject any
+/// slot that contains one, which is what Alpenglow testnet returns today.
+pub const MAX_SUPPORTED_TRANSACTION_VERSION: u8 = 1;
+
+pub(crate) fn get_block_config(commitment: &str) -> Value {
+    json!({
+        "encoding": "base64",
+        "transactionDetails": "full",
+        "rewards": true,
+        "commitment": commitment,
+        "maxSupportedTransactionVersion": MAX_SUPPORTED_TRANSACTION_VERSION
+    })
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct RpcBackfillConfig {
     pub rpc_url: String,
@@ -498,16 +514,7 @@ async fn fetch_get_block(
         "jsonrpc": "2.0",
         "id": slot,
         "method": "getBlock",
-        "params": [
-            slot,
-            {
-                "encoding": "base64",
-                "transactionDetails": "full",
-                "rewards": true,
-                "commitment": commitment,
-                "maxSupportedTransactionVersion": 0
-            }
-        ]
+        "params": [slot, get_block_config(commitment)]
     });
 
     rpc.json_rpc(rpc_url, &request, &format!("getBlock slot {slot}"))
@@ -578,4 +585,17 @@ fn write_journal(writer: &mut impl Write, record: RpcBackfillJournalRecord) -> R
     serde_json::to_writer(&mut *writer, &record)?;
     writer.write_all(b"\n")?;
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::get_block_config;
+
+    #[test]
+    fn get_block_config_accepts_version_1_transactions() {
+        let config = get_block_config("finalized");
+        assert_eq!(config["maxSupportedTransactionVersion"], 1);
+        assert_eq!(config["encoding"], "base64");
+        assert_eq!(config["commitment"], "finalized");
+    }
 }

@@ -305,16 +305,7 @@ impl HeliusRpcClient {
     async fn block(&self, slot: u64, stats: &mut RuntimeStats) -> Result<Option<Value>> {
         self.call(
             "getBlock",
-            json!([
-                slot,
-                {
-                    "encoding": "base64",
-                    "transactionDetails": "full",
-                    "rewards": true,
-                    "commitment": "finalized",
-                    "maxSupportedTransactionVersion": 0
-                }
-            ]),
+            json!([slot, crate::rpc::get_block_config("finalized")]),
             stats,
         )
         .await
