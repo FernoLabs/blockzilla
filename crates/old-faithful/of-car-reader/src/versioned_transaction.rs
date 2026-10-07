@@ -208,11 +208,60 @@ fn read_v1_message<'de, C: Config>(mut reader: impl Reader<'de>) -> ReadResult<V
     })
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, SchemaRead)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct VersionedTransaction<'a> {
-    #[wincode(with = "containers::Vec<&'a [u8; 64], ShortU16>")]
     pub signatures: Vec<&'a [u8; 64]>,
     pub message: VersionedMessage<'a>,
+}
+
+/// SIMD-0385 puts the version byte first and the signatures last.
+const V1_TRANSACTION_PREFIX: u8 = MESSAGE_VERSION_PREFIX | 1;
+
+unsafe impl<'de, C: Config> SchemaRead<'de, C> for VersionedTransaction<'de> {
+    type Dst = Self;
+
+    fn read(mut reader: impl Reader<'de>, dst: &mut MaybeUninit<Self::Dst>) -> ReadResult<()> {
+        let first = <u8 as SchemaRead<'de, C>>::get(reader.by_ref())?;
+        if first == V1_TRANSACTION_PREFIX {
+            let message = read_v1_message::<C>(reader.by_ref())?;
+            let signatures = read_borrowed_signatures(
+                reader.by_ref(),
+                usize::from(message.header.num_required_signatures),
+            )?;
+            if reader.take_byte().is_ok() {
+                return Err(trailing_bytes());
+            }
+            dst.write(Self {
+                signatures,
+                message: VersionedMessage::V1(message),
+            });
+            return Ok(());
+        }
+
+        let signature_count = crate::short_vec::read_short_u16_with_first(first, reader.by_ref())?;
+        let signatures = read_borrowed_signatures(reader.by_ref(), signature_count)?;
+        let message = <VersionedMessage<'de> as SchemaRead<'de, C>>::get(reader)?;
+        dst.write(Self {
+            signatures,
+            message,
+        });
+        Ok(())
+    }
+}
+
+fn read_borrowed_signatures<'de>(
+    mut reader: impl Reader<'de>,
+    count: usize,
+) -> ReadResult<Vec<&'de [u8; 64]>> {
+    let mut signatures = Vec::with_capacity(count);
+    for _ in 0..count {
+        let bytes = reader.take_borrowed(64)?;
+        let signature: &[u8; 64] = bytes
+            .try_into()
+            .map_err(|_| invalid_value("borrowed signature is not 64 bytes"))?;
+        signatures.push(signature);
+    }
+    Ok(signatures)
 }
 
 /// Reusable allocations for transaction and message decoding.
@@ -766,21 +815,24 @@ pub fn deserialize_versioned_transaction_reusing<'de>(
 ) -> ReadResult<VersionedTransaction<'de>> {
     let result = (|| {
         let mut reader = src;
-        let signature_count = read_short_u16_len(&mut reader)?;
-        let mut signatures = reuse.take_signatures();
-        signatures.clear();
-        ensure_fixed_items_fit(
-            reader,
-            signature_count,
-            64,
-            "truncated transaction signatures",
-        )?;
-        reuse.record_outer_use(signatures.capacity(), signature_count);
-        signatures.reserve(signature_count);
-        for _ in 0..signature_count {
-            signatures.push(take_array_ref::<64>(&mut reader)?);
+        if reader.first() == Some(&V1_TRANSACTION_PREFIX) {
+            let message = read_versioned_message_reusing(&mut reader, reuse)?;
+            let signature_count = match &message {
+                VersionedMessage::V1(body) => usize::from(body.header.num_required_signatures),
+                _ => return Err(invalid_tag_encoding(1)),
+            };
+            let signatures = read_signature_array(&mut reader, signature_count, reuse)?;
+            if !reader.is_empty() {
+                return Err(trailing_bytes());
+            }
+            return Ok(VersionedTransaction {
+                signatures,
+                message,
+            });
         }
 
+        let signature_count = read_short_u16_len(&mut reader)?;
+        let signatures = read_signature_array(&mut reader, signature_count, reuse)?;
         let message = read_versioned_message_reusing(&mut reader, reuse)?;
         if !reader.is_empty() {
             return Err(trailing_bytes());
@@ -1091,6 +1143,27 @@ fn copy_bytes_reusing(
     Ok(value)
 }
 
+fn read_signature_array<'de>(
+    reader: &mut &'de [u8],
+    signature_count: usize,
+    reuse: &mut VersionedTransactionReuse,
+) -> ReadResult<Vec<&'de [u8; 64]>> {
+    let mut signatures = reuse.take_signatures();
+    signatures.clear();
+    ensure_fixed_items_fit(
+        reader,
+        signature_count,
+        64,
+        "truncated transaction signatures",
+    )?;
+    reuse.record_outer_use(signatures.capacity(), signature_count);
+    signatures.reserve(signature_count);
+    for _ in 0..signature_count {
+        signatures.push(take_array_ref::<64>(reader)?);
+    }
+    Ok(signatures)
+}
+
 fn read_short_u16_len(reader: &mut &[u8]) -> ReadResult<usize> {
     let (len, prefix_len) = crate::short_vec::decode_shortu16_len(reader)
         .map_err(|()| invalid_value("invalid ShortU16 sequence length"))?;
@@ -1177,10 +1250,6 @@ mod tests {
     fn encoded_v1_transaction() -> Vec<u8> {
         let mut bytes = Vec::new();
 
-        // One signature, encoded with Solana's ShortU16 length prefix.
-        bytes.push(1);
-        bytes.extend_from_slice(&[7; 64]);
-
         bytes.push(MESSAGE_VERSION_PREFIX | 1);
         bytes.extend_from_slice(&[1, 0, 1]);
         bytes.extend_from_slice(&V1_CONFIG_KNOWN_BITS.to_le_bytes());
@@ -1201,6 +1270,7 @@ mod tests {
         bytes.extend_from_slice(&3u16.to_le_bytes());
         bytes.push(0);
         bytes.extend_from_slice(&[0xaa, 0xbb, 0xcc]);
+        bytes.extend_from_slice(&[7; 64]);
 
         bytes
     }
@@ -1424,7 +1494,7 @@ mod tests {
     }
 
     fn v1_transaction_bytes() -> Vec<u8> {
-        let mut bytes = transaction_prefix(0x13);
+        let mut bytes = Vec::new();
         bytes.push(MESSAGE_VERSION_PREFIX | 1);
         bytes.extend_from_slice(&[1, 0, 1]);
         bytes.extend_from_slice(&V1_CONFIG_KNOWN_BITS.to_le_bytes());
@@ -1444,6 +1514,7 @@ mod tests {
         bytes.extend_from_slice(&[2, 4]);
         bytes.extend_from_slice(&[6, 8, 10]);
         bytes.extend_from_slice(&[12]);
+        bytes.extend_from_slice(&[0x13; 64]);
         bytes
     }
 

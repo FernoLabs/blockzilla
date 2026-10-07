@@ -67,13 +67,36 @@ fn decode_short_u16<E>(
 fn read_short_u16<'de>(mut reader: impl Reader<'de>) -> ReadResult<usize> {
     decode_short_u16(|| reader.take_byte())
         .map(|(value, _)| value)
-        .map_err(|error| match error {
-            DecodeError::Input(error) => error.into(),
-            DecodeError::NonCanonical => {
-                ReadError::InvalidValue("short u16: non-canonical encoding")
-            }
-            DecodeError::Overflow => ReadError::LengthEncodingOverflow("u16::MAX"),
-        })
+        .map_err(decode_error_to_read)
+}
+
+/// Continue a short-u16 whose first byte was already consumed.
+///
+/// Transaction decoding peeks that byte to distinguish a version-1 payload
+/// (`0x81`) from a legacy or v0 signature count.
+pub(crate) fn read_short_u16_with_first<'de>(
+    first: u8,
+    mut reader: impl Reader<'de>,
+) -> ReadResult<usize> {
+    let mut yielded_first = false;
+    decode_short_u16(|| {
+        if !yielded_first {
+            yielded_first = true;
+            Ok(first)
+        } else {
+            reader.take_byte()
+        }
+    })
+    .map(|(value, _)| value)
+    .map_err(decode_error_to_read)
+}
+
+fn decode_error_to_read<E: Into<ReadError>>(error: DecodeError<E>) -> ReadError {
+    match error {
+        DecodeError::Input(error) => error.into(),
+        DecodeError::NonCanonical => ReadError::InvalidValue("short u16: non-canonical encoding"),
+        DecodeError::Overflow => ReadError::LengthEncodingOverflow("u16::MAX"),
+    }
 }
 
 #[inline]
