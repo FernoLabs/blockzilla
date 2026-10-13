@@ -1,0 +1,65 @@
+{
+  "schema": "blockzilla-ops-review-20261013",
+  "checked_unix_ms": 1791846751603,
+  "validator_pid": 2630745,
+  "free_disk_bytes": 963134136320,
+  "guard": {
+    "state": "BACKGROUND_RUNNING",
+    "updated_unix_ms": 1791846750185,
+    "source": "000000000000000018ddd9a6bb6fc50e-282459",
+    "slot_lag": 0,
+    "event_lag": 180,
+    "capture_sequence": 210880563,
+    "capture_rooted_slot": 456223208,
+    "healthy": true,
+    "capture_progress_observed": true,
+    "capture_progress_healthy": true,
+    "capture_sequence_age_seconds": 0.0,
+    "capture_root_age_seconds": 0.0,
+    "capture_progress_timeout_seconds": 60
+  },
+  "sender": {
+    "schema": "blockzilla-foundation-heartbeat-sender-v1",
+    "state": "SENT",
+    "sampled_unix_ms": 1791846747039,
+    "errors": [],
+    "send_error": null
+  },
+  "live_storage": {
+    "schema": "blockzilla-native-cold-storage-status-v1",
+    "state": "RUNNING",
+    "archived_banks": 51865,
+    "retired_banks": 51865,
+    "freed_bytes_this_run": 192428404736,
+    "keep_seconds": 7200,
+    "batch_bank_limit": 64,
+    "parallel_bundle_limit": 2,
+    "pending_bundles": 0,
+    "last_batch_banks": 64,
+    "last_batch_seconds": 19.465809195069596,
+    "full_remote_readback_required": true,
+    "updated_unix_ms": 1791846745319
+  },
+  "backfill": {
+    "state": "DOWNLOADING",
+    "epoch": 1049,
+    "updated_unix_ms": 1791844916275,
+    "car_bytes": 760850591135,
+    "temporary_cache": "private_tmpfs"
+  },
+  "old_drain": {
+    "state": "COMPLETED_VERIFIED",
+    "old_source": "000000000000000018dd84835b6e7677-282459",
+    "feed_tail": 623694,
+    "cloud_sequence": 623694,
+    "pending_intent": false,
+    "finished_events": 14,
+    "drain_disabled": true,
+    "completed_recovery_unit_disabled": true,
+    "source_failure_preserved": true,
+    "checked_unix_ms": 1791844704637
+  },
+  "worker_memory_max": "34359738368",
+  "timer_state": "active",
+  "completed_1048": 112620833984
+}

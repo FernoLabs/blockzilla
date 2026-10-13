@@ -1,0 +1,22 @@
+{
+  "state": "PASSED",
+  "commands": [
+    [
+      "/home/ubuntu/.cargo/bin/cargo",
+      "+1.98.0",
+      "test",
+      "--offline"
+    ],
+    [
+      "/home/ubuntu/.cargo/bin/cargo",
+      "+1.98.0",
+      "build",
+      "--offline",
+      "--release"
+    ]
+  ],
+  "format_status": "PASSED",
+  "updated_unix_ms": 1791653050910,
+  "tests_passed": 22,
+  "formatter": "rustfmt 1.9.0-stable (8bab26f4f6 2026-07-14)"
+}

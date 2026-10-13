@@ -1,0 +1,322 @@
+diff --git a/yellowstone-grpc-geyser/src/block_reconstruction_v2.rs b/yellowstone-grpc-geyser/src/block_reconstruction_v2.rs
+index 059e7f2..2743923 100644
+--- a/yellowstone-grpc-geyser/src/block_reconstruction_v2.rs
++++ b/yellowstone-grpc-geyser/src/block_reconstruction_v2.rs
+@@ -36,6 +36,12 @@ const MUST_HAVE_SYSVAR_ACCOUNTS: [Pubkey; 4] = [
+     Pubkey::from_str_const("SysvarRecentB1ockHashes11111111111111111111"),
+ ];
+ 
++pub(crate) fn is_block_seal_account(pubkey: &[u8]) -> bool {
++    MUST_HAVE_SYSVAR_ACCOUNTS
++        .iter()
++        .any(|required| required.as_ref() == pubkey)
++}
++
+ const fn commitment_rank(level: CommitmentLevel) -> u8 {
+     match level {
+         CommitmentLevel::Processed => 0,
+@@ -1202,6 +1208,49 @@ mod tests {
+         );
+     }
+ 
++    #[test]
++    fn hivezilla_blocks_only_accounts_keep_complete_banks() {
++        let mut storage = BlockMachineStorage::new(10);
++        let slot = 42;
++        let bank_id = 420;
++        let ordinary = Pubkey::new_unique();
++        storage.add(make_created_bank_msg(slot, Some(41), bank_id));
++        for pubkey in std::iter::once(ordinary).chain(MUST_HAVE_SYSVAR_ACCOUNTS) {
++            if is_block_seal_account(pubkey.as_ref()) {
++                storage.add(make_account_msg(slot, bank_id, pubkey, 1));
++            }
++        }
++        storage.add(make_entry_msg(slot, 0, bank_id));
++        storage.add(make_block_meta_msg(slot, 41, bank_id));
++        storage.add(make_commitment_msg(
++            slot,
++            Some(41),
++            SlotStatus::Processed,
++            bank_id,
++        ));
++        let (_, frozen) = storage
++            .pop_ready_block()
++            .expect("required sysvars must seal the bank");
++        let accounts: Vec<_> = frozen
++            .messages()
++            .iter()
++            .filter_map(|message| {
++                if let Message::Account(account) = message {
++                    Some(account.account.pubkey)
++                } else {
++                    None
++                }
++            })
++            .collect();
++        assert_eq!(accounts.len(), MUST_HAVE_SYSVAR_ACCOUNTS.len());
++        assert!(!accounts.contains(&ordinary));
++        assert!(accounts
++            .iter()
++            .all(|pubkey| is_block_seal_account(pubkey.as_ref())));
++        assert!(!is_block_seal_account(&[]));
++        assert!(!is_block_seal_account(&[0; 31]));
++    }
++
+     #[test]
+     fn does_not_seal_without_created_bank() {
+         let mut storage = BlockMachineStorage::new(10);
+diff --git a/yellowstone-grpc-geyser/src/config.rs b/yellowstone-grpc-geyser/src/config.rs
+index a290437..34f3559 100644
+--- a/yellowstone-grpc-geyser/src/config.rs
++++ b/yellowstone-grpc-geyser/src/config.rs
+@@ -27,6 +27,9 @@ pub const DEFAULT_TRITON_AUTH_MAX_CONCURRENT_REQUESTS: NonZeroUsize =
+ #[serde(deny_unknown_fields)]
+ pub struct Config {
+     pub libpath: String,
++    /// Keep block data and only system accounts needed for block sealing.
++    #[serde(default)]
++    pub hivezilla_blocks_only: bool,
+     #[serde(default)]
+     pub log: ConfigLog,
+     #[serde(default)]
+diff --git a/yellowstone-grpc-geyser/src/metrics.rs b/yellowstone-grpc-geyser/src/metrics.rs
+index d21e868..f25649f 100644
+--- a/yellowstone-grpc-geyser/src/metrics.rs
++++ b/yellowstone-grpc-geyser/src/metrics.rs
+@@ -51,6 +51,22 @@ lazy_static::lazy_static! {
+         &["reason"]
+     ).unwrap();
+ 
++    static ref HIVEZILLA_BLOCKS_ONLY: IntGauge = IntGauge::new(
++        "hivezilla_blocks_only", "One when the fixed block-stream profile is active"
++    ).unwrap();
++
++    static ref HIVEZILLA_ACCOUNT_UPDATES_SKIPPED: IntCounter = IntCounter::new(
++        "hivezilla_account_updates_skipped_total", "Account updates skipped before data copying"
++    ).unwrap();
++
++    static ref HIVEZILLA_ACCOUNT_BYTES_SKIPPED: IntCounter = IntCounter::new(
++        "hivezilla_account_bytes_skipped_total", "Account data bytes skipped before copying"
++    ).unwrap();
++
++    static ref HIVEZILLA_ACCOUNT_UPDATES_KEPT: IntCounter = IntCounter::new(
++        "hivezilla_account_updates_kept_total", "System account updates retained for complete blocks"
++    ).unwrap();
++
+     static ref MESSAGE_QUEUE_SIZE: IntGauge = IntGauge::new(
+         "yellowstone_grpc_geyser_message_queue_size", "Size of geyser message queue"
+     ).unwrap();
+@@ -250,6 +266,10 @@ impl PrometheusService {
+             register!(SLOT_STATUS_PLUGIN);
+             register!(INVALID_FULL_BLOCKS);
+             register!(MESSAGE_QUEUE_SIZE);
++            register!(HIVEZILLA_BLOCKS_ONLY);
++            register!(HIVEZILLA_ACCOUNT_UPDATES_SKIPPED);
++            register!(HIVEZILLA_ACCOUNT_BYTES_SKIPPED);
++            register!(HIVEZILLA_ACCOUNT_UPDATES_KEPT);
+             register!(BLOCK_RECONSTRUCTION_QUEUE_SIZE);
+             register!(SUBSCRIPTIONS_TOTAL);
+             register!(MISSED_STATUS_MESSAGE);
+@@ -654,6 +674,10 @@ pub fn reset_metrics() {
+     PRE_ENCODED_CACHE_HIT.reset();
+     PRE_ENCODED_CACHE_MISS.reset();
+ 
++    HIVEZILLA_BLOCKS_ONLY.set(0);
++    HIVEZILLA_ACCOUNT_UPDATES_SKIPPED.reset();
++    HIVEZILLA_ACCOUNT_BYTES_SKIPPED.reset();
++    HIVEZILLA_ACCOUNT_UPDATES_KEPT.reset();
+     GEYSER_EVENT_DROPPED.reset();
+     GEYSER_BLOCK_MISMATCH_TRANSACTION.reset();
+     GEYSER_UNTRACK_SLOT_EVENT_DROPPED.reset();
+@@ -667,3 +691,16 @@ pub fn reset_metrics() {
+     // - VERSION contains build info set once on startup
+     // - GEYSER_ACCOUNT_UPDATE_RECEIVED is a Histogram which doesn't support reset()
+ }
++
++pub fn set_hivezilla_blocks_only(enabled: bool) {
++    HIVEZILLA_BLOCKS_ONLY.set(i64::from(enabled));
++}
++
++pub fn hivezilla_account_update_skipped(bytes: usize) {
++    HIVEZILLA_ACCOUNT_UPDATES_SKIPPED.inc();
++    HIVEZILLA_ACCOUNT_BYTES_SKIPPED.inc_by(bytes as u64);
++}
++
++pub fn hivezilla_account_update_kept() {
++    HIVEZILLA_ACCOUNT_UPDATES_KEPT.inc();
++}
+diff --git a/yellowstone-grpc-geyser/src/plugin/entry.rs b/yellowstone-grpc-geyser/src/plugin/entry.rs
+index 4198bb5..ea0cdfe 100644
+--- a/yellowstone-grpc-geyser/src/plugin/entry.rs
++++ b/yellowstone-grpc-geyser/src/plugin/entry.rs
+@@ -48,6 +48,7 @@ pub struct PluginInner {
+     snapshot_channel: Mutex<Option<crossbeam_channel::Sender<Box<Message>>>>,
+     snapshot_channel_closed: AtomicBool,
+     filter_limits: FilterLimits,
++    hivezilla_blocks_only: bool,
+     grpc_channel: mpsc::UnboundedSender<Message>, // geyser_loop
+     deshred_channel: broadcast::Sender<Message>,  // deshred_client_loop
+     contact_info_channel: mpsc::UnboundedSender<ContactInfoNotification>,
+@@ -128,7 +129,11 @@ impl GeyserPlugin for Plugin {
+     }
+ 
+     fn on_load(&mut self, config_file: &str, is_reload: bool) -> PluginResult<()> {
+-        let config = Config::load_from_file(config_file)?;
++        let mut config = Config::load_from_file(config_file)?;
++        let hivezilla_blocks_only = config.hivezilla_blocks_only;
++        if hivezilla_blocks_only {
++            config.grpc.filter_limits = FilterLimits::block_stream_only();
++        }
+         let filter_limits = config.grpc.filter_limits.clone();
+ 
+         // Setup logger
+@@ -138,6 +143,7 @@ impl GeyserPlugin for Plugin {
+ 
+         // Reset metrics to prevent accumulation across plugin reload cycles
+         metrics::reset_metrics();
++        metrics::set_hivezilla_blocks_only(hivezilla_blocks_only);
+ 
+         // Create inner
+         let mut builder = Builder::new_multi_thread();
+@@ -214,6 +220,7 @@ impl GeyserPlugin for Plugin {
+             snapshot_channel: Mutex::new(grpc_service_result.snapshot_tx),
+             snapshot_channel_closed: AtomicBool::new(false),
+             filter_limits,
++            hivezilla_blocks_only,
+             grpc_channel: grpc_channel_tx,
+             deshred_channel: grpc_service_result.deshred_broadcast_tx,
+             contact_info_channel: grpc_service_result.contact_info_tx,
+@@ -317,6 +324,14 @@ impl GeyserPlugin for Plugin {
+                 }
+             }
+ 
++            if inner.hivezilla_blocks_only {
++                if !crate::block_reconstruction_v2::is_block_seal_account(account.pubkey) {
++                    metrics::hivezilla_account_update_skipped(account.data.len());
++                    return Ok(());
++                }
++                metrics::hivezilla_account_update_kept();
++            }
++
+             let message = Message::Account(Arc::new(MessageAccount::from_geyser(
+                 account,
+                 slot,
+@@ -611,7 +626,9 @@ impl GeyserPlugin for Plugin {
+     }
+ 
+     fn contact_info_notifications_enabled(&self) -> bool {
+-        true
++        self.inner
++            .as_ref()
++            .is_none_or(|inner| !inner.hivezilla_blocks_only)
+     }
+ 
+     fn account_data_notifications_enabled(&self) -> bool {
+@@ -631,11 +648,15 @@ impl GeyserPlugin for Plugin {
+     }
+ 
+     fn deshred_transaction_notifications_enabled(&self) -> bool {
+-        true
++        self.inner
++            .as_ref()
++            .is_none_or(|inner| !inner.hivezilla_blocks_only)
+     }
+ 
+     fn deshred_transaction_alt_resolution_enabled(&self) -> bool {
+-        true
++        self.inner
++            .as_ref()
++            .is_none_or(|inner| !inner.hivezilla_blocks_only)
+     }
+ 
+     fn block_footer_notifications_enabled(&self) -> bool {
+diff --git a/yellowstone-grpc-geyser/src/plugin/filter/filter.rs b/yellowstone-grpc-geyser/src/plugin/filter/filter.rs
+index e6b6a3a..4cd5490 100644
+--- a/yellowstone-grpc-geyser/src/plugin/filter/filter.rs
++++ b/yellowstone-grpc-geyser/src/plugin/filter/filter.rs
+@@ -2175,7 +2175,7 @@ impl FilterBlocks {
+             if !(matches!(filter.include_accounts, None | Some(false)) || limits.include_accounts) {
+                 return Err(FilterError::CreateBlocksNotAllowed("accounts"));
+             }
+-            if !(matches!(filter.include_entries, None | Some(false)) || limits.include_accounts) {
++            if !(matches!(filter.include_entries, None | Some(false)) || limits.include_entries) {
+                 return Err(FilterError::CreateBlocksNotAllowed("entries"));
+             }
+ 
+@@ -5231,6 +5231,46 @@ mod filter_kind_coverage {
+         }
+     }
+ 
++    #[test]
++    fn hivezilla_blocks_only_accepts_entries_without_account_output() {
++        let limits = FilterLimits::block_stream_only();
++        let request = blocks_request(Some(true), Some(false), Some(true), vec![], None);
++        assert!(Filter::new(&request, &limits, &mut tests::create_filter_names()).is_ok());
++        let requested_accounts = blocks_request(Some(true), Some(true), Some(true), vec![], None);
++        assert!(Filter::new(
++            &requested_accounts,
++            &limits,
++            &mut tests::create_filter_names()
++        )
++        .is_err());
++        let custom_account_filter = blocks_request(
++            Some(true),
++            Some(false),
++            Some(true),
++            vec![Pubkey::new_unique().to_string()],
++            None,
++        );
++        assert!(Filter::new(
++            &custom_account_filter,
++            &limits,
++            &mut tests::create_filter_names()
++        )
++        .is_err());
++        let standalone_accounts = SubscribeRequest {
++            accounts: HashMap::from([(
++                "accounts".to_owned(),
++                SubscribeRequestFilterAccounts::default(),
++            )]),
++            ..Default::default()
++        };
++        assert!(Filter::new(
++            &standalone_accounts,
++            &limits,
++            &mut tests::create_filter_names()
++        )
++        .is_err());
++    }
++
+     fn block_payload(update: &FilteredUpdate) -> &FilteredUpdateBlock {
+         match &update.message {
+             FilteredUpdateOneof::Block(block) => block,
+diff --git a/yellowstone-grpc-geyser/src/plugin/filter/limits.rs b/yellowstone-grpc-geyser/src/plugin/filter/limits.rs
+index 8fe806e..5033982 100644
+--- a/yellowstone-grpc-geyser/src/plugin/filter/limits.rs
++++ b/yellowstone-grpc-geyser/src/plugin/filter/limits.rs
+@@ -33,6 +33,25 @@ pub struct FilterLimits {
+ }
+ 
+ impl FilterLimits {
++    /// Fixed full blocks: no account predicates or standalone account/transaction feeds.
++    pub fn block_stream_only() -> Self {
++        let mut limits = Self::default();
++        limits.accounts.max = 0;
++        limits.accounts.data_slice_max = 0;
++        limits.transactions.max = 0;
++        limits.transactions_status.max = 0;
++        limits.deshred_transactions.max = 0;
++        limits.slots.max = 1;
++        limits.blocks.max = 1;
++        limits.blocks.account_include_max = 0;
++        limits.blocks.cuckoo_max_size = 0;
++        limits.blocks.include_accounts = false;
++        limits.blocks_meta.max = 1;
++        limits.block_footer.max = 1;
++        limits.entries.max = 1;
++        limits
++    }
++
+     pub const fn check_max(len: usize, max: usize) -> FilterLimitsCheckResult {
+         if len <= max {
+             Ok(())

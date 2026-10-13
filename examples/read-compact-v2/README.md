@@ -1,5 +1,10 @@
 # Read Compact V2
 
+For your first block, use the [quick start](../../docs/start/quick-start.md).
+It uses the included CAR fixture and the reader's small
+[`first_read` callback](../../crates/compact-v2/blockzilla-compact-v2-reader/examples/first_read.rs).
+The commands below are larger workload examples.
+
 These four small programs show how to use the Compact V2 SDK:
 
 - [Count the epoch in approximate slot-hours](src/bin/read-compact-v2-slot-hours.rs)

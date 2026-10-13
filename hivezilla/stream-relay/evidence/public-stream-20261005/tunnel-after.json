@@ -1,0 +1,17 @@
+{
+  "version": 2,
+  "config": {
+    "ingress": [
+      {
+        "service": "http://127.0.0.1:8871",
+        "hostname": "stream.blockzilla.dev"
+      },
+      {
+        "service": "http_status:404"
+      }
+    ],
+    "warp-routing": {
+      "enabled": false
+    }
+  }
+}

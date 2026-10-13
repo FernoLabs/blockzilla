@@ -10,6 +10,21 @@ and draft [record and sync protocol](../../docs/design/hivezilla-record-and-sync
 describe how the current source-specific paths converge into one hive.
 The [implementation assessment](../../docs/architecture/hivezilla-v1-implementation-plan.md)
 maps those contracts to the existing modules and ordered build gates.
+The [live relaunch review](../../docs/architecture/hivezilla-live-relaunch.md)
+sets the current target: one Hetzner reader, one NAS custody consumer, shared
+live subscriptions for other projects, and Blockzilla reconciliation,
+compaction, and finalized block backfill on the NAS.
+
+The [local validator execution test](EXECUTION-CANARY.md) uses a separate
+current-schema stream with finalized blocks from a self-operated validator.
+It retains raw execution evidence and builds a verified Compact V2 test
+archive. Its output is explicitly noncanonical. See the
+[validator operations guide](../../docs/architecture/hivezilla-live-canary-operations.md)
+for the bounded node test and local control commands.
+The [validator dashboard](../dashboard/README.md) is a loopback-only Topcoat
+page for the canary report and validator metrics.
+The planned [Hivezilla-owned Geyser plugin](../../docs/architecture/hivezilla-geyser-plugin-v1.md)
+will first run beside Yellowstone and write a separate durable local stream.
 
 Hivezilla is under active development. The repository currently includes:
 
@@ -19,9 +34,13 @@ Hivezilla is under active development. The repository currently includes:
 - a checksummed, segmented spool with inspection, replay, repair, and
   materialization tools;
 - mTLS receiver, push replication, pull replication, and receiver-to-spool
-  bridging; and
+  bridging;
 - bounded supervision, disk admission, rotation, retention, and monitoring
-  helpers.
+  helpers; and
+- a durable V1 overflow range catalog, an R2 backend, and explicit commands
+  for verified upload and recovery of sealed segments, including bounded
+  conversion of committed gRPC journals. Automatic spill and NAS recovery
+  remain pending.
 
 Canonical multi-source selection and a continuous rooted shred-to-block
 promotion path remain planned. Dynamic source failover, peer membership, and
@@ -52,9 +71,11 @@ replay. It does not compact archives or allow subscribers to affect capture,
 custody, or retention. The proposed
 [node-role schema](../../docs/architecture/hivezilla-node-roles.md) separates
 capture, terminal custody/download, processing, public exit, compact workers,
-archive reads, and operations. Blockzilla remains the scheduler and canonical
-catalog authority; a fenced Hivezilla compact worker performs the physical
-Archive V2 build and upload.
+archive reads, and operations. The relaunch puts reconciliation and Compact V2
+building in Blockzilla on the NAS. Hivezilla may prepare data tied to its source.
+Ordinary subscribers use Blockzilla for finalized block backfill; Compact V2
+cannot replace exact raw-event replay. These subscription and backfill runtimes
+remain to be implemented.
 
 ## Try it
 
@@ -77,11 +98,144 @@ The main command groups are:
 | Replicate | `serve-ingest-receiver`, `replicate-grpc-raw`, `pull-grpc-raw`, `serve-grpc-raw-pull-source`, `serve-shred-spool-pull-source`, `bridge-receiver-grpc-raw` |
 | Capture | `capture-grpc`, `inspect-capture` |
 | Repair | `sync-rpc-epoch`, `backfill-rpc`, `prepare-epoch-repair` |
+| Overflow | `spill-grpc-raw-overflow`, `upload-overflow-segment`, `recover-overflow-segment`, `inspect-overflow-index` |
 | Operate | `serve-shred-reader`, `serve-shred-status`, `supervise`, `notify-supervisor` |
 
 Use command-specific `--help` before starting a networked or disk-writing task.
 Examples reference credentials through environment variables or files; do not
 place secret values in them.
+
+### Overflow catalog inspection
+
+Read an existing V1 overflow catalog without object-store access:
+
+```bash
+cargo run --locked -p hivezilla -- \
+  inspect-overflow-index --state-dir /path/to/overflow-state
+```
+
+JSON output lists each reader and stream, pending ranges, verified ranges and
+bytes, and the contiguous verified record prefix. The prefix stops at a gap or
+an unverified upload. It is not a NAS ACK, a current remote-availability check,
+or proof of complete blocks. Inspection does not initialize missing state.
+
+The catalog persists upload intents before remote writes and verifies the
+stored bytes before it records a receipt. Recovery rechecks object identity,
+length, version, checksum, and the complete record chain. The library supports
+bounded range pages for restart recovery and refuses overlapping or conflicting
+ranges. It cannot delete data or advance a consumer ACK. Source journal
+adapters and the continuous spill/recovery loop are not wired to this catalog
+yet.
+
+### Bounded R2 overflow transfer
+
+Upload one **sealed HIVESEG1 segment**, then recover its exact bytes into a new
+local file. These commands do not accept legacy recorder WAL files. They use
+the existing uploader's R2 settings file or environment variables.
+
+```bash
+cargo run --locked -p hivezilla -- \
+  upload-overflow-segment \
+  --state-dir /path/to/overflow-state \
+  --credentials-file /path/to/r2.env \
+  --remote-prefix hivezilla/hetzner-1 \
+  --reader-id hetzner-1 \
+  --segment /path/to/sealed-segment.hseg
+
+cargo run --locked -p hivezilla -- \
+  recover-overflow-segment \
+  --state-dir /path/to/overflow-state \
+  --credentials-file /path/to/r2.env \
+  --remote-prefix hivezilla/hetzner-1 \
+  --reader-id hetzner-1 \
+  --stream-id STREAM_ID_FROM_UPLOAD_REPORT \
+  --sequence RECORD_SEQUENCE_FROM_UPLOAD_REPORT \
+  --output /existing/directory/recovered.hseg
+```
+
+The upload report includes `stream_id`, `first_sequence`, and `next_sequence`.
+Choose a record sequence in that interval. Recovery requires the existing
+catalog; it does not discover objects by listing the bucket. This is a manual
+transfer path, not the NAS live consumer or a deployed spill service.
+
+The backend reuses the signed S3 client and conditional writes documented in
+[R2 S3 compatibility](https://developers.cloudflare.com/r2/api/s3/api/).
+It does a full SHA-256 read-back before the catalog records verification.
+User-supplied checksum metadata and ETags do not replace that check. Transfers
+are limited to 256 MiB per segment by default and can use a smaller
+`--max-segment-bytes` value. The limit bounds encoded bytes, not total process
+memory; decoding and upload buffers also use memory. HTTP retries share one
+immutable body buffer. Network I/O runs in a blocking worker.
+
+The catalog namespace binds the endpoint, bucket, and prefix. Credentials may
+rotate without changing it. A lost upload reply leaves a pending intent; rerun
+the same upload to verify the existing object without replacing it. Failed
+uploads preserve the source file. Failed recovery does not publish a partial
+output; successful recovery syncs the new file and its directory. Existing
+output files are never replaced. These commands perform no ACK or deletion.
+
+### Committed gRPC journal to R2
+
+`spill-grpc-raw-overflow` reads committed records from the live recorder. It
+keeps each compressed payload unchanged and maps each logical source sequence
+to the same V1 record sequence. It does not sort, deduplicate, or select blocks.
+Blockzilla owns those decisions.
+
+```bash
+cargo run --locked -p hivezilla -- \
+  spill-grpc-raw-overflow \
+  --state-dir /path/to/overflow-state \
+  --credentials-file /path/to/r2.env \
+  --remote-prefix hivezilla/hetzner-1 \
+  --reader-id hetzner-1 \
+  --manifest /path/to/trusted-stream.manifest \
+  --cache-root /path/to/grpc-hot-cache \
+  --max-records-per-segment 256 \
+  --max-segments 4
+```
+
+Use `--source-dir` instead of `--cache-root` for one generation. The cache-root
+path follows validated physical rotations within the manifest's logical source
+stream. Copied boundary records are not repeated. Other logical streams need
+their own manifests and spill passes.
+
+The manifest must be a canonical binary `StreamManifestV1` from trusted stream
+configuration. Use V1 payload format **1/version 1** for this adapter; the
+legacy recorder's format number **2** means gRPC, while V1 format **2** means
+raw shreds. Build the producer descriptor with
+`overflow::grpc::GrpcRawOverflowDescriptor::new(source, max_decoded_bytes)`
+and its `encode()` method. Bind the actual logical `ReplicationStreamId`,
+cluster genesis, R2 namespace, gap stream, and terminal durability policy in
+the manifest. This command does not create a policy or a stream registry.
+Manifest provisioning remains a deployment requirement. Do not use example
+identities or a placeholder manifest hash for production.
+
+The descriptor pins the Yellowstone 12.7.0 protobuf schema and the admitted
+field set. The adapter checks exact protobuf decode/encode equality, block
+identity, hashes, and one complete zstd frame. Unknown fields, unsupported
+transaction config, extra zstd frames, or corruption stop conversion. Stored
+compressed bytes are never recompressed; the legacy recorder did not persist
+its original compression settings. The manifest is uploaded and verified
+before any segment.
+
+One pass handles at most four segments by default, with at most 256 records
+per segment. Both count limits can be set to 1..=1024. Encoded segments use the
+R2 byte limit above. Decoded input is limited to 512 MiB per segment, with a
+per-record limit in the immutable producer descriptor of at most 128 MiB.
+These limits do not represent peak process memory.
+
+Rerun the command to resume from the catalog. An unfinished upload retains its
+original segment boundary and checksum, even when the journal grows or the
+record-count setting changes. A missing or changed source range stops the
+pass. An incomplete handoff tail waits for the writer to commit it. The JSON
+report includes `next_sequence`, `verified_records`, and
+`incomplete_handoff_tail_bytes`. `reached_snapshot_end` refers only to the
+selected generation snapshots; a live writer can append immediately afterward.
+
+Source journals remain intact. This command supplies a bounded gRPC spill
+pass, not an automatic spill controller, a shred adapter, or NAS reconciliation.
+Disable legacy source cleanup when using this V1 path until the V1 custody
+policy and recovery process are in place.
 
 ### Offline ledger projection shadow
 

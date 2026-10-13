@@ -1,0 +1,7 @@
+{
+  "state": "LOG_CONTENT_DIFFERENCE",
+  "epoch": 1049,
+  "full_block_comparison": "PASSED",
+  "metadata_sample": "FAILED",
+  "native_data_left_foundation": false
+}

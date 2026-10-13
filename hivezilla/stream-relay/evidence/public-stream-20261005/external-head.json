@@ -1,0 +1,11 @@
+{
+  "schema": "blockzilla-public-stream-external-head-check-v1",
+  "client": "operator Mac",
+  "dns": "Cloudflare DNS over HTTPS",
+  "status": 200,
+  "state": "LIVE",
+  "last_slot": 453702247,
+  "intake_age_ms": 52,
+  "ssh_transport": false,
+  "system_dns_still_cached_negative": true
+}

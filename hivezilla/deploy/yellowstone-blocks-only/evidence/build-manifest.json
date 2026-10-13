@@ -1,0 +1,13 @@
+{
+  "created_utc": "2026-10-01T09:32:56.195321+00:00",
+  "repository": "https://github.com/rpcpool/yellowstone-grpc",
+  "release": "v16.0.0+solana.4.3.0",
+  "revision": "bfd1d7ee548081b6e36d4238d5ce8f34c94c4fb6",
+  "rust_toolchain": "1.97.1",
+  "lib_sha256": "e24e48a18f9b1a7b67a51f8b3fc1d005f7cbb27b5954eb8707e89aa74f202df6",
+  "config_check_sha256": "c46075dd605c111b1d7752bc9d1ffe13ac9ad817680dd4b6fa78dd5e563159a3",
+  "patch_sha256": "816cbf1eb1a81d363a07e61e7239803aaf4083e84b825ded943a591393a3e01b",
+  "staged_config": "/home/ubuntu/live/hivezilla-validator-20260930/config/yellowstone-blocks-only.json",
+  "stock_config": "/home/ubuntu/live/hivezilla-validator-20260930/config/yellowstone-stock-20261001.json",
+  "tests_passed": 168
+}

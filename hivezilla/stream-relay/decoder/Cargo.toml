@@ -1,0 +1,30 @@
+[package]
+name = "blockzilla-stream-decoder"
+version = "0.1.0"
+edition = "2024"
+rust-version = "1.98"
+publish = false
+
+[workspace]
+
+[lib]
+crate-type = ["rlib", "cdylib"]
+
+[dependencies]
+anyhow = "1.0.104"
+blockzilla-bank-stream-v2 = { path = "../../../crates/blockzilla-bank-stream-v2" }
+blockzilla-archive-v2 = { path = "../../../crates/compact-v2/blockzilla-archive-v2", default-features = false, features = ["known-program-logs"] }
+blockzilla-compact = { path = "../../../crates/compact-v2/blockzilla-compact", default-features = false, features = ["known-program-logs"] }
+blockzilla-primitives = { path = "../../../crates/blockzilla-primitives", default-features = false }
+bs58 = "0.5.1"
+ruzstd = "0.9.0"
+serde = { version = "1.0.229", features = ["derive"] }
+serde_json = "1.0.151"
+wincode = "=0.6.1"
+
+[profile.release]
+opt-level = 3
+lto = "thin"
+codegen-units = 1
+panic = "abort"
+strip = true

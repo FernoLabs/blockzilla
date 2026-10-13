@@ -1,0 +1,13 @@
+{
+  "state": "APPLIED_WITHOUT_RESTART",
+  "unit": "hivezilla-bank-v2-origin.service",
+  "memory_max_before_bytes": 8589934592,
+  "memory_max_after_bytes": 17179869184,
+  "origin_pid_unchanged": true,
+  "validator_pid_unchanged": true,
+  "compact_worker_pid_unchanged": true,
+  "source_and_spools_unchanged": true,
+  "persisted_by_systemd_set_property": true,
+  "reason": "origin hit its 8 GiB cgroup memory limit; retained 4 GiB replay plus process and filesystem cache need headroom",
+  "checked_unix_ms": 1791666664389
+}

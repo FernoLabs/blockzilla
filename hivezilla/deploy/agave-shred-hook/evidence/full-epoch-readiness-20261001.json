@@ -1,0 +1,117 @@
+{
+  "schema": "hivezilla-full-epoch-readiness-assessment-v1",
+  "observed_utc": "2026-10-01T13:10:32.996878+00:00",
+  "validator_health": "ok",
+  "epoch_info": {
+    "absoluteSlot": 452297125,
+    "blockHeight": 430336086,
+    "epoch": 1046,
+    "slotIndex": 425125,
+    "slotsInEpoch": 432000,
+    "transactionCount": 554808385676
+  },
+  "epoch_schedule": {
+    "firstNormalEpoch": 0,
+    "firstNormalSlot": 0,
+    "leaderScheduleSlotOffset": 432000,
+    "slotsPerEpoch": 432000,
+    "warmup": false
+  },
+  "recent_performance_samples": [
+    {
+      "numNonVoteTransactions": 147713,
+      "numSlots": 221,
+      "numTransactions": 295343,
+      "samplePeriodSecs": 60,
+      "slot": 452297041
+    },
+    {
+      "numNonVoteTransactions": 147032,
+      "numSlots": 224,
+      "numTransactions": 296849,
+      "samplePeriodSecs": 60,
+      "slot": 452296820
+    },
+    {
+      "numNonVoteTransactions": 111105,
+      "numSlots": 227,
+      "numTransactions": 262773,
+      "samplePeriodSecs": 60,
+      "slot": 452296596
+    },
+    {
+      "numNonVoteTransactions": 133728,
+      "numSlots": 226,
+      "numTransactions": 284890,
+      "samplePeriodSecs": 60,
+      "slot": 452296369
+    },
+    {
+      "numNonVoteTransactions": 124447,
+      "numSlots": 228,
+      "numTransactions": 276914,
+      "samplePeriodSecs": 60,
+      "slot": 452296143
+    },
+    {
+      "numNonVoteTransactions": 129552,
+      "numSlots": 221,
+      "numTransactions": 277273,
+      "samplePeriodSecs": 60,
+      "slot": 452295915
+    },
+    {
+      "numNonVoteTransactions": 124944,
+      "numSlots": 228,
+      "numTransactions": 277305,
+      "samplePeriodSecs": 60,
+      "slot": 452295694
+    },
+    {
+      "numNonVoteTransactions": 108055,
+      "numSlots": 217,
+      "numTransactions": 253069,
+      "samplePeriodSecs": 60,
+      "slot": 452295466
+    },
+    {
+      "numNonVoteTransactions": 114587,
+      "numSlots": 230,
+      "numTransactions": 265693,
+      "samplePeriodSecs": 60,
+      "slot": 452295249
+    },
+    {
+      "numNonVoteTransactions": 103274,
+      "numSlots": 226,
+      "numTransactions": 254391,
+      "samplePeriodSecs": 60,
+      "slot": 452295019
+    }
+  ],
+  "observed_slots_per_second": 3.7466666666666666,
+  "target_epoch": 1047,
+  "target_start_slot": 452304000,
+  "target_end_slot_inclusive": 452735999,
+  "estimated_seconds_to_next_epoch": 1834.964412811388,
+  "estimated_epoch_seconds": 115302.49110320285,
+  "free_bytes": 2294023352320,
+  "reserve_free_bytes": 536870912000,
+  "available_after_reserve_bytes": 1757152440320,
+  "grpc_sample_bytes_per_block": 897981.109375,
+  "estimated_grpc_epoch_bytes_upper_slot_count": 387927839250.0,
+  "raw_capture_state": "ACTIVE",
+  "raw_journal_bytes": 25571675245,
+  "raw_root_limit_bytes": 68719476736,
+  "recent_raw_journal_bytes_per_second": 9490092.956396742,
+  "raw_rate_sample_seconds": 202.439,
+  "estimated_seconds_to_raw_quota": 4546.61526385961,
+  "estimated_raw_epoch_bytes": 1094231358673.5034,
+  "current_grpc_default_max_capture_bytes": 4294967296,
+  "current_grpc_automatic_reconnect": false,
+  "raw_producer_recovery_requires_validator_restart": true,
+  "full_epoch_run_started": false,
+  "estimates_assume_current_rates": true,
+  "archive_verification_run": false,
+  "r2_publication_run": false
+}

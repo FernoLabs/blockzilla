@@ -74,6 +74,8 @@ const POH_MIGRATION_BATCH_ROWS: usize = 1024;
 #[derive(Debug, Serialize)]
 pub(crate) struct PohVerificationReport {
     archive: String,
+    source_profile: &'static str,
+    complete_source: bool,
     blocks_verified: u64,
     entries_verified: u64,
     transactions_consumed: u64,
@@ -4220,11 +4222,141 @@ pub(crate) fn verify_archive_v2_poh(
     verify_archive_v2_poh_with_predecessor_policy(archive_dir, requested_threads, max_blocks, None)
 }
 
+#[derive(Debug, Deserialize, PartialEq)]
+struct NativePohBlock {
+    block_id: u32,
+    slot: u64,
+    blockhash: [u8; 32],
+    parent_slot: u64,
+    parent_blockhash: [u8; 32],
+    transactions: u64,
+    signatures: u64,
+    entries: u64,
+}
+
+fn native_poh_blocks(archive_dir: &Path) -> Result<Vec<NativePohBlock>> {
+    let read_json = |name: &str| -> Result<Vec<u8>> {
+        let path = archive_dir.join(name);
+        anyhow::ensure!(
+            fs::metadata(&path)?.len() <= 16 << 20,
+            "native receipt exceeds 16 MiB"
+        );
+        read_exact_file(path)
+    };
+    let bytes = read_json("DIRECT-AGAVE-NORMALIZED.v1.json")?;
+    let receipt: serde_json::Value = serde_json::from_slice(&bytes)?;
+    let marker: serde_json::Value =
+        serde_json::from_slice(&read_json("DIRECT-AGAVE-COMPACT.v1.json")?)?;
+    anyhow::ensure!(
+        receipt["schema"] == "hivezilla-direct-agave-normalized-v1"
+            && marker["schema"] == "hivezilla-direct-agave-compact-v1"
+            && marker["state"] == "COMPLETE"
+            && receipt["source_profile"] == "agave-bank-callbacks-v1"
+            && receipt["canonical"] == false
+            && receipt["finalized"] == true
+            && marker["canonical"] == false
+            && marker["finalized"] == true
+            && marker["publication_ready"] == false,
+        "not a committed native Agave execution projection"
+    );
+    for key in [
+        "session_id",
+        "agave_revision",
+        "genesis_hash",
+        "node_identity",
+        "epoch",
+        "start_slot",
+        "end_slot_exclusive",
+        "source_profile",
+    ] {
+        anyhow::ensure!(
+            receipt[key] == marker[key] && !receipt[key].is_null(),
+            "native receipt/marker mismatch: {key}"
+        );
+    }
+    let digest: [u8; 32] = Sha256::digest(&bytes).into();
+    anyhow::ensure!(
+        marker["source_receipt_sha256"] == hex32(&digest),
+        "native source receipt digest mismatch"
+    );
+    let blocks: Vec<NativePohBlock> = serde_json::from_value(receipt["blocks"].clone())?;
+    let marked: Vec<NativePohBlock> = serde_json::from_value(marker["produced_blocks"].clone())?;
+    anyhow::ensure!(
+        !blocks.is_empty()
+            && blocks.len() <= 4096
+            && blocks == marked
+            && marker["blocks"] == blocks.len(),
+        "native block inventory mismatch"
+    );
+    let epoch = receipt["epoch"].as_u64().context("missing native epoch")?;
+    for (position, block) in blocks.iter().enumerate() {
+        anyhow::ensure!(
+            block.block_id as usize == position
+                && block.slot / 432_000 == epoch
+                && block.parent_slot < block.slot
+                && block.entries > 0,
+            "invalid native block identity"
+        );
+        if position > 0 {
+            let parent = &blocks[position - 1];
+            anyhow::ensure!(
+                block.slot > parent.slot
+                    && block.parent_slot == parent.slot
+                    && block.parent_blockhash == parent.blockhash,
+                "native parent chain gap"
+            );
+        }
+    }
+    anyhow::ensure!(
+        receipt["start_slot"] == blocks[0].slot
+            && receipt["end_slot_exclusive"]
+                == blocks
+                    .last()
+                    .unwrap()
+                    .slot
+                    .checked_add(1)
+                    .context("native slot overflow")?,
+        "native range mismatch"
+    );
+    Ok(blocks)
+}
+
+pub(crate) fn verify_direct_agave_available_poh(
+    archive_dir: &Path,
+    requested_threads: usize,
+    max_blocks: Option<u64>,
+) -> Result<PohVerificationReport> {
+    let blocks = native_poh_blocks(archive_dir)?;
+    verify_archive_v2_poh_inner(
+        archive_dir,
+        requested_threads,
+        max_blocks,
+        None,
+        Some(&blocks),
+    )
+}
+
 fn verify_archive_v2_poh_with_predecessor_policy(
     archive_dir: &Path,
     requested_threads: usize,
     max_blocks: Option<u64>,
     predecessor_override: Option<[u8; 32]>,
+) -> Result<PohVerificationReport> {
+    verify_archive_v2_poh_inner(
+        archive_dir,
+        requested_threads,
+        max_blocks,
+        predecessor_override,
+        None,
+    )
+}
+
+fn verify_archive_v2_poh_inner(
+    archive_dir: &Path,
+    requested_threads: usize,
+    max_blocks: Option<u64>,
+    predecessor_override: Option<[u8; 32]>,
+    native_blocks: Option<&[NativePohBlock]>,
 ) -> Result<PohVerificationReport> {
     let index_path = archive_dir.join(ARCHIVE_V2_BLOCK_INDEX_FILE);
     let index = read_archive_v2_hot_block_index(&index_path)?;
@@ -4242,15 +4374,23 @@ fn verify_archive_v2_poh_with_predecessor_policy(
     // publication contract and is also caught by length/index consistency checks.
     let block_map = unsafe { Mmap::map(&block_file) }.context("map compact block file")?;
     // SAFETY: see the immutable-generation argument above.
-    let signature_map =
-        unsafe { Mmap::map(&signature_file) }.context("map compact signature sidecar")?;
+    // Tick-only native chunks have a valid empty signature sidecar; mmap cannot map zero bytes.
+    let signature_map = if signature_file.metadata()?.len() == 0 {
+        None
+    } else {
+        Some(unsafe { Mmap::map(&signature_file) }.context("map compact signature sidecar")?)
+    };
+    let signature_bytes: &[u8] = signature_map.as_deref().unwrap_or(&[]);
     // Both mappings are traversed strictly forward (block order, then non-decreasing signature
     // ordinals), so hint the kernel to evict pages behind the read cursor rather than letting
     // often multi-GB mappings accumulate as resident memory. Best-effort.
     if let Err(error) = block_map.advise(memmap2::Advice::Sequential) {
         warn!("madvise(SEQUENTIAL) failed for compact block file: {error}");
     }
-    if let Err(error) = signature_map.advise(memmap2::Advice::Sequential) {
+    if let Some(Err(error)) = signature_map
+        .as_ref()
+        .map(|map| map.advise(memmap2::Advice::Sequential))
+    {
         warn!("madvise(SEQUENTIAL) failed for compact signature sidecar: {error}");
     }
 
@@ -4295,8 +4435,34 @@ fn verify_archive_v2_poh_with_predecessor_policy(
         (Err(error), _) => return Err(error),
     };
 
-    let poh_file =
-        File::open(archive_dir.join(ARCHIVE_V2_POH_FILE)).context("open compact PoH sidecar")?;
+    if let Some(blocks) = native_blocks {
+        anyhow::ensure!(
+            blocks.len() == index.rows.len() && predecessor == blocks[0].parent_blockhash,
+            "native index/predecessor mismatch"
+        );
+        let tail = read_exact_file(&predecessor_path)?;
+        let parent_slot = u64::from_le_bytes(tail[tail.len() - 8..].try_into().unwrap());
+        anyhow::ensure!(
+            parent_slot == blocks[0].parent_slot,
+            "native predecessor slot mismatch"
+        );
+        anyhow::ensure!(
+            signature_bytes.len() as u64
+                == index
+                    .rows
+                    .iter()
+                    .map(|row| u64::from(row.signature_count) * 64)
+                    .sum::<u64>(),
+            "native signature sidecar length mismatch"
+        );
+    }
+
+    let poh_file = File::open(archive_dir.join(if native_blocks.is_some() {
+        "available-poh.wincode"
+    } else {
+        ARCHIVE_V2_POH_FILE
+    }))
+    .context("open compact PoH sidecar")?;
     let mut poh_reader =
         WincodeLeb128FramedReader::new(BufReader::with_capacity(POH_READER_BUFFER_BYTES, poh_file));
     let worker_threads = if requested_threads == 0 {
@@ -4350,7 +4516,7 @@ fn verify_archive_v2_poh_with_predecessor_policy(
                     .context("signature length overflow")?,
             )
             .context("signature range overflow")?;
-        let block_signatures = signature_map
+        let block_signatures = signature_bytes
             .get(signature_start..signature_end)
             .with_context(|| format!("block {} signatures point outside sidecar", row.block_id))?;
 
@@ -4402,6 +4568,27 @@ fn verify_archive_v2_poh_with_predecessor_policy(
             "block {} header/index mismatch",
             row.block_id
         );
+        if let Some(expected) = native_blocks.map(|blocks| &blocks[position]) {
+            anyhow::ensure!(
+                row.block_id == expected.block_id
+                    && row.slot == expected.slot
+                    && u64::from(row.tx_count) == expected.transactions
+                    && u64::from(row.signature_count) == expected.signatures
+                    && block.header.parent_slot == expected.parent_slot
+                    && block.header.blockhash_id == expected.block_id
+                    && block.header.previous_blockhash_id == expected.block_id.saturating_sub(1)
+                    && blockhash_at(&blockhashes, position)? == expected.blockhash
+                    && poh.entries.len() as u64 == expected.entries,
+                "native compact block/source mismatch at slot {}",
+                row.slot
+            );
+            anyhow::ensure!(
+                poh.entries
+                    .iter()
+                    .all(|entry| entry.num_hashes <= 16_777_216),
+                "native PoH entry exceeds replay hash guard"
+            );
+        }
         let externally_rooted_start = if position == 0 {
             false
         } else {
@@ -4611,6 +4798,12 @@ fn verify_archive_v2_poh_with_predecessor_policy(
     let safe_elapsed = elapsed_secs.max(f64::EPSILON);
     Ok(PohVerificationReport {
         archive: archive_dir.display().to_string(),
+        source_profile: if native_blocks.is_some() {
+            "agave-bank-callbacks-v1"
+        } else {
+            "compact-v2-archive"
+        },
+        complete_source: limit == index.rows.len(),
         blocks_verified,
         entries_verified,
         transactions_consumed,
@@ -4800,6 +4993,159 @@ fn hex32(value: &[u8; 32]) -> String {
 mod tests {
     use super::*;
     use std::os::unix::fs::PermissionsExt;
+
+    fn native_tick_fixture() -> tempfile::TempDir {
+        use blockzilla_archive_v2::{
+            ArchiveV2HotBlockBlob, ArchiveV2HotBlockHeader, write_archive_v2_hot_block_index,
+        };
+        use blockzilla_compact::CompactPohEntry;
+        let temp = tempfile::tempdir().unwrap();
+        let root = temp.path();
+        let slot = 453_168_000;
+        let parent = [7; 32];
+        let final_hash = recompute_entry_hash_standalone(&EntryJob {
+            start_hash: parent,
+            num_hashes: 3,
+            transaction_count: 0,
+            signatures: &[],
+        });
+        let blob = ArchiveV2HotBlockBlob {
+            header: ArchiveV2HotBlockHeader {
+                slot,
+                parent_slot: slot - 1,
+                blockhash_id: 0,
+                previous_blockhash_id: 0,
+                block_time: None,
+                block_height: None,
+                rewards: None,
+            },
+            tx_count: 0,
+            tx_rows: vec![],
+            message_bytes: vec![],
+            metadata_bytes: vec![],
+        };
+        let raw = wincode::config::serialize(&blob, blockzilla_primitives::wincode_leb128_config())
+            .unwrap();
+        let compressed = zstd::bulk::compress(&raw, 1).unwrap();
+        fs::write(root.join(ARCHIVE_V2_BLOCKS_FILE), &compressed).unwrap();
+        write_archive_v2_hot_block_index(
+            &root.join(ARCHIVE_V2_BLOCK_INDEX_FILE),
+            compressed.len() as u64,
+            1,
+            0,
+            &[ArchiveV2HotBlockIndexRow {
+                block_id: 0,
+                slot,
+                compressed_offset: 0,
+                compressed_len: compressed.len() as u32,
+                uncompressed_len: raw.len() as u32,
+                tx_count: 0,
+                first_tx_ordinal: 0,
+                first_signature_ordinal: 0,
+                signature_count: 0,
+            }],
+        )
+        .unwrap();
+        fs::write(root.join(ARCHIVE_V2_SIGNATURES_FILE), []).unwrap();
+        fs::write(root.join(ARCHIVE_V2_BLOCKHASH_REGISTRY_FILE), final_hash).unwrap();
+        fs::write(
+            root.join(ARCHIVE_V2_PREV_BLOCKHASH_TAIL_FILE),
+            [parent.as_slice(), &(slot - 1u64).to_le_bytes()].concat(),
+        )
+        .unwrap();
+        let mut writer = WincodeLeb128FramedWriter::new(
+            File::create(root.join("available-poh.wincode")).unwrap(),
+        );
+        writer
+            .write(&WincodeArchiveV2PohRecord {
+                block_id: 0,
+                slot,
+                entries: vec![CompactPohEntry {
+                    num_hashes: 3,
+                    hash: final_hash,
+                    tx_count: 0,
+                    signature_count: 0,
+                }],
+            })
+            .unwrap();
+        writer.flush().unwrap();
+        let blocks = serde_json::json!([{"block_id":0,"slot":slot,"blockhash":final_hash,"parent_slot":slot-1,"parent_blockhash":parent,"transactions":0,"signatures":0,"entries":1}]);
+        let receipt = serde_json::json!({"schema":"hivezilla-direct-agave-normalized-v1","source_profile":"agave-bank-callbacks-v1","session_id":"fixture","agave_revision":"fixture","genesis_hash":"fixture","node_identity":"fixture","canonical":false,"finalized":true,"epoch":1049,"start_slot":slot,"end_slot_exclusive":slot+1,"blocks":blocks});
+        let bytes = serde_json::to_vec(&receipt).unwrap();
+        fs::write(root.join("DIRECT-AGAVE-NORMALIZED.v1.json"), &bytes).unwrap();
+        let digest: [u8; 32] = Sha256::digest(&bytes).into();
+        let mut marker = receipt;
+        marker["schema"] = "hivezilla-direct-agave-compact-v1".into();
+        marker["state"] = "COMPLETE".into();
+        marker["publication_ready"] = false.into();
+        marker["produced_blocks"] = blocks;
+        marker["blocks"] = 1.into();
+        marker["source_receipt_sha256"] = hex32(&digest).into();
+        fs::write(
+            root.join("DIRECT-AGAVE-COMPACT.v1.json"),
+            serde_json::to_vec(&marker).unwrap(),
+        )
+        .unwrap();
+        temp
+    }
+
+    #[test]
+    fn native_available_poh_verifies_tick_only_chunk_with_empty_signatures() {
+        let fixture = native_tick_fixture();
+        let report = verify_direct_agave_available_poh(fixture.path(), 1, None).unwrap();
+        assert!(report.complete_source);
+        assert_eq!(report.blocks_verified, 1);
+        assert_eq!(report.entries_verified, 1);
+        assert_eq!(report.hashes_recomputed, 3);
+        assert_eq!(report.external_blockhash_blocks, 0);
+        assert!(!fixture.path().join(ARCHIVE_V2_POH_FILE).exists());
+    }
+
+    #[test]
+    fn native_available_poh_rejects_mutated_entry_and_missing_input() {
+        let fixture = native_tick_fixture();
+        let mut writer = WincodeLeb128FramedWriter::new(
+            File::create(fixture.path().join("available-poh.wincode")).unwrap(),
+        );
+        writer
+            .write(&WincodeArchiveV2PohRecord {
+                block_id: 0,
+                slot: 453_168_000,
+                entries: vec![blockzilla_compact::CompactPohEntry {
+                    num_hashes: 3,
+                    hash: [0; 32],
+                    tx_count: 0,
+                    signature_count: 0,
+                }],
+            })
+            .unwrap();
+        writer.flush().unwrap();
+        let error = verify_direct_agave_available_poh(fixture.path(), 1, None).unwrap_err();
+        assert!(error.to_string().contains("PoH mismatch"));
+        fs::remove_file(fixture.path().join("available-poh.wincode")).unwrap();
+        assert!(verify_direct_agave_available_poh(fixture.path(), 1, None).is_err());
+    }
+
+    #[test]
+    fn native_available_poh_rejects_header_parent_and_receipt_changes() {
+        let fixture = native_tick_fixture();
+        let tail = fixture.path().join(ARCHIVE_V2_PREV_BLOCKHASH_TAIL_FILE);
+        let mut bytes = fs::read(&tail).unwrap();
+        bytes[32..].copy_from_slice(&453_167_998u64.to_le_bytes());
+        fs::write(tail, bytes).unwrap();
+        assert!(
+            verify_direct_agave_available_poh(fixture.path(), 1, None)
+                .unwrap_err()
+                .to_string()
+                .contains("predecessor slot")
+        );
+        fs::write(
+            fixture.path().join("DIRECT-AGAVE-NORMALIZED.v1.json"),
+            b"{}",
+        )
+        .unwrap();
+        assert!(verify_direct_agave_available_poh(fixture.path(), 1, None).is_err());
+    }
 
     struct PohOrphanRepairFixture {
         parent: PathBuf,

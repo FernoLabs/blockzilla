@@ -1,0 +1,33 @@
+{
+  "compiler": "rustc 1.97.1 (8bab26f4f 2026-07-14)",
+  "agave_revision": "825efd18292aff6ffcf9daa0f7612f21b3531a72",
+  "unit": "hivezilla-direct-engine-tests-v13-20261002",
+  "passed": 19,
+  "failed": 0,
+  "results": [
+    "Oct 02 19:16:09 blockzilla env[1101524]: test worker::tests::byte_budget_splits_before_count_limit ... ok",
+    "Oct 02 19:16:09 blockzilla env[1101524]: test plugin::tests::native_wire_error_and_absent_metadata_survive_projection ... ok",
+    "Oct 02 19:16:09 blockzilla env[1101524]: test worker::late_tests::late_other_fork_death_is_allowed_but_competing_root_is_rejected ... ok",
+    "Oct 02 19:16:09 blockzilla env[1101524]: test worker::late_tests::late_identical_event_is_allowed_but_conflict_is_rejected ... ok",
+    "Oct 02 19:16:09 blockzilla env[1101524]: test worker::late_tests::retired_journal_uses_compressed_source_for_late_callback_audit ... ok",
+    "Oct 02 19:16:09 blockzilla env[1101524]: test retention::tests::retirement_rejects_tampered_source_without_deletion ... ok",
+    "Oct 02 19:16:09 blockzilla env[1101524]: test retention::tests::retirement_is_bounded_and_ack_follows_durable_delete ... ok",
+    "Oct 02 19:16:09 blockzilla env[1101524]: test result: ok. 7 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.02s",
+    "Oct 02 19:16:09 blockzilla env[1101535]: test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s",
+    "Oct 02 19:16:09 blockzilla env[1101536]: test compressed_payload_is_bounded_and_corruption_fails ... ok",
+    "Oct 02 19:16:09 blockzilla env[1101536]: test duplicate_callbacks_must_be_identical ... ok",
+    "Oct 02 19:16:09 blockzilla env[1101536]: test bank_requires_root_metadata_and_dense_entries ... ok",
+    "Oct 02 19:16:09 blockzilla env[1101536]: test same_slot_forks_and_cleared_banks_cannot_mix ... ok",
+    "Oct 02 19:16:09 blockzilla env[1101536]: test new_session_records_previous_unclean_session ... ok",
+    "Oct 02 19:16:09 blockzilla env[1101536]: test oversize_event_latches_failure_and_never_resumes ... ok",
+    "Oct 02 19:16:09 blockzilla env[1101536]: test concurrent_capture_is_rejected ... ok",
+    "Oct 02 19:16:09 blockzilla env[1101536]: test queue_saturation_latches_failure_instead_of_silent_drop ... ok",
+    "Oct 02 19:16:09 blockzilla env[1101536]: test journal_commits_and_reopens_without_losing_sequence ... ok",
+    "Oct 02 19:16:09 blockzilla env[1101536]: test disk_reserve_failure_is_visible_with_service_alive ... ok",
+    "Oct 02 19:16:09 blockzilla env[1101536]: test journal_quota_failure_does_not_publish_an_accepted_record ... ok",
+    "Oct 02 19:16:09 blockzilla env[1101536]: test result: ok. 11 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.10s",
+    "Oct 02 19:16:09 blockzilla env[1101556]: test real_compact_writer_crosses_epoch_and_restart_does_not_duplicate ... ok",
+    "Oct 02 19:16:09 blockzilla env[1101556]: test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.04s",
+    "Oct 02 19:16:09 blockzilla env[1101611]: test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s"
+  ]
+}

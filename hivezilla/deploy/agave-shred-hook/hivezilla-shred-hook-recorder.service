@@ -1,0 +1,28 @@
+[Unit]
+Description=Hivezilla raw shred hook recorder
+After=local-fs.target
+Before=hivezilla-validator-canary.service
+
+[Service]
+Type=notify
+User=ubuntu
+Group=ubuntu
+WorkingDirectory=/home/ubuntu/live/hivezilla-validator-20260930
+RuntimeDirectory=hivezilla-shred-hook
+RuntimeDirectoryMode=0700
+UMask=0077
+ExecStart=/home/ubuntu/live/hivezilla-validator-20260930/releases/hivezilla-shred-hook/hivezilla-shred-hook-recorder --socket /run/hivezilla-shred-hook/packets.sock --output-root /home/ubuntu/live/hivezilla-validator-20260930/captures/shred-hook-live --expected-executable /home/ubuntu/live/hivezilla-validator-20260930/releases/agave-shred-hook-v4.3.0/agave-validator --genesis-hash 5eykt4UsFv8P8NJdTREpY1vzqKqZKvdpKuc147dw2N9d --validator-identity J7qpvCEWhdBgPdYRV3s3btWPrRVXa2qnAzgvxWTvtbrQ --segment-bytes 67108864 --max-bytes 68719476736 --reserve-free-bytes 536870912000
+Restart=on-failure
+RestartSec=5s
+TimeoutStartSec=30s
+TimeoutStopSec=10s
+MemoryMax=512M
+CPUQuota=400%
+NoNewPrivileges=yes
+PrivateTmp=yes
+ProtectSystem=strict
+ProtectHome=read-only
+ReadWritePaths=/home/ubuntu/live/hivezilla-validator-20260930/captures/shred-hook-live /run/hivezilla-shred-hook
+
+[Install]
+WantedBy=multi-user.target

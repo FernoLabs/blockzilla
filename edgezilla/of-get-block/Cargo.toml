@@ -16,7 +16,7 @@ base64 = "0.23.1"
 base58-turbo = "0.3.0"
 five8 = "1.0.0"
 js-sys = "0.3.105"
-of-car-reader = { path = "../../crates/old-faithful/of-car-reader", version = "=0.2.0", default-features = false, features = ["compact-index", "zstd-wasm"] }
+of-car-reader = { path = "../../crates/old-faithful/of-car-reader", version = "=0.2.1", default-features = false, features = ["compact-index", "zstd-wasm"] }
 of-slot-ranges = { path = "../../crates/old-faithful/of-slot-ranges", default-features = false }
 prost = "0.14.4"
 quick-protobuf = "0.8.1"

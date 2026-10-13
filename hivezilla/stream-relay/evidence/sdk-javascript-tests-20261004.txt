@@ -1,0 +1,22 @@
+✔ portable decoder has no host imports and handles errors without a trap (12.737708ms)
+✔ owned decoder buffers do not grow memory during repeated failed reads (24.951708ms)
+✔ filter option bounds and types fail before invoking the decoder (3.6505ms)
+✔ chunk key resolution preserves leading zeros and uses the current dictionary (0.375667ms)
+✔ client requires a key and keeps transport initialization out of filtering (0.126125ms)
+✔ single-byte fragmentation and coalesced frames give identical chunks (65.828834ms)
+✔ corrupt, truncated and oversized frames fail (1.433917ms)
+✔ SSE handles CRLF split across network reads (0.53525ms)
+✔ binary and SSE paths return exactly the same frame (24.275958ms)
+✔ checkpoint must be saved before the next chunk (1.054833ms)
+✔ expired cursor fails instead of switching to latest (0.241292ms)
+✔ SSE cannot send credentials to an external chunk URL (0.276375ms)
+✔ ambiguous cursor syntax is rejected (0.109ms)
+✔ silent binary connection has a bounded read deadline (11.967208ms)
+ℹ tests 14
+ℹ suites 0
+ℹ pass 14
+ℹ fail 0
+ℹ cancelled 0
+ℹ skipped 0
+ℹ todo 0
+ℹ duration_ms 186.765583

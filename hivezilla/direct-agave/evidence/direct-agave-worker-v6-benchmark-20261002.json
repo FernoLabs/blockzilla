@@ -1,0 +1,35 @@
+{
+  "source_session": "000000000000000018dacaf3bcb24839-90155",
+  "blocks": 349,
+  "transactions": 496217,
+  "batches": 57,
+  "objects_with_identical_size_and_sha256": 741,
+  "normalized_source_receipts_identical": true,
+  "v5": {
+    "wall_seconds": 91.54,
+    "blocks_per_second": 3.812540965698055,
+    "max_rss_kib": 372872,
+    "cpu_user_seconds": 74.86,
+    "cpu_system_seconds": 14.87
+  },
+  "v6": {
+    "wall_seconds": 66.24,
+    "blocks_per_second": 5.268719806763285,
+    "max_rss_kib": 463344,
+    "cpu_user_seconds": 82.48,
+    "cpu_system_seconds": 18.2
+  },
+  "speed_ratio": 1.3819444444444446,
+  "elapsed_reduction_percent": 27.63819095477388,
+  "worker_sha256": "220fd37dda37d9700cc2dd509b075cda3ae59513c201348285e8c1aadf162d72",
+  "limits": {
+    "bank_readers": 4,
+    "bank_source_bytes": 134217728,
+    "batch_source_bytes": 134217728,
+    "benchmark_memory_max_bytes": 8589934592,
+    "benchmark_cpu_quota_percent": 800
+  },
+  "tests_passed": 21,
+  "production_deployed": false,
+  "live_validator_unchanged": true
+}

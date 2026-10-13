@@ -1,0 +1,194 @@
+{
+  "time": 1790968457.7370121,
+  "session": "/home/ubuntu/live/hivezilla-validator-20260930/captures/direct-agave-crash-canary-20261002/000000000000000018dacc4ba1b824d9-90155",
+  "output": "/home/ubuntu/live/hivezilla-validator-20260930/compact/direct-agave-crash-canary-20261002",
+  "pending_batch": {
+    "session_id": "000000000000000018dacc4ba1b824d9-90155",
+    "first_slot": 452701091,
+    "last_slot": 452701097
+  },
+  "interrupted_stage": "/home/ubuntu/live/hivezilla-validator-20260930/compact/direct-agave-crash-canary-20261002/epoch-1047/.452701091-452701097.compact.direct-agave-stage",
+  "committed_batches_before": 2,
+  "source_before": [
+    1,
+    "CAPTURING",
+    311669,
+    null,
+    452701159,
+    39474
+  ],
+  "signal": "SIGKILL to worker and compact child only",
+  "source_before_restart": [
+    1,
+    "CAPTURING",
+    632890,
+    null,
+    452701273,
+    39474
+  ],
+  "restart_time": 1790968489.3463259,
+  "final_time": 1790968672.218275,
+  "final_source": [
+    1,
+    "CLOSED",
+    1958708,
+    null,
+    452701755,
+    1511039
+  ],
+  "final_worker": {
+    "compacted_blocks": 679,
+    "compacted_entries": 936564,
+    "compacted_transactions": 927098,
+    "durable_sequence": 1958708,
+    "first_compact_slot": 452701077,
+    "full_epoch": false,
+    "last_compact_slot": 452701755,
+    "startup_incomplete_roots": [
+      [
+        452701045,
+        415528
+      ],
+      [
+        452701046,
+        415529
+      ],
+      [
+        452701047,
+        415530
+      ],
+      [
+        452701048,
+        415531
+      ],
+      [
+        452701049,
+        415532
+      ],
+      [
+        452701050,
+        415533
+      ],
+      [
+        452701051,
+        415534
+      ],
+      [
+        452701052,
+        415535
+      ],
+      [
+        452701053,
+        415536
+      ],
+      [
+        452701054,
+        415537
+      ],
+      [
+        452701055,
+        415538
+      ],
+      [
+        452701056,
+        415539
+      ],
+      [
+        452701057,
+        415540
+      ],
+      [
+        452701058,
+        415541
+      ],
+      [
+        452701059,
+        415542
+      ],
+      [
+        452701060,
+        415543
+      ],
+      [
+        452701061,
+        415544
+      ],
+      [
+        452701062,
+        415545
+      ],
+      [
+        452701063,
+        415546
+      ],
+      [
+        452701064,
+        415547
+      ],
+      [
+        452701065,
+        415548
+      ],
+      [
+        452701066,
+        415549
+      ],
+      [
+        452701067,
+        415550
+      ],
+      [
+        452701068,
+        415551
+      ],
+      [
+        452701069,
+        415552
+      ],
+      [
+        452701070,
+        415553
+      ],
+      [
+        452701071,
+        415554
+      ],
+      [
+        452701072,
+        415555
+      ],
+      [
+        452701073,
+        415556
+      ],
+      [
+        452701074,
+        415557
+      ],
+      [
+        452701075,
+        415558
+      ],
+      [
+        452701076,
+        415559
+      ]
+    ],
+    "state": "DRAINED",
+    "updated_unix_ms": 1790968645934
+  },
+  "unique_parent_linked_blocks": 679,
+  "files_checked": 1313,
+  "retained_object_bytes": 1477566656,
+  "source_uncompressed_bytes": 12333561506,
+  "source_zstd_bytes": 1160880285,
+  "journal_bytes": 1042591744,
+  "pending_retirement_after_close": 19,
+  "failure": {},
+  "retirement_failure": false,
+  "interrupted_stage_preserved": [
+    "/home/ubuntu/live/hivezilla-validator-20260930/compact/direct-agave-crash-canary-20261002/epoch-1047/.452701091-452701097.compact.direct-agave-interrupted-1790968491030551352-1099672"
+  ],
+  "pending_batch_removed": true,
+  "validator_pid": 590165
+}

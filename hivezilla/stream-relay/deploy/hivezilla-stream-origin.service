@@ -1,0 +1,33 @@
+[Unit]
+Description=Hivezilla read-only finalized compact origin (development projection)
+After=network.target hivezilla-direct-worker.service
+
+[Service]
+User=ubuntu
+Group=ubuntu
+ExecStart=/home/ubuntu/live/hivezilla-validator-20260930/releases/hivezilla-stream-r2-20261005/hivezilla-stream origin --output /home/ubuntu/live/hivezilla-validator-20260930/compact/direct-agave-live/000000000000000018daf342ba38d3d0-10e3f5 --tail-slots 256 --bind 127.0.0.1:8870 --token-file /home/ubuntu/live/hivezilla-validator-20260930/config/stream-20261004/origin-api.key --tls-cert /home/ubuntu/live/hivezilla-validator-20260930/config/stream-20261004/origin.crt --tls-key /home/ubuntu/live/hivezilla-validator-20260930/config/stream-20261004/origin.key --client-ca /home/ubuntu/live/hivezilla-validator-20260930/config/stream-20261004/ca.crt --max-requests 4
+Restart=on-failure
+RestartSec=3
+CPUQuota=100%
+MemoryMax=512M
+TasksMax=128
+LimitNOFILE=1024
+Nice=10
+IOSchedulingClass=best-effort
+IOSchedulingPriority=7
+NoNewPrivileges=true
+ProtectSystem=strict
+ProtectHome=read-only
+# SQLite readers need mutable WAL read marks. Only shared lock metadata is writable.
+# The database connection remains SQLITE_OPEN_READ_ONLY and query_only=ON.
+ReadWritePaths=/home/ubuntu/live/hivezilla-validator-20260930/compact/direct-agave-live/000000000000000018daf342ba38d3d0-10e3f5/committed.sqlite-shm
+PrivateTmp=true
+ProtectKernelTunables=true
+ProtectKernelModules=true
+ProtectControlGroups=true
+CapabilityBoundingSet=
+UMask=0077
+TimeoutStopSec=10
+
+[Install]
+WantedBy=multi-user.target

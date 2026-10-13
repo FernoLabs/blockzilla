@@ -1,23 +1,26 @@
+#![recursion_limit = "256"]
+
 #[path = "../../car-export/shared.rs"]
 mod common_export;
+mod retry_policy;
 #[global_allocator]
 static ALLOCATOR: mimalloc::MiMalloc = mimalloc::MiMalloc;
 
 use futures_util::future::BoxFuture;
 use jetstreamer_firehose::{
-    firehose::{
-        firehose, BlockData, FirehoseErrorContext, OnEntryFn, OnRewardFn, Stats, StatsTracking,
-        TransactionData,
-    },
     SharedError,
+    firehose::{
+        BlockData, FirehoseErrorContext, OnEntryFn, OnRewardFn, Stats, StatsTracking,
+        TransactionData, firehose,
+    },
 };
 use serde_json::json;
 use std::{
     collections::BTreeMap,
     io::Write,
     sync::{
-        atomic::{AtomicU64, Ordering::Relaxed},
         Arc, Mutex,
+        atomic::{AtomicU64, Ordering::Relaxed},
     },
     time::Instant,
 };
@@ -60,6 +63,8 @@ struct State {
     export: common_export::Export,
     stats_transactions: AtomicU64,
     errors: Mutex<Vec<String>>,
+    retry_policy: retry_policy::Policy,
+    retries: Mutex<retry_policy::RetryTracker>,
     stop: broadcast::Sender<()>,
 }
 
@@ -78,7 +83,9 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     let mut input = std::env::args().skip(1);
     while let Some(key) = input.next() {
         if key == "--help" {
-            println!("jetstreamer-count-reference --epoch N --http-base URL --output NEW_JSON --plan PLAN_JSON --export NEW_BIN [--index-base URL] [--workers 12] [--start-slot N] [--end-slot-exclusive N] [--mode decoded]\nUses upstream Jetstreamer 0.7.0, parallel raw HTTP CAR only. No local-file or outer-zstd adapter. Only decoded mode is supported: complete transaction callbacks are checked against Entry counts and an external canonical block plan. Upstream statistics are sampled telemetry, not final counts. No signature verification feature is enabled.");
+            println!(
+                "jetstreamer-count-reference --epoch N --http-base URL --output NEW_JSON --plan PLAN_JSON --export NEW_BIN [--index-base URL] [--workers 12] [--start-slot N] [--end-slot-exclusive N] [--mode decoded] [--reported-error-policy strict|body-transport] [--export-mode disk|memory] [--export-memory-mib 196608]\nUses unmodified upstream Jetstreamer at Git revision 048d2cd25af949679c56347440b7cf5a9a900063 (package version 0.7.0), parallel raw HTTP CAR only. Strict error policy is the default. Body-transport permits at most two exact response-body errors per worker/slot, only between complete blocks. Complete callbacks and the canonical block plan remain mandatory. No signature verification feature is enabled."
+            );
             return Ok(());
         }
         if ![
@@ -92,6 +99,9 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             "--mode",
             "--plan",
             "--export",
+            "--export-mode",
+            "--export-memory-mib",
+            "--reported-error-policy",
         ]
         .contains(&key.as_str())
         {
@@ -124,6 +134,23 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         .transpose()?
         .unwrap_or(12);
     let mode = args.get("--mode").map(String::as_str).unwrap_or("decoded");
+    let export_mode = args
+        .get("--export-mode")
+        .map(String::as_str)
+        .unwrap_or("disk");
+    let export_memory_mib: usize = args
+        .get("--export-memory-mib")
+        .map(|s| s.parse())
+        .transpose()?
+        .unwrap_or(196608);
+    if !matches!(export_mode, "disk" | "memory") || !(1..=262144).contains(&export_memory_mib) {
+        return Err("invalid export mode or memory limit (1..=262144 MiB)".into());
+    }
+    let retry_policy = retry_policy::Policy::parse(
+        args.get("--reported-error-policy")
+            .map(String::as_str)
+            .unwrap_or("strict"),
+    )?;
     if !(1..=256).contains(&workers) || start < epoch_start || end > epoch_end || end <= start {
         return Err("invalid worker count or epoch-contained half-open slot range".into());
     }
@@ -154,7 +181,12 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     std::env::set_var("JETSTREAMER_HTTP_BASE_URL", base);
     std::env::set_var("JETSTREAMER_COMPACT_INDEX_BASE_URL", index);
     let total_started = Instant::now();
-    let export = common_export::Export::create(std::path::Path::new(required("--export")?))?;
+    let export_path = std::path::Path::new(required("--export")?);
+    let export = if export_mode == "memory" {
+        common_export::Export::create_memory(export_path, export_memory_mib << 20)?
+    } else {
+        common_export::Export::create(export_path)?
+    };
     let (stop, receiver) = broadcast::channel(16);
     let state = Arc::new(State {
         workers: (0..workers).map(|_| Worker::new()).collect(),
@@ -165,6 +197,8 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         export,
         stats_transactions: AtomicU64::new(0),
         errors: Mutex::new(Vec::new()),
+        retry_policy,
+        retries: Mutex::new(retry_policy::RetryTracker::default()),
         stop,
     });
 
@@ -255,11 +289,36 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         Box::pin(async { Ok(()) })
     };
     let error_state = Arc::clone(&state);
-    let on_error = move |_thread: usize, error: FirehoseErrorContext| -> Callback {
-        error_state.fail(format!(
-            "upstream retry invalidates sample: slot={} {}",
-            error.slot, error.error_message
-        ));
+    let on_error = move |thread: usize, error: FirehoseErrorContext| -> Callback {
+        let worker = error_state.workers.get(thread);
+        let observed = retry_policy::Observation {
+            worker: thread,
+            context_worker: error.thread_id,
+            workers: error_state.workers.len(),
+            slot: error.slot,
+            start: error_state.start,
+            end: error_state.end,
+            pending: worker.map_or(u64::MAX, |w| w.pending.load(Relaxed)),
+            callback_slot: worker.map_or(0, |w| w.slot.load(Relaxed)),
+            buffer_empty: worker.is_some_and(|w| w.export_buffer.lock().unwrap().is_empty()),
+            message: &error.error_message,
+            elapsed_seconds: total_started.elapsed().as_secs_f64(),
+        };
+        let decision = error_state
+            .retries
+            .lock()
+            .unwrap()
+            .observe(error_state.retry_policy, observed);
+        match decision {
+            Ok(attempt) => eprintln!(
+                "permitted upstream body retry: worker={thread} slot={} attempt={attempt} {}",
+                error.slot, error.error_message
+            ),
+            Err(reason) => error_state.fail(format!(
+                "upstream retry invalidates sample: worker={thread} slot={} {} ({reason})",
+                error.slot, error.error_message
+            )),
+        }
         Box::pin(async { Ok(()) })
     };
     let runtime = tokio::runtime::Builder::new_multi_thread()
@@ -320,6 +379,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     if rows != expected {
         state.fail("block rows differ from canonical plan".into());
     }
+    let export_finish_started = Instant::now();
     let mut export_bytes = None;
     if state.errors.lock().unwrap().is_empty() {
         match state.export.finish(&expected) {
@@ -327,15 +387,38 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             Err(error) => state.fail(format!("export finish: {error}")),
         }
     }
+    let export_finish_seconds = export_finish_started.elapsed().as_secs_f64();
+    let export_stats = state.export.stats()?;
     drop(runtime);
     let total_seconds = total_started.elapsed().as_secs_f64();
+    let retries = state.retries.lock().unwrap();
+    let retry_events: Vec<_> = retries
+        .events
+        .iter()
+        .map(|event| {
+            json!({
+                "worker": event.worker, "slot": event.slot, "attempt": event.attempt,
+                "elapsed_seconds": event.elapsed_seconds, "error_message": event.error_message,
+            })
+        })
+        .collect();
     let errors = state.errors.lock().unwrap();
     serde_json::to_writer_pretty(
         &mut output,
         &json!({
             "schema": "jetstreamer-common-export-reference-v1",
             "export_schema":common_export::SCHEMA, "export_bytes":export_bytes, "total_seconds":total_seconds, "allocator":"mimalloc", "upstream_version": "0.7.0",
-            "upstream_commit": "cffaf3d891b3cbe45a46dd963d6d3571b2aa1a24", "mode": mode,
+            "export_finish_seconds":export_finish_seconds,
+            "export_storage":{"mode":export_stats.mode, "memory_limit_bytes":export_stats.memory_limit_bytes,
+                "peak_memory_bytes":export_stats.peak_memory_bytes, "spool_bytes":export_stats.spool_bytes},
+            "upstream_commit": "048d2cd25af949679c56347440b7cf5a9a900063", "mode": mode,
+            "reported_error_policy": state.retry_policy.name(), "reported_body_retries": retries.allowed,
+            "reported_body_retry_limit_per_worker_slot": retry_policy::MAX_RETRIES_PER_WORKER_SLOT,
+            "reported_error_events": retry_events,
+            "reported_error_events_truncated": retries.allowed > retries.events.len() as u64,
+            "upstream_connection_recycles": jetstreamer_firehose::firehose::thread_activity::recycle_count(),
+            "upstream_operation_timeouts": jetstreamer_firehose::firehose::thread_activity::timeout_count(),
+            "upstream_work_steals": jetstreamer_firehose::firehose::thread_activity::steal_count(),
             "epoch": epoch, "start_slot": start, "end_slot_exclusive": end,
             "http_base": base, "index_base": index, "processing_workers": workers,
         "sequential": false, "scan_seconds": elapsed,
@@ -346,7 +429,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             "sampled_transaction_nodes_from_upstream_stats": stats_transactions,
             "sampled_upstream_stats_are_final": false,
             "stats_tracking_interval_slots": 10_000,
-            "retry_observation": "reported firehose errors invalidate the sample; deliberate connection recycling and lower-level transport retries are not counted here",
+            "retry_observation": "reported body retries follow the explicit policy and remain inside timing; every other reported error is fatal. Upstream connection recycles and operation timeouts have separate counters; hidden lower-level retries are not measured",
             "worker_counters": worker_rows, "block_transaction_rows": rows,
             "errors": *errors, "valid": errors.is_empty(),
             "signature_verification": false, "outer_car_zstd": false,

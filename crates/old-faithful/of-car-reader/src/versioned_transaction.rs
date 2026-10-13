@@ -235,6 +235,8 @@ pub struct VersionedTransactionReuse {
     lookup_writable_indexes: Vec<Vec<u8>>,
     lookup_readonly_indexes: Vec<Vec<u8>>,
     v1_instruction_headers: Vec<(u8, u8, u16)>,
+    // Smallest capacity ever accepted by a byte pool; removals cannot raise it.
+    byte_buffer_capacity_floor: usize,
     max_retained_buffer_bytes: usize,
     max_retained_total_bytes: usize,
     stats: VersionedTransactionReuseStats,
@@ -265,6 +267,7 @@ impl VersionedTransactionReuse {
             lookup_writable_indexes: Vec::new(),
             lookup_readonly_indexes: Vec::new(),
             v1_instruction_headers: Vec::new(),
+            byte_buffer_capacity_floor: usize::MAX,
             max_retained_buffer_bytes,
             max_retained_total_bytes,
             stats: VersionedTransactionReuseStats {
@@ -455,23 +458,13 @@ impl VersionedTransactionReuse {
     fn take_byte_buffer(
         pool: &mut Vec<Vec<u8>>,
         len: usize,
+        capacity_floor: usize,
         stats: &mut VersionedTransactionReuseStats,
     ) -> Vec<u8> {
         if len == 0 {
             return Vec::new();
         }
-        let best = pool
-            .iter()
-            .enumerate()
-            .filter(|(_, value)| value.capacity() >= len)
-            .min_by_key(|(index, value)| (value.capacity(), usize::MAX - index))
-            .map(|(index, _)| index)
-            .or_else(|| {
-                pool.iter()
-                    .enumerate()
-                    .max_by_key(|(_, value)| value.capacity())
-                    .map(|(index, _)| index)
-            });
+        let best = Self::byte_buffer_index(pool, len, capacity_floor);
         let mut value = if let Some(index) = best {
             if len != 0 {
                 stats.inner_buffer_reuses = stats.inner_buffer_reuses.saturating_add(1);
@@ -488,6 +481,33 @@ impl VersionedTransactionReuse {
         }
         value.clear();
         value
+    }
+
+    #[inline]
+    fn byte_buffer_index(pool: &[Vec<u8>], len: usize, capacity_floor: usize) -> Option<usize> {
+        let minimum_fit = len.max(capacity_floor);
+        let mut best = None;
+        let mut best_capacity = usize::MAX;
+        let mut largest = None;
+        let mut largest_capacity = 0;
+        // The floor is no greater than any retained capacity. Visit the
+        // preferred index first on ties; a minimum possible fit is final.
+        for (index, value) in pool.iter().enumerate().rev() {
+            let capacity = value.capacity();
+            if capacity == minimum_fit {
+                return Some(index);
+            }
+            if capacity >= len {
+                if best.is_none() || capacity < best_capacity {
+                    best = Some(index);
+                    best_capacity = capacity;
+                }
+            } else if best.is_none() && (largest.is_none() || capacity > largest_capacity) {
+                largest = Some(index);
+                largest_capacity = capacity;
+            }
+        }
+        best.or(largest)
     }
 
     fn record_outer_use(&mut self, capacity: usize, desired_len: usize) {
@@ -607,7 +627,9 @@ impl VersionedTransactionReuse {
             return;
         }
         *remaining_budget = remaining_budget.saturating_sub(required_budget);
+        let capacity = value.capacity();
         target.push(value);
+        self.byte_buffer_capacity_floor = self.byte_buffer_capacity_floor.min(capacity);
     }
 
     fn retain_v1_headers(&mut self, mut value: Vec<(u8, u8, u16)>) {
@@ -938,12 +960,14 @@ fn read_v1_message_reusing<'de>(
             reader,
             usize::from(num_accounts),
             &mut reuse.instruction_accounts,
+            reuse.byte_buffer_capacity_floor,
             &mut reuse.stats,
         )?;
         let data = copy_bytes_reusing(
             reader,
             usize::from(data_len),
             &mut reuse.instruction_data,
+            reuse.byte_buffer_capacity_floor,
             &mut reuse.stats,
         )?;
         instructions.push(CompiledInstruction {
@@ -1008,6 +1032,7 @@ fn read_compiled_instructions_reusing(
             reader,
             accounts_len,
             &mut reuse.instruction_accounts,
+            reuse.byte_buffer_capacity_floor,
             &mut reuse.stats,
         )?;
         let data_len = read_short_u16_len(reader)?;
@@ -1015,6 +1040,7 @@ fn read_compiled_instructions_reusing(
             reader,
             data_len,
             &mut reuse.instruction_data,
+            reuse.byte_buffer_capacity_floor,
             &mut reuse.stats,
         )?;
         instructions.push(CompiledInstruction {
@@ -1043,6 +1069,7 @@ fn read_address_table_lookups_reusing<'de>(
             reader,
             writable_len,
             &mut reuse.lookup_writable_indexes,
+            reuse.byte_buffer_capacity_floor,
             &mut reuse.stats,
         )?;
         let readonly_len = read_short_u16_len(reader)?;
@@ -1050,6 +1077,7 @@ fn read_address_table_lookups_reusing<'de>(
             reader,
             readonly_len,
             &mut reuse.lookup_readonly_indexes,
+            reuse.byte_buffer_capacity_floor,
             &mut reuse.stats,
         )?;
         lookups.push(MessageAddressTableLookup {
@@ -1105,10 +1133,11 @@ fn copy_bytes_reusing(
     reader: &mut &[u8],
     len: usize,
     pool: &mut Vec<Vec<u8>>,
+    capacity_floor: usize,
     stats: &mut VersionedTransactionReuseStats,
 ) -> ReadResult<Vec<u8>> {
     let bytes = reader.take_borrowed(len)?;
-    let mut value = VersionedTransactionReuse::take_byte_buffer(pool, len, stats);
+    let mut value = VersionedTransactionReuse::take_byte_buffer(pool, len, capacity_floor, stats);
     value.extend_from_slice(bytes);
     Ok(value)
 }
@@ -1339,6 +1368,197 @@ mod tests {
         assert_eq!(message.instructions[0].program_id_index, 1);
         assert_eq!(message.instructions[0].accounts, [0]);
         assert_eq!(message.instructions[0].data, [0xaa, 0xbb, 0xcc]);
+    }
+
+    #[test]
+    fn byte_buffer_selection_matches_previous_algorithm() {
+        fn check(pool: &[Vec<u8>]) {
+            for len in [0, 1, 2, 3, 7, 8, 9, 16, 17, 31, 64, usize::MAX] {
+                let expected = pool
+                    .iter()
+                    .enumerate()
+                    .filter(|(_, value)| value.capacity() >= len)
+                    .min_by_key(|(index, value)| (value.capacity(), usize::MAX - index))
+                    .map(|(index, _)| index)
+                    .or_else(|| {
+                        pool.iter()
+                            .enumerate()
+                            .max_by_key(|(_, value)| value.capacity())
+                            .map(|(index, _)| index)
+                    });
+                let current_minimum = pool.iter().map(Vec::capacity).min().unwrap_or(usize::MAX);
+                for floor in [
+                    0,
+                    current_minimum / 2,
+                    current_minimum.saturating_sub(1),
+                    current_minimum,
+                ] {
+                    assert_eq!(
+                        VersionedTransactionReuse::byte_buffer_index(pool, len, floor),
+                        expected,
+                        "requested length {len}, capacity floor {floor}"
+                    );
+                }
+            }
+        }
+
+        // All ordered pools up to five buffers include duplicates, zero
+        // capacities, exact fits, best fits, and all-too-small fallbacks.
+        let capacities = [0, 1, 2, 8, 16];
+        for count in 0..=5 {
+            for mut pattern in 0..capacities.len().pow(count) {
+                let pool: Vec<Vec<u8>> = (0..count)
+                    .map(|_| {
+                        let capacity = capacities[pattern % capacities.len()];
+                        pattern /= capacities.len();
+                        Vec::with_capacity(capacity)
+                    })
+                    .collect();
+                check(&pool);
+            }
+        }
+
+        // Also check longer pools with the same buffers in different orders.
+        let mut pool: Vec<Vec<u8>> = (0..64)
+            .map(|index| Vec::with_capacity((index * 13) % 33))
+            .collect();
+        for index in 0..64 {
+            pool.swap(index, (index * 17 + 11) % 64);
+            check(&pool);
+        }
+    }
+
+    #[test]
+    fn byte_buffer_selection_preserves_reuse_and_growth_stats() {
+        for (capacities, len) in [
+            (vec![], 0),
+            (vec![], 4),
+            (vec![0, 0, 0], 1),
+            (vec![8, 16, 8], 8),
+            (vec![8, 16, 8], 7),
+            (vec![8, 16, 16], 32),
+            (vec![8, 16, 8], 0),
+        ] {
+            let mut pool: Vec<Vec<u8>> = capacities
+                .into_iter()
+                .map(|capacity| {
+                    let mut value = Vec::with_capacity(capacity);
+                    value.resize(capacity, 0x55);
+                    value
+                })
+                .collect();
+            let floor = pool.iter().map(Vec::capacity).min().unwrap_or(usize::MAX);
+            let selected = (len != 0)
+                .then(|| VersionedTransactionReuse::byte_buffer_index(&pool, len, floor))
+                .flatten();
+            let selected_capacity = selected.map_or(0, |index| pool[index].capacity());
+            let selected_pointer = selected.map(|index| pool[index].as_ptr());
+            let mut expected_pool: Vec<_> = pool
+                .iter()
+                .map(|value| (value.as_ptr(), value.capacity(), value.len()))
+                .collect();
+            if let Some(index) = selected {
+                expected_pool.swap_remove(index);
+            }
+            let mut stats = VersionedTransactionReuseStats::default();
+            let value =
+                VersionedTransactionReuse::take_byte_buffer(&mut pool, len, floor, &mut stats);
+            assert!(value.is_empty());
+            assert_eq!(value.capacity(), selected_capacity);
+            if let Some(pointer) = selected_pointer {
+                assert_eq!(value.as_ptr(), pointer);
+            }
+            assert_eq!(
+                pool.iter()
+                    .map(|value| (value.as_ptr(), value.capacity(), value.len()))
+                    .collect::<Vec<_>>(),
+                expected_pool
+            );
+            assert_eq!(
+                stats,
+                VersionedTransactionReuseStats {
+                    inner_buffer_reuses: u64::from(selected.is_some()),
+                    inner_buffer_fresh: u64::from(len != 0 && selected.is_none()),
+                    growth_events: u64::from(len > selected_capacity),
+                    ..VersionedTransactionReuseStats::default()
+                }
+            );
+        }
+    }
+
+    #[test]
+    fn byte_buffer_floor_survives_external_buffers_decode_errors_and_trimming() {
+        fn check(reuse: &VersionedTransactionReuse) {
+            for pool in [
+                &reuse.instruction_accounts,
+                &reuse.instruction_data,
+                &reuse.lookup_writable_indexes,
+                &reuse.lookup_readonly_indexes,
+            ] {
+                assert!(
+                    pool.iter()
+                        .all(|value| value.capacity() >= reuse.byte_buffer_capacity_floor)
+                );
+            }
+            assert!(reuse.retained_capacity_bytes() <= reuse.max_retained_total_bytes);
+        }
+
+        let mut reuse = VersionedTransactionReuse::with_retention_limits(1024, 4096);
+        assert_eq!(reuse.byte_buffer_capacity_floor, usize::MAX);
+        reuse.recycle_instruction_buffers(vec![1; 16], vec![2; 8]);
+        assert_eq!(reuse.byte_buffer_capacity_floor, 8);
+        check(&reuse);
+
+        // Public recycling can supply a capacity below Vec's growth minimum.
+        let tiny = vec![3];
+        assert_eq!(tiny.capacity(), 1);
+        reuse.recycle_lookup_index_buffers(tiny, vec![4; 4]);
+        assert_eq!(reuse.byte_buffer_capacity_floor, 1);
+        check(&reuse);
+
+        let valid = legacy_transaction_bytes();
+        let transaction = reuse.deserialize_transaction(&valid).unwrap();
+        check(&reuse);
+        reuse.recycle_transaction(transaction);
+        check(&reuse);
+        let truncated = &valid[..valid.len() - 1];
+        assert!(reuse.deserialize_transaction(truncated).is_err());
+        assert_eq!(reuse.byte_buffer_capacity_floor, 1);
+        check(&reuse);
+
+        reuse.max_retained_total_bytes = 0;
+        reuse.trim_to_total_limit();
+        assert_eq!(reuse.retained_capacity_bytes(), 0);
+        assert_eq!(reuse.byte_buffer_capacity_floor, 1);
+        check(&reuse);
+        reuse.max_retained_total_bytes = 4096;
+        reuse.recycle_instruction_buffers(vec![5; 32], vec![6; 16]);
+        assert_eq!(reuse.byte_buffer_capacity_floor, 1);
+        let transaction = reuse.deserialize_transaction(&valid).unwrap();
+        let expected = wincode::deserialize_exact::<VersionedTransaction<'_>>(&valid).unwrap();
+        assert_eq!(transaction, expected);
+        reuse.recycle_transaction(transaction);
+        check(&reuse);
+    }
+
+    #[test]
+    fn byte_buffer_floor_changes_only_for_accepted_nonempty_allocations() {
+        let mut reuse = VersionedTransactionReuse::with_retention_limits(1024, 4096);
+        reuse.recycle_instruction_buffers(Vec::new(), Vec::with_capacity(1025));
+        assert_eq!(reuse.byte_buffer_capacity_floor, usize::MAX);
+        reuse.recycle_instruction_buffers(vec![1; 8], Vec::new());
+        assert_eq!(reuse.byte_buffer_capacity_floor, 8);
+
+        // The one-byte allocation is rejected by the total budget, so it must
+        // not change the floor. Trimming the old pool must not raise it either.
+        reuse.max_retained_total_bytes = 0;
+        reuse.recycle_lookup_index_buffers(vec![2], Vec::new());
+        assert_eq!(reuse.byte_buffer_capacity_floor, 8);
+        assert_eq!(reuse.retained_capacity_bytes(), 0);
+        reuse.max_retained_total_bytes = 4096;
+        reuse.recycle_lookup_index_buffers(vec![3], Vec::new());
+        assert_eq!(reuse.byte_buffer_capacity_floor, 1);
+        assert!(reuse.retained_capacity_bytes() <= 4096);
     }
 
     #[test]

@@ -1,0 +1,100 @@
+{
+  "schema": "hivezilla-capture-reader-after-v1",
+  "checked_utc": "2026-10-01T14:03:16.822718+00:00",
+  "progress": {
+    "archive_publication_allowed": false,
+    "archive_verification": "SKIPPED",
+    "capture_error": null,
+    "capture_retries": 22,
+    "capture_state": "CAPTURING",
+    "collected_blocks": 4864,
+    "compact_bytes": 1971552242,
+    "compacted_blocks": 4736,
+    "compaction_error": null,
+    "compaction_state": "COMPACTING",
+    "counts_basis": "sealed unique finalized block records in the target epoch",
+    "covered_slots": 4874,
+    "end_slot_exclusive": 452736000,
+    "epoch": 1047,
+    "gap_policy": "stop capture rather than count a missing produced block as a skipped slot",
+    "genesis_hash": "5eykt4UsFv8P8NJdTREpY1vzqKqZKvdpKuc147dw2N9d",
+    "last_collected_slot": 452308873,
+    "last_compacted_slot": 452308745,
+    "missing_blocks": 0,
+    "node_identity": "J7qpvCEWhdBgPdYRV3s3btWPrRVXa2qnAzgvxWTvtbrQ",
+    "r2_upload": "DISABLED",
+    "raw_bytes": 5253149240,
+    "run_dir": "/home/ubuntu/live/hivezilla-validator-20260930/epoch-runs/epoch-1047-20261001",
+    "schema": "hivezilla-epoch-progress-v1",
+    "skipped_slots": 10,
+    "slots_in_epoch": 432000,
+    "start_slot": 452304000,
+    "state": "CAPTURING",
+    "updated_unix_ms": 1790863386157
+  },
+  "epoch_info": {
+    "absoluteSlot": 452308935,
+    "blockHeight": 430347870,
+    "epoch": 1047,
+    "slotIndex": 4935,
+    "slotsInEpoch": 432000,
+    "transactionCount": 554824303084
+  },
+  "lag_slots": 62,
+  "retries_since_install": 0,
+  "new_batches": [
+    {
+      "capture": "/home/ubuntu/live/hivezilla-validator-20260930/epoch-runs/epoch-1047-20261001/chunks/000035-1790863284497-606063/capture",
+      "compacted": true,
+      "elapsed_seconds": 27.159821708,
+      "counts": {
+        "events": 187027,
+        "blocks": 128,
+        "transactions": 187003,
+        "block_entries": 186217,
+        "slots": 682,
+        "entries": 186217,
+        "footers": 0,
+        "parent_updates": 0,
+        "first_slot": 452308490,
+        "last_slot": 452308649
+      }
+    },
+    {
+      "capture": "/home/ubuntu/live/hivezilla-validator-20260930/epoch-runs/epoch-1047-20261001/chunks/000036-1790863318960-606063/capture",
+      "compacted": true,
+      "elapsed_seconds": 25.798883412,
+      "counts": {
+        "events": 184121,
+        "blocks": 128,
+        "transactions": 183995,
+        "block_entries": 183312,
+        "slots": 681,
+        "entries": 183312,
+        "footers": 0,
+        "parent_updates": 0,
+        "first_slot": 452308618,
+        "last_slot": 452308777
+      }
+    },
+    {
+      "capture": "/home/ubuntu/live/hivezilla-validator-20260930/epoch-runs/epoch-1047-20261001/chunks/000037-1790863351369-606063/capture",
+      "compacted": false,
+      "elapsed_seconds": 28.409435234,
+      "counts": {
+        "events": 186816,
+        "blocks": 128,
+        "transactions": 182340,
+        "block_entries": 185993,
+        "slots": 695,
+        "entries": 185993,
+        "footers": 0,
+        "parent_updates": 0,
+        "first_slot": 452308746,
+        "last_slot": 452308905
+      }
+    }
+  ],
+  "services": "Id=hivezilla-epoch-1047.service\nActiveState=active\nMainPID=606063\nNRestarts=0\n\nId=hivezilla-validator-canary.service\nActiveState=active\nMainPID=590165\nNRestarts=0\n",
+  "installed_reader_hash_matches": true
+}

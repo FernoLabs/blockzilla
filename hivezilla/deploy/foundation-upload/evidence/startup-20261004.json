@@ -1,0 +1,61 @@
+{
+  "recorded_at": "2026-10-04T21:26:41.318317+02:00",
+  "bucket": "solana-archive-data",
+  "credentials_found_existing": true,
+  "credential_file": "/Users/augustin/Developement/ferno/ferno-btc/secrets/fondation-s3.txt",
+  "secret_values_logged": false,
+  "private_config_directory_mode": "0700",
+  "private_config_file_mode": "0600",
+  "historical_archive": {
+    "state": "UPLOADING",
+    "current_epoch": 1046,
+    "snapshot_epochs": 1047,
+    "source_bytes_observed": 105343758623662,
+    "future_epoch": 1047,
+    "prefix": "compact-v2/blockzilla-20261004",
+    "enabled_for_boot": true,
+    "transferred_gib_last_sample": 8.794,
+    "complete_epochs_not_yet_claimed": true,
+    "uploaded_index_bytes": 22438504,
+    "uploaded_index_header_and_first_row_match": true
+  },
+  "native_backup": {
+    "state": "UPLOADING",
+    "prefix": "native-backup/direct-agave-20261004",
+    "release": "foundation-upload-20261004-r2",
+    "enabled_for_boot": true,
+    "snapshot_chunks": 363496,
+    "snapshot_blocks": 518636,
+    "snapshot_last_slot": 453348420,
+    "completed_packs_last_sample": 7,
+    "completed_pack_bytes_last_sample": 1909862400,
+    "first_remote_member_matches_source_and_receipt_sha256": true,
+    "first_remote_member_bytes": 1901,
+    "full_remote_readback": false,
+    "canonical": false,
+    "publication_ready": false,
+    "oom_events": 0,
+    "oom_kills": 0,
+    "native_compact_lag_last_sample": 1,
+    "validator_pid": 1106933,
+    "validator_restarted_by_backup": false,
+    "original_failed_release_retained": true
+  },
+  "latest_car": {
+    "epoch": 1047,
+    "state": "DOWNLOADING",
+    "last_sample_percent": 72,
+    "automatic_compaction_queued": true,
+    "retained_car": true
+  },
+  "local_source_deletion": false,
+  "tests": {
+    "passed": 3,
+    "failed": 0,
+    "cases": [
+      "remote archive size mismatch prevents completion",
+      "native source mutation prevents pack sealing",
+      "lost native upload reply resumes same bytes and retains source"
+    ]
+  }
+}

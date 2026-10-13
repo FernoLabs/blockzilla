@@ -1,0 +1,437 @@
+{
+  "schema": "hivezilla-direct-capture-incident-v1",
+  "updated_unix": 1790971350,
+  "state": "LIVE_CAPTURE_RESTORED",
+  "failure_observed_utc": "2026-10-02 19:55:48.555 UTC",
+  "old_session": "000000000000000018daccf4d01ca96d-10e3f5",
+  "new_session": "000000000000000018daceb49b8b9a08-10e3f5",
+  "failure": {
+    "accepted_events": 19598012,
+    "coverage_complete": false,
+    "durable_sequence": 19581628,
+    "error": "callback queue event limit reached or writer stopped",
+    "state": "FAILED"
+  },
+  "old_cursor": {
+    "session_id": "000000000000000018daccf4d01ca96d-10e3f5",
+    "first_slot": 452703612,
+    "last_slot": 452710427,
+    "last_hash": [
+      161,
+      135,
+      220,
+      67,
+      234,
+      136,
+      144,
+      35,
+      106,
+      109,
+      50,
+      237,
+      72,
+      84,
+      163,
+      13,
+      132,
+      119,
+      91,
+      148,
+      103,
+      118,
+      92,
+      45,
+      146,
+      167,
+      119,
+      3,
+      168,
+      106,
+      222,
+      109
+    ],
+    "batches": 1115,
+    "compacted_blocks": 6812,
+    "compacted_transactions": 9633788,
+    "compacted_entries": 9612350,
+    "updated_unix_ms": 1790970948818,
+    "startup_incomplete_roots": [
+      [
+        452703580,
+        28
+      ],
+      [
+        452703581,
+        29
+      ],
+      [
+        452703582,
+        30
+      ],
+      [
+        452703583,
+        31
+      ],
+      [
+        452703584,
+        32
+      ],
+      [
+        452703585,
+        33
+      ],
+      [
+        452703586,
+        34
+      ],
+      [
+        452703587,
+        35
+      ],
+      [
+        452703588,
+        36
+      ],
+      [
+        452703589,
+        37
+      ],
+      [
+        452703590,
+        38
+      ],
+      [
+        452703591,
+        39
+      ],
+      [
+        452703592,
+        40
+      ],
+      [
+        452703593,
+        41
+      ],
+      [
+        452703594,
+        42
+      ],
+      [
+        452703595,
+        43
+      ],
+      [
+        452703596,
+        44
+      ],
+      [
+        452703597,
+        45
+      ],
+      [
+        452703598,
+        46
+      ],
+      [
+        452703599,
+        47
+      ],
+      [
+        452703600,
+        48
+      ],
+      [
+        452703601,
+        49
+      ],
+      [
+        452703602,
+        50
+      ],
+      [
+        452703603,
+        51
+      ],
+      [
+        452703604,
+        52
+      ],
+      [
+        452703605,
+        53
+      ],
+      [
+        452703606,
+        54
+      ],
+      [
+        452703607,
+        55
+      ],
+      [
+        452703608,
+        56
+      ],
+      [
+        452703609,
+        57
+      ],
+      [
+        452703610,
+        58
+      ],
+      [
+        452703611,
+        59
+      ]
+    ]
+  },
+  "gap_first_slot": 452710428,
+  "gap_last_slot": 452710957,
+  "native_compact_gap_rebuilt": false,
+  "validator_restart_required": false,
+  "validator_pid": 1106933,
+  "shreds_stayed_active": true,
+  "raw_shred_coverage_verified": false,
+  "writer_delay_cause": "Not established. Failure was observed during the approved duplicate-export removal and filesystem synchronization period.",
+  "recovery": {
+    "queue_events": 65536,
+    "queue_bytes": 1073741824,
+    "plugin_hot_reload": true,
+    "new_session": "000000000000000018daceb49b8b9a08-10e3f5",
+    "rpc_backup_path": "/home/ubuntu/live/hivezilla-validator-20260930/recovery/direct-agave-queue-overflow-20261002",
+    "rpc_backup_receipt": {
+      "schema": "hivezilla-local-rpc-gap-backup-v1",
+      "state": "SAVED",
+      "started_unix": 1790971274,
+      "rpc": "http://127.0.0.1:8899",
+      "identity": "J7qpvCEWhdBgPdYRV3s3btWPrRVXa2qnAzgvxWTvtbrQ",
+      "genesis_hash": "5eykt4UsFv8P8NJdTREpY1vzqKqZKvdpKuc147dw2N9d",
+      "old_session": "000000000000000018daccf4d01ca96d-10e3f5",
+      "new_session": "000000000000000018daceb49b8b9a08-10e3f5",
+      "first_slot": 452710428,
+      "last_slot": 452710957,
+      "slot_span": 530,
+      "skipped_slots": [],
+      "native_capture_complete": false,
+      "compact_gap_rebuilt": false,
+      "raw_shred_coverage_verified": false,
+      "entry_boundaries_preserved": false,
+      "errors": [],
+      "updated_unix": 1790971305,
+      "following_block": {
+        "parentSlot": 452710957,
+        "previousBlockhash": "FmCVKzd3mAxjBfJ5jTfW6pKuMtT1FGZfVEnJP81Td1wc",
+        "blockhash": "6VAqErKYP57qsQQvysFoVFMzBFTyrwqQhpySLLbMAkaw"
+      },
+      "chain_matches_boundaries": true,
+      "completed_unix": 1790971306,
+      "blocks_saved": 530,
+      "transactions_saved": 781721,
+      "gzip_bytes": 846410792
+    }
+  },
+  "current_health": {
+    "schema": "hivezilla-direct-pipeline-health-v1",
+    "updated_unix_ms": 1790971339904,
+    "state": "WARNING",
+    "problems": [],
+    "warnings": [
+      "An earlier session ended without a clean close; earlier coverage can have gaps"
+    ],
+    "canonical": false,
+    "full_epoch": false,
+    "validator": {
+      "health": "ok",
+      "finalized_slot": 452711899,
+      "identity": "J7qpvCEWhdBgPdYRV3s3btWPrRVXa2qnAzgvxWTvtbrQ",
+      "genesis_hash": "5eykt4UsFv8P8NJdTREpY1vzqKqZKvdpKuc147dw2N9d"
+    },
+    "capture": {
+      "session_id": "000000000000000018daceb49b8b9a08-10e3f5",
+      "path": "/home/ubuntu/live/hivezilla-validator-20260930/captures/direct-agave-live/000000000000000018daceb49b8b9a08-10e3f5",
+      "state": "CAPTURING",
+      "node_identity": "J7qpvCEWhdBgPdYRV3s3btWPrRVXa2qnAzgvxWTvtbrQ",
+      "genesis_hash": "5eykt4UsFv8P8NJdTREpY1vzqKqZKvdpKuc147dw2N9d",
+      "validator_pid": 1106933,
+      "writer_live": true,
+      "durable_sequence": 2842222,
+      "latest_rooted_slot": 452711900,
+      "journal_bytes": 585125968,
+      "journal_limit_bytes": 68719476736,
+      "reserve_disk_bytes": 536870912000,
+      "previous_unclean_sessions": [
+        "000000000000000018daccf4d01ca96d-10e3f5"
+      ],
+      "raw_shred_completeness": false
+    },
+    "worker": {
+      "compacted_blocks": 942,
+      "compacted_entries": 1364349,
+      "compacted_transactions": 1376836,
+      "durable_sequence": 2837896,
+      "first_compact_slot": 452710958,
+      "full_epoch": false,
+      "last_compact_slot": 452711899,
+      "startup_incomplete_roots": [
+        [
+          452710926,
+          7370
+        ],
+        [
+          452710927,
+          7371
+        ],
+        [
+          452710928,
+          7372
+        ],
+        [
+          452710929,
+          7373
+        ],
+        [
+          452710930,
+          7374
+        ],
+        [
+          452710931,
+          7375
+        ],
+        [
+          452710932,
+          7376
+        ],
+        [
+          452710933,
+          7377
+        ],
+        [
+          452710934,
+          7378
+        ],
+        [
+          452710935,
+          7379
+        ],
+        [
+          452710936,
+          7380
+        ],
+        [
+          452710937,
+          7381
+        ],
+        [
+          452710938,
+          7382
+        ],
+        [
+          452710939,
+          7383
+        ],
+        [
+          452710940,
+          7384
+        ],
+        [
+          452710941,
+          7385
+        ],
+        [
+          452710942,
+          7386
+        ],
+        [
+          452710943,
+          7387
+        ],
+        [
+          452710944,
+          7388
+        ],
+        [
+          452710945,
+          7389
+        ],
+        [
+          452710946,
+          7390
+        ],
+        [
+          452710947,
+          7391
+        ],
+        [
+          452710948,
+          7392
+        ],
+        [
+          452710949,
+          7393
+        ],
+        [
+          452710950,
+          7394
+        ],
+        [
+          452710951,
+          7395
+        ],
+        [
+          452710952,
+          7396
+        ],
+        [
+          452710953,
+          7397
+        ],
+        [
+          452710954,
+          7398
+        ],
+        [
+          452710955,
+          7399
+        ],
+        [
+          452710956,
+          7400
+        ],
+        [
+          452710957,
+          7401
+        ]
+      ],
+      "state": "WAITING",
+      "updated_unix_ms": 1790971339501
+    },
+    "compact_lag_slots": 1,
+    "worker_status_age_seconds": 0,
+    "free_disk_bytes": 2893871788032,
+    "last_durable_change_unix_ms": 1790971339904,
+    "shreds": {
+      "schema": "hivezilla-shred-hook-status-v1",
+      "state": "ACTIVE",
+      "reason": "receiving",
+      "updated_unix_ms": 1790971339856,
+      "durable_next_sequence": 19976025,
+      "durable_prefix_hash": "6ad1cb626780463492118b619a1b018f604dc3627ea63ae6e698bfe8dc1d655a",
+      "journal_bytes": 26176563468,
+      "counts": {
+        "packets": 19976025,
+        "payload_bytes": 24258821324,
+        "turbine_received": 17794244,
+        "repair_received": 1092926,
+        "repair_accepted": 1088855,
+        "data_shreds": 11064624,
+        "coding_shreds": 8907902,
+        "other_datagrams": 3499,
+        "first_header_slot": 452704425,
+        "max_header_slot": 452711933
+      },
+      "custody_authority": false,
+      "canonical_coverage_verified": false
+    }
+  }
+}

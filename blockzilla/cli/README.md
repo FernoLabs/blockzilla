@@ -1,13 +1,30 @@
 # Blockzilla CLI
 
-`blockzilla` is the main product in this repository. It converts Solana CAR or
-CAR.ZST files into indexed Archive V2 directories and reads them back.
+Read historical compact blocks from Blockzilla through Cloudflare. Use
+`stream` for ordered JSON block summaries and `dump-tokens` for recorded token
+balances. `index-tokens` reads a private live relay or Blockzilla history into
+SQLite. `token-db` queries that file while indexing continues. These commands
+are implemented in this checkout; crates.io publication and the public live
+stream remain unfinished.
 
-The local CAR-to-Archive V2 path works today. The CLI and format are pre-1.0;
-pin the producing Git revision. The CLI can finalize captured live input, but
-continuous production ingestion, replication, and indexer streaming remain
-roadmap work. A recovered finite-work scheduler is available for experimental
-deployments.
+Start with the [user quick start](../../docs/start/quick-start.md).
+
+```bash
+blockzilla stream --epoch 0 --max-blocks 10
+blockzilla dump-tokens --epoch 900 --max-blocks 100 > token-balances.jsonl
+blockzilla index-tokens --epoch 900 --max-blocks 3 --db ./tokens.sqlite
+blockzilla token-db --db ./tokens.sqlite --status
+```
+
+See [Live token index in SQLite](../../docs/start/token-indexer.md) for the live
+command, local queries, restart behavior, and archive backfill requirements.
+The [live stream guide](../../docs/start/live-stream.md) covers browser/Node
+clients. The [token dumper guide](../../docs/start/token-dumper.md) defines JSON
+exports. The [program dumper guide](../../docs/start/program-dumper.md) covers
+live local filters and the separate `blockzilla-dump program` executable.
+
+The CLI also contains archive production and maintenance tools. The following
+sections describe those contributor commands.
 
 ## Try it
 
@@ -22,6 +39,10 @@ The main commands are:
 
 | Command | Purpose |
 | --- | --- |
+| `stream` | Read ordered JSON block summaries from a fixed historical archive. |
+| `dump-tokens` | Export recorded historical token balances as JSON Lines. |
+| `index-tokens` | Store live or historical token balances in SQLite with saved progress. |
+| `token-db` | Query that SQLite file while indexing continues. |
 | `scheduler` | Observe archive inventory and optionally schedule finite build, repair, and finalization jobs. |
 | `acquire-car` | Supervise resumable `aria2c` transfer, structural preflight, and durable no-clobber CAR publication. |
 | `preflight-car` | Verify that a CAR can be streamed to clean EOF. |

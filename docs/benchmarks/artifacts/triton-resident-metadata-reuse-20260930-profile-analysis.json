@@ -1,0 +1,276 @@
+{
+  "schema": "zilla-resident-metadata-reuse-profile-v1",
+  "event": "cpu-clock",
+  "sample_frequency_hz": 99,
+  "sample_period_ns": 10101010,
+  "folded_units": "CPU-clock nanoseconds; not sample counts",
+  "profile_worker_counts": {
+    "parsers": 64,
+    "decoders": 64
+  },
+  "old_A2_plus_B": {
+    "total_weight_ns": 3274717138970,
+    "sample_count_from_periods": 324197,
+    "inclusive_symbol_percent": {
+      "take_byte_buffer": 2.858138724294179,
+      "copy_bytes_reusing": 3.30848218829909,
+      "retained_capacity_bytes": 1.2424544335697123,
+      "decode_transaction_status_meta_into_reusing": 0.0,
+      "merge_protobuf": 0.0,
+      "retain_log": 0.0,
+      "retain_token": 0.0
+    },
+    "unresolved_leaf_percent": 12.39369889295706,
+    "unresolved_leaf_by_placeholder_percent": {
+      "[car-decode-reference]": 1.7103797999364583,
+      "[libc.so.6]": 10.676533095617788,
+      "[[vdso]]": 0.006785997402813721
+    }
+  },
+  "metadata_reuse": {
+    "total_weight_ns": 3223272695040,
+    "sample_count_from_periods": 319104,
+    "inclusive_symbol_percent": {
+      "take_byte_buffer": 2.8768050541516246,
+      "copy_bytes_reusing": 3.342797332531087,
+      "retained_capacity_bytes": 1.4330751103088648,
+      "decode_transaction_status_meta_into_reusing": 23.856172282390695,
+      "merge_protobuf": 23.813239570798235,
+      "retain_log": 0.43684817488969113,
+      "retain_token": 0.5875827316486161
+    },
+    "unresolved_leaf_percent": 12.839074408343361,
+    "unresolved_leaf_by_placeholder_percent": {
+      "[car-decode-reference]": 1.9520281789009226,
+      "[libc.so.6]": 10.879838547934217,
+      "[[vdso]]": 0.007207681508223024
+    }
+  },
+  "samples": 319104,
+  "lost_samples_reported": 0,
+  "scan_seconds": 39.510687427,
+  "allocator_self_comparison": [
+    {
+      "symbol": "_mi_page_malloc_zero",
+      "baseline_percent_rounded": 2.66,
+      "candidate_percent_rounded": 1.6
+    },
+    {
+      "symbol": "mi_free",
+      "baseline_percent_rounded": 1.62,
+      "candidate_percent_rounded": 0.92
+    },
+    {
+      "symbol": "mi_theap_malloc_aligned",
+      "baseline_percent_rounded": 1.45,
+      "candidate_percent_rounded": 0.75
+    },
+    {
+      "symbol": "<alloc::raw_vec::RawVecInner>::finish_grow",
+      "baseline_percent_rounded": 1.26,
+      "candidate_percent_rounded": 0.52
+    }
+  ],
+  "top_self_symbols": [
+    {
+      "self_percent_rounded": 15.61,
+      "symbol": "_blake3_compress_in_place_avx512"
+    },
+    {
+      "self_percent_rounded": 9.56,
+      "symbol": "ZSTD_decompressSequences_default.constprop.0"
+    },
+    {
+      "self_percent_rounded": 5.42,
+      "symbol": "<of_car_reader::reader::CarBlockReader<alloc::boxed::Box<dyn std::io::Read>>>::read_until_block_ordered_lossless_inner::{closure#0}"
+    },
+    {
+      "self_percent_rounded": 4.73,
+      "symbol": "core::str::converts::from_utf8"
+    },
+    {
+      "self_percent_rounded": 3.73,
+      "symbol": "<car_decode_reference::Decoder>::decode"
+    },
+    {
+      "self_percent_rounded": 3.34,
+      "symbol": "of_car_reader::versioned_transaction::copy_bytes_reusing"
+    },
+    {
+      "self_percent_rounded": 2.99,
+      "symbol": "<minicbor::decode::decoder::Decoder>::unsigned"
+    },
+    {
+      "self_percent_rounded": 2.84,
+      "symbol": "of_car_reader::metadata_decoder::decode_transaction_status_meta_into_reusing"
+    },
+    {
+      "self_percent_rounded": 2.6,
+      "symbol": "prost::encoding::string::merge::<&[u8]>"
+    },
+    {
+      "self_percent_rounded": 2.42,
+      "symbol": "ZSTD_decompressMultiFrame"
+    },
+    {
+      "self_percent_rounded": 1.9,
+      "symbol": "<of_car_reader::metadata_decoder::ZstdReusableDecoder>::decompress_if_zstd"
+    },
+    {
+      "self_percent_rounded": 1.82,
+      "symbol": "prost::encoding::message::merge::<of_car_reader::confirmed_block::TokenBalance, &[u8]>"
+    },
+    {
+      "self_percent_rounded": 1.75,
+      "symbol": "prost::encoding::varint::decode_varint_slice"
+    },
+    {
+      "self_percent_rounded": 1.63,
+      "symbol": "of_car_reader::versioned_transaction::read_compiled_instructions_reusing"
+    },
+    {
+      "self_percent_rounded": 1.6,
+      "symbol": "_mi_page_malloc_zero"
+    },
+    {
+      "self_percent_rounded": 1.43,
+      "symbol": "<of_car_reader::confirmed_block::TransactionStatusMeta as prost::message::Message>::merge_field::<&[u8]>"
+    },
+    {
+      "self_percent_rounded": 1.37,
+      "symbol": "prost::encoding::uint64::merge::<&[u8]>"
+    },
+    {
+      "self_percent_rounded": 1.28,
+      "symbol": "<of_car_reader::versioned_transaction::VersionedTransactionReuse>::retained_capacity_bytes"
+    },
+    {
+      "self_percent_rounded": 1.24,
+      "symbol": "of_car_reader::node::decode_node_with_kind"
+    },
+    {
+      "self_percent_rounded": 1.24,
+      "symbol": "<minicbor::decode::decoder::Decoder>::array"
+    },
+    {
+      "self_percent_rounded": 1.18,
+      "symbol": "std::sys::backtrace::__rust_begin_short_backtrace::<car_decode_reference::dynamic::scan_dynamic_profiled<car_decode_reference::resident::platform::ResidentSource>::{closure#2}::{closure#0}::{closure#1}, ()>"
+    },
+    {
+      "self_percent_rounded": 0.97,
+      "symbol": "ZSTD_buildFSETable_body_default.isra.0"
+    },
+    {
+      "self_percent_rounded": 0.92,
+      "symbol": "mi_free"
+    },
+    {
+      "self_percent_rounded": 0.86,
+      "symbol": "0x00000000001bc2d3"
+    },
+    {
+      "self_percent_rounded": 0.85,
+      "symbol": "prost::encoding::bytes::merge::<alloc::vec::Vec<u8>, &[u8]>"
+    }
+  ],
+  "limits": [
+    "Profile comparisons use P64/W64. Speed comparisons use unprofiled P32/W128.",
+    "Selected allocator symbols are a subset of all allocation costs; they are not allocation counts.",
+    "A lower total CPU cost, changed layout, and inline attribution can change sample percentages.",
+    "Unresolved leaf frames and inline expansion limit attribution. Zero lost samples does not prove complete unwinding."
+  ],
+  "artifacts": {
+    "triton-resident-metadata-reuse-20260930-cpu-time.svg": {
+      "bytes": 233095,
+      "sha256": "d2c583047fdc53b919f3d1294325cf7078c6ccb2e8287d7312443e4b12f16513"
+    },
+    "triton-resident-metadata-reuse-20260930-cpu.folded.gz": {
+      "bytes": 103043,
+      "sha256": "a5fa071e8d3e59e41df0ceb5ed545fde49fc2815b5c8088713e7afb7b9b9287b"
+    },
+    "triton-resident-metadata-reuse-20260930-perf-self.txt": {
+      "bytes": 18341,
+      "sha256": "b98e327a602d4e78233357f036dadc860fcc4b44763d345a5c5219c185758dd5"
+    }
+  },
+  "conversion": {
+    "state": "PASS",
+    "steps": [
+      {
+        "name": "perf-report",
+        "command": [
+          "sudo",
+          "-n",
+          "perf",
+          "report",
+          "-i",
+          "/home/ubuntu/benchmarks/zilla-triton-20260930/results-opt-meta-profile-v1/meta-stacks-p64-w64/perf.data",
+          "--stdio",
+          "--no-children",
+          "--no-inline",
+          "--call-graph",
+          "none",
+          "--percent-limit",
+          "0.3",
+          "--sort",
+          "comm,dso,symbol"
+        ],
+        "seconds": 0.541297435760498,
+        "exit_code": 0
+      },
+      {
+        "name": "perf-script",
+        "command": [
+          "sudo",
+          "-n",
+          "perf",
+          "script",
+          "-i",
+          "/home/ubuntu/benchmarks/zilla-triton-20260930/results-opt-meta-profile-v1/meta-stacks-p64-w64/perf.data",
+          "-F",
+          "comm,pid,time,period,event,ip,sym,dso",
+          "--inline"
+        ],
+        "seconds": 128.1195056438446,
+        "exit_code": 0
+      },
+      {
+        "name": "inferno",
+        "command": [
+          "/home/ubuntu/benchmarks/zilla-triton-20260930/resident-converter-bin-v3/perf-flamegraph",
+          "/home/ubuntu/benchmarks/zilla-triton-20260930/results-opt-meta-profile-v1/meta-stacks-p64-w64/perf-inline.script",
+          "/home/ubuntu/benchmarks/zilla-triton-20260930/results-opt-meta-profile-v1/meta-stacks-p64-w64/cpu.folded",
+          "/home/ubuntu/benchmarks/zilla-triton-20260930/results-opt-meta-profile-v1/meta-stacks-p64-w64/cpu.svg"
+        ],
+        "seconds": 3.0980520248413086,
+        "exit_code": 0
+      }
+    ],
+    "artifacts": {
+      "cpu.folded": {
+        "bytes": 8194319,
+        "sha256": "aa8af96ed2f663491fc927c65e81a13c1bba59ed4c0cbf14701fa2ba36bf6225"
+      },
+      "cpu.folded.gz": {
+        "bytes": 103043,
+        "sha256": "a5fa071e8d3e59e41df0ceb5ed545fde49fc2815b5c8088713e7afb7b9b9287b"
+      },
+      "cpu.svg": {
+        "bytes": 230003,
+        "sha256": "486ce36fd7d385c1bba6171e91ef18dc9f338f548e44a5a2953ace935972b21c"
+      },
+      "cpu-time.svg": {
+        "bytes": 233095,
+        "sha256": "d2c583047fdc53b919f3d1294325cf7078c6ccb2e8287d7312443e4b12f16513"
+      },
+      "perf-self-flat.txt": {
+        "bytes": 18341,
+        "sha256": "b98e327a602d4e78233357f036dadc860fcc4b44763d345a5c5219c185758dd5"
+      },
+      "perf.data": {
+        "bytes": 41924038,
+        "sha256": "a5329ad1828daf655416ff788425aadd6336bc8a5ca1ff2bb88d1111a990c429"
+      }
+    }
+  }
+}

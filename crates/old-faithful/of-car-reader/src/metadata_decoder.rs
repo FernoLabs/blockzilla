@@ -21,6 +21,9 @@ use crate::stored_transaction::{
     StoredTransactionStatusMetaLegacyLogs, StoredTransactionStatusMetaV2,
 };
 
+mod owned_reuse;
+pub use owned_reuse::TransactionStatusMetaReuse;
+
 pub const BINCODE_EPOCH_CUTOFF: u64 = 156;
 
 #[derive(Debug)]
@@ -459,6 +462,47 @@ pub fn decode_transaction_status_meta_from_frame(
         decode_transaction_status_meta_into(slot, zstd.output(), out)
     } else {
         decode_transaction_status_meta_into(slot, reassembled_metadata, out)
+    }
+}
+
+/// Decode one metadata frame while retaining bounded log and token string buffers.
+/// The output is reset first, including for empty frames and decompression errors.
+pub fn decode_transaction_status_meta_from_frame_reusing(
+    slot: u64,
+    reassembled_metadata: &[u8],
+    out: &mut TransactionStatusMeta,
+    zstd: &mut ZstdReusableDecoder,
+    reuse: &mut TransactionStatusMetaReuse,
+) -> Result<(), MetadataDecodeError> {
+    reuse.reset(out);
+    if reassembled_metadata.is_empty() {
+        return Ok(());
+    }
+    if zstd
+        .decompress_if_zstd(reassembled_metadata)
+        .map_err(MetadataDecodeError::ZstdDecompress)?
+    {
+        decode_transaction_status_meta_into_reusing(slot, zstd.output(), out, reuse)
+    } else {
+        decode_transaction_status_meta_into_reusing(slot, reassembled_metadata, out, reuse)
+    }
+}
+
+/// Merge raw metadata with reusable log and token buffers, without resetting `out`.
+/// Legacy metadata uses the same replacement behavior as the original decoder.
+pub fn decode_transaction_status_meta_into_reusing(
+    slot: u64,
+    metadata_bytes: &[u8],
+    out: &mut TransactionStatusMeta,
+    reuse: &mut TransactionStatusMetaReuse,
+) -> Result<(), MetadataDecodeError> {
+    if slot_uses_protobuf_metadata(slot) {
+        reuse
+            .merge_protobuf(out, metadata_bytes)
+            .inspect_err(|_err| println!("invalid protobuf metadata : {slot} {:?}", metadata_bytes))
+            .map_err(MetadataDecodeError::ProstDecode)
+    } else {
+        decode_transaction_status_meta_into(slot, metadata_bytes, out)
     }
 }
 

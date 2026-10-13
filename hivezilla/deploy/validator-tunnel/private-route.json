@@ -1,0 +1,5 @@
+{
+  "network": "10.253.45.3/32",
+  "tunnel_id": "0cd18a26-d76a-408c-a1fa-55a1151fa3ae",
+  "comment": "Hivezilla validator: SSH, dashboard, and Yellowstone stream"
+}

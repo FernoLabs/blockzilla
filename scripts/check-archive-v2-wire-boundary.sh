@@ -4,7 +4,9 @@ set -euo pipefail
 # Archive V2 readers must select one generation-bound wire profile through
 # blockzilla-compact-v2-reader. Keep this small allowlist for existing migration debt;
 # a new direct decoder, including one added to an allowlisted file, changes the
-# exact report and fails CI.
+# exact report and fails CI. The native canary builder's output audit and the
+# sampled native/CAR diagnostic also retain direct decoding. Neither is a public
+# archive reader or a source of canonical catalog admission.
 pattern='ArchiveV2HotMessagePayload\s*=\s*wincode::config::deserialize|deserialize(?:_exact)?::<\s*ArchiveV2HotMessagePayload|fn\s+decode_message[\s\S]{0,1200}wincode::config::deserialize'
 
 actual="$({
@@ -16,7 +18,9 @@ actual="$({
 } | sed 's#^\./##' | LC_ALL=C sort)"
 
 expected="$(LC_ALL=C sort <<'EOF'
+bench/native-car-compare/src/main.rs:1
 blockzilla/cli/src/archive_v2.rs:3
+blockzilla/cli/src/archive_v2/execution_canary.rs:1
 blockzilla/cli/src/archive_v2/registry_reprocess.rs:2
 blockzilla/cli/src/bin/upgrade_block_access_vote_hashes.rs:2
 blockzilla/cli/src/bin/verify_access_vote_hashes.rs:1

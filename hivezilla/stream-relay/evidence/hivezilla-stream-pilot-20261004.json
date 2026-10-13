@@ -1,0 +1,303 @@
+{
+  "schema": "hivezilla-stream-pilot-v1",
+  "state": "RUNNING",
+  "updated_unix_ms": 1791104352350,
+  "binary": "/home/ubuntu/live/hivezilla-validator-20260930/releases/hivezilla-stream-v1-20261004/hivezilla-stream",
+  "binary_sha256": "89e820aed09e547b1e002cff42681ff62315c5b02dc94ee2488b3c4a6402a4b8",
+  "origin": "https://127.0.0.1:8870",
+  "relay": "http://127.0.0.1:8871",
+  "mTLS": true,
+  "token_paths": [
+    "/home/ubuntu/live/hivezilla-validator-20260930/config/stream-20261004/origin-api.key",
+    "/home/ubuntu/live/hivezilla-validator-20260930/config/stream-20261004/client-api.key"
+  ],
+  "certificate_days": 30,
+  "certificate_renewal_automated": false,
+  "source_session": "000000000000000018daf342ba38d3d0-10e3f5",
+  "source_session_switch_automated": false,
+  "native_services_before": "Id=hivezilla-validator.service\nActiveState=active\nMainPID=1106933\nNRestarts=0\n\nId=hivezilla-shred-hook-recorder.service\nActiveState=active\nMainPID=1106863\nNRestarts=0\n\nId=hivezilla-direct-worker.service\nActiveState=active\nMainPID=4105319\nNRestarts=1\n",
+  "native_services_after": "Id=hivezilla-validator.service\nActiveState=active\nMainPID=1106933\nNRestarts=0\n\nId=hivezilla-shred-hook-recorder.service\nActiveState=active\nMainPID=1106863\nNRestarts=0\n\nId=hivezilla-direct-worker.service\nActiveState=active\nMainPID=4105319\nNRestarts=1\n",
+  "origin_head": {
+    "canonical": false,
+    "earliest_after": "000000000000000018daf342ba38d3d0-10e3f5:453209280:-",
+    "error": null,
+    "evidence_included": false,
+    "finalized": true,
+    "genesis_hash": "5eykt4UsFv8P8NJdTREpY1vzqKqZKvdpKuc147dw2N9d",
+    "intake_age_ms": 71,
+    "last_admitted_unix_ms": 1791104352280,
+    "last_slot": 453209540,
+    "latest_cursor": "000000000000000018daf342ba38d3d0-10e3f5:453209540:1a38093e5621854f100d5b815f691cf83149d970cc955ad17ddb616f12251783",
+    "node_identity": "J7qpvCEWhdBgPdYRV3s3btWPrRVXa2qnAzgvxWTvtbrQ",
+    "profile": "native-compact-projection-v1",
+    "publication_ready": false,
+    "received_bytes": 106305893,
+    "received_chunks": 184,
+    "replay_bytes": 106305893,
+    "replay_limit_bytes": 134217728,
+    "retained_chunks": 184,
+    "schema": "blockzilla-stream-head-v1",
+    "stale": false,
+    "state": "LIVE",
+    "upstream_http_version": null
+  },
+  "relay_head": {
+    "canonical": false,
+    "earliest_after": "000000000000000018daf342ba38d3d0-10e3f5:453209539:ea0aceeb0ade136711f240e6115d616e209667d9259f58cba9e71d64dea193b0",
+    "error": null,
+    "evidence_included": false,
+    "finalized": true,
+    "genesis_hash": "5eykt4UsFv8P8NJdTREpY1vzqKqZKvdpKuc147dw2N9d",
+    "intake_age_ms": 71,
+    "last_admitted_unix_ms": 1791104352281,
+    "last_slot": 453209540,
+    "latest_cursor": "000000000000000018daf342ba38d3d0-10e3f5:453209540:1a38093e5621854f100d5b815f691cf83149d970cc955ad17ddb616f12251783",
+    "node_identity": "J7qpvCEWhdBgPdYRV3s3btWPrRVXa2qnAzgvxWTvtbrQ",
+    "profile": "native-compact-projection-v1",
+    "publication_ready": false,
+    "received_bytes": 329805,
+    "received_chunks": 1,
+    "replay_bytes": 329805,
+    "replay_limit_bytes": 134217728,
+    "retained_chunks": 1,
+    "schema": "blockzilla-stream-head-v1",
+    "stale": false,
+    "state": "LIVE",
+    "upstream_http_version": "HTTP/2.0"
+  },
+  "same_machine_pilot": true,
+  "public_tunnel_changed": false,
+  "second_machine_deployed": false,
+  "final_checked_unix_ms": 1791104782824,
+  "final_relay_head": {
+    "canonical": false,
+    "earliest_after": "000000000000000018daf342ba38d3d0-10e3f5:453210815:a9e0d68f3e381400853c55401c53d89d873770ac6d6bfd9aadc9046596beef1a",
+    "error": null,
+    "evidence_included": false,
+    "finalized": true,
+    "genesis_hash": "5eykt4UsFv8P8NJdTREpY1vzqKqZKvdpKuc147dw2N9d",
+    "intake_age_ms": 210,
+    "last_admitted_unix_ms": 1791104782614,
+    "last_slot": 453211148,
+    "latest_cursor": "000000000000000018daf342ba38d3d0-10e3f5:453211148:0ef0462ac28a37eebc27c722fd527f8d388ee13dce5ef7036ac4dd7c7dec8465",
+    "node_identity": "J7qpvCEWhdBgPdYRV3s3btWPrRVXa2qnAzgvxWTvtbrQ",
+    "profile": "native-compact-projection-v1",
+    "publication_ready": false,
+    "received_bytes": 673052072,
+    "received_chunks": 1127,
+    "replay_bytes": 134180451,
+    "replay_limit_bytes": 134217728,
+    "retained_chunks": 235,
+    "schema": "blockzilla-stream-head-v1",
+    "stale": false,
+    "state": "LIVE",
+    "upstream_http_version": "HTTP/2.0"
+  },
+  "final_native_health": {
+    "schema": "hivezilla-direct-pipeline-health-v1",
+    "updated_unix_ms": 1791104768255,
+    "state": "WARNING",
+    "problems": [],
+    "warnings": [
+      "An earlier session ended without a clean close; earlier coverage can have gaps"
+    ],
+    "canonical": false,
+    "full_epoch": false,
+    "validator": {
+      "health": "ok",
+      "finalized_slot": 453211093,
+      "identity": "J7qpvCEWhdBgPdYRV3s3btWPrRVXa2qnAzgvxWTvtbrQ",
+      "genesis_hash": "5eykt4UsFv8P8NJdTREpY1vzqKqZKvdpKuc147dw2N9d"
+    },
+    "capture": {
+      "session_id": "000000000000000018daf342ba38d3d0-10e3f5",
+      "path": "/home/ubuntu/live/hivezilla-validator-20260930/captures/direct-agave-live/000000000000000018daf342ba38d3d0-10e3f5",
+      "state": "CAPTURING",
+      "node_identity": "J7qpvCEWhdBgPdYRV3s3btWPrRVXa2qnAzgvxWTvtbrQ",
+      "genesis_hash": "5eykt4UsFv8P8NJdTREpY1vzqKqZKvdpKuc147dw2N9d",
+      "validator_pid": 1106933,
+      "writer_live": true,
+      "durable_sequence": 828147790,
+      "latest_rooted_slot": 453211094,
+      "journal_bytes": 5164192202,
+      "journal_limit_bytes": 68719476736,
+      "reserve_disk_bytes": 536870912000,
+      "previous_unclean_sessions": [
+        "000000000000000018daccf4d01ca96d-10e3f5",
+        "000000000000000018daceb49b8b9a08-10e3f5"
+      ],
+      "raw_shred_completeness": false
+    },
+    "worker": {
+      "compacted_blocks": 349552,
+      "compacted_entries": 417393689,
+      "compacted_transactions": 408212440,
+      "durable_sequence": 828142087,
+      "first_compact_slot": 452861384,
+      "full_epoch": false,
+      "last_compact_slot": 453211091,
+      "startup_incomplete_roots": [
+        [
+          452861352,
+          157741
+        ],
+        [
+          452861353,
+          157742
+        ],
+        [
+          452861354,
+          157743
+        ],
+        [
+          452861355,
+          157744
+        ],
+        [
+          452861356,
+          157745
+        ],
+        [
+          452861357,
+          157746
+        ],
+        [
+          452861358,
+          157747
+        ],
+        [
+          452861359,
+          157748
+        ],
+        [
+          452861360,
+          157749
+        ],
+        [
+          452861361,
+          157750
+        ],
+        [
+          452861362,
+          157751
+        ],
+        [
+          452861363,
+          157752
+        ],
+        [
+          452861364,
+          157753
+        ],
+        [
+          452861365,
+          157754
+        ],
+        [
+          452861366,
+          157755
+        ],
+        [
+          452861367,
+          157756
+        ],
+        [
+          452861368,
+          157757
+        ],
+        [
+          452861369,
+          157758
+        ],
+        [
+          452861370,
+          157759
+        ],
+        [
+          452861371,
+          157760
+        ],
+        [
+          452861372,
+          157761
+        ],
+        [
+          452861373,
+          157762
+        ],
+        [
+          452861374,
+          157763
+        ],
+        [
+          452861375,
+          157764
+        ],
+        [
+          452861376,
+          157765
+        ],
+        [
+          452861377,
+          157766
+        ],
+        [
+          452861378,
+          157767
+        ],
+        [
+          452861379,
+          157768
+        ],
+        [
+          452861380,
+          157769
+        ],
+        [
+          452861381,
+          157770
+        ],
+        [
+          452861382,
+          157771
+        ],
+        [
+          452861383,
+          157772
+        ]
+      ],
+      "state": "WAITING",
+      "updated_unix_ms": 1791104767668
+    },
+    "compact_lag_slots": 3,
+    "worker_status_age_seconds": 0,
+    "free_disk_bytes": 2017739476992,
+    "last_durable_change_unix_ms": 1791104768255,
+    "shreds": {
+      "schema": "hivezilla-shred-hook-status-v1",
+      "state": "ACTIVE",
+      "reason": "receiving",
+      "updated_unix_ms": 1791104768190,
+      "durable_next_sequence": 866479963,
+      "durable_prefix_hash": "fa0e7d3d038837af23ca857f7cbd0486567308ad0facc1d79d1fc9cd608c2197",
+      "journal_bytes": 1136108393876,
+      "counts": {
+        "packets": 866479963,
+        "payload_bytes": 1052924421316,
+        "turbine_received": 857472475,
+        "repair_received": 4603694,
+        "repair_accepted": 4403794,
+        "data_shreds": 437257720,
+        "coding_shreds": 429024461,
+        "other_datagrams": 197782,
+        "first_header_slot": 452704425,
+        "max_header_slot": 453211126
+      },
+      "custody_authority": false,
+      "canonical_coverage_verified": false
+    }
+  },
+  "javascript_live_report": "hivezilla-stream-javascript-live-20261004.json",
+  "unit_update": "removed ignored CPUAccounting option; no service restart",
+  "final_service_state": "Id=hivezilla-stream-origin.service\nActiveState=active\nMainPID=4193455\nNRestarts=0\n\nId=hivezilla-stream-relay.service\nActiveState=active\nMainPID=4193601\nNRestarts=0\n\nId=hivezilla-validator.service\nActiveState=active\nMainPID=1106933\nNRestarts=0\n\nId=hivezilla-shred-hook-recorder.service\nActiveState=active\nMainPID=1106863\nNRestarts=0\n\nId=hivezilla-direct-worker.service\nActiveState=active\nMainPID=4105319\nNRestarts=1\n"
+}

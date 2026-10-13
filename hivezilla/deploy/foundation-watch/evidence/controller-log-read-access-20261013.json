@@ -1,0 +1,31 @@
+{
+  "schema": "blockzilla-controller-log-read-access-v1",
+  "changed_unix_ms": 1791873455753,
+  "path": "/home/ubuntu/live/hivezilla-validator-20260930/jobs/car-backfill-20261012/controller.log",
+  "before": {
+    "owner": "root",
+    "group": "root",
+    "mode": "0600",
+    "regular": true
+  },
+  "after": {
+    "owner": "root",
+    "group": "ubuntu",
+    "mode": "0640",
+    "regular": true
+  },
+  "scope": "only_this_controller_log",
+  "user_approved": true,
+  "raw_log_forwarded": false,
+  "live_services_restarted": false,
+  "read_verified_as_ubuntu": true,
+  "rclone_timezone": "UTC",
+  "historical_upload_parser_proof": {
+    "epoch": 1051,
+    "progress_percent": 100.0,
+    "bytes_per_second": 41722839.04,
+    "eta_seconds": null,
+    "progress_updated_unix_ms": 1791868566000,
+    "current_upload_statistic": false
+  }
+}

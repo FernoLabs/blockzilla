@@ -1,0 +1,74 @@
+{
+  "state": "COMPLETE",
+  "authorized_by": "Owner reply: Remove the old CAR cache",
+  "started_at": "2026-10-10T17:14:41.532872+00:00",
+  "removed_path": "/home/ubuntu/benchmarks/zilla-triton-20260930/cache-epoch1000/epoch-1000.car",
+  "file_bytes": 767389334224,
+  "allocated_bytes": 767391117312,
+  "device": 66305,
+  "inode": 118415365,
+  "historical_sha256": "3c9727378e617f5cba8b5e206bce8fc6ae5df34d3a4408eeb69aea4d62ac7218",
+  "hash_source": "Existing benchmark receipt; no full-file rehash during removal",
+  "space_before": {
+    "available_bytes": 482515804160,
+    "free_bytes": 482532581376
+  },
+  "preserved_cache_files": [
+    {
+      "name": ".download.lock",
+      "bytes": 0,
+      "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+    },
+    {
+      "name": "dataset-manifest.json",
+      "bytes": 2868,
+      "sha256": "f14fe03d29983ee8dbe000d842ee292d6bca83f65e3608050596e1762593e7db"
+    },
+    {
+      "name": "download-state.json",
+      "bytes": 181110,
+      "sha256": "12c23399ce6e896fb1f6179e5e20567edf7d9de043390ca1dee4fdc45d912ad3"
+    },
+    {
+      "name": "epoch-1000-slot-ranges.raw",
+      "bytes": 5184000,
+      "sha256": "6b0e72ff321996c23ef3fcd53a02d812141484ec4eea559f45d67113be1b89e3"
+    },
+    {
+      "name": "events.jsonl",
+      "bytes": 7863,
+      "sha256": "8ce495f87b210d16897c1c8fed8d2ed2cd400c85345aebb062d26d8c72277422"
+    },
+    {
+      "name": "manifest.json",
+      "bytes": 120324,
+      "sha256": "bd36a672d10d7005b0ae1c83f5250ac3fc45a53fc6c998c6a29456ed3228320e"
+    }
+  ],
+  "scope": "Only epoch-1000.car removed. Benchmark reports, slot ranges, metadata, native epoch files and comparison results retained.",
+  "completed_at": "2026-10-10T17:14:49.636560+00:00",
+  "space_after": {
+    "available_bytes": 1249992630272,
+    "free_bytes": 1250009407488
+  },
+  "car_absent": true,
+  "preserved_files_verified": true,
+  "available_bytes_increase": 767476826112,
+  "post_cleanup_live_check": {
+    "checked_at": "2026-10-10T17:15:54.752692+00:00",
+    "capture": {
+      "state": "CAPTURING",
+      "durable_sequence": 29881246,
+      "error": null,
+      "latest_rooted_slot": 455334342
+    },
+    "worker": {
+      "state": "RUNNING",
+      "event_sequence": 25747,
+      "last_compact_slot": 455334157,
+      "source_sequence": 29325674
+    },
+    "worker_advanced_since_first_check": true,
+    "capture_failure": {}
+  }
+}

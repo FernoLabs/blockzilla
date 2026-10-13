@@ -1,0 +1,30 @@
+{
+  "observed_at": "2026-10-06T08:36:23.962757+02:00",
+  "epoch": 1048,
+  "state": "COMPLETE",
+  "errors": [],
+  "download_completed_at": "2026-10-05T23:49:21+0200",
+  "compaction_completed_at": "2026-10-06T01:43:52+0200",
+  "source": "/volume1/blockzilla/old-faithful/epoch-1048.car",
+  "source_bytes": 734710698166,
+  "output": "/volume1/blockzilla/archive/epoch-1048",
+  "import_receipt_present": true,
+  "converter_sha256": "0ab2f742c5c06170ed9f864dc99e46eec3e5727565109761f1f2c191d0ce801d",
+  "coverage": {
+    "blocks": 431808,
+    "transactions": 498029026,
+    "signatures": 519913704,
+    "first_slot": 452736000,
+    "last_slot": 453167999,
+    "blob_bytes": 77746841009,
+    "source_slots_matched": true
+  },
+  "service": {
+    "name": "blockzilla-latest-car-e1048-20261005.service",
+    "active_state": "inactive",
+    "result": "success",
+    "main_pid": 0
+  },
+  "validation": "Builder success, source slots and transaction counts, complete index byte coverage; no separate cryptographic verification or whole-file hash pass.",
+  "cloud_upload_verified_by_this_record": false
+}

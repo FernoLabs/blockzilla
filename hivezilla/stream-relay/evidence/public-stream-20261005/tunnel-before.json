@@ -1,0 +1,13 @@
+{
+  "version": 1,
+  "config": {
+    "ingress": [
+      {
+        "service": "http_status:404"
+      }
+    ],
+    "warp-routing": {
+      "enabled": false
+    }
+  }
+}

@@ -1,0 +1,158 @@
+{
+  "schema": "blockzilla-network-capacity-sample-v1",
+  "start_utc": "2026-10-05T21:45:46.247476+00:00",
+  "end_utc": "2026-10-05T21:46:41.269242+00:00",
+  "seconds": 55.01490712107625,
+  "interface": "bond0",
+  "link": {
+    "speed": "200000",
+    "duplex": "full",
+    "bonding/mode": "802.3ad 4",
+    "bonding/slaves": "enp1s0f0np0 enp1s0f1np1",
+    "bonding/active_slave": "",
+    "enp1s0f0np0": {
+      "speed": "100000",
+      "duplex": "full",
+      "operstate": "up"
+    },
+    "enp1s0f1np1": {
+      "speed": "100000",
+      "duplex": "full",
+      "operstate": "up"
+    }
+  },
+  "average": {
+    "rx_bytes": 130.438,
+    "tx_bytes": 164.578,
+    "received_bytes": 14.52
+  },
+  "counter_delta": {
+    "rx_bytes": 897005466,
+    "tx_bytes": 1131780149,
+    "rx_dropped": 0,
+    "tx_dropped": 0,
+    "rx_errors": 0,
+    "tx_errors": 0,
+    "received_bytes": 99855145,
+    "received_chunks": 146,
+    "last_slot": 203
+  },
+  "bins_5s": [
+    {
+      "seconds": 5,
+      "rx_mbps": 124.041,
+      "tx_mbps": 173.58,
+      "compact_mbps": 13.426,
+      "slots": 18,
+      "chunks": 14
+    },
+    {
+      "seconds": 5,
+      "rx_mbps": 125.904,
+      "tx_mbps": 179.777,
+      "compact_mbps": 14.863,
+      "slots": 18,
+      "chunks": 15
+    },
+    {
+      "seconds": 5,
+      "rx_mbps": 125.501,
+      "tx_mbps": 188.785,
+      "compact_mbps": 15.741,
+      "slots": 21,
+      "chunks": 14
+    },
+    {
+      "seconds": 5,
+      "rx_mbps": 113.006,
+      "tx_mbps": 125.869,
+      "compact_mbps": 11.141,
+      "slots": 14,
+      "chunks": 11
+    },
+    {
+      "seconds": 5,
+      "rx_mbps": 125.102,
+      "tx_mbps": 164.789,
+      "compact_mbps": 14.047,
+      "slots": 20,
+      "chunks": 13
+    },
+    {
+      "seconds": 5,
+      "rx_mbps": 140.417,
+      "tx_mbps": 129.309,
+      "compact_mbps": 15.894,
+      "slots": 18,
+      "chunks": 14
+    },
+    {
+      "seconds": 5,
+      "rx_mbps": 148.01,
+      "tx_mbps": 173.326,
+      "compact_mbps": 14.435,
+      "slots": 18,
+      "chunks": 15
+    },
+    {
+      "seconds": 5,
+      "rx_mbps": 124.258,
+      "tx_mbps": 144.743,
+      "compact_mbps": 12.203,
+      "slots": 15,
+      "chunks": 11
+    },
+    {
+      "seconds": 5,
+      "rx_mbps": 148.26,
+      "tx_mbps": 184.023,
+      "compact_mbps": 17.883,
+      "slots": 23,
+      "chunks": 11
+    },
+    {
+      "seconds": 5,
+      "rx_mbps": 135.316,
+      "tx_mbps": 176.726,
+      "compact_mbps": 13.393,
+      "slots": 18,
+      "chunks": 13
+    },
+    {
+      "seconds": 5,
+      "rx_mbps": 125.004,
+      "tx_mbps": 169.428,
+      "compact_mbps": 16.699,
+      "slots": 20,
+      "chunks": 15
+    }
+  ],
+  "head": {
+    "state": "LIVE",
+    "intake_age_ms": 159,
+    "last_slot": 453703931
+  },
+  "capacity_assumptions": {
+    "per_client_budget_mbps": 20,
+    "reserved_link_fraction": 0.3,
+    "basis": "Observed five-second compact peak 17.883 Mbit/s; budget includes an allowance for protocol overhead. Extra link reserve allows bursts and recovery. This is a bandwidth estimate, not a load-test result.",
+    "available_internet_uplink": "unknown",
+    "current_relay_active_request_limit": 32,
+    "current_tcp_connection_limit": 64,
+    "previous_local_fanout_test_clients": 10
+  },
+  "dedicated_relay_estimates": [
+    {
+      "usable_uplink_mbps": 1000,
+      "full_feed_clients": 35
+    },
+    {
+      "usable_uplink_mbps": 10000,
+      "full_feed_clients": 350
+    },
+    {
+      "usable_uplink_mbps": 100000,
+      "full_feed_clients": 3500
+    }
+  ]
+}

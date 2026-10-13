@@ -1,0 +1,357 @@
+{
+  "schema": "hivezilla-explicit-owner-shred-prune-v1",
+  "state": "COMPLETE",
+  "started_unix": 1791101998.5399477,
+  "keep_epoch": 1049,
+  "keep_start_slot": 453168000,
+  "plan_sha256": "39e343cce4b84a60a36f286b273b4f95354e6e162844466bcc660f2862c74664",
+  "planned_files": 16579,
+  "planned_bytes": 1112520511617,
+  "deleted_files": 16579,
+  "deleted_bytes": 1112520511617,
+  "deleted_allocated_bytes": 1112596623360,
+  "free_before_bytes": 955255644160,
+  "healthy_before": {
+    "schema": "hivezilla-direct-pipeline-health-v1",
+    "updated_unix_ms": 1791101985333,
+    "state": "WARNING",
+    "problems": [],
+    "warnings": [
+      "An earlier session ended without a clean close; earlier coverage can have gaps",
+      "Compact output is more than 256 rooted slots behind capture"
+    ],
+    "canonical": false,
+    "full_epoch": false,
+    "validator": {
+      "health": "ok",
+      "finalized_slot": 453200716,
+      "identity": "J7qpvCEWhdBgPdYRV3s3btWPrRVXa2qnAzgvxWTvtbrQ",
+      "genesis_hash": "5eykt4UsFv8P8NJdTREpY1vzqKqZKvdpKuc147dw2N9d"
+    },
+    "capture": {
+      "session_id": "000000000000000018daf342ba38d3d0-10e3f5",
+      "path": "/home/ubuntu/live/hivezilla-validator-20260930/captures/direct-agave-live/000000000000000018daf342ba38d3d0-10e3f5",
+      "state": "CAPTURING",
+      "node_identity": "J7qpvCEWhdBgPdYRV3s3btWPrRVXa2qnAzgvxWTvtbrQ",
+      "genesis_hash": "5eykt4UsFv8P8NJdTREpY1vzqKqZKvdpKuc147dw2N9d",
+      "validator_pid": 1106933,
+      "writer_live": true,
+      "durable_sequence": 803316339,
+      "latest_rooted_slot": 453200718,
+      "journal_bytes": 5164192203,
+      "journal_limit_bytes": 68719476736,
+      "reserve_disk_bytes": 536870912000,
+      "previous_unclean_sessions": [
+        "000000000000000018daccf4d01ca96d-10e3f5",
+        "000000000000000018daceb49b8b9a08-10e3f5"
+      ],
+      "raw_shred_completeness": false
+    },
+    "worker": {
+      "batches": 240038,
+      "canonical": false,
+      "compacted_blocks": 338509,
+      "compacted_entries": 404077645,
+      "compacted_transactions": 395208642,
+      "durable_sequence": 803301423,
+      "epoch": 1049,
+      "first_compact_slot": 452861384,
+      "full_epoch": false,
+      "last_compact_slot": 453200042,
+      "state": "BUILDING",
+      "updated_unix_ms": 1791101984670
+    },
+    "compact_lag_slots": 676,
+    "worker_status_age_seconds": 0,
+    "free_disk_bytes": 955585110016,
+    "last_durable_change_unix_ms": 1791101985333,
+    "shreds": {
+      "schema": "hivezilla-shred-hook-status-v1",
+      "state": "ACTIVE",
+      "reason": "receiving",
+      "updated_unix_ms": 1791101985298,
+      "durable_next_sequence": 848187250,
+      "durable_prefix_hash": "bc885473ffb40710390da8bd31cab4cb23fe8eefdbe2adc070428bfc88782ee3",
+      "journal_bytes": 1112123005150,
+      "counts": {
+        "packets": 848187250,
+        "payload_bytes": 1030695173022,
+        "turbine_received": 839328507,
+        "repair_received": 4527240,
+        "repair_accepted": 4331503,
+        "data_shreds": 428047422,
+        "coding_shreds": 419946174,
+        "other_datagrams": 193654,
+        "first_header_slot": 452704425,
+        "max_header_slot": 453200750
+      },
+      "custody_authority": false,
+      "canonical_coverage_verified": false
+    }
+  },
+  "scope": "Only sealed production raw-shred WAL files with every observed valid-shape shred slot below current epoch boundary. No active file, fixture, native journal, compact output, ledger, snapshot, RPC backup, or metadata deletion.",
+  "recorder_cumulative_quota_reset": false,
+  "historical_recovery_raw_files_intentionally_retired": true,
+  "validator_restarted": false,
+  "recorder_restarted": false,
+  "finished_unix": 1791102012.2465515,
+  "elapsed_seconds": 13.701226588978898,
+  "free_after_bytes": 2068375072768,
+  "remaining_raw_sessions": {
+    "/home/ubuntu/live/hivezilla-validator-20260930/captures/shred-hook-live/dae740beed881a744a080c1ce52c9df9": {
+      "sealed_files": 0,
+      "sealed_bytes": 0,
+      "active_files": []
+    },
+    "/home/ubuntu/live/hivezilla-validator-20260930/captures/shred-hook-direct-20261002/b3b37602d8180e62e483f98786f94fc2": {
+      "sealed_files": 1021,
+      "sealed_bytes": 68517500059,
+      "active_files": [
+        "00000000000040bf.active"
+      ]
+    }
+  },
+  "health_immediately_after": {
+    "schema": "hivezilla-direct-pipeline-health-v1",
+    "updated_unix_ms": 1791102000342,
+    "state": "WARNING",
+    "problems": [],
+    "warnings": [
+      "An earlier session ended without a clean close; earlier coverage can have gaps",
+      "Compact output is more than 256 rooted slots behind capture"
+    ],
+    "canonical": false,
+    "full_epoch": false,
+    "validator": {
+      "health": "ok",
+      "finalized_slot": 453200773,
+      "identity": "J7qpvCEWhdBgPdYRV3s3btWPrRVXa2qnAzgvxWTvtbrQ",
+      "genesis_hash": "5eykt4UsFv8P8NJdTREpY1vzqKqZKvdpKuc147dw2N9d"
+    },
+    "capture": {
+      "session_id": "000000000000000018daf342ba38d3d0-10e3f5",
+      "path": "/home/ubuntu/live/hivezilla-validator-20260930/captures/direct-agave-live/000000000000000018daf342ba38d3d0-10e3f5",
+      "state": "CAPTURING",
+      "node_identity": "J7qpvCEWhdBgPdYRV3s3btWPrRVXa2qnAzgvxWTvtbrQ",
+      "genesis_hash": "5eykt4UsFv8P8NJdTREpY1vzqKqZKvdpKuc147dw2N9d",
+      "validator_pid": 1106933,
+      "writer_live": true,
+      "durable_sequence": 803448134,
+      "latest_rooted_slot": 453200774,
+      "journal_bytes": 5164192203,
+      "journal_limit_bytes": 68719476736,
+      "reserve_disk_bytes": 536870912000,
+      "previous_unclean_sessions": [
+        "000000000000000018daccf4d01ca96d-10e3f5",
+        "000000000000000018daceb49b8b9a08-10e3f5"
+      ],
+      "raw_shred_completeness": false
+    },
+    "worker": {
+      "batches": 240050,
+      "canonical": false,
+      "compacted_blocks": 338604,
+      "compacted_entries": 404192511,
+      "compacted_transactions": 395320771,
+      "durable_sequence": 803430472,
+      "epoch": 1049,
+      "first_compact_slot": 452861384,
+      "full_epoch": false,
+      "last_compact_slot": 453200137,
+      "state": "BUILDING",
+      "updated_unix_ms": 1791101999319
+    },
+    "compact_lag_slots": 637,
+    "worker_status_age_seconds": 1,
+    "free_disk_bytes": 1109609091072,
+    "last_durable_change_unix_ms": 1791102000342,
+    "shreds": {
+      "schema": "hivezilla-shred-hook-status-v1",
+      "state": "ACTIVE",
+      "reason": "receiving",
+      "updated_unix_ms": 1791102000275,
+      "durable_next_sequence": 848278466,
+      "durable_prefix_hash": "a24a4e6033d8acfe0188843f65aa49dcbf79a1d951786c419a1edcaf8c96da7f",
+      "journal_bytes": 1112242596826,
+      "counts": {
+        "packets": 848278466,
+        "payload_bytes": 1030806007850,
+        "turbine_received": 839418978,
+        "repair_received": 4527626,
+        "repair_accepted": 4331862,
+        "data_shreds": 428093490,
+        "coding_shreds": 419991295,
+        "other_datagrams": 193681,
+        "first_header_slot": 452704425,
+        "max_header_slot": 453200807
+      },
+      "custody_authority": false,
+      "canonical_coverage_verified": false
+    }
+  },
+  "followup_health": {
+    "schema": "hivezilla-direct-pipeline-health-v1",
+    "updated_unix_ms": 1791102060478,
+    "state": "WARNING",
+    "problems": [],
+    "warnings": [
+      "An earlier session ended without a clean close; earlier coverage can have gaps",
+      "Compact output is more than 256 rooted slots behind capture"
+    ],
+    "canonical": false,
+    "full_epoch": false,
+    "validator": {
+      "health": "ok",
+      "finalized_slot": 453200998,
+      "identity": "J7qpvCEWhdBgPdYRV3s3btWPrRVXa2qnAzgvxWTvtbrQ",
+      "genesis_hash": "5eykt4UsFv8P8NJdTREpY1vzqKqZKvdpKuc147dw2N9d"
+    },
+    "capture": {
+      "session_id": "000000000000000018daf342ba38d3d0-10e3f5",
+      "path": "/home/ubuntu/live/hivezilla-validator-20260930/captures/direct-agave-live/000000000000000018daf342ba38d3d0-10e3f5",
+      "state": "CAPTURING",
+      "node_identity": "J7qpvCEWhdBgPdYRV3s3btWPrRVXa2qnAzgvxWTvtbrQ",
+      "genesis_hash": "5eykt4UsFv8P8NJdTREpY1vzqKqZKvdpKuc147dw2N9d",
+      "validator_pid": 1106933,
+      "writer_live": true,
+      "durable_sequence": 803974938,
+      "latest_rooted_slot": 453200999,
+      "journal_bytes": 5164192203,
+      "journal_limit_bytes": 68719476736,
+      "reserve_disk_bytes": 536870912000,
+      "previous_unclean_sessions": [
+        "000000000000000018daccf4d01ca96d-10e3f5",
+        "000000000000000018daceb49b8b9a08-10e3f5"
+      ],
+      "raw_shred_completeness": false
+    },
+    "worker": {
+      "batches": 240099,
+      "canonical": false,
+      "compacted_blocks": 339033,
+      "compacted_entries": 404699547,
+      "compacted_transactions": 395816139,
+      "durable_sequence": 803957981,
+      "epoch": 1049,
+      "first_compact_slot": 452861384,
+      "full_epoch": false,
+      "last_compact_slot": 453200566,
+      "state": "BUILDING",
+      "updated_unix_ms": 1791102059785
+    },
+    "compact_lag_slots": 433,
+    "worker_status_age_seconds": 0,
+    "free_disk_bytes": 2066590732288,
+    "last_durable_change_unix_ms": 1791102060478,
+    "shreds": {
+      "schema": "hivezilla-shred-hook-status-v1",
+      "state": "ACTIVE",
+      "reason": "receiving",
+      "updated_unix_ms": 1791102060416,
+      "durable_next_sequence": 848640859,
+      "durable_prefix_hash": "64d68f9734ba7b999922cd958a8d535fa857fd0819d5b98f59dcac248362ef70",
+      "journal_bytes": 1112717761351,
+      "counts": {
+        "packets": 848640859,
+        "payload_bytes": 1031246381863,
+        "turbine_received": 839778325,
+        "repair_received": 4529193,
+        "repair_accepted": 4333341,
+        "data_shreds": 428275889,
+        "coding_shreds": 420171201,
+        "other_datagrams": 193769,
+        "first_header_slot": 452704425,
+        "max_header_slot": 453201031
+      },
+      "custody_authority": false,
+      "canonical_coverage_verified": false
+    }
+  },
+  "compact_worker_recovery_index_report": "/home/ubuntu/live/hivezilla-validator-20260930/reports/direct-agave-worker-recovery-index-fix-20261004.json",
+  "compact_worker_auto_oom_restart_during_scan": true,
+  "followup_service_state": "Id=hivezilla-validator.service\nActiveState=active\nMainPID=1106933\nNRestarts=0\nMemoryCurrent=688637382656\n\nId=hivezilla-shred-hook-recorder.service\nActiveState=active\nMainPID=1106863\nNRestarts=0\nMemoryCurrent=536641536\n\nId=hivezilla-direct-worker.service\nActiveState=active\nMainPID=4105319\nNRestarts=1\nMemoryCurrent=14890373120\n",
+  "final_followup_health": {
+    "schema": "hivezilla-direct-pipeline-health-v1",
+    "updated_unix_ms": 1791102361356,
+    "state": "WARNING",
+    "problems": [],
+    "warnings": [
+      "An earlier session ended without a clean close; earlier coverage can have gaps"
+    ],
+    "canonical": false,
+    "full_epoch": false,
+    "validator": {
+      "health": "ok",
+      "finalized_slot": 453202117,
+      "identity": "J7qpvCEWhdBgPdYRV3s3btWPrRVXa2qnAzgvxWTvtbrQ",
+      "genesis_hash": "5eykt4UsFv8P8NJdTREpY1vzqKqZKvdpKuc147dw2N9d"
+    },
+    "capture": {
+      "session_id": "000000000000000018daf342ba38d3d0-10e3f5",
+      "path": "/home/ubuntu/live/hivezilla-validator-20260930/captures/direct-agave-live/000000000000000018daf342ba38d3d0-10e3f5",
+      "state": "CAPTURING",
+      "node_identity": "J7qpvCEWhdBgPdYRV3s3btWPrRVXa2qnAzgvxWTvtbrQ",
+      "genesis_hash": "5eykt4UsFv8P8NJdTREpY1vzqKqZKvdpKuc147dw2N9d",
+      "validator_pid": 1106933,
+      "writer_live": true,
+      "durable_sequence": 806847359,
+      "latest_rooted_slot": 453202118,
+      "journal_bytes": 5164192202,
+      "journal_limit_bytes": 68719476736,
+      "reserve_disk_bytes": 536870912000,
+      "previous_unclean_sessions": [
+        "000000000000000018daccf4d01ca96d-10e3f5",
+        "000000000000000018daceb49b8b9a08-10e3f5"
+      ],
+      "raw_shred_completeness": false
+    },
+    "worker": {
+      "batches": 240664,
+      "canonical": false,
+      "compacted_blocks": 340583,
+      "compacted_entries": 406641040,
+      "compacted_transactions": 397718609,
+      "durable_sequence": 806843541,
+      "epoch": 1049,
+      "first_compact_slot": 452861384,
+      "full_epoch": false,
+      "last_compact_slot": 453202116,
+      "state": "BUILDING",
+      "updated_unix_ms": 1791102361246
+    },
+    "compact_lag_slots": 2,
+    "worker_status_age_seconds": 0,
+    "free_disk_bytes": 2060658360320,
+    "last_durable_change_unix_ms": 1791102361356,
+    "shreds": {
+      "schema": "hivezilla-shred-hook-status-v1",
+      "state": "ACTIVE",
+      "reason": "receiving",
+      "updated_unix_ms": 1791102361302,
+      "durable_next_sequence": 850864386,
+      "durable_prefix_hash": "b6e0c843bfc2df00126cb4d1ec6d760543a9781efa28fdd738bbbefadafbaee8",
+      "journal_bytes": 1115633256439,
+      "counts": {
+        "packets": 850864386,
+        "payload_bytes": 1033948413431,
+        "turbine_received": 841983549,
+        "repair_received": 4538579,
+        "repair_accepted": 4342258,
+        "data_shreds": 429396609,
+        "coding_shreds": 421273540,
+        "other_datagrams": 194237,
+        "first_header_slot": 452704425,
+        "max_header_slot": 453202151
+      },
+      "custody_authority": false,
+      "canonical_coverage_verified": false
+    }
+  },
+  "final_followup_unix_ms": 1791102368054,
+  "worker_runtime_memory_limit_bytes": 34359738368,
+  "worker_boot_memory_limit_bytes": 17179869184,
+  "worker_memory_growth_cause_established": false,
+  "development_engine_tests_passed": 23,
+  "production_worker_executable_changed": false,
+  "final_service_state": "Id=hivezilla-validator.service\nActiveState=active\nMainPID=1106933\nNRestarts=0\nMemoryMax=912680550400\n\nId=hivezilla-shred-hook-recorder.service\nActiveState=active\nMainPID=1106863\nNRestarts=0\nMemoryMax=536870912\n\nId=hivezilla-direct-worker.service\nActiveState=active\nMainPID=4105319\nNRestarts=1\nMemoryMax=34359738368\n"
+}

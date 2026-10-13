@@ -1,0 +1,16 @@
+{
+  "state": "PASSED",
+  "events": 80,
+  "blocks": 27,
+  "transactions": 27896,
+  "failed_transactions": 2154,
+  "missing_errors": 0,
+  "kinds": {
+    "block": 27,
+    "root": 27,
+    "confirmed": 26
+  },
+  "confirmed_hash_ready_observations": 0,
+  "exact_resume": true,
+  "private_data_kept_on_server": true
+}

@@ -1,0 +1,32 @@
+[Unit]
+Description=Blockzilla USDC token index in SQLite (development consumer)
+After=network.target hivezilla-stream-relay.service
+Wants=hivezilla-stream-relay.service
+StartLimitIntervalSec=300
+StartLimitBurst=5
+
+[Service]
+User=ubuntu
+Group=ubuntu
+WorkingDirectory=/home/ubuntu/live/hivezilla-validator-20260930/indexes/token-demo
+ExecStart=/home/ubuntu/live/hivezilla-validator-20260930/releases/blockzilla-token-indexer-20261004-r2/blockzilla index-tokens --url http://127.0.0.1:8871 --api-key-file /home/ubuntu/live/hivezilla-validator-20260930/config/stream-20261004/client-api.key --db /home/ubuntu/live/hivezilla-validator-20260930/indexes/token-demo/usdc.sqlite --mint EPjFWdd5AufqSSqeM2qN1xzybapC8G4wEGGkZwyTDt1v --native-history-dir /home/ubuntu/live/hivezilla-validator-20260930/compact/direct-agave-live/000000000000000018daf342ba38d3d0-10e3f5
+Restart=on-abnormal
+RestartSec=5
+CPUQuota=200%
+MemoryMax=2G
+TasksMax=64
+Nice=10
+IOSchedulingClass=best-effort
+IOSchedulingPriority=7
+NoNewPrivileges=true
+ProtectSystem=strict
+ProtectHome=read-only
+ReadWritePaths=/home/ubuntu/live/hivezilla-validator-20260930/indexes/token-demo
+ReadWritePaths=/home/ubuntu/live/hivezilla-validator-20260930/compact/direct-agave-live/000000000000000018daf342ba38d3d0-10e3f5/committed.sqlite-shm
+PrivateTmp=true
+CapabilityBoundingSet=
+UMask=0077
+TimeoutStopSec=10
+
+[Install]
+WantedBy=multi-user.target

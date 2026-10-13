@@ -1,0 +1,40 @@
+{
+  "schema": "hivezilla-shred-hook-fixture-comparison-v1",
+  "checked_utc": "2026-10-01T10:09:56.859452+00:00",
+  "fixture_source": "bounded packet mirror from the running validator TVU, replayed through the C ABI; not an activated validator hook",
+  "input_packets": 256,
+  "output_packets": 256,
+  "exact_payload_order_match": true,
+  "payload_bytes": 254681,
+  "framed_payload_sha256": "d835dc0ff6338a3f26c4860cd80f4178779a455acdacd5783a63b549520c03f4",
+  "journal_frames": 257,
+  "journal_prefix_chain_matches": true,
+  "status": {
+    "schema": "hivezilla-shred-hook-status-v1",
+    "state": "CLOSED",
+    "reason": "clean producer shutdown",
+    "updated_unix_ms": 1790849336684,
+    "durable_next_sequence": 257,
+    "durable_prefix_hash": "4cdf92b578d01bb4df839a73e1a2f1c0bd99eca68ed424bb4427f2cac3796900",
+    "journal_bytes": 279469,
+    "counts": {
+      "packets": 256,
+      "payload_bytes": 254681,
+      "turbine_received": 256,
+      "repair_received": 0,
+      "repair_accepted": 0,
+      "data_shreds": 66,
+      "coding_shreds": 73,
+      "other_datagrams": 117,
+      "first_header_slot": 452253982,
+      "max_header_slot": 452253982
+    },
+    "custody_authority": false,
+    "canonical_coverage_verified": false
+  },
+  "pcap_sha256": "7e0468f04550c3a34b4730c4f7a8bdc1bec95db8e599a817e9599ed3f23ce955",
+  "pcap_path": "/tmp/hivezilla-hook-real-tvu-20261001.pcap",
+  "capture_path": "/home/ubuntu/live/hivezilla-validator-20260930/captures/shred-hook-fixture-final-20261001/79edfdd153671ab344e2866a88fd2993",
+  "validator_pid": 471837,
+  "validator_restarted": false
+}

@@ -1,0 +1,75 @@
+{
+  "startedMs": 1791846078202,
+  "armed": true,
+  "sample": {
+    "schema": "blockzilla-foundation-heartbeat-v1",
+    "machine_id": "foundation",
+    "sampled_unix_ms": 1791847140143,
+    "monotonic_ms": 1138286063,
+    "boot_id": "5caa7ddd-4731-4b83-8233-6b3c6a2e203d",
+    "free_disk_bytes": 968718397440,
+    "capture_reserve_bytes": 429496729600,
+    "mem_available_bytes": 303395598336,
+    "capture": {
+      "session": "000000000000000018ddd9a6bb6fc50e-282459",
+      "state": "CAPTURING",
+      "durable_sequence": 215039887,
+      "latest_rooted_slot": 456224992,
+      "updated_unix_ms": null
+    },
+    "compact": {
+      "state": "RUNNING",
+      "last_compact_slot": 456225022,
+      "event_sequence": 179026,
+      "source_sequence": 215037137,
+      "updated_unix_ms": 1791847140048
+    },
+    "publisher": {
+      "state": "RUNNING",
+      "sequence": 178848,
+      "updated_unix_ms": 1791847134355
+    },
+    "cold_storage": {
+      "state": "RUNNING",
+      "retired_banks": 51865,
+      "updated_unix_ms": 1791847137072
+    },
+    "services": {
+      "hivezilla-validator.service": "active",
+      "hivezilla-direct-worker.service": "active",
+      "hivezilla-bank-v2-r2-publisher.service": "active",
+      "hivezilla-native-cold-storage-20261012-live.service": "active",
+      "hivezilla-live-priority-20261012.service": "active",
+      "hivezilla-bank-v2-producer.service": "active"
+    },
+    "rpc": {
+      "healthy": true,
+      "finalized_slot": 456224992
+    },
+    "errors": []
+  },
+  "lastReceivedMs": 1791847140411,
+  "lastCheckMs": 1791847129013,
+  "counters": {
+    "session": "000000000000000018ddd9a6bb6fc50e-282459",
+    "captureSequence": 215039887,
+    "captureRoot": 456224992,
+    "publisherSequence": 178848,
+    "captureSequenceChangedMs": 1791847140411,
+    "captureRootChangedMs": 1791847140411,
+    "publisherChangedMs": 1791847140411
+  },
+  "incident": {
+    "active": [],
+    "candidate": [],
+    "candidateSinceMs": 1791847129013,
+    "issueSinceMs": {}
+  },
+  "currentIssues": [],
+  "streamIssue": null,
+  "lastDeliveryMs": null,
+  "deliveryError": "alert_destination_not_configured",
+  "alert_delivery_configured": false,
+  "next_alarm_ms": 1791847158743,
+  "pending_alerts": 0
+}

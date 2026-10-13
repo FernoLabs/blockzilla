@@ -1,0 +1,25 @@
+[Unit]
+Description=Hivezilla epoch 1047 local capture and compaction
+After=network-online.target hivezilla-validator-canary.service
+StartLimitIntervalSec=0
+[Service]
+Type=exec
+User=ubuntu
+Group=ubuntu
+WorkingDirectory=/home/ubuntu/live/hivezilla-validator-20260930/epoch-runs/epoch-1047-20261001
+ExecStart=/home/ubuntu/live/hivezilla-validator-20260930/releases/epoch-runner-20261001/hivezilla-epoch-runner --config /home/ubuntu/live/hivezilla-validator-20260930/epoch-runs/epoch-1047-20261001/config.json
+Restart=on-failure
+RestartSec=5s
+RuntimeMaxSec=infinity
+TimeoutStopSec=30s
+KillMode=control-group
+MemoryMax=16G
+CPUQuota=800%
+UMask=0077
+NoNewPrivileges=yes
+PrivateTmp=yes
+ProtectSystem=strict
+ProtectHome=read-only
+ReadWritePaths=/home/ubuntu/live/hivezilla-validator-20260930/epoch-runs/epoch-1047-20261001 /home/ubuntu/live/hivezilla-validator-20260930/reports
+[Install]
+WantedBy=multi-user.target

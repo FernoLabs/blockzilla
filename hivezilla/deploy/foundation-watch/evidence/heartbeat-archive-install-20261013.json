@@ -1,0 +1,14 @@
+{
+  "schema": "blockzilla-heartbeat-archive-status-install-v1",
+  "installed_unix_ms": 1791865844774,
+  "release": "/home/ubuntu/live/hivezilla-validator-20260930/releases/foundation-watch-status-20261013",
+  "sha256": {
+    "heartbeat.py": "0afec0531455fe3b247f5a97ee08912a18d3ffdbdf37aff7f86e6ed442b4a839",
+    "archive_status.py": "0431aa76da786bf0b0da1627f8eaba36467dee88b69cc20c4064bbc82c0b1311"
+  },
+  "previous_exec_start": "ExecStart={ path=/usr/bin/python3 ; argv[]=/usr/bin/python3 -B /home/ubuntu/live/hivezilla-validator-20260930/releases/foundation-watch-20261013/heartbeat.py --report /home/ubuntu/live/hivezilla-validator-20260930/reports/foundation-watch/STATUS.json ; ignore_errors=no ; start_time=[Tue 2026-10-13 04:30:40 UTC] ; stop_time=[Tue 2026-10-13 04:30:40 UTC] ; pid=285685 ; code=exited ; status=0 }",
+  "sender_state": "SENT",
+  "sender_errors": [],
+  "collector_read_only": true,
+  "controller_log_ownership_changed": false
+}

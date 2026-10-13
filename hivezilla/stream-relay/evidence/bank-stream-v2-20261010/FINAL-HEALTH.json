@@ -1,0 +1,55 @@
+{
+  "state": "PASSED",
+  "public_routes": {
+    "v1_head": {
+      "http_status": 200,
+      "profile": "native-processed-compact-v1",
+      "status": null
+    },
+    "demo": {
+      "http_status": 200,
+      "free_sse_route_present": true
+    },
+    "blockhashes": {
+      "http_status": 200,
+      "sse_header": true,
+      "body_started": true
+    },
+    "v2_head": {
+      "http_status": 200,
+      "profile": "native-bank-compact-v2",
+      "status": "live"
+    }
+  },
+  "services": {
+    "hivezilla-validator": {
+      "ActiveState": "active",
+      "MainPID": "2630745"
+    },
+    "hivezilla-direct-worker": {
+      "ActiveState": "active",
+      "MainPID": "2638111"
+    },
+    "hivezilla-bank-v2-producer": {
+      "ActiveState": "active",
+      "MainPID": "2880038"
+    },
+    "hivezilla-bank-v2-origin": {
+      "ActiveState": "active",
+      "MainPID": "2837930"
+    },
+    "hivezilla-stream-origin": {
+      "ActiveState": "active",
+      "MainPID": "2638780"
+    },
+    "hivezilla-stream-relay": {
+      "ActiveState": "active",
+      "MainPID": "2837965"
+    },
+    "hivezilla-bank-v2-r2-publisher": {
+      "ActiveState": "active",
+      "MainPID": "2635215"
+    }
+  },
+  "v1_contract_separate": true
+}

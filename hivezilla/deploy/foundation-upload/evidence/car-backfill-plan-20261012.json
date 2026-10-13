@@ -1,0 +1,43 @@
+{
+  "schema": "blockzilla-foundation-car-backfill-v1",
+  "epochs": [
+    {
+      "epoch": 1048,
+      "bytes": 734710698166
+    },
+    {
+      "epoch": 1049,
+      "bytes": 760850591135
+    },
+    {
+      "epoch": 1050,
+      "bytes": 846200266459
+    },
+    {
+      "epoch": 1051,
+      "bytes": 801066633292
+    },
+    {
+      "epoch": 1052,
+      "bytes": 755949463614
+    },
+    {
+      "epoch": 1053,
+      "bytes": 627293342751
+    },
+    {
+      "epoch": 1054,
+      "bytes": 628246747897
+    }
+  ],
+  "tools": {
+    "blockzilla": "61b882a604638da6eb46922acc35dd39cc7a79f724641fc9d62a6f036fa3064a",
+    "rclone": "1c5fad6f1650ddeabc857793bd978b9e5f0a9fd816fabf7eab7e5f6a3766c36f"
+  },
+  "destination": "foundation:solana-archive-data/compact-v2/blockzilla-20261004",
+  "profile": "query-with-signatures",
+  "live_capture_reserve_bytes": 429496729600,
+  "one_epoch_at_a_time": true,
+  "temporary_staging_cleanup_after_verified_upload": true,
+  "original_NAS_and_native_files_preserved": true
+}

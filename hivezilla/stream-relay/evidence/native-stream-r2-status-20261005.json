@@ -1,0 +1,30 @@
+{
+  "observed_at": "2026-10-05T14:16:19.075610+00:00",
+  "heads": {
+    "8870": {
+      "state": "LIVE",
+      "error": null,
+      "stale": false,
+      "last_slot": 453603467,
+      "received_chunks": 2274
+    },
+    "8871": {
+      "state": "LIVE",
+      "error": null,
+      "stale": false,
+      "last_slot": 453603467,
+      "received_chunks": 2272
+    }
+  },
+  "compact_slot": 453603467,
+  "publisher": {
+    "start_slot": 453600000,
+    "sequence": 1168,
+    "cursor": "000000000000000018daf342ba38d3d0-10e3f5:453601622:6d25952a3db0f09c1280e6a9b0369465686e9802191e0b34811604c865e6db5c",
+    "blocks": 1623,
+    "bytes": 887023581
+  },
+  "publisher_lag_slots": 1845,
+  "token_indexer_slot": 453447391,
+  "token_indexer_lag_slots": 156076
+}

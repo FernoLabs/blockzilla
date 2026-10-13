@@ -1,0 +1,34 @@
+{
+  "timestamp": "2026-10-01T12:17:02.023897+00:00",
+  "unit": "ActiveState=active\nFragmentPath=/run/systemd/transient/hivezilla-validator-canary.service\nDropInPaths=/etc/systemd/system/hivezilla-validator-canary.service.d/continuous.conf\nRuntimeMaxUSec=infinity\nMainPID=471837\nNRestarts=0\nExecMainStartTimestamp=Thu 2026-10-01 08:34:53 UTC\n",
+  "disk": {
+    "total": 7450013548544,
+    "used": 5130747305984,
+    "free": 2319249465344
+  },
+  "rpc": {
+    "getHealth": {
+      "jsonrpc": "2.0",
+      "result": "ok",
+      "id": 1
+    },
+    "getIdentity": {
+      "jsonrpc": "2.0",
+      "result": {
+        "identity": "J7qpvCEWhdBgPdYRV3s3btWPrRVXa2qnAzgvxWTvtbrQ"
+      },
+      "id": 1
+    },
+    "getGenesisHash": {
+      "jsonrpc": "2.0",
+      "result": "5eykt4UsFv8P8NJdTREpY1vzqKqZKvdpKuc147dw2N9d",
+      "id": 1
+    },
+    "getSlot": {
+      "jsonrpc": "2.0",
+      "result": 452285116,
+      "id": 1
+    }
+  },
+  "executable": "/home/ubuntu/live/hivezilla-validator-20260930/releases/agave-source-v4.3.0/target/release/agave-validator"
+}

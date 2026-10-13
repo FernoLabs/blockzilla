@@ -1,0 +1,16 @@
+{
+  "state": "PASSED",
+  "public_fields": [
+    "bank_id",
+    "blockhash",
+    "commitment",
+    "cursor",
+    "parent_blockhash",
+    "parent_slot",
+    "sequence",
+    "session",
+    "slot",
+    "type"
+  ],
+  "checked_unix_ms": 1791654179892
+}

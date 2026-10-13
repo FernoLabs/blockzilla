@@ -1,0 +1,17 @@
+PRAGMA journal_mode=WAL;
+PRAGMA synchronous=FULL;
+PRAGMA foreign_keys=ON;
+PRAGMA application_id=1113216073;
+PRAGMA user_version=1;
+CREATE TABLE IF NOT EXISTS settings(key TEXT PRIMARY KEY,value TEXT NOT NULL);
+CREATE TABLE IF NOT EXISTS sources(source_id TEXT PRIMARY KEY,identity TEXT NOT NULL);
+CREATE TABLE IF NOT EXISTS blocks(slot INTEGER PRIMARY KEY,blockhash TEXT,parent_slot INTEGER,epoch INTEGER NOT NULL,transactions INTEGER NOT NULL,source_id TEXT NOT NULL REFERENCES sources,content_digest TEXT NOT NULL);
+CREATE TABLE IF NOT EXISTS transactions(slot INTEGER NOT NULL REFERENCES blocks,tx_index INTEGER NOT NULL,signature TEXT NOT NULL,success INTEGER NOT NULL CHECK(success IN(0,1)),PRIMARY KEY(slot,tx_index));
+CREATE INDEX IF NOT EXISTS transaction_signature ON transactions(signature);
+CREATE TABLE IF NOT EXISTS token_balances(slot INTEGER NOT NULL,tx_index INTEGER NOT NULL,side TEXT NOT NULL CHECK(side IN('pre','post')),balance_index INTEGER NOT NULL,account_index INTEGER NOT NULL,account TEXT,mint TEXT,owner TEXT,token_program TEXT,amount TEXT NOT NULL,decimals INTEGER NOT NULL CHECK(decimals BETWEEN 0 AND 255),PRIMARY KEY(slot,tx_index,side,balance_index),FOREIGN KEY(slot,tx_index) REFERENCES transactions);
+CREATE INDEX IF NOT EXISTS balance_mint ON token_balances(mint,slot);
+CREATE INDEX IF NOT EXISTS balance_owner ON token_balances(owner,slot);
+CREATE INDEX IF NOT EXISTS balance_account ON token_balances(account,slot);
+CREATE TABLE IF NOT EXISTS checkpoint(id INTEGER PRIMARY KEY CHECK(id=1),last_slot INTEGER,last_blockhash TEXT,live_cursor TEXT);
+INSERT OR IGNORE INTO checkpoint(id) VALUES(1);
+CREATE TABLE IF NOT EXISTS recovery(id INTEGER PRIMARY KEY CHECK(id=1),from_slot INTEGER NOT NULL,to_slot INTEGER NOT NULL,status TEXT NOT NULL,error TEXT);

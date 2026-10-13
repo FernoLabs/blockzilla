@@ -1,0 +1,114 @@
+[
+  {
+    "slug": "index",
+    "title": "Introduction",
+    "group": "Get started",
+    "source": "docs/start/overview.md",
+    "description": "Read Solana history from a compact archive on Cloudflare. No validator or RPC node."
+  },
+  {
+    "slug": "quick-start",
+    "title": "Quick start",
+    "group": "Get started",
+    "source": "docs/start/quick-start.md",
+    "description": "Install the CLI, stream an epoch, and export real data in about 10 minutes."
+  },
+  {
+    "slug": "read-an-archive",
+    "title": "Read an epoch",
+    "group": "User guide",
+    "source": "docs/start/read-an-archive.md",
+    "description": "Available epochs, output, options, and local files."
+  },
+  {
+    "slug": "live-stream",
+    "title": "Live stream",
+    "group": "User guide",
+    "source": "docs/start/live-stream.md",
+    "description": "Follow new processed blocks in Node.js, a browser, or Rust. Private beta."
+  },
+  {
+    "slug": "callbacks",
+    "title": "Rust callbacks",
+    "group": "User guide",
+    "source": "docs/start/callbacks.md",
+    "description": "Run the Rust example and process blocks and transactions in your code."
+  },
+  {
+    "slug": "filters",
+    "title": "Local filters",
+    "group": "User guide",
+    "source": "docs/start/filters.md",
+    "description": "Select programs and token balances on your machine."
+  },
+  {
+    "slug": "network",
+    "title": "Cloudflare reads",
+    "group": "User guide",
+    "source": "docs/start/network.md",
+    "description": "The archive source, what the reader downloads, and the cache."
+  },
+  {
+    "slug": "jetstreamer",
+    "title": "From Jetstreamer",
+    "group": "User guide",
+    "source": "docs/start/jetstreamer.md",
+    "description": "Map a Jetstreamer workload to Blockzilla."
+  },
+  {
+    "slug": "token-indexer",
+    "title": "Token index",
+    "group": "Examples",
+    "source": "docs/start/token-indexer.md",
+    "description": "Keep token balances in SQLite, from history or live blocks, with restart recovery."
+  },
+  {
+    "slug": "token-dumper",
+    "title": "Token dumper",
+    "group": "Examples",
+    "source": "docs/start/token-dumper.md",
+    "description": "Export recorded token balances as JSON Lines."
+  },
+  {
+    "slug": "program-dumper",
+    "title": "Program dumper",
+    "group": "Examples",
+    "source": "docs/start/program-dumper.md",
+    "description": "Find the transactions that call a program, live or in history."
+  },
+  {
+    "slug": "clickhouse",
+    "title": "ClickHouse",
+    "group": "Examples",
+    "source": "docs/start/clickhouse.md",
+    "description": "Load token balances into ClickHouse."
+  },
+  {
+    "slug": "formats",
+    "title": "File formats",
+    "group": "Advanced",
+    "source": "docs/advanced/formats.md",
+    "description": "Understand archive families, indexes, dictionaries, and record ownership."
+  },
+  {
+    "slug": "compact-v2",
+    "title": "Compact V2",
+    "group": "Advanced",
+    "source": "docs/reference/archive-v2-hot-block-format.md",
+    "description": "Exact Compact V2 files, index offsets, flag bits, and payload schemas."
+  },
+  {
+    "slug": "archive-v3",
+    "title": "Canonical V3",
+    "group": "Advanced",
+    "source": "docs/advanced/archive-v3.md",
+    "description": "Canonical V3 headers, block catalog, transaction effects, and local reads."
+  },
+  {
+    "slug": "coverage",
+    "title": "Data and coverage",
+    "group": "Advanced",
+    "source": "docs/advanced/coverage.md",
+    "description": "Keep missing data, verification, source identity, and restart positions explicit."
+  }
+]

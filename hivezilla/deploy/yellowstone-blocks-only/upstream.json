@@ -1,0 +1,7 @@
+{
+  "repository": "https://github.com/rpcpool/yellowstone-grpc",
+  "release": "v16.0.0+solana.4.3.0",
+  "revision": "bfd1d7ee548081b6e36d4238d5ce8f34c94c4fb6",
+  "agave_interface": "4.3.0",
+  "rust_toolchain": "1.97.1"
+}

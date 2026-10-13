@@ -1,0 +1,25 @@
+[Unit]
+Description=Foundation backup of committed native Hivezilla compact chunks
+After=network-online.target
+Wants=network-online.target
+StartLimitIntervalSec=3600
+StartLimitBurst=3
+
+[Service]
+Type=simple
+User=ubuntu
+WorkingDirectory=/home/ubuntu/live/hivezilla-validator-20260930/releases/foundation-upload-20261004-r2
+ExecStart=/usr/bin/python3 -u /home/ubuntu/live/hivezilla-validator-20260930/releases/foundation-upload-20261004-r2/native_backup.py --root /home/ubuntu/live/hivezilla-validator-20260930/compact/direct-agave-live --state /home/ubuntu/live/hivezilla-validator-20260930/reports/foundation-native-backup-20261004 --config /home/ubuntu/live/hivezilla-validator-20260930/config/foundation-r2/rclone.conf --destination foundation:solana-archive-data/native-backup/direct-agave-20261004 --rclone /home/ubuntu/live/hivezilla-validator-20260930/releases/foundation-upload-20261004-r2/rclone --bandwidth 32M
+Restart=on-failure
+RestartSec=60
+TimeoutStopSec=120
+KillMode=control-group
+Nice=10
+IOSchedulingClass=best-effort
+IOSchedulingPriority=7
+MemoryMax=1G
+CPUQuota=100%
+UMask=0077
+
+[Install]
+WantedBy=multi-user.target

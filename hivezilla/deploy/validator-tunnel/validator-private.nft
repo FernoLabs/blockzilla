@@ -1,0 +1,11 @@
+# This table only affects the validator's Tunnel address.
+# cloudflared connects through loopback; packets from physical interfaces fail.
+table inet hivezilla_private {
+    chain input {
+        type filter hook input priority -10; policy accept;
+        ip daddr 10.253.45.3 iifname != "lo" drop
+        ip daddr 10.253.45.3 ct state established,related accept
+        ip daddr 10.253.45.3 tcp dport { 22, 8766, 10000 } accept
+        ip daddr 10.253.45.3 drop
+    }
+}

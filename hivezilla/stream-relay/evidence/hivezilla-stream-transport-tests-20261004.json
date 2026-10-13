@@ -1,0 +1,42 @@
+{
+  "schema": "hivezilla-stream-transport-test-v1",
+  "state": "PASS",
+  "checks": [
+    "mTLS rejects missing client certificate",
+    "origin and relay reject wrong API keys",
+    "relay negotiates HTTP/2 over mTLS",
+    "SSE notice, chunk fetch and binary stream are byte-identical",
+    "CORS accepts only the configured origin",
+    "skipped slots with matching parent chain are accepted",
+    "forced relay restart resumes durable cursor and retains exact old bytes",
+    "unavailable cursor returns 410 instead of latest",
+    "unread client does not block relay intake",
+    "origin restart reproduces stable chunk identities and relay resumes"
+  ],
+  "relay_head": {
+    "canonical": false,
+    "earliest_after": "session1:100:04320566e765acc3e67d79b314fba788c0b0f0892ca2de399a2c156df743c93c",
+    "error": null,
+    "evidence_included": false,
+    "finalized": true,
+    "genesis_hash": "genesis",
+    "intake_age_ms": 5,
+    "last_admitted_unix_ms": 1791104351355,
+    "last_slot": 107,
+    "latest_cursor": "session1:107:624512e57a3431e9c1f710b72a1e37736d0912182eeaad9312006f7d38609037",
+    "node_identity": "operator",
+    "profile": "native-compact-projection-v1",
+    "publication_ready": false,
+    "received_bytes": 8910,
+    "received_chunks": 3,
+    "replay_bytes": 14850,
+    "replay_limit_bytes": 134217728,
+    "retained_chunks": 5,
+    "schema": "blockzilla-stream-head-v1",
+    "stale": false,
+    "state": "LIVE",
+    "upstream_http_version": "HTTP/2.0"
+  },
+  "fixture_only": true,
+  "validator_changed": false
+}

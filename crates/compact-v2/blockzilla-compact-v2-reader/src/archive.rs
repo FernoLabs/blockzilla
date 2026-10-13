@@ -28,10 +28,10 @@ pub use crate::{
 use crate::{CompactV2MessageSchema, CompactV2MetadataSchema};
 pub use blockzilla_model::{
     ArchiveFormat, ArchiveInstructionSource, ArchiveInstructionSourceExt, ArchiveIoSnapshot,
-    BlockSink, BlockView, Error as QueryError, FnBlockSink, InstructionDataRequirement,
-    RecordedTokenBalance, Result as QueryResult, ScanIoReceipt, ScanRange, ScanReceipt,
-    ScanRequest, SourceIdentity, SourceVerification, TokenBalanceCoverage, TokenBalanceRequirement,
-    TokenBalanceSide, TransactionView,
+    BlockSink, BlockView, Error as QueryError, ExecutionStatus, FnBlockSink,
+    InstructionDataRequirement, RecordedTokenBalance, Result as QueryResult, ScanIoReceipt,
+    ScanRange, ScanReceipt, ScanRequest, SourceIdentity, SourceVerification, TokenBalanceCoverage,
+    TokenBalanceRequirement, TokenBalanceSide, TransactionView,
 };
 use sha2::{Digest, Sha256};
 use thiserror::Error;
@@ -371,6 +371,78 @@ impl NetworkObjectInventory {
 }
 
 impl CompactV2Archive {
+    /// Read the admitted hot header and bounded hash references for one row.
+    /// This does not certify full-epoch coverage. Consumers can use parent
+    /// links to reject holes when joining archive rows to a live stream.
+    pub fn block_identity(&self, row: usize) -> QueryResult<(u64, [u8; 32], Option<[u8; 32]>)> {
+        fn read<S: RangeSource>(
+            reader: &ArchiveReader<S>,
+            row: usize,
+            epoch: u64,
+        ) -> QueryResult<(u64, [u8; 32], Option<[u8; 32]>)> {
+            let result = (|| -> anyhow::Result<_> {
+                use blockzilla_archive_v2::{
+                    ARCHIVE_V2_BLOCKHASH_REGISTRY_FILE as HASHES,
+                    ARCHIVE_V2_PREV_BLOCKHASH_TAIL_FILE as TAIL,
+                };
+                let block = reader.read_block(row)?;
+                let header = &block.block.header;
+                let length = reader
+                    .source()
+                    .size(HASHES)?
+                    .ok_or_else(|| anyhow::anyhow!("Blockhash registry is absent"))?;
+                let offset = crate::blockhash::blockhash_registry_offset(
+                    usize::try_from(length)?,
+                    reader.index().rows.len(),
+                )?;
+                anyhow::ensure!(
+                    header.blockhash_id as usize == row + offset,
+                    "Header blockhash ID differs from the archive row"
+                );
+                let hash = |id: u32| -> anyhow::Result<[u8; 32]> {
+                    let bytes = reader.source().read_range(HASHES, u64::from(id) * 32, 32)?;
+                    Ok(bytes
+                        .try_into()
+                        .map_err(|_| anyhow::anyhow!("Invalid blockhash record"))?)
+                };
+                let previous = if header.blockhash_id == 0 && header.previous_blockhash_id == 0 {
+                    match reader.source().size(TAIL)? {
+                        Some(bytes) => {
+                            anyhow::ensure!(bytes <= 300 * 40, "Previous hash tail is too large");
+                            let bytes = reader.source().read_range(TAIL, 0, bytes as usize)?;
+                            let tail = crate::parse_previous_blockhash_tail(
+                                &bytes,
+                                crate::PreviousBlockhashTailSchema::CurrentHashAndSlot,
+                            )?;
+                            let last = tail
+                                .entries
+                                .last()
+                                .ok_or_else(|| anyhow::anyhow!("Previous hash tail is empty"))?;
+                            anyhow::ensure!(
+                                last.slot == Some(header.parent_slot),
+                                "Previous hash tail slot differs from the parent"
+                            );
+                            Some(last.hash)
+                        }
+                        None if epoch == 0 && row == 0 => None,
+                        None => anyhow::bail!("Previous blockhash is absent"),
+                    }
+                } else {
+                    Some(hash(header.previous_blockhash_id)?)
+                };
+                Ok((header.parent_slot, hash(header.blockhash_id)?, previous))
+            })();
+            result.map_err(|e| QueryError::sink(std::io::Error::other(e.to_string())))
+        }
+        match &self.source {
+            CompactV2ArchiveSource::Network(source) => {
+                read(source.reader(), row, self.identity.epoch)
+            }
+            CompactV2ArchiveSource::Local(source) => {
+                read(source.reader(), row, self.identity.epoch)
+            }
+        }
+    }
     /// Open one mainnet-beta epoch from
     /// `origin/compact-v2/<epoch>/<object-name>`.
     pub fn open(origin: &str, epoch: u64, cache_root: impl AsRef<Path>) -> Result<Self> {

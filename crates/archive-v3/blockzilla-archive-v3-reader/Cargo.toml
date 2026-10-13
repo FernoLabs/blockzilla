@@ -5,7 +5,7 @@ edition.workspace = true
 rust-version.workspace = true
 license.workspace = true
 repository.workspace = true
-publish = false
+publish = ["crates-io"]
 description = "Canonical Archive V3 local reader and frozen standalone prototype compatibility"
 readme = "README.md"
 
@@ -15,12 +15,12 @@ blockzilla-source-local = { version = "0.2.0", path = "../../source/blockzilla-s
 blockzilla-source-http = { version = "0.2.0", path = "../../source/blockzilla-source-http" }
 blockzilla-source-cache = { version = "0.2.0", path = "../../source/blockzilla-source-cache" }
 anyhow = "1.0.104"
-blockzilla-archive-v2 = { path = "../../compact-v2/blockzilla-archive-v2", default-features = false }
-blockzilla-compact = { path = "../../compact-v2/blockzilla-compact", default-features = false }
-blockzilla-primitives = { path = "../../blockzilla-primitives", default-features = false }
-blockzilla-registry = { path = "../../compact-v2/blockzilla-registry", default-features = false }
-blockzilla-archive-v3 = { path = "../blockzilla-archive-v3" }
-blockzilla-compact-v2-reader = { path = "../../compact-v2/blockzilla-compact-v2-reader", default-features = false }
+blockzilla-archive-v2 = { path = "../../compact-v2/blockzilla-archive-v2", default-features = false, version = "0.2.0" }
+blockzilla-compact = { path = "../../compact-v2/blockzilla-compact", default-features = false, version = "0.2.0" }
+blockzilla-primitives = { path = "../../blockzilla-primitives", default-features = false, version = "0.2.0" }
+blockzilla-registry = { path = "../../compact-v2/blockzilla-registry", default-features = false, version = "0.2.0" }
+blockzilla-archive-v3 = { path = "../blockzilla-archive-v3", version = "0.2.0" }
+blockzilla-compact-v2-reader = { path = "../../compact-v2/blockzilla-compact-v2-reader", default-features = false, version = "0.2.0" }
 blockzilla-model = { version = "0.2.0", path = "../../blockzilla-model" }
 serde = { version = "1.0.229", features = ["derive"] }
 serde_json = "1.0.151"

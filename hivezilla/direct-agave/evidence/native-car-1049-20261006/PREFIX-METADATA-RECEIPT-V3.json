@@ -1,0 +1,247 @@
+{
+  "state": "LOG_CONTENT_DIFFERENCE",
+  "epoch": 1049,
+  "scope": "first 64 produced blocks only",
+  "blocks": 64,
+  "transactions": 66397,
+  "non_log_fields_match": true,
+  "non_log_mismatches": [],
+  "log_mismatch_blocks": 38,
+  "native_truncated_log_transactions": 100,
+  "car_truncated_log_transactions": 0,
+  "reward_order_differences": 64,
+  "mismatches": [
+    {
+      "slot": 453168004,
+      "fields": [
+        "logs"
+      ]
+    },
+    {
+      "slot": 453168006,
+      "fields": [
+        "logs"
+      ]
+    },
+    {
+      "slot": 453168007,
+      "fields": [
+        "logs"
+      ]
+    },
+    {
+      "slot": 453168009,
+      "fields": [
+        "logs"
+      ]
+    },
+    {
+      "slot": 453168012,
+      "fields": [
+        "logs"
+      ]
+    },
+    {
+      "slot": 453168013,
+      "fields": [
+        "logs"
+      ]
+    },
+    {
+      "slot": 453168014,
+      "fields": [
+        "logs"
+      ]
+    },
+    {
+      "slot": 453168015,
+      "fields": [
+        "logs"
+      ]
+    },
+    {
+      "slot": 453168016,
+      "fields": [
+        "logs"
+      ]
+    },
+    {
+      "slot": 453168019,
+      "fields": [
+        "logs"
+      ]
+    },
+    {
+      "slot": 453168021,
+      "fields": [
+        "logs"
+      ]
+    },
+    {
+      "slot": 453168022,
+      "fields": [
+        "logs"
+      ]
+    },
+    {
+      "slot": 453168023,
+      "fields": [
+        "logs"
+      ]
+    },
+    {
+      "slot": 453168024,
+      "fields": [
+        "logs"
+      ]
+    },
+    {
+      "slot": 453168025,
+      "fields": [
+        "logs"
+      ]
+    },
+    {
+      "slot": 453168026,
+      "fields": [
+        "logs"
+      ]
+    },
+    {
+      "slot": 453168027,
+      "fields": [
+        "logs"
+      ]
+    },
+    {
+      "slot": 453168030,
+      "fields": [
+        "logs"
+      ]
+    },
+    {
+      "slot": 453168032,
+      "fields": [
+        "logs"
+      ]
+    },
+    {
+      "slot": 453168034,
+      "fields": [
+        "logs"
+      ]
+    },
+    {
+      "slot": 453168035,
+      "fields": [
+        "logs"
+      ]
+    },
+    {
+      "slot": 453168036,
+      "fields": [
+        "logs"
+      ]
+    },
+    {
+      "slot": 453168039,
+      "fields": [
+        "logs"
+      ]
+    },
+    {
+      "slot": 453168044,
+      "fields": [
+        "logs"
+      ]
+    },
+    {
+      "slot": 453168045,
+      "fields": [
+        "logs"
+      ]
+    },
+    {
+      "slot": 453168046,
+      "fields": [
+        "logs"
+      ]
+    },
+    {
+      "slot": 453168047,
+      "fields": [
+        "logs"
+      ]
+    },
+    {
+      "slot": 453168048,
+      "fields": [
+        "logs"
+      ]
+    },
+    {
+      "slot": 453168049,
+      "fields": [
+        "logs"
+      ]
+    },
+    {
+      "slot": 453168051,
+      "fields": [
+        "logs"
+      ]
+    },
+    {
+      "slot": 453168052,
+      "fields": [
+        "logs"
+      ]
+    },
+    {
+      "slot": 453168054,
+      "fields": [
+        "logs"
+      ]
+    },
+    {
+      "slot": 453168056,
+      "fields": [
+        "logs"
+      ]
+    },
+    {
+      "slot": 453168057,
+      "fields": [
+        "logs"
+      ]
+    },
+    {
+      "slot": 453168058,
+      "fields": [
+        "logs"
+      ]
+    },
+    {
+      "slot": 453168059,
+      "fields": [
+        "logs"
+      ]
+    },
+    {
+      "slot": 453168060,
+      "fields": [
+        "logs"
+      ]
+    },
+    {
+      "slot": 453168062,
+      "fields": [
+        "logs"
+      ]
+    }
+  ],
+  "whole_epoch_metadata_checked": false,
+  "top_level_instruction_data_checked": false,
+  "reward_values_compared_in_sorted_order": true,
+  "logs_rendered_before_comparison": true
+}

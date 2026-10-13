@@ -1,0 +1,277 @@
+diff --git a/geyser-plugin-interface/src/geyser_plugin_interface.rs b/geyser-plugin-interface/src/geyser_plugin_interface.rs
+index 0bc2d90..81c2f7d 100644
+--- a/geyser-plugin-interface/src/geyser_plugin_interface.rs
++++ b/geyser-plugin-interface/src/geyser_plugin_interface.rs
+@@ -597,6 +597,19 @@ pub type Result<T> = std::result::Result<T, GeyserPluginError>;
+ /// Defines a Geyser plugin, to stream data from the runtime.
+ /// Geyser plugins must describe desired behavior for load and unload,
+ /// as well as how they will handle streamed data.
++#[derive(Clone, Debug)]
++pub struct ReplicaBankStateInfoV2 {
++    pub slot: u64,
++    pub bank_id: u64,
++    pub parent_slot: u64,
++    pub blockhash: [u8; 32],
++    pub parent_blockhash: [u8; 32],
++    pub block_height: u64,
++    pub last_valid_block_height: Option<u64>,
++    pub observed_at_unix_ms: u64,
++    pub confirmed: bool,
++}
++
+ pub trait GeyserPlugin: Any + Send + Sync + std::fmt::Debug {
+     /// The callback to allow the plugin to setup the logging configuration using the logger
+     /// and log level specified by the validator. Will be called first on load/reload, before any other
+@@ -953,4 +966,10 @@ pub trait GeyserPlugin: Any + Send + Sync + std::fmt::Debug {
+     ) -> Result<()> {
+         Ok(())
+     }
++    /// Blockzilla v2: exact frozen/confirmed bank and its native blockhash queue.
++    /// This hook requires a plugin built against this exact patched interface.
++    #[allow(unused_variables)]
++    fn notify_bank_state_v2(&self, bank: &ReplicaBankStateInfoV2) -> Result<()> {
++        Ok(())
++    }
+ }
+diff --git a/geyser-plugin-manager/Cargo.toml b/geyser-plugin-manager/Cargo.toml
+index 0dea9c6..fcfb126 100644
+--- a/geyser-plugin-manager/Cargo.toml
++++ b/geyser-plugin-manager/Cargo.toml
+@@ -49,3 +49,6 @@ tokio = { workspace = true }
+ 
+ [lints]
+ workspace = true
++
++[dev-dependencies]
++solana-runtime = { path = "../runtime", features = ["agave-unstable-api", "dev-context-only-utils"] }
+diff --git a/geyser-plugin-manager/src/geyser_plugin_manager.rs b/geyser-plugin-manager/src/geyser_plugin_manager.rs
+index ff6ae1e..28d203b 100644
+--- a/geyser-plugin-manager/src/geyser_plugin_manager.rs
++++ b/geyser-plugin-manager/src/geyser_plugin_manager.rs
+@@ -1021,3 +1021,61 @@ mod tests {
+         assert!(!test_plugin_loaded.load(Ordering::Relaxed));
+     }
+ }
++
++// Compiled inside the pinned host, with the host's Rust toolchain and trait.
++#[cfg(test)]
++mod hivezilla_bank_v2_load_test {
++    use super::*;
++    use solana_rpc::{
++        optimistically_confirmed_bank_tracker::NativeBankStateV2,
++        slot_status_notifier::SlotStatusNotifierInterface,
++    };
++    use solana_runtime::{bank::Bank, bank_forks::BankForks, genesis_utils::create_genesis_config};
++    #[test]
++    #[ignore = "requires the actual bank-v2 plugin and an isolated config"]
++    fn native_bank_v2_actual_plugin_load() {
++        let config = std::env::var("HIVEZILLA_NATIVE_TEST_CONFIG").expect("isolated config");
++        let receipt = std::env::var("HIVEZILLA_NATIVE_TEST_RECEIPT").expect("receipt path");
++        let info = create_genesis_config(100);
++        let forks = BankForks::new_rw_arc(Bank::new_for_tests(&info.genesis_config));
++        let parent = forks.read().unwrap().root_bank();
++        parent.freeze();
++        let bank = Bank::new_from_parent(parent.clone(), Default::default(), 17);
++        bank.freeze();
++        let manager = Arc::new(ArcSwap::from_pointee(GeyserPluginManager::default()));
++        // The host unit-test loader is mocked. Load the actual library here.
++        let config_json: serde_json::Value =
++            serde_json::from_slice(&std::fs::read(&config).unwrap()).unwrap();
++        let library = unsafe { Library::new(config_json["libpath"].as_str().unwrap()).unwrap() };
++        type Constructor = unsafe fn() -> *mut dyn GeyserPlugin;
++        let constructor: libloading::Symbol<Constructor> =
++            unsafe { library.get(b"_create_plugin").unwrap() };
++        let mut plugin = unsafe { Box::from_raw(constructor()) };
++        plugin.on_load(&config, false).expect("actual on_load");
++        let name = plugin.name().to_owned();
++        manager.store(Arc::new(GeyserPluginManager {
++            plugins: vec![Arc::new(LoadedGeyserPlugin::new(library, plugin, None))],
++        }));
++        let notifier = crate::slot_status_notifier::SlotStatusNotifierImpl::new(manager.clone());
++        let frozen = NativeBankStateV2::from_bank(&bank, false);
++        let confirmed = NativeBankStateV2::from_bank(&bank, true);
++        assert_eq!(
++            confirmed.last_valid_block_height,
++            bank.get_blockhash_last_valid_block_height(&bank.last_blockhash())
++        );
++        assert_eq!(confirmed.bank_id, bank.bank_id());
++        assert_eq!(
++            confirmed.parent_blockhash,
++            parent.last_blockhash().to_bytes()
++        );
++        assert!(confirmed.last_valid_block_height.is_some());
++        notifier.notify_bank_state_v2(&frozen);
++        notifier.notify_bank_state_v2(&confirmed);
++        drop(notifier);
++        let old = manager.swap(Arc::new(GeyserPluginManager::default()));
++        let mut m = Arc::try_unwrap(old).expect("isolated manager");
++        m.unload();
++        drop(manager);
++        std::fs::write(receipt,serde_json::to_vec_pretty(&serde_json::json!({"state":"PASSED","load_result":name,"slot":confirmed.slot,"bank_id":confirmed.bank_id,"parent_slot":confirmed.parent_slot,"blockhash":confirmed.blockhash,"parent_blockhash":confirmed.parent_blockhash,"block_height":confirmed.block_height,"last_valid_block_height":confirmed.last_valid_block_height,"confirmed":confirmed.confirmed,"observed_at_unix_ms":confirmed.observed_at_unix_ms})).unwrap()).unwrap();
++    }
++}
+diff --git a/geyser-plugin-manager/src/slot_status_notifier.rs b/geyser-plugin-manager/src/slot_status_notifier.rs
+index 1b820e4..4904ae1 100644
+--- a/geyser-plugin-manager/src/slot_status_notifier.rs
++++ b/geyser-plugin-manager/src/slot_status_notifier.rs
+@@ -13,6 +13,34 @@ pub struct SlotStatusNotifierImpl {
+ }
+ 
+ impl SlotStatusNotifierInterface for SlotStatusNotifierImpl {
++    fn notify_bank_state_v2(
++        &self,
++        state: &solana_rpc::optimistically_confirmed_bank_tracker::NativeBankStateV2,
++    ) {
++        use agave_geyser_plugin_interface::geyser_plugin_interface::ReplicaBankStateInfoV2;
++        let bank = ReplicaBankStateInfoV2 {
++            slot: state.slot,
++            bank_id: state.bank_id,
++            parent_slot: state.parent_slot,
++            blockhash: state.blockhash,
++            parent_blockhash: state.parent_blockhash,
++            block_height: state.block_height,
++            last_valid_block_height: state.last_valid_block_height,
++            observed_at_unix_ms: state.observed_at_unix_ms,
++            confirmed: state.confirmed,
++        };
++        let manager = self.plugin_manager.load();
++        for plugin in manager.plugins.iter() {
++            if let Err(error) = plugin.notify_bank_state_v2(&bank) {
++                error!(
++                    "Blockzilla bank tuple callback failed at slot {} for plugin {}: {}",
++                    bank.slot,
++                    plugin.name(),
++                    error
++                );
++            }
++        }
++    }
+     fn notify_slot_confirmed(&self, slot: Slot, parent: Option<Slot>, bank_id: BankId) {
+         self.notify_bank_status(slot, parent, SlotStatus::Confirmed, bank_id);
+     }
+diff --git a/geyser-plugin-manager/src/slot_status_observer.rs b/geyser-plugin-manager/src/slot_status_observer.rs
+index a8fd488..15342c8 100644
+--- a/geyser-plugin-manager/src/slot_status_observer.rs
++++ b/geyser-plugin-manager/src/slot_status_observer.rs
+@@ -55,6 +55,12 @@ impl SlotStatusObserver {
+                 while !exit.load(Ordering::Relaxed) {
+                     if let Ok(slot) = bank_notification_receiver.recv() {
+                         match slot {
++                            SlotNotification::BankStateV2(state) => {
++                                slot_status_notifier
++                                    .read()
++                                    .unwrap()
++                                    .notify_bank_state_v2(&state);
++                            }
+                             SlotNotification::OptimisticallyConfirmed(slot, bank_id) => {
+                                 slot_status_notifier
+                                     .read()
+diff --git a/rpc/src/optimistically_confirmed_bank_tracker.rs b/rpc/src/optimistically_confirmed_bank_tracker.rs
+index 2e571e8..7425fa5 100644
+--- a/rpc/src/optimistically_confirmed_bank_tracker.rs
++++ b/rpc/src/optimistically_confirmed_bank_tracker.rs
+@@ -51,8 +51,44 @@ pub enum BankNotification {
+     NewRootedChain(Vec<(Slot, BankId)>, Slot),
+ }
+ 
++#[derive(Clone, Debug)]
++pub struct NativeBankStateV2 {
++    pub slot: u64,
++    pub bank_id: u64,
++    pub parent_slot: u64,
++    pub blockhash: [u8; 32],
++    pub parent_blockhash: [u8; 32],
++    pub block_height: u64,
++    pub last_valid_block_height: Option<u64>,
++    pub observed_at_unix_ms: u64,
++    pub confirmed: bool,
++}
++impl NativeBankStateV2 {
++    pub fn from_bank(bank: &Bank, confirmed: bool) -> Self {
++        let hash = bank.last_blockhash();
++        Self {
++            slot: bank.slot(),
++            bank_id: bank.bank_id(),
++            parent_slot: bank.parent_slot(),
++            blockhash: hash.to_bytes(),
++            parent_blockhash: bank
++                .parent()
++                .map(|p| p.last_blockhash().to_bytes())
++                .unwrap_or([0; 32]),
++            block_height: bank.block_height(),
++            last_valid_block_height: bank.get_blockhash_last_valid_block_height(&hash),
++            observed_at_unix_ms: std::time::SystemTime::now()
++                .duration_since(std::time::UNIX_EPOCH)
++                .unwrap()
++                .as_millis() as u64,
++            confirmed,
++        }
++    }
++}
++
+ #[derive(Clone, Debug)]
+ pub enum SlotNotification {
++    BankStateV2(NativeBankStateV2),
+     OptimisticallyConfirmed(Slot, BankId),
+     /// The (Slot, Parent Slot, Bank Id) tuple for the slot frozen
+     Frozen((Slot, Slot, BankId)),
+@@ -206,6 +242,10 @@ impl OptimisticallyConfirmedBankTracker {
+                     bank.slot()
+                 );
+                 subscriptions.notify_gossip_subscribers(bank.slot());
++                Self::notify_slot_status(
++                    slot_notification_subscribers,
++                    SlotNotification::BankStateV2(NativeBankStateV2::from_bank(bank, true)),
++                );
+                 *last_notified_confirmed_slot = bank.slot();
+                 Self::notify_slot_status(
+                     slot_notification_subscribers,
+@@ -368,6 +408,10 @@ impl OptimisticallyConfirmedBankTracker {
+                 // `notify_or_defer()` under the `bank.is_frozen()` case instead of here.
+             }
+             BankNotification::Frozen(bank) => {
++                Self::notify_slot_status(
++                    slot_notification_subscribers,
++                    SlotNotification::BankStateV2(NativeBankStateV2::from_bank(&bank, false)),
++                );
+                 let frozen_slot = bank.slot();
+                 if let Some(parent) = bank.parent() {
+                     let num_successful_transactions = bank
+@@ -465,7 +509,9 @@ mod tests {
+     fn get_root_notifications(receiver: &Receiver<SlotNotification>) -> Vec<SlotNotification> {
+         let mut notifications = Vec::new();
+         while let Ok(notification) = receiver.recv_timeout(Duration::from_millis(100)) {
+-            notifications.push(notification);
++            if !matches!(notification, SlotNotification::BankStateV2(_)) {
++                notifications.push(notification);
++            }
+         }
+         notifications
+     }
+@@ -873,4 +919,26 @@ mod tests {
+ 
+         handle.join().unwrap();
+     }
++    #[test]
++    fn test_hivezilla_native_bank_tuple_v2() {
++        let GenesisConfigInfo { genesis_config, .. } = create_genesis_config(100);
++        let forks = BankForks::new_rw_arc(Bank::new_for_tests(&genesis_config));
++        let parent = forks.read().unwrap().root_bank();
++        parent.freeze();
++        let bank = Bank::new_from_parent(parent.clone(), SlotLeader::default(), 17);
++        bank.freeze();
++        let tuple = NativeBankStateV2::from_bank(&bank, true);
++        assert_eq!(tuple.slot, 17);
++        assert_eq!(tuple.bank_id, bank.bank_id());
++        assert_eq!(tuple.parent_slot, parent.slot());
++        assert_eq!(tuple.blockhash, bank.last_blockhash().to_bytes());
++        assert_eq!(tuple.parent_blockhash, parent.last_blockhash().to_bytes());
++        assert_eq!(tuple.block_height, bank.block_height());
++        assert_eq!(
++            tuple.last_valid_block_height,
++            bank.get_blockhash_last_valid_block_height(&bank.last_blockhash())
++        );
++        assert!(tuple.last_valid_block_height.is_some());
++        assert!(tuple.confirmed);
++    }
+ }

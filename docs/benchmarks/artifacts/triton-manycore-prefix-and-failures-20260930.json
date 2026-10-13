@@ -1,0 +1,2245 @@
+{
+  "schema": "triton-manycore-prefix-and-failures-v1",
+  "date": "2026-09-30",
+  "evidence_collected_at_utc": "2026-09-30T09:09:24Z",
+  "remote_host": "ubuntu@213.239.141.61",
+  "remote_evidence_root": "/home/ubuntu/benchmarks/zilla-triton-20260930",
+  "status": "PREFIX_RESULTS_VALID_FULL_EPOCH_900_COMPARISON_NOT_ACCEPTED",
+  "scope": {
+    "epochs": [
+      900,
+      1000
+    ],
+    "prefix_blocks": 8192,
+    "accepted_full_epoch_900_comparison": false,
+    "epoch1000_full_epoch_results_included": false,
+    "raw_transaction_rows_included": false,
+    "raw_worker_counters_included": false
+  },
+  "host": {
+    "hostname": "blockzilla",
+    "cpu_model": "AMD EPYC 9555P 64-Core Processor",
+    "logical_cpus": 128,
+    "cores_per_socket": 64,
+    "sockets": 1,
+    "threads_per_core": 2,
+    "numa_nodes": 1,
+    "memory_bytes": 1212137078784,
+    "root_filesystem_bytes": 7450013548544,
+    "os_release": "PRETTY_NAME=\"Ubuntu 26.04 LTS\"\nNAME=\"Ubuntu\"\nVERSION_ID=\"26.04\"\nVERSION=\"26.04 LTS (Resolute Raccoon)\"\nVERSION_CODENAME=resolute\nID=ubuntu\nID_LIKE=debian\nHOME_URL=\"https://www.ubuntu.com/\"\nSUPPORT_URL=\"https://help.ubuntu.com/\"\nBUG_REPORT_URL=\"https://bugs.launchpad.net/ubuntu/\"\nPRIVACY_POLICY_URL=\"https://www.ubuntu.com/legal/terms-and-policies/privacy-policy\"\nUBUNTU_CODENAME=resolute\nLOGO=ubuntu-logo\n",
+    "uname": "Linux blockzilla 7.0.0-15-generic #15-Ubuntu SMP PREEMPT_DYNAMIC Wed Apr 22 16:06:43 UTC 2026 x86_64 GNU/Linux\n",
+    "source": {
+      "path": "control/benchmark-host.json",
+      "sha256": "6b560ff8b3ab38a361ffee18a09acfff1db3827aff7a5d8fb05ad82c271c63a5",
+      "bytes": 6903
+    }
+  },
+  "build": {
+    "rust_version": "rustc 1.98.0 (88d9e12ae 2026-08-18)",
+    "build_flags": "RUSTFLAGS=-C target-cpu=native; --release --locked; CAR feature reference-mimalloc",
+    "base_commit": "454ed4189dc082729b5babccbc9c5f15ea1861bf",
+    "source_state": "selected snapshot with benchmark changes; not a clean commit",
+    "allocator": "mimalloc 0.1.52",
+    "jetstreamer_version": "0.7.0",
+    "jetstreamer_upstream_commit": "cffaf3d891b3cbe45a46dd963d6d3571b2aa1a24",
+    "variants": {
+      "car_initial": {
+        "sha256": "afe6d7d055bee41c9a28aa8126a04ff8c20aa186c80f9e31e8cfb2879f8fb79b",
+        "preserved_path": "control/initial-bin/car"
+      },
+      "car_sharded": {
+        "sha256": "60df4b3984e4ebd56ae3d36dddabf245486734cec4e8bc52cacf3671a6da360e",
+        "preserved_path": "control/sharded-bin/car"
+      },
+      "car_diagnostics": {
+        "sha256": "ea1083a2fe7d8d66fc2e7bce086d0d57e7830ab884d582bb5cf62368b256d59c",
+        "observed_path": "source/target/release/car-decode-reference",
+        "note": "Current binary hash collected from the recorded command path; diagnostics change error reporting only."
+      },
+      "jetstreamer": {
+        "sha256": "0464deb0a2119e49f0f3e9e8b22e857309dddc502cd0b9d718ca82c258d33447",
+        "preserved_path": "control/initial-bin/jetstreamer"
+      },
+      "native_export_verifier": {
+        "sha256": "14813476682bd575c5d7b3b024d45bed7d55a3d8748920e102a2c4fbe2cabb3e",
+        "path": "control/verify-export"
+      }
+    },
+    "observed_binary_snapshots": {
+      "control/initial-bin/car": {
+        "sha256": "afe6d7d055bee41c9a28aa8126a04ff8c20aa186c80f9e31e8cfb2879f8fb79b",
+        "file_bytes": 6288560
+      },
+      "control/initial-bin/jetstreamer": {
+        "sha256": "0464deb0a2119e49f0f3e9e8b22e857309dddc502cd0b9d718ca82c258d33447",
+        "file_bytes": 13050520
+      },
+      "control/sharded-bin/car": {
+        "sha256": "60df4b3984e4ebd56ae3d36dddabf245486734cec4e8bc52cacf3671a6da360e",
+        "file_bytes": 6383088
+      },
+      "source/target/release/car-decode-reference": {
+        "sha256": "ea1083a2fe7d8d66fc2e7bce086d0d57e7830ab884d582bb5cf62368b256d59c",
+        "file_bytes": 6397936
+      },
+      "source/bench/jetstreamer-reference/target/release/jetstreamer-common-export-reference": {
+        "sha256": "0464deb0a2119e49f0f3e9e8b22e857309dddc502cd0b9d718ca82c258d33447",
+        "file_bytes": 13050520
+      }
+    }
+  },
+  "comparison_contract": {
+    "workload": "Fully decode transactions and metadata, then write the same ordered binary transaction export.",
+    "export_schema": "car-common-export-v1",
+    "fields": [
+      "slot",
+      "transaction index",
+      "first signature",
+      "message hash",
+      "simple vote flag",
+      "failure flag",
+      "fee",
+      "pre lamport balances",
+      "post lamport balances"
+    ],
+    "votes_and_failed_transactions_included": true,
+    "signature_verification": false,
+    "timing": "Reader total_seconds includes setup, scan, export ordering, file writes, and final file sync. Output verification and hashing run outside reader timing.",
+    "representation_limit": "Equal exported fields do not prove equality of every metadata field or isolate decoder costs.",
+    "source_identity_limit": "Triton CAR admission is operator-trusted where no strong ETag exists. Length, range checks, and sparse samples are not a whole-object cryptographic commitment.",
+    "retry_limit": "Successful checked CAR retries remain in time and counters. Jetstreamer's lower transport retries are not fully observed. Returned reader errors invalidate a case."
+  },
+  "epoch900": {
+    "prefix_plan": {
+      "epoch": 900,
+      "start_slot": 388800000,
+      "end_slot_exclusive": 388808198,
+      "source_index": {
+        "source_path": "/Users/augustin/Developement/ferno/blockzilla-v1/benchmark-results/sample-read-matrix-main-4bac6a0-network-20260903/results/cache/compact-v2/epoch-900/origin-798206b5d89db2eab62ce11a1dfc2a2d/compact-v2/epoch-900/etag-set-7f848afac03e5a7f0addb3490f4db3346d8a1271460fe0eaaa5f862a56613f2f/epoch-900.archive-v2-blocks.index.http-range-cache-v1",
+        "source_sha256": "752347fe2af803475d2b58ba44402e12f7e4280a30f68c4a8d4e667ecfcc2c0a",
+        "base_url": "https://blockzilla-archive-samples-v1.cheron-augustin.workers.dev/compact-v2/",
+        "object": "archive-v2-blocks.index",
+        "strong_etag": "\"d3955cd3dc5dd9ceedd37b4e76e98537\"",
+        "index_sha256": "4488c7cf2750c0a7fe11ae798b9d960ed72a0a9e904aa336a30c35198697d55d",
+        "index_bytes": 22456652,
+        "index_block_count": 431858,
+        "index_transactions": 476026811,
+        "index_level": 1,
+        "index_flags": 0,
+        "accepted_index_sha256": "4488c7cf2750c0a7fe11ae798b9d960ed72a0a9e904aa336a30c35198697d55d"
+      },
+      "blocks": 8192,
+      "transactions": 8925832,
+      "source": {
+        "path": "control/plan.json",
+        "sha256": "e40cf6f48bf09dc5719db986182ea845b9d5bca9763d4fb216ccc788a6180708",
+        "bytes": 139435
+      }
+    },
+    "source_preflight": {
+      "car_bytes": 527045598158,
+      "car_etag": null,
+      "car_samples": [
+        {
+          "start": 0,
+          "bytes": 65536,
+          "sha256": "5141dbea7fe2724e52ff1b08991150275b86e5c34b21714931e569f1fa0f1bae"
+        },
+        {
+          "start": 263522799079,
+          "bytes": 65536,
+          "sha256": "df4f3e42414a9e272e864f545bad77b95b4afcf5b8b325ee141fc06904f777a4"
+        },
+        {
+          "start": 527045532622,
+          "bytes": 65536,
+          "sha256": "3ad15a721ca63e7fec39fe4fef0e70091b5bbe639c5118f88fda169d5642f35c"
+        }
+      ],
+      "index_bytes": 5184000,
+      "index_sha256": "b9551b93bd720c221c7d1a605452bd9a676e326344ef56371a03ad44e32c1056",
+      "source": {
+        "path": "control/source-preflight.json",
+        "sha256": "7958f0da4dece50acbf4763159daefebaae29aa12c766eea81fc89bb24403694",
+        "bytes": 617
+      }
+    },
+    "initial_series": {
+      "state": "FAILED",
+      "series_accepted": false,
+      "reason": "The last Jetstreamer confirmation failed with Unknown CID version. The preceding individual PASS cases retain their own verification, but the confirmation series is incomplete.",
+      "status_source": {
+        "path": "results-initial/status.json",
+        "sha256": "47078477502ec461d0eacafbebf052d5bc82b113a79a3f37cab651a66c16875d",
+        "bytes": 8922445
+      },
+      "binary_sha256": {
+        "car": "afe6d7d055bee41c9a28aa8126a04ff8c20aa186c80f9e31e8cfb2879f8fb79b",
+        "jetstreamer": "0464deb0a2119e49f0f3e9e8b22e857309dddc502cd0b9d718ca82c258d33447"
+      },
+      "settings": {
+        "car_bin": "target/release/car-decode-reference",
+        "jetstreamer_bin": "bench/jetstreamer-reference/target/release/jetstreamer-common-export-reference",
+        "plan": "../control/plan.json",
+        "results": "../results-initial",
+        "base": "https://files.old-faithful.net/",
+        "workers": [
+          12,
+          32,
+          64,
+          128
+        ],
+        "http_workers": 16,
+        "http_window_chunks": 16,
+        "http_chunk_mib": 32,
+        "baseline": true,
+        "best_repeats": 2,
+        "timeout_seconds": 1800
+      },
+      "selection_rule": "Select the fastest passing sweep setting per reader by total_seconds, then confirm it. Only confirmation runs enter the final summary.",
+      "selected_settings": {
+        "car": {
+          "workers": 12,
+          "selection_case": "sweep-12-car"
+        },
+        "jetstreamer": {
+          "workers": 128,
+          "selection_case": "sweep-128-jetstreamer"
+        }
+      },
+      "cases": [
+        {
+          "label": "smoke-car",
+          "reader": "car",
+          "workers": 12,
+          "smoke": true,
+          "baseline": true,
+          "state": "PASS",
+          "exit_code": 0,
+          "process_seconds": 2.6028452789978473,
+          "user_cpu_seconds": 0.404997,
+          "system_cpu_seconds": 0.21087399999999998,
+          "cpu_seconds": 0.615871,
+          "peak_rss_mib": 444.91796875,
+          "byte_parity": "REFERENCE",
+          "output_sha256": "92eb3a69bce633f80cfa3195e40b69235334181eafb96604e5f96a0d8ecee0dc",
+          "output_bytes": 16290170,
+          "votes": 50605,
+          "failed": 2861,
+          "total_seconds": 2.5953807639999997,
+          "scan_seconds": 2.504918691,
+          "total_tps": 25735.33753754831,
+          "mean_cpu_cores": 0.23661452525411877,
+          "report_sha256": "99e7f323e1dd6532f7d11a6d891eb7f108797c07dbb59a917e1362b092d76c39",
+          "http": {
+            "body_buffer_allocated_bytes": 301989888,
+            "body_buffer_allocations": 9,
+            "body_bytes": 301989888,
+            "bytes_delivered": 83886080,
+            "get_requests": 9,
+            "incomplete_body_retries": 0,
+            "workers_finished": 4
+          },
+          "scan_tps": 26664.73775774944,
+          "parameters": {
+            "decode_workers": 12,
+            "parser_workers": 1,
+            "http_workers": 4,
+            "http_window_chunks": 8,
+            "http_chunk_mib": 32
+          },
+          "report_path": "results-initial/smoke-car/report.json",
+          "performance_accepted": true
+        },
+        {
+          "label": "smoke-jetstreamer",
+          "reader": "jetstreamer",
+          "workers": 12,
+          "smoke": true,
+          "baseline": true,
+          "state": "PASS",
+          "exit_code": 0,
+          "process_seconds": 0.9014488969987724,
+          "user_cpu_seconds": 0.479452,
+          "system_cpu_seconds": 0.10337199999999999,
+          "cpu_seconds": 0.582824,
+          "peak_rss_mib": 267.85546875,
+          "byte_parity": "PASS",
+          "output_sha256": "92eb3a69bce633f80cfa3195e40b69235334181eafb96604e5f96a0d8ecee0dc",
+          "output_bytes": 16290170,
+          "votes": 50605,
+          "failed": 2861,
+          "total_seconds": 0.821779087,
+          "scan_seconds": 0.813429687,
+          "total_tps": 81278.53465319445,
+          "mean_cpu_cores": 0.6465413646191346,
+          "report_sha256": "c20294cb79e039467afe3b3e8b15945ada38bb3939aa87a7c6727d831b6340c3",
+          "http": null,
+          "scan_tps": 82112.8132738042,
+          "parameters": {
+            "decode_workers": 12,
+            "parser_workers": null
+          },
+          "report_path": "results-initial/smoke-jetstreamer/report.json",
+          "performance_accepted": true
+        },
+        {
+          "label": "baseline-car",
+          "reader": "car",
+          "workers": 12,
+          "smoke": false,
+          "baseline": true,
+          "state": "PASS",
+          "exit_code": 0,
+          "process_seconds": 82.17036881999957,
+          "user_cpu_seconds": 35.546932,
+          "system_cpu_seconds": 6.047057,
+          "cpu_seconds": 41.593989,
+          "peak_rss_mib": 443,
+          "byte_parity": "REFERENCE",
+          "output_sha256": "bf9b07fbda244bb1e5c5d07059db8489133e544d1ade482808936eceb01fd035",
+          "output_bytes": 2300383008,
+          "votes": 6533434,
+          "failed": 341094,
+          "total_seconds": 82.015926184,
+          "scan_seconds": 81.102452448,
+          "total_tps": 108830.47251060963,
+          "mean_cpu_cores": 0.5061920689575434,
+          "report_sha256": "98d28ccad14b817bf4cf88266351e5a440141ec5fcdc1ef38cbca54c206ae5d0",
+          "http": {
+            "body_buffer_allocated_bytes": 9797894144,
+            "body_buffer_allocations": 292,
+            "body_bytes": 9812626573,
+            "bytes_delivered": 9663676416,
+            "get_requests": 293,
+            "incomplete_body_retries": 1,
+            "workers_finished": 4
+          },
+          "scan_tps": 110056.25268511979,
+          "parameters": {
+            "decode_workers": 12,
+            "parser_workers": 1,
+            "http_workers": 4,
+            "http_window_chunks": 8,
+            "http_chunk_mib": 32
+          },
+          "report_path": "results-initial/baseline-car/report.json",
+          "performance_accepted": true
+        },
+        {
+          "label": "baseline-jetstreamer",
+          "reader": "jetstreamer",
+          "workers": 12,
+          "smoke": false,
+          "baseline": true,
+          "state": "PASS",
+          "exit_code": 0,
+          "process_seconds": 29.028341552999336,
+          "user_cpu_seconds": 55.59727,
+          "system_cpu_seconds": 6.024186,
+          "cpu_seconds": 61.621456,
+          "peak_rss_mib": 377.953125,
+          "byte_parity": "PASS",
+          "output_sha256": "bf9b07fbda244bb1e5c5d07059db8489133e544d1ade482808936eceb01fd035",
+          "output_bytes": 2300383008,
+          "votes": 6533434,
+          "failed": 341094,
+          "total_seconds": 28.816399243,
+          "scan_seconds": 27.950983158,
+          "total_tps": 309748.34588912904,
+          "mean_cpu_cores": 2.1228031883079796,
+          "report_sha256": "4831dcb071e81d493a40fff32801f0eb4110e0200d0c5ca6ac5ed3dd3160967e",
+          "http": null,
+          "scan_tps": 319338.74917903525,
+          "parameters": {
+            "decode_workers": 12,
+            "parser_workers": null
+          },
+          "report_path": "results-initial/baseline-jetstreamer/report.json",
+          "performance_accepted": true
+        },
+        {
+          "label": "sweep-12-car",
+          "reader": "car",
+          "workers": 12,
+          "smoke": false,
+          "baseline": false,
+          "state": "PASS",
+          "exit_code": 0,
+          "process_seconds": 32.22507348500221,
+          "user_cpu_seconds": 36.393269,
+          "system_cpu_seconds": 6.353251,
+          "cpu_seconds": 42.74652,
+          "peak_rss_mib": 834.1328125,
+          "byte_parity": "PASS",
+          "output_sha256": "bf9b07fbda244bb1e5c5d07059db8489133e544d1ade482808936eceb01fd035",
+          "output_bytes": 2300383008,
+          "votes": 6533434,
+          "failed": 341094,
+          "total_seconds": 32.024041091,
+          "scan_seconds": 31.107886552,
+          "total_tps": 278722.8499562632,
+          "mean_cpu_cores": 1.3264987594177107,
+          "report_sha256": "3fa209311d77b997ad5c4d48bab07e253d7917855897fd175333755b9d8d5cb5",
+          "http": {
+            "body_buffer_allocated_bytes": 10200547328,
+            "body_buffer_allocations": 304,
+            "body_bytes": 10200547328,
+            "bytes_delivered": 9663676416,
+            "get_requests": 304,
+            "incomplete_body_retries": 0,
+            "workers_finished": 16
+          },
+          "scan_tps": 286931.4823133215,
+          "parameters": {
+            "decode_workers": 12,
+            "parser_workers": 1,
+            "http_workers": 16,
+            "http_window_chunks": 16,
+            "http_chunk_mib": 32
+          },
+          "report_path": "results-initial/sweep-12-car/report.json",
+          "performance_accepted": true
+        },
+        {
+          "label": "sweep-12-jetstreamer",
+          "reader": "jetstreamer",
+          "workers": 12,
+          "smoke": false,
+          "baseline": false,
+          "state": "PASS",
+          "exit_code": 0,
+          "process_seconds": 21.11555208000209,
+          "user_cpu_seconds": 55.626704,
+          "system_cpu_seconds": 5.9957709999999995,
+          "cpu_seconds": 61.622474999999994,
+          "peak_rss_mib": 329.6171875,
+          "byte_parity": "PASS",
+          "output_sha256": "bf9b07fbda244bb1e5c5d07059db8489133e544d1ade482808936eceb01fd035",
+          "output_bytes": 2300383008,
+          "votes": 6533434,
+          "failed": 341094,
+          "total_seconds": 20.94943411,
+          "scan_seconds": 20.097069175,
+          "total_tps": 426065.54206346534,
+          "mean_cpu_cores": 2.9183454340443604,
+          "report_sha256": "9498fa0264effda8cc47e3c63883fea4065fb0e9c735a2da0a32a6aeb2f9e3d6",
+          "http": null,
+          "scan_tps": 444136.0042241084,
+          "parameters": {
+            "decode_workers": 12,
+            "parser_workers": null
+          },
+          "report_path": "results-initial/sweep-12-jetstreamer/report.json",
+          "performance_accepted": true
+        },
+        {
+          "label": "sweep-32-jetstreamer",
+          "reader": "jetstreamer",
+          "workers": 32,
+          "smoke": false,
+          "baseline": false,
+          "state": "PASS",
+          "exit_code": 0,
+          "process_seconds": 14.814726505996077,
+          "user_cpu_seconds": 65.854186,
+          "system_cpu_seconds": 6.808246,
+          "cpu_seconds": 72.662432,
+          "peak_rss_mib": 704.60546875,
+          "byte_parity": "PASS",
+          "output_sha256": "bf9b07fbda244bb1e5c5d07059db8489133e544d1ade482808936eceb01fd035",
+          "output_bytes": 2300383008,
+          "votes": 6533434,
+          "failed": 341094,
+          "total_seconds": 14.667822367,
+          "scan_seconds": 13.790198746,
+          "total_tps": 608531.5036321642,
+          "mean_cpu_cores": 4.904743396416449,
+          "report_sha256": "53eb43c7ae78824117d6997318936d2a02211f279824f0e66fd70ff667590cff",
+          "http": null,
+          "scan_tps": 647259.1268917742,
+          "parameters": {
+            "decode_workers": 32,
+            "parser_workers": null
+          },
+          "report_path": "results-initial/sweep-32-jetstreamer/report.json",
+          "performance_accepted": true
+        },
+        {
+          "label": "sweep-32-car",
+          "reader": "car",
+          "workers": 32,
+          "smoke": false,
+          "baseline": false,
+          "state": "PASS",
+          "exit_code": 0,
+          "process_seconds": 45.44148725999548,
+          "user_cpu_seconds": 35.606132,
+          "system_cpu_seconds": 6.514133,
+          "cpu_seconds": 42.120265,
+          "peak_rss_mib": 1080.30859375,
+          "byte_parity": "PASS",
+          "output_sha256": "bf9b07fbda244bb1e5c5d07059db8489133e544d1ade482808936eceb01fd035",
+          "output_bytes": 2300383008,
+          "votes": 6533434,
+          "failed": 341094,
+          "total_seconds": 45.25008925,
+          "scan_seconds": 44.32352237,
+          "total_tps": 197255.5667390203,
+          "mean_cpu_cores": 0.9269121135716144,
+          "report_sha256": "11e8cd27ee37a8f467726b9dee7fe3867ca39c67c6e6c64a869d885c114f9dc8",
+          "http": {
+            "body_buffer_allocated_bytes": 10200547328,
+            "body_buffer_allocations": 304,
+            "body_bytes": 10200547328,
+            "bytes_delivered": 9663676416,
+            "get_requests": 304,
+            "incomplete_body_retries": 0,
+            "workers_finished": 16
+          },
+          "scan_tps": 201379.1215754408,
+          "parameters": {
+            "decode_workers": 32,
+            "parser_workers": 1,
+            "http_workers": 16,
+            "http_window_chunks": 16,
+            "http_chunk_mib": 32
+          },
+          "report_path": "results-initial/sweep-32-car/report.json",
+          "performance_accepted": true
+        },
+        {
+          "label": "sweep-64-car",
+          "reader": "car",
+          "workers": 64,
+          "smoke": false,
+          "baseline": false,
+          "state": "PASS",
+          "exit_code": 0,
+          "process_seconds": 36.73101246100123,
+          "user_cpu_seconds": 35.301797,
+          "system_cpu_seconds": 6.452073,
+          "cpu_seconds": 41.75387,
+          "peak_rss_mib": 1701.19921875,
+          "byte_parity": "PASS",
+          "output_sha256": "bf9b07fbda244bb1e5c5d07059db8489133e544d1ade482808936eceb01fd035",
+          "output_bytes": 2300383008,
+          "votes": 6533434,
+          "failed": 341094,
+          "total_seconds": 36.54337342,
+          "scan_seconds": 35.628104536,
+          "total_tps": 244253.09336972533,
+          "mean_cpu_cores": 1.1367470484058053,
+          "report_sha256": "387b407288305fc2476071e89a9c7d45c7673ecb47c7d1f3424dbf4d1a73ffc0",
+          "http": {
+            "body_buffer_allocated_bytes": 10200547328,
+            "body_buffer_allocations": 304,
+            "body_bytes": 10200547328,
+            "bytes_delivered": 9663676416,
+            "get_requests": 304,
+            "incomplete_body_retries": 0,
+            "workers_finished": 16
+          },
+          "scan_tps": 250527.83795952427,
+          "parameters": {
+            "decode_workers": 64,
+            "parser_workers": 1,
+            "http_workers": 16,
+            "http_window_chunks": 16,
+            "http_chunk_mib": 32
+          },
+          "report_path": "results-initial/sweep-64-car/report.json",
+          "performance_accepted": true
+        },
+        {
+          "label": "sweep-64-jetstreamer",
+          "reader": "jetstreamer",
+          "workers": 64,
+          "smoke": false,
+          "baseline": false,
+          "state": "PASS",
+          "exit_code": 0,
+          "process_seconds": 17.12211097600084,
+          "user_cpu_seconds": 69.86706,
+          "system_cpu_seconds": 6.927504,
+          "cpu_seconds": 76.794564,
+          "peak_rss_mib": 1116.00390625,
+          "byte_parity": "PASS",
+          "output_sha256": "bf9b07fbda244bb1e5c5d07059db8489133e544d1ade482808936eceb01fd035",
+          "output_bytes": 2300383008,
+          "votes": 6533434,
+          "failed": 341094,
+          "total_seconds": 16.953585836,
+          "scan_seconds": 16.095393182,
+          "total_tps": 526486.3779464572,
+          "mean_cpu_cores": 4.485110749932581,
+          "report_sha256": "9558e9959b5f0f0b2b978af4df66985c5e14ca7b8deee1fe833ee9828a48857d",
+          "http": null,
+          "scan_tps": 554558.1831441091,
+          "parameters": {
+            "decode_workers": 64,
+            "parser_workers": null
+          },
+          "report_path": "results-initial/sweep-64-jetstreamer/report.json",
+          "performance_accepted": true
+        },
+        {
+          "label": "sweep-128-jetstreamer",
+          "reader": "jetstreamer",
+          "workers": 128,
+          "smoke": false,
+          "baseline": false,
+          "state": "PASS",
+          "exit_code": 0,
+          "process_seconds": 10.110810896003386,
+          "user_cpu_seconds": 71.381649,
+          "system_cpu_seconds": 7.051496,
+          "cpu_seconds": 78.433145,
+          "peak_rss_mib": 1797.75390625,
+          "byte_parity": "PASS",
+          "output_sha256": "bf9b07fbda244bb1e5c5d07059db8489133e544d1ade482808936eceb01fd035",
+          "output_bytes": 2300383008,
+          "votes": 6533434,
+          "failed": 341094,
+          "total_seconds": 9.956162199,
+          "scan_seconds": 9.118236206,
+          "total_tps": 896513.3172394995,
+          "mean_cpu_cores": 7.757354559069357,
+          "report_sha256": "0523a0c2bf9327612f550ded893707ee3ad8f5271fbe84eb1db67deb5ca3a738",
+          "http": null,
+          "scan_tps": 978898.9666802671,
+          "parameters": {
+            "decode_workers": 128,
+            "parser_workers": null
+          },
+          "report_path": "results-initial/sweep-128-jetstreamer/report.json",
+          "performance_accepted": true
+        },
+        {
+          "label": "sweep-128-car",
+          "reader": "car",
+          "workers": 128,
+          "smoke": false,
+          "baseline": false,
+          "state": "PASS",
+          "exit_code": 0,
+          "process_seconds": 41.83830610899895,
+          "user_cpu_seconds": 34.314628,
+          "system_cpu_seconds": 6.806341,
+          "cpu_seconds": 41.120969,
+          "peak_rss_mib": 2143.5,
+          "byte_parity": "PASS",
+          "output_sha256": "bf9b07fbda244bb1e5c5d07059db8489133e544d1ade482808936eceb01fd035",
+          "output_bytes": 2300383008,
+          "votes": 6533434,
+          "failed": 341094,
+          "total_seconds": 41.636890913,
+          "scan_seconds": 40.749201112,
+          "total_tps": 214373.16293981855,
+          "mean_cpu_cores": 0.9828545374870075,
+          "report_sha256": "ee9118e97940eb267682fe95e6f870c65dd28e7629cb915574433510a2ec4929",
+          "http": {
+            "body_buffer_allocated_bytes": 10200547328,
+            "body_buffer_allocations": 304,
+            "body_bytes": 10200547328,
+            "bytes_delivered": 9663676416,
+            "get_requests": 304,
+            "incomplete_body_retries": 0,
+            "workers_finished": 16
+          },
+          "scan_tps": 219043.1163415246,
+          "parameters": {
+            "decode_workers": 128,
+            "parser_workers": 1,
+            "http_workers": 16,
+            "http_window_chunks": 16,
+            "http_chunk_mib": 32
+          },
+          "report_path": "results-initial/sweep-128-car/report.json",
+          "performance_accepted": true
+        },
+        {
+          "label": "confirm-1-jetstreamer",
+          "reader": "jetstreamer",
+          "workers": 128,
+          "smoke": false,
+          "baseline": false,
+          "state": "PASS",
+          "exit_code": 0,
+          "process_seconds": 17.62428763200296,
+          "user_cpu_seconds": 70.693406,
+          "system_cpu_seconds": 7.275381,
+          "cpu_seconds": 77.96878699999999,
+          "peak_rss_mib": 1680.66796875,
+          "byte_parity": "PASS",
+          "output_sha256": "bf9b07fbda244bb1e5c5d07059db8489133e544d1ade482808936eceb01fd035",
+          "output_bytes": 2300383008,
+          "votes": 6533434,
+          "failed": 341094,
+          "total_seconds": 17.420053618,
+          "scan_seconds": 16.598195512,
+          "total_tps": 512388.3195616005,
+          "mean_cpu_cores": 4.423939771524202,
+          "report_sha256": "a18030a65ee83ae4911eaf0e2eb3ac1d957b915e07c58a15ccfed4bb8767a434",
+          "http": null,
+          "scan_tps": 537759.1795172488,
+          "parameters": {
+            "decode_workers": 128,
+            "parser_workers": null
+          },
+          "report_path": "results-initial/confirm-1-jetstreamer/report.json",
+          "performance_accepted": true
+        },
+        {
+          "label": "confirm-1-car",
+          "reader": "car",
+          "workers": 12,
+          "smoke": false,
+          "baseline": false,
+          "state": "PASS",
+          "exit_code": 0,
+          "process_seconds": 37.13066894000076,
+          "user_cpu_seconds": 35.883129,
+          "system_cpu_seconds": 6.478968,
+          "cpu_seconds": 42.362097,
+          "peak_rss_mib": 819.64453125,
+          "byte_parity": "PASS",
+          "output_sha256": "bf9b07fbda244bb1e5c5d07059db8489133e544d1ade482808936eceb01fd035",
+          "output_bytes": 2300383008,
+          "votes": 6533434,
+          "failed": 341094,
+          "total_seconds": 36.9727355,
+          "scan_seconds": 36.092222782,
+          "total_tps": 241416.5973734889,
+          "mean_cpu_cores": 1.1408923730529248,
+          "report_sha256": "4dab598d56e30cfb60d581b35c1c1354baed37f2076eaa699626fd344f57f0c5",
+          "http": {
+            "body_buffer_allocated_bytes": 10200547328,
+            "body_buffer_allocations": 304,
+            "body_bytes": 10200547328,
+            "bytes_delivered": 9663676416,
+            "get_requests": 304,
+            "incomplete_body_retries": 0,
+            "workers_finished": 16
+          },
+          "scan_tps": 247306.24250860803,
+          "parameters": {
+            "decode_workers": 12,
+            "parser_workers": 1,
+            "http_workers": 16,
+            "http_window_chunks": 16,
+            "http_chunk_mib": 32
+          },
+          "report_path": "results-initial/confirm-1-car/report.json",
+          "performance_accepted": true
+        },
+        {
+          "label": "confirm-2-car",
+          "reader": "car",
+          "workers": 12,
+          "smoke": false,
+          "baseline": false,
+          "state": "PASS",
+          "exit_code": 0,
+          "process_seconds": 33.62495815800503,
+          "user_cpu_seconds": 35.525672,
+          "system_cpu_seconds": 6.308011,
+          "cpu_seconds": 41.833683,
+          "peak_rss_mib": 844.41796875,
+          "byte_parity": "PASS",
+          "output_sha256": "bf9b07fbda244bb1e5c5d07059db8489133e544d1ade482808936eceb01fd035",
+          "output_bytes": 2300383008,
+          "votes": 6533434,
+          "failed": 341094,
+          "total_seconds": 33.431090877,
+          "scan_seconds": 32.562221636,
+          "total_tps": 266991.9456962984,
+          "mean_cpu_cores": 1.2441259496419845,
+          "report_sha256": "cb3faf62a8ad485681216423760e28d5043fa010f3f23602208abdc0a9e0163a",
+          "http": {
+            "body_buffer_allocated_bytes": 10200547328,
+            "body_buffer_allocations": 304,
+            "body_bytes": 10200547328,
+            "bytes_delivered": 9663676416,
+            "get_requests": 304,
+            "incomplete_body_retries": 0,
+            "workers_finished": 16
+          },
+          "scan_tps": 274116.18592178053,
+          "parameters": {
+            "decode_workers": 12,
+            "parser_workers": 1,
+            "http_workers": 16,
+            "http_window_chunks": 16,
+            "http_chunk_mib": 32
+          },
+          "report_path": "results-initial/confirm-2-car/report.json",
+          "performance_accepted": true
+        },
+        {
+          "label": "confirm-2-jetstreamer",
+          "reader": "jetstreamer",
+          "workers": 128,
+          "smoke": false,
+          "baseline": false,
+          "state": "FAILED",
+          "exit_code": 1,
+          "process_seconds": 2.602728555997601,
+          "user_cpu_seconds": 2.310356,
+          "system_cpu_seconds": 0.319911,
+          "cpu_seconds": 2.630267,
+          "peak_rss_mib": 466.0390625,
+          "error": "ValueError('confirm-2-jetstreamer: reader failed; see retained stderr.log')",
+          "parameters": {
+            "decode_workers": 128,
+            "parser_workers": null
+          },
+          "report_path": "results-initial/confirm-2-jetstreamer/report.json",
+          "performance_accepted": false,
+          "reader_failure": {
+            "allocator": "mimalloc",
+            "blocks": 321,
+            "decoded_bytes": null,
+            "end_slot_exclusive": 388808198,
+            "epoch": 900,
+            "errors": [
+              "upstream retry invalidates sample: slot=388802438 Error reading until block: Unknown CID version",
+              "block rows differ from canonical plan"
+            ],
+            "export_bytes": null,
+            "export_schema": "car-common-export-v1",
+            "http_base": "https://files.old-faithful.net/",
+            "index_base": "https://files.old-faithful.net/",
+            "metadata_absence_coverage": "unavailable: upstream maps empty metadata to default status",
+            "mode": "decoded",
+            "network_bytes": null,
+            "outer_car_zstd": false,
+            "peak_active_workers": null,
+            "plan_parity": "external comparison required",
+            "processing_workers": 128,
+            "retry_observation": "reported firehose errors invalidate the sample; deliberate connection recycling and lower-level transport retries are not counted here",
+            "sampled_transaction_nodes_from_upstream_stats": 0,
+            "sampled_upstream_stats_are_final": false,
+            "scan_seconds": 2.533431316,
+            "schema": "jetstreamer-common-export-reference-v1",
+            "sequential": false,
+            "signature_verification": false,
+            "start_slot": 388800000,
+            "stats_tracking_interval_slots": 10000,
+            "total_seconds": 2.5416390030000002,
+            "transaction_callbacks": 348716,
+            "transactions": 348716,
+            "upstream_commit": "cffaf3d891b3cbe45a46dd963d6d3571b2aa1a24",
+            "upstream_version": "0.7.0",
+            "valid": false,
+            "workers_with_real_blocks": 39
+          }
+        }
+      ]
+    },
+    "sharded_prefix": {
+      "repeat_count_per_configuration": 1,
+      "series_note": "These later sharded cases were run separately from the initial sequential-parser sweep. They are prefix results and do not establish a full-epoch speed ratio.",
+      "cases": [
+        {
+          "label": "car-parser-32",
+          "report_source": {
+            "path": "results-sharded-32/report.json",
+            "sha256": "33dc70c4b411ec56b9afeff34d57b345baeaecc8414360ec5b81c4d8c417c66e",
+            "bytes": 1187008
+          },
+          "binary_variant": "car_sharded",
+          "reader_report": {
+            "allocations": null,
+            "allocator": "mimalloc",
+            "blocks": 8192,
+            "effective_http_workers": 32,
+            "epoch": 900,
+            "export_bytes": 2300383008,
+            "export_schema": "car-common-export-v1",
+            "failed": 341094,
+            "http": {
+              "body_bytes": 9668188311,
+              "bytes_delivered": 9661955735,
+              "get_requests": 304,
+              "head_requests": 4,
+              "incomplete_body_retries": 0,
+              "server_error_retries": 0,
+              "workers_finished": 32
+            },
+            "http_body_window_bytes": 1073741824,
+            "http_chunk_bytes": 33554432,
+            "http_transport_mode": "sharded-range",
+            "http_window_chunks": 8,
+            "http_workers": 4,
+            "identity": {
+              "bytes": 527045598158,
+              "car_header_bytes": 59,
+              "operator_trusted": true,
+              "slot_index_blake3": "a39f85d4b92c2949a58aa4c29cd01237f563088b77bfe7208a15ba9dea89d184",
+              "slot_index_bytes": 5184000,
+              "slot_index_url": "https://files.old-faithful.net/900/epoch-900-slot-ranges.raw",
+              "url": "https://files.old-faithful.net/900/epoch-900.car"
+            },
+            "metadata_mode": "Owned",
+            "parser_workers": 32,
+            "physical_blocks": 8192,
+            "reuse_http_buffers": false,
+            "scan_seconds": 18.282547869,
+            "scan_tps": 488215.9786456622,
+            "schema": "blockzilla-car-decode-reference-v1",
+            "setup_seconds": 0.458834569,
+            "signature_verification": false,
+            "total_seconds": 19.554563699,
+            "transactions": 8925832,
+            "valid": true,
+            "votes": 6533434,
+            "workers": 64,
+            "shard_summary": {
+              "count": 32,
+              "decode_workers": 64,
+              "physical_blocks": 8192,
+              "start_byte": 59,
+              "end_byte_exclusive": 9661955794
+            }
+          },
+          "process_resources": {
+            "source": {
+              "path": "results-sharded-32/resources.txt",
+              "sha256": "ca5811dabfc442bc0deeaf844343577a05cfdc834572f901ab68a591a7d4f9fd",
+              "bytes": 1015
+            },
+            "user_cpu_seconds": 33.57,
+            "system_cpu_seconds": 5.61,
+            "cpu_seconds": 39.18,
+            "process_seconds": 19.71,
+            "reported_cpu_percent": 198,
+            "peak_rss_kib": 2480860,
+            "peak_rss_mib": 2422.71484375,
+            "exit_code": 0,
+            "rounding_note": "GNU time values are rounded; reader timers retain their original precision."
+          },
+          "total_tps": 456457.74241725774,
+          "verification": {
+            "state": "PASS",
+            "output_sha256": "bf9b07fbda244bb1e5c5d07059db8489133e544d1ade482808936eceb01fd035",
+            "output_bytes": 2300383008,
+            "blocks": 8192,
+            "transactions": 8925832,
+            "votes": 6533434,
+            "failed": 341094,
+            "exact_byte_comparison": "PASS",
+            "evidence_kind": "coordinating_agent_observation",
+            "evidence_note": "The coordinating agent reported successful native export verification, SHA-256, and exact comparison against the saved epoch-900 prefix reference. This compact collection did not repeat the large output reads.",
+            "reference_status": {
+              "path": "results-initial/status.json",
+              "sha256": "47078477502ec461d0eacafbebf052d5bc82b113a79a3f37cab651a66c16875d",
+              "bytes": 8922445
+            }
+          }
+        },
+        {
+          "label": "car-parser-64",
+          "report_source": {
+            "path": "results-sharded-64/report.json",
+            "sha256": "33220c84730eb9874fc07aa78f1ddfccfa58366229861c3717dc64eced49ec78",
+            "bytes": 1193755
+          },
+          "binary_variant": "car_sharded",
+          "reader_report": {
+            "allocations": null,
+            "allocator": "mimalloc",
+            "blocks": 8192,
+            "effective_http_workers": 64,
+            "epoch": 900,
+            "export_bytes": 2300383008,
+            "export_schema": "car-common-export-v1",
+            "failed": 341094,
+            "http": {
+              "body_bytes": 9668188311,
+              "bytes_delivered": 9661955735,
+              "get_requests": 326,
+              "head_requests": 4,
+              "incomplete_body_retries": 0,
+              "server_error_retries": 0,
+              "workers_finished": 64
+            },
+            "http_body_window_bytes": 2147483648,
+            "http_chunk_bytes": 33554432,
+            "http_transport_mode": "sharded-range",
+            "http_window_chunks": 8,
+            "http_workers": 4,
+            "identity": {
+              "bytes": 527045598158,
+              "car_header_bytes": 59,
+              "operator_trusted": true,
+              "slot_index_blake3": "a39f85d4b92c2949a58aa4c29cd01237f563088b77bfe7208a15ba9dea89d184",
+              "slot_index_bytes": 5184000,
+              "slot_index_url": "https://files.old-faithful.net/900/epoch-900-slot-ranges.raw",
+              "url": "https://files.old-faithful.net/900/epoch-900.car"
+            },
+            "metadata_mode": "Owned",
+            "parser_workers": 64,
+            "physical_blocks": 8192,
+            "reuse_http_buffers": false,
+            "scan_seconds": 12.569415297,
+            "scan_tps": 710123.0875974294,
+            "schema": "blockzilla-car-decode-reference-v1",
+            "setup_seconds": 0.479975131,
+            "signature_verification": false,
+            "total_seconds": 13.853929597,
+            "transactions": 8925832,
+            "valid": true,
+            "votes": 6533434,
+            "workers": 128,
+            "shard_summary": {
+              "count": 64,
+              "decode_workers": 128,
+              "physical_blocks": 8192,
+              "start_byte": 59,
+              "end_byte_exclusive": 9661955794
+            }
+          },
+          "process_resources": {
+            "source": {
+              "path": "results-sharded-64/resources.txt",
+              "sha256": "8a66ac0f445908c938748154a2cf77d9317c33799203fa51db207650732a3dd4",
+              "bytes": 1016
+            },
+            "user_cpu_seconds": 32.82,
+            "system_cpu_seconds": 4.26,
+            "cpu_seconds": 37.08,
+            "process_seconds": 14.01,
+            "reported_cpu_percent": 264,
+            "peak_rss_kib": 4640656,
+            "peak_rss_mib": 4531.890625,
+            "exit_code": 0,
+            "rounding_note": "GNU time values are rounded; reader timers retain their original precision."
+          },
+          "total_tps": 644281.6052661942,
+          "verification": {
+            "state": "PASS",
+            "output_sha256": "bf9b07fbda244bb1e5c5d07059db8489133e544d1ade482808936eceb01fd035",
+            "output_bytes": 2300383008,
+            "blocks": 8192,
+            "transactions": 8925832,
+            "votes": 6533434,
+            "failed": 341094,
+            "exact_byte_comparison": "PASS",
+            "evidence_kind": "coordinating_agent_observation",
+            "evidence_note": "The coordinating agent reported successful native export verification, SHA-256, and exact comparison against the saved epoch-900 prefix reference. This compact collection did not repeat the large output reads.",
+            "reference_status": {
+              "path": "results-initial/status.json",
+              "sha256": "47078477502ec461d0eacafbebf052d5bc82b113a79a3f37cab651a66c16875d",
+              "bytes": 8922445
+            }
+          }
+        },
+        {
+          "label": "car-parser-128",
+          "report_source": {
+            "path": "results-sharded-128/report.json",
+            "sha256": "133e0fcd57ab6fa731aafa0808f8fce527c8c3bd69702e1ab8adf310468b81be",
+            "bytes": 1207116
+          },
+          "binary_variant": "car_sharded",
+          "reader_report": {
+            "allocations": null,
+            "allocator": "mimalloc",
+            "blocks": 8192,
+            "effective_http_workers": 128,
+            "epoch": 900,
+            "export_bytes": 2300383008,
+            "export_schema": "car-common-export-v1",
+            "failed": 341094,
+            "http": {
+              "body_bytes": 9668188311,
+              "bytes_delivered": 9661955735,
+              "get_requests": 384,
+              "head_requests": 4,
+              "incomplete_body_retries": 0,
+              "server_error_retries": 0,
+              "workers_finished": 128
+            },
+            "http_body_window_bytes": 4294967296,
+            "http_chunk_bytes": 33554432,
+            "http_transport_mode": "sharded-range",
+            "http_window_chunks": 8,
+            "http_workers": 4,
+            "identity": {
+              "bytes": 527045598158,
+              "car_header_bytes": 59,
+              "operator_trusted": true,
+              "slot_index_blake3": "a39f85d4b92c2949a58aa4c29cd01237f563088b77bfe7208a15ba9dea89d184",
+              "slot_index_bytes": 5184000,
+              "slot_index_url": "https://files.old-faithful.net/900/epoch-900-slot-ranges.raw",
+              "url": "https://files.old-faithful.net/900/epoch-900.car"
+            },
+            "metadata_mode": "Owned",
+            "parser_workers": 128,
+            "physical_blocks": 8192,
+            "reuse_http_buffers": false,
+            "scan_seconds": 9.958795021,
+            "scan_tps": 896276.304631052,
+            "schema": "blockzilla-car-decode-reference-v1",
+            "setup_seconds": 0.205113453,
+            "signature_verification": false,
+            "total_seconds": 10.973915727,
+            "transactions": 8925832,
+            "valid": true,
+            "votes": 6533434,
+            "workers": 128,
+            "shard_summary": {
+              "count": 128,
+              "decode_workers": 128,
+              "physical_blocks": 8192,
+              "start_byte": 59,
+              "end_byte_exclusive": 9661955794
+            }
+          },
+          "process_resources": {
+            "source": {
+              "path": "results-sharded-128/resources.txt",
+              "sha256": "dfb5dbb5a3a4328b79d40b92981a7813b0d8180a4696f436a4af65622f65a48c",
+              "bytes": 1019
+            },
+            "user_cpu_seconds": 32.71,
+            "system_cpu_seconds": 4.43,
+            "cpu_seconds": 37.14,
+            "process_seconds": 11.14,
+            "reported_cpu_percent": 333,
+            "peak_rss_kib": 6709764,
+            "peak_rss_mib": 6552.50390625,
+            "exit_code": 0,
+            "rounding_note": "GNU time values are rounded; reader timers retain their original precision."
+          },
+          "total_tps": 813368.0102936333,
+          "verification": {
+            "state": "PASS",
+            "output_sha256": "bf9b07fbda244bb1e5c5d07059db8489133e544d1ade482808936eceb01fd035",
+            "output_bytes": 2300383008,
+            "blocks": 8192,
+            "transactions": 8925832,
+            "votes": 6533434,
+            "failed": 341094,
+            "exact_byte_comparison": "PASS",
+            "evidence_kind": "coordinating_agent_observation",
+            "evidence_note": "The coordinating agent reported successful native export verification, SHA-256, and exact comparison against the saved epoch-900 prefix reference. This compact collection did not repeat the large output reads.",
+            "reference_status": {
+              "path": "results-initial/status.json",
+              "sha256": "47078477502ec461d0eacafbebf052d5bc82b113a79a3f37cab651a66c16875d",
+              "bytes": 8922445
+            }
+          }
+        }
+      ]
+    },
+    "full_epoch": {
+      "plan": {
+        "epoch": 900,
+        "start_slot": 388800000,
+        "end_slot_exclusive": 389232000,
+        "blocks": 431858,
+        "transactions": 476026811,
+        "source_index": {
+          "source_path": "/Users/augustin/Developement/ferno/blockzilla-v1/benchmark-results/sample-read-matrix-main-4bac6a0-network-20260903/results/cache/compact-v2/epoch-900/origin-798206b5d89db2eab62ce11a1dfc2a2d/compact-v2/epoch-900/etag-set-7f848afac03e5a7f0addb3490f4db3346d8a1271460fe0eaaa5f862a56613f2f/epoch-900.archive-v2-blocks.index.http-range-cache-v1",
+          "source_sha256": "752347fe2af803475d2b58ba44402e12f7e4280a30f68c4a8d4e667ecfcc2c0a",
+          "base_url": "https://blockzilla-archive-samples-v1.cheron-augustin.workers.dev/compact-v2/",
+          "object": "archive-v2-blocks.index",
+          "strong_etag": "\"d3955cd3dc5dd9ceedd37b4e76e98537\"",
+          "index_sha256": "4488c7cf2750c0a7fe11ae798b9d960ed72a0a9e904aa336a30c35198697d55d",
+          "index_bytes": 22456652,
+          "index_block_count": 431858,
+          "index_transactions": 476026811,
+          "index_level": 1,
+          "index_flags": 0,
+          "accepted_index_sha256": "4488c7cf2750c0a7fe11ae798b9d960ed72a0a9e904aa336a30c35198697d55d"
+        },
+        "source_plan_sha256": "440f9685017c74ec73c19374ec3f87e5e481e89c0ac951837bfd229a8f37dac0",
+        "saved_plan_sha256": "440f9685017c74ec73c19374ec3f87e5e481e89c0ac951837bfd229a8f37dac0",
+        "tsv_sha256": "10b0a18fdf6bf6e536f7bba5ef924f3447a46d4619cbf82ef128d1c23d662185"
+      },
+      "comparison_accepted": false,
+      "car_attempts": [
+        {
+          "label": "results-full-epoch",
+          "state": "FAILED",
+          "performance_accepted": false,
+          "status_source": {
+            "path": "results-full-epoch/status.json",
+            "sha256": "05c588d2fbe34534b5848a00ebb61af45e09383e255d67deb7cd8c97e143cfd4",
+            "bytes": 1051707
+          },
+          "settings": {
+            "car_bin": "target/release/car-decode-reference",
+            "jetstreamer_bin": "bench/jetstreamer-reference/target/release/jetstreamer-common-export-reference",
+            "verifier_bin": "../control/verify-export",
+            "plan": "../control/full-plan.json",
+            "results": "../results-full-epoch",
+            "car_workers": 128,
+            "car_parser_workers": 128,
+            "jetstreamer_workers": 128,
+            "car_http_workers": 16,
+            "car_http_window_chunks": 16,
+            "car_http_chunk_mib": 32,
+            "base": "https://files.old-faithful.net/",
+            "order": "car-first",
+            "timeout_seconds": 7200,
+            "verification_timeout_seconds": 3600,
+            "minimum_free_gib": 512
+          },
+          "binary_sha256": {
+            "car": "60df4b3984e4ebd56ae3d36dddabf245486734cec4e8bc52cacf3671a6da360e",
+            "jetstreamer": "0464deb0a2119e49f0f3e9e8b22e857309dddc502cd0b9d718ca82c258d33447",
+            "verifier": "14813476682bd575c5d7b3b024d45bed7d55a3d8748920e102a2c4fbe2cabb3e"
+          },
+          "execution": {
+            "reader": "car",
+            "workers": 128,
+            "parser_workers": 128,
+            "state": "FAILED",
+            "exit_code": 1,
+            "process_seconds": 192.8164612019973,
+            "cpu_seconds": 1312.0662639999998,
+            "user_cpu_seconds": 1202.082933,
+            "system_cpu_seconds": 109.983331,
+            "peak_rss_mib": 8756.390625,
+            "error": "ValueError('car failed; see reader.stderr.log')"
+          },
+          "reader_report": {
+            "error": "io error: I/O error for epoch-900.car: request or response body error",
+            "scan_seconds": 191.22236103,
+            "valid": false
+          },
+          "report_source": {
+            "path": "results-full-epoch/car/report.json",
+            "sha256": "6d04dc05cc85a976e62f04fa99e34b9909372fb056861f7be002bb8db6606210",
+            "bytes": 136
+          },
+          "error_log": "Error: io error: I/O error for epoch-900.car: request or response body error\n",
+          "limits": "The reader failed before ordered export completion. No full output hash or accepted full-epoch throughput exists. The old failure receipt has no HTTP byte or retry totals."
+        },
+        {
+          "label": "results-full-epoch-64",
+          "state": "FAILED",
+          "performance_accepted": false,
+          "status_source": {
+            "path": "results-full-epoch-64/status.json",
+            "sha256": "b8a83d191ce7ad8b5c0ea7e3f3464d73cf14c1ac6e183f3f1aa6f71af484e502",
+            "bytes": 1051725
+          },
+          "settings": {
+            "car_bin": "target/release/car-decode-reference",
+            "jetstreamer_bin": "bench/jetstreamer-reference/target/release/jetstreamer-common-export-reference",
+            "verifier_bin": "../control/verify-export",
+            "plan": "../control/full-plan.json",
+            "results": "../results-full-epoch-64",
+            "car_workers": 128,
+            "car_parser_workers": 64,
+            "jetstreamer_workers": 64,
+            "car_http_workers": 16,
+            "car_http_window_chunks": 16,
+            "car_http_chunk_mib": 32,
+            "base": "https://files.old-faithful.net/",
+            "order": "car-first",
+            "timeout_seconds": 7200,
+            "verification_timeout_seconds": 3600,
+            "minimum_free_gib": 512
+          },
+          "binary_sha256": {
+            "car": "60df4b3984e4ebd56ae3d36dddabf245486734cec4e8bc52cacf3671a6da360e",
+            "jetstreamer": "0464deb0a2119e49f0f3e9e8b22e857309dddc502cd0b9d718ca82c258d33447",
+            "verifier": "14813476682bd575c5d7b3b024d45bed7d55a3d8748920e102a2c4fbe2cabb3e"
+          },
+          "execution": {
+            "reader": "car",
+            "workers": 128,
+            "parser_workers": 64,
+            "state": "FAILED",
+            "exit_code": 1,
+            "process_seconds": 246.23946957600128,
+            "cpu_seconds": 733.031157,
+            "user_cpu_seconds": 649.418153,
+            "system_cpu_seconds": 83.613004,
+            "peak_rss_mib": 4598.14453125,
+            "error": "ValueError('car failed; see reader.stderr.log')"
+          },
+          "reader_report": {
+            "error": "io error: I/O error for epoch-900.car: request or response body error",
+            "scan_seconds": 244.861642621,
+            "valid": false
+          },
+          "report_source": {
+            "path": "results-full-epoch-64/car/report.json",
+            "sha256": "fd097284ccc33d19aaa9457130bec1869d6b8a523c4e8408d75f9d9b7e662c6e",
+            "bytes": 137
+          },
+          "error_log": "Error: io error: I/O error for epoch-900.car: request or response body error\n",
+          "limits": "The reader failed before ordered export completion. No full output hash or accepted full-epoch throughput exists. The old failure receipt has no HTTP byte or retry totals."
+        }
+      ],
+      "jetstreamer_standalone": {
+        "state": "FAILED",
+        "performance_accepted": false,
+        "report_source": {
+          "path": "results-jetstreamer-full-64/report.json",
+          "sha256": "e5c6a3daa6208a01ea9cdc776f9249309f92941bd8c062c680d38fe30cfd2a3a",
+          "bytes": 518256
+        },
+        "reader_report": {
+          "allocator": "mimalloc",
+          "blocks": 12365,
+          "decoded_bytes": null,
+          "end_slot_exclusive": 389232000,
+          "epoch": 900,
+          "errors": [
+            "upstream retry invalidates sample: slot=388894528 Error reading until block: error decoding response body",
+            "upstream retry invalidates sample: slot=389090363 Error reading until block: error decoding response body",
+            "upstream retry invalidates sample: slot=388921563 Error reading until block: error decoding response body",
+            "upstream retry invalidates sample: slot=389036478 Error reading until block: error decoding response body",
+            "block rows differ from canonical plan"
+          ],
+          "export_bytes": null,
+          "export_schema": "car-common-export-v1",
+          "http_base": "https://files.old-faithful.net/",
+          "index_base": "https://files.old-faithful.net/",
+          "metadata_absence_coverage": "unavailable: upstream maps empty metadata to default status",
+          "mode": "decoded",
+          "network_bytes": null,
+          "outer_car_zstd": false,
+          "peak_active_workers": null,
+          "plan_parity": "external comparison required",
+          "processing_workers": 64,
+          "retry_observation": "reported firehose errors invalidate the sample; deliberate connection recycling and lower-level transport retries are not counted here",
+          "sampled_transaction_nodes_from_upstream_stats": 1022020,
+          "sampled_upstream_stats_are_final": false,
+          "scan_seconds": 8.971531788,
+          "schema": "jetstreamer-common-export-reference-v1",
+          "sequential": false,
+          "signature_verification": false,
+          "start_slot": 388800000,
+          "stats_tracking_interval_slots": 10000,
+          "total_seconds": 8.977610723,
+          "transaction_callbacks": 13543410,
+          "transactions": 13543410,
+          "upstream_commit": "cffaf3d891b3cbe45a46dd963d6d3571b2aa1a24",
+          "upstream_version": "0.7.0",
+          "valid": false,
+          "workers_with_real_blocks": 64,
+          "worker_counter_totals": {
+            "blocks": 12365,
+            "transaction_callbacks": 13543410,
+            "simple_vote_callbacks": 9848896,
+            "failed_status_callbacks": 539459
+          }
+        },
+        "process_resources": {
+          "source": {
+            "path": "results-jetstreamer-full-64/resources.txt",
+            "sha256": "233e7720016403cf4f5dd2d959d06d2b67cdc8f1903fb445c06ddc5eea22111a",
+            "bytes": 1176
+          },
+          "user_cpu_seconds": 111.11,
+          "system_cpu_seconds": 10.79,
+          "cpu_seconds": 121.9,
+          "process_seconds": 10.01,
+          "reported_cpu_percent": 1217,
+          "peak_rss_kib": 1238416,
+          "peak_rss_mib": 1209.390625,
+          "exit_code": 1,
+          "rounding_note": "GNU time values are rounded; reader timers retain their original precision."
+        },
+        "exit_code": 1,
+        "limits": "Partial callback counts are diagnostic only. The export was not finalized and no full-epoch TPS is accepted."
+      }
+    },
+    "transport_diagnostic": {
+      "diagnostic_only": true,
+      "control": {
+        "diagnostic_only": true,
+        "command": [
+          "/home/ubuntu/benchmarks/zilla-triton-20260930/source/target/release/car-decode-reference",
+          "--url",
+          "https://files.old-faithful.net/900/epoch-900.car",
+          "--operator-trusted",
+          "--plan",
+          "/home/ubuntu/benchmarks/zilla-triton-20260930/control/full-plan.json",
+          "--output",
+          "/home/ubuntu/benchmarks/zilla-triton-20260930/results-transport-diagnostic/report.json",
+          "--export",
+          "/home/ubuntu/benchmarks/zilla-triton-20260930/results-transport-diagnostic/transactions.bin",
+          "--workers",
+          "128",
+          "--parser-workers",
+          "64",
+          "--legacy-http-buffers"
+        ],
+        "stop_rule": "first logged shard error or 90 seconds; no speed claim",
+        "stop_reason": "observed_shard_error",
+        "exit_code": -15,
+        "seconds": 2.00742599300429,
+        "errors": "[car-shard-error elapsed_seconds=0.444] CAR shard 14 failed: slots=388894530..388901278 bytes=118114876359..126261597046 decode_workers=2: io error: CAR range request failed: object=epoch-900.car bytes=118114876359..118148430791 expected_body_bytes=33554432: I/O error for epoch-900.car: request or response body error: request or response body error: error reading a body from connection: end of file before message length reached\n"
+      },
+      "control_source": {
+        "path": "results-transport-diagnostic/control.json",
+        "sha256": "a3a81a207889834095c136e171e2c62edd2454fe588f918a25a391134fff37ab",
+        "bytes": 1259
+      },
+      "report_state": {
+        "unreadable_json": "Expecting value: line 1 column 1 (char 0)",
+        "bytes": 0
+      },
+      "log": "[car-shard-error elapsed_seconds=0.444] CAR shard 14 failed: slots=388894530..388901278 bytes=118114876359..126261597046 decode_workers=2: io error: CAR range request failed: object=epoch-900.car bytes=118114876359..118148430791 expected_body_bytes=33554432: I/O error for epoch-900.car: request or response body error: request or response body error: error reading a body from connection: end of file before message length reached\n",
+      "observed_failure": {
+        "shard": 14,
+        "start_slot": 388894530,
+        "end_slot_exclusive": 388901278,
+        "request_start_byte": 118114876359,
+        "request_end_byte_exclusive": 118148430791,
+        "expected_body_bytes": 33554432,
+        "basis": "Exact fields copied from the saved diagnostic error line."
+      },
+      "curl_checks": [
+        {
+          "protocol": "http1",
+          "headers": "HTTP/1.1 206 Partial Content\r\nDate: Wed, 30 Sep 2026 08:49:12 GMT\r\nContent-Type: binary/octet-stream\r\nContent-Length: 33554432\r\nConnection: keep-alive\r\nStrict-Transport-Security: max-age=63072000\r\nReport-To: {\"group\":\"cf-nel\",\"max_age\":604800,\"endpoints\":[{\"url\":\"https://a.nel.cloudflare.com/report/v4?s=3QrOxkt5Q6LlnOFyNumaSnq6UEDAB%2Fde2Yq3NT5P3h%2FfJix%2F3EmoMQ7U0kco%2BiP%2BjYF8NpaUy2bJq4yO6xebxUh6KO0UC5SgLFWd%2BzTpsRGiYLvHhefEnuua15r7uHxSgWeqDfpFkARlsad%2BUp0%2Fad2zrSM%3D\"}]}\r\nNel: {\"report_to\":\"cf-nel\",\"success_fraction\":0.0,\"max_age\":604800}\r\nAccept-Ranges: bytes\r\nContent-Range: bytes 118114876359-118148430790/527045598158\r\ncf-cache-status: DYNAMIC\r\nServer: cloudflare\r\nCF-RAY: a431f9130beb249b-FRA\r\n\r\n",
+          "stderr": "  % Total    % Received % Xferd  Average Speed  Time    Time    Time   Current\n                                 Dload  Upload  Total   Spent   Left   Speed\n\r  0      0   0      0   0      0      0      0                              0\ncurl: (18) end of response with 33554432 bytes missing\n",
+          "headers_source": {
+            "path": "control/diagnostic-range-http1.headers",
+            "sha256": "fb02ccb318066aa930fd818158ca3e9a36e5ac6d9ec56c50c54e8ee7c819f914",
+            "bytes": 715
+          },
+          "stderr_source": {
+            "path": "control/diagnostic-range-http1.stderr",
+            "sha256": "50402493a9ec958e420acd7ec307ea464cd73ed02ea620e63b60f3b8a0e939d9",
+            "bytes": 290
+          }
+        },
+        {
+          "protocol": "http2",
+          "headers": "HTTP/2 206 \r\ndate: Wed, 30 Sep 2026 08:49:12 GMT\r\ncontent-type: binary/octet-stream\r\ncontent-length: 33554432\r\nstrict-transport-security: max-age=63072000\r\nreport-to: {\"group\":\"cf-nel\",\"max_age\":604800,\"endpoints\":[{\"url\":\"https://a.nel.cloudflare.com/report/v4?s=NKWqWLVJdQVYcUfWg%2FUAu5rzKXdK7Pm3zvWwAKVUdOVYd3uXrKmxTv3AlCpg4jLvHT2XFAro72L8jiB%2B%2FV%2B6i9Y5xyL1bfbchknArIGaZErXz1RKUTQvLBoW3daHhJlcKV6edGdKi1s52z%2BSUEWIOaS4D%2FA%3D\"}]}\r\nnel: {\"report_to\":\"cf-nel\",\"success_fraction\":0.0,\"max_age\":604800}\r\naccept-ranges: bytes\r\ncontent-range: bytes 118114876359-118148430790/527045598158\r\ncf-cache-status: DYNAMIC\r\nserver: cloudflare\r\ncf-ray: a431f9143addd2a8-FRA\r\n\r\n",
+          "stderr": "  % Total    % Received % Xferd  Average Speed  Time    Time    Time   Current\n                                 Dload  Upload  Total   Spent   Left   Speed\n\r  0      0   0      0   0      0      0      0                              0\ncurl: (92) HTTP/2 stream 1 was not closed cleanly: INTERNAL_ERROR (err 2)\n",
+          "headers_source": {
+            "path": "control/diagnostic-range-http2.headers",
+            "sha256": "d815ac47994fae27c507c42226b8c6b0c432d38c3e8cec2c44816421af603520",
+            "bytes": 670
+          },
+          "stderr_source": {
+            "path": "control/diagnostic-range-http2.stderr",
+            "sha256": "ddfad3a661fc982ad69ee2781c0909601d03b05983c42d19b1a331d86afca5b4",
+            "bytes": 309
+          }
+        }
+      ],
+      "inference": "The same range failed in independent curl requests with matching 206 range headers. This supports a source-response problem independent of the CAR decoder. It does not identify the failing storage or network component.",
+      "timing_accepted": false
+    }
+  },
+  "epoch1000": {
+    "source_evidence": {
+      "dataset-1000": {
+        "epoch": 1000,
+        "start_slot": 432000000,
+        "end_slot_exclusive": 432432000,
+        "blocks": 431781,
+        "transactions": 547899266,
+        "canonical_index_sha256": "e65650edc7f486766ccaa9dbe575c876e3844a1e580165b309fe8619eb28ad3a",
+        "car_bytes": 767389334224,
+        "index_bytes": 5184000,
+        "index_sha256": "6b0e72ff321996c23ef3fcd53a02d812141484ec4eea559f45d67113be1b89e3",
+        "car_samples": [
+          {
+            "start": 0,
+            "sha256": "425eb9df4b9844f4d9be08bf848b697b8bbc1dd325f8993e9b3c19d55a473aad"
+          },
+          {
+            "start": 47961833389,
+            "sha256": "cd1087ef72ad18e394839e9206cf75db17ff701d5e516479b7f7e55e73fa9bc4"
+          },
+          {
+            "start": 95923666778,
+            "sha256": "e0e1e837e567a4a63abb1c2119f3d6389bff1cb64840dea79764464b6a34bf87"
+          },
+          {
+            "start": 143885500167,
+            "sha256": "d2641e645f2c1b2a4d9df4addcfe1ab864e77fdd0758211251a0c3ea889e746d"
+          },
+          {
+            "start": 191847333556,
+            "sha256": "3905beca1ef856b85ca6a6fd0196a9e0cd0199d8c720b99b88b5b040a0bc7867"
+          },
+          {
+            "start": 239809166945,
+            "sha256": "cc3973e3019c6f092e8f8c48030e63630e6a650c62a791679172d8cc1a59c0f2"
+          },
+          {
+            "start": 287771000334,
+            "sha256": "711702a3905d5d42947c5d48e7fed814ce737cc16fa5b5f7f62f55f6f2e74fcb"
+          },
+          {
+            "start": 335732833723,
+            "sha256": "a778096ea689321e3d118bdbbe25d5b87db1d1a1ec05ba6959f33052d6540524"
+          },
+          {
+            "start": 383694667112,
+            "sha256": "90af5a2fcdfde4636c46f68f8d3fc97474cf08176a42ff2cff8a508a1b96c8d5"
+          },
+          {
+            "start": 431656500501,
+            "sha256": "9f7de3c025dfbdfe98dc53c7430e037f23f295239fe9aaf42528619fa4a7eee9"
+          },
+          {
+            "start": 479618333890,
+            "sha256": "dd9337614e84748b093f522964c1ac729e630dae0d65ea48145286510288d346"
+          },
+          {
+            "start": 527580167279,
+            "sha256": "b5161df95e774a0e9b929e3f24f241d71978573ca29b6f8d592a14fd312bebc6"
+          },
+          {
+            "start": 575542000668,
+            "sha256": "4a06b32df1a7264163d49875be76533d77eaaa305efb184f6d120a42b161bcae"
+          },
+          {
+            "start": 623503834057,
+            "sha256": "fb2fd71a8a16d703eedbceebb0dffb4f6495cac219232c0d0a583d3d8869471d"
+          },
+          {
+            "start": 671465667446,
+            "sha256": "cfd52bad2adb4e83bad2448e903123f2b313ebaadd015cc3c496cced525f1179"
+          },
+          {
+            "start": 719427500835,
+            "sha256": "02393e012ffea34eae623e89b6c79f300d6b98ddbad1fce229361c8981d980bc"
+          },
+          {
+            "start": 767389268688,
+            "sha256": "67e220324664fbd4cccbe1aa6f5f1bcc212ffa27a13fe0212122d5252a5a8e71"
+          }
+        ],
+        "canonical_index_live_check": {
+          "url": "https://blockzilla-archive-samples-v1.cheron-augustin.workers.dev/compact-v2/1000/archive-v2-blocks.index",
+          "status": 200,
+          "bytes": 22452648,
+          "etag": "\"6d193aca0692a95619380b9f0991f621\"",
+          "sha256": "e65650edc7f486766ccaa9dbe575c876e3844a1e580165b309fe8619eb28ad3a"
+        },
+        "source_sample_bytes": 65536,
+        "source": {
+          "path": "control/dataset-1000.json",
+          "sha256": "f14fe03d29983ee8dbe000d842ee292d6bca83f65e3608050596e1762593e7db",
+          "bytes": 2868
+        }
+      },
+      "source-epoch-1000-survey": {
+        "epoch": 1000,
+        "car_bytes": 767389334224,
+        "samples": [
+          {
+            "offset": 0,
+            "status": 206,
+            "bytes": 65536,
+            "sha256": "425eb9df4b9844f4d9be08bf848b697b8bbc1dd325f8993e9b3c19d55a473aad"
+          },
+          {
+            "offset": 47961833389,
+            "status": 206,
+            "bytes": 65536,
+            "sha256": "cd1087ef72ad18e394839e9206cf75db17ff701d5e516479b7f7e55e73fa9bc4"
+          },
+          {
+            "offset": 95923666778,
+            "status": 206,
+            "bytes": 65536,
+            "sha256": "e0e1e837e567a4a63abb1c2119f3d6389bff1cb64840dea79764464b6a34bf87"
+          },
+          {
+            "offset": 143885500167,
+            "status": 206,
+            "bytes": 65536,
+            "sha256": "d2641e645f2c1b2a4d9df4addcfe1ab864e77fdd0758211251a0c3ea889e746d"
+          },
+          {
+            "offset": 191847333556,
+            "status": 206,
+            "bytes": 65536,
+            "sha256": "3905beca1ef856b85ca6a6fd0196a9e0cd0199d8c720b99b88b5b040a0bc7867"
+          },
+          {
+            "offset": 239809166945,
+            "status": 206,
+            "bytes": 65536,
+            "sha256": "cc3973e3019c6f092e8f8c48030e63630e6a650c62a791679172d8cc1a59c0f2"
+          },
+          {
+            "offset": 287771000334,
+            "status": 206,
+            "bytes": 65536,
+            "sha256": "711702a3905d5d42947c5d48e7fed814ce737cc16fa5b5f7f62f55f6f2e74fcb"
+          },
+          {
+            "offset": 335732833723,
+            "status": 206,
+            "bytes": 65536,
+            "sha256": "a778096ea689321e3d118bdbbe25d5b87db1d1a1ec05ba6959f33052d6540524"
+          },
+          {
+            "offset": 383694667112,
+            "status": 206,
+            "bytes": 65536,
+            "sha256": "90af5a2fcdfde4636c46f68f8d3fc97474cf08176a42ff2cff8a508a1b96c8d5"
+          },
+          {
+            "offset": 431656500501,
+            "status": 206,
+            "bytes": 65536,
+            "sha256": "9f7de3c025dfbdfe98dc53c7430e037f23f295239fe9aaf42528619fa4a7eee9"
+          },
+          {
+            "offset": 479618333890,
+            "status": 206,
+            "bytes": 65536,
+            "sha256": "dd9337614e84748b093f522964c1ac729e630dae0d65ea48145286510288d346"
+          },
+          {
+            "offset": 527580167279,
+            "status": 206,
+            "bytes": 65536,
+            "sha256": "b5161df95e774a0e9b929e3f24f241d71978573ca29b6f8d592a14fd312bebc6"
+          },
+          {
+            "offset": 575542000668,
+            "status": 206,
+            "bytes": 65536,
+            "sha256": "4a06b32df1a7264163d49875be76533d77eaaa305efb184f6d120a42b161bcae"
+          },
+          {
+            "offset": 623503834057,
+            "status": 206,
+            "bytes": 65536,
+            "sha256": "fb2fd71a8a16d703eedbceebb0dffb4f6495cac219232c0d0a583d3d8869471d"
+          },
+          {
+            "offset": 671465667446,
+            "status": 206,
+            "bytes": 65536,
+            "sha256": "cfd52bad2adb4e83bad2448e903123f2b313ebaadd015cc3c496cced525f1179"
+          },
+          {
+            "offset": 719427500835,
+            "status": 206,
+            "bytes": 65536,
+            "sha256": "02393e012ffea34eae623e89b6c79f300d6b98ddbad1fce229361c8981d980bc"
+          },
+          {
+            "offset": 767389268688,
+            "status": 206,
+            "bytes": 65536,
+            "sha256": "67e220324664fbd4cccbe1aa6f5f1bcc212ffa27a13fe0212122d5252a5a8e71"
+          }
+        ],
+        "good": 17,
+        "source": {
+          "path": "control/source-epoch-1000-survey.json",
+          "sha256": "2cd18cf7592184fd793bf961dbef6e187d7eab8c5b28d53bdd8b2035db88795c",
+          "bytes": 2941
+        }
+      },
+      "epoch-1000-canonical-index-check": {
+        "url": "https://blockzilla-archive-samples-v1.cheron-augustin.workers.dev/compact-v2/1000/archive-v2-blocks.index",
+        "status": 200,
+        "bytes": 22452648,
+        "etag": "\"6d193aca0692a95619380b9f0991f621\"",
+        "sha256": "e65650edc7f486766ccaa9dbe575c876e3844a1e580165b309fe8619eb28ad3a",
+        "source": {
+          "path": "control/epoch-1000-canonical-index-check.json",
+          "sha256": "1f525cf69011ad0011f63bb0e259e8dac1d371807457e74a4458cb161b23fca9",
+          "bytes": 288
+        }
+      },
+      "epoch-1000-triton-index-check": {
+        "url": "https://files.old-faithful.net/1000/epoch-1000-slot-ranges.raw",
+        "status": 200,
+        "bytes": 5184000,
+        "sha256": "6b0e72ff321996c23ef3fcd53a02d812141484ec4eea559f45d67113be1b89e3",
+        "source": {
+          "path": "control/epoch-1000-triton-index-check.json",
+          "sha256": "b13d5cfaaa1fa0562c8fd88d14c39651388b5a078ce791d854cdfc165b57a792",
+          "bytes": 194
+        }
+      }
+    },
+    "prefix_plan": {
+      "epoch": 1000,
+      "start_slot": 432000000,
+      "end_slot_exclusive": 432008197,
+      "source_index": {
+        "source_path": "/Users/augustin/Developement/ferno/blockzilla-v1/benchmark-results/sample-read-matrix-main-4bac6a0-network-20260903/results/cache/compact-v2/epoch-1000/origin-798206b5d89db2eab62ce11a1dfc2a2d/compact-v2/epoch-1000/etag-set-291354c19cd73a55ccc0df8d409b6ccb5e476a7cb2e8c811e8e09b1d7fe31dc6/epoch-1000.archive-v2-blocks.index.http-range-cache-v1",
+        "source_sha256": "1ccc0ab6b1063a4b4f7eb42f845c1ab7daa6cb0e3d58c11b301edabafaf1a265",
+        "base_url": "https://blockzilla-archive-samples-v1.cheron-augustin.workers.dev/compact-v2/",
+        "object": "archive-v2-blocks.index",
+        "strong_etag": "\"6d193aca0692a95619380b9f0991f621\"",
+        "index_sha256": "e65650edc7f486766ccaa9dbe575c876e3844a1e580165b309fe8619eb28ad3a",
+        "index_bytes": 22452648,
+        "index_block_count": 431781,
+        "index_transactions": 547899266,
+        "index_level": 1,
+        "index_flags": 0,
+        "accepted_index_sha256": "e65650edc7f486766ccaa9dbe575c876e3844a1e580165b309fe8619eb28ad3a",
+        "hash_acceptance_context": "Accepted for the current benchmark after structural validation of a historical Compact V2 HTTP cache. SHA-256 was measured during this session; no prior receipt containing this exact index SHA-256 was found. This index was not built with the CAR reader or Jetstreamer decoder under test.",
+        "provenance": {
+          "method": "Historical Compact V2 HTTP cache, verified independently of the current benchmark decoders.",
+          "exact_index_sha256_found_in_prior_receipt": false,
+          "cached_etag_matches_payload_md5": true,
+          "source_cache_mtime_utc": "2026-09-03T13:23:54.505661+00:00",
+          "validation": "Verified complete cache/header length, epoch, index magic/version, row count, increasing slots, sequential block IDs, contiguous compressed offsets, cumulative transaction and signature ordinals, and full declared blob coverage.",
+          "historical_evidence": [
+            {
+              "path": "docs/benchmarks/artifacts/all-samples-reader-20260908/results.json",
+              "file_sha256": "f2d9093a40c100195eabacc4567c635dd0c99db89f38595087ed33605fd834b4",
+              "json_array": "cases",
+              "matching_cases": [
+                {
+                  "format": "compact-v2",
+                  "mode": "local",
+                  "epoch": 1000,
+                  "workload": "slot-hours",
+                  "status": "PASS",
+                  "blocks": "431781",
+                  "transactions": "547899266",
+                  "parity": "PENDING",
+                  "scan_source_bytes": "85438781218",
+                  "attempt": "/volume2/blockzilla-bench/results/all-samples-38e1dca-20260906T203900Z/local/jobs/compact-v2/local/epoch-1000/slot-hours/attempt-001"
+                },
+                {
+                  "format": "indexer-v3",
+                  "mode": "local",
+                  "epoch": 1000,
+                  "workload": "slot-hours",
+                  "status": "PASS",
+                  "blocks": "431781",
+                  "transactions": "547899266",
+                  "parity": "PENDING",
+                  "scan_source_bytes": "44337397122",
+                  "attempt": "/volume2/blockzilla-bench/results/all-samples-signer-fix-20260907T001310Z/local/jobs/indexer-v3/local/epoch-1000/slot-hours/attempt-001"
+                },
+                {
+                  "format": "car",
+                  "mode": "local",
+                  "epoch": 1000,
+                  "workload": "slot-hours",
+                  "status": "PASS",
+                  "blocks": "431781",
+                  "transactions": "547899266",
+                  "parity": "MATCH",
+                  "scan_source_bytes": "767389334224",
+                  "attempt": "/volume2/blockzilla-bench/results/all-samples-signer-fix-20260907T001310Z/local/jobs/car/local/epoch-1000/slot-hours/attempt-001"
+                }
+              ]
+            },
+            {
+              "path": "docs/benchmarks/artifacts/full-v2-v3-reader-20260911/results.json",
+              "file_sha256": "0d0563a59e2a6b96f5dcb0b9b3c2318d159d9e964b06116c3335cedd2b270108",
+              "json_array": "cases",
+              "matching_cases": [
+                {
+                  "format": "compact-v2",
+                  "mode": "local",
+                  "epoch": "1000",
+                  "workload": "slot-hours",
+                  "status": "PASS",
+                  "blocks": "431781",
+                  "transactions": "547899266",
+                  "parity": "PENDING",
+                  "scan_source_bytes": "85438781218"
+                },
+                {
+                  "format": "compact-v2",
+                  "mode": "network",
+                  "epoch": "1000",
+                  "workload": "slot-hours",
+                  "status": "PASS",
+                  "blocks": "431781",
+                  "transactions": "547899266",
+                  "parity": "PENDING",
+                  "scan_source_bytes": "85438781218"
+                },
+                {
+                  "format": "indexer-v3",
+                  "mode": "local",
+                  "epoch": "1000",
+                  "workload": "slot-hours",
+                  "status": "PASS",
+                  "blocks": "431781",
+                  "transactions": "547899266",
+                  "parity": "PENDING",
+                  "scan_source_bytes": "44337397122"
+                },
+                {
+                  "format": "indexer-v3",
+                  "mode": "network",
+                  "epoch": "1000",
+                  "workload": "slot-hours",
+                  "status": "PASS",
+                  "blocks": "431781",
+                  "transactions": "547899266",
+                  "parity": "MATCH",
+                  "scan_source_bytes": "44337397122"
+                }
+              ]
+            },
+            {
+              "path": "docs/benchmarks/artifacts/full-v2-v3-reader-20260911/results.json",
+              "file_sha256": "0d0563a59e2a6b96f5dcb0b9b3c2318d159d9e964b06116c3335cedd2b270108",
+              "json_array": "car_file_cases",
+              "matching_cases": [
+                {
+                  "format": "car",
+                  "mode": "local",
+                  "epoch": 1000,
+                  "workload": "slot-hours",
+                  "status": "PASS",
+                  "blocks": "431781",
+                  "transactions": "547899266",
+                  "parity": "MATCH",
+                  "scan_source_bytes": "767389334224",
+                  "attempt": "/volume2/blockzilla-bench/results/all-samples-signer-fix-20260907T001310Z/local/jobs/car/local/epoch-1000/slot-hours/attempt-001"
+                }
+              ]
+            }
+          ],
+          "limits": "Accepted historical full CAR/V2/V3 measurements independently confirm total blocks and transactions. They do not provide a per-slot cryptographic commitment to these index bytes. The cache ETag and newly measured SHA-256 have not yet been checked against a current canonical HTTP response."
+        }
+      },
+      "blocks": 8192,
+      "transactions": 10204602,
+      "source": {
+        "path": "control/prefix-plan-1000.json",
+        "sha256": "7aa38f0d65314cd834688b95ddb99a3bb6cdecee8e687032268af33d3e6ac537",
+        "bytes": 160526
+      },
+      "provenance_update": "The plan retains its earlier cache-provenance note. The separately saved live canonical-index check later matched its accepted SHA-256."
+    },
+    "prefix_comparison": {
+      "state": "PASS",
+      "repeat_count_per_reader": 1,
+      "output_sha256": "500b5b9bd2eae34df83005fb08ad7298995480be2d2457499313f9b1280ec949",
+      "exact_byte_comparison": "PASS",
+      "hash_and_cmp_evidence": {
+        "kind": "coordinating_agent_observation",
+        "note": "The coordinating agent ran the native verifier on each output, then sha256sum on both outputs and cmp with exit code 0. This compact collection reads the saved native verifier records and does not repeat output hashing."
+      },
+      "cases": [
+        {
+          "reader": "car",
+          "binary_variant": "car_diagnostics",
+          "reader_report": {
+            "allocations": null,
+            "allocator": "mimalloc",
+            "blocks": 8192,
+            "effective_http_workers": 128,
+            "epoch": 1000,
+            "export_bytes": 3109086212,
+            "export_schema": "car-common-export-v1",
+            "failed": 1221482,
+            "http": {
+              "body_bytes": 13685878205,
+              "bytes_delivered": 13679645629,
+              "get_requests": 471,
+              "head_requests": 4,
+              "incomplete_body_retries": 0,
+              "scan_completed": true,
+              "server_error_retries": 0,
+              "snapshot_scope": "after all parser workers joined",
+              "workers_finished": 128
+            },
+            "http_body_window_bytes": 4294967296,
+            "http_chunk_bytes": 33554432,
+            "http_transport_mode": "sharded-range",
+            "http_window_chunks": 8,
+            "http_workers": 4,
+            "identity": {
+              "bytes": 767389334224,
+              "car_header_bytes": 59,
+              "operator_trusted": true,
+              "slot_index_blake3": "889bcc4874cee706ae5824346cb3b00898bb6d3d3f7390916226814ebc49d830",
+              "slot_index_bytes": 5184000,
+              "slot_index_url": "https://files.old-faithful.net/1000/epoch-1000-slot-ranges.raw",
+              "url": "https://files.old-faithful.net/1000/epoch-1000.car"
+            },
+            "metadata_mode": "Owned",
+            "parser_workers": 128,
+            "physical_blocks": 8192,
+            "reuse_http_buffers": false,
+            "scan_seconds": 7.04790361,
+            "scan_tps": 1447891.8221187193,
+            "schema": "blockzilla-car-decode-reference-v1",
+            "setup_seconds": 0.575250714,
+            "signature_verification": false,
+            "total_seconds": 8.717835994,
+            "transactions": 10204602,
+            "valid": true,
+            "votes": 5746054,
+            "workers": 128,
+            "shard_summary": {
+              "count": 128,
+              "decode_workers": 128,
+              "physical_blocks": 8192,
+              "start_byte": 59,
+              "end_byte_exclusive": 13679645688
+            }
+          },
+          "report_source": {
+            "path": "results-1000-prefix-car/report.json",
+            "sha256": "490dc89de1560ebb840f21ffb16d30f329a0abb63174274b266cd16df56b59b3",
+            "bytes": 1207932
+          },
+          "process_resources": {
+            "source": {
+              "path": "results-1000-prefix-car/resources.txt",
+              "sha256": "eb106b5d804fdeecba1d64cbab7f3027cfddaf047e85d57f11f1e29dd4e4ac48",
+              "bytes": 1043
+            },
+            "user_cpu_seconds": 45.28,
+            "system_cpu_seconds": 5.71,
+            "cpu_seconds": 50.99,
+            "process_seconds": 8.9,
+            "reported_cpu_percent": 572,
+            "peak_rss_kib": 7248952,
+            "peak_rss_mib": 7079.0546875,
+            "exit_code": 0,
+            "rounding_note": "GNU time values are rounded; reader timers retain their original precision."
+          },
+          "native_verification": {
+            "output_bytes": 3109086212,
+            "blocks": 8192,
+            "transactions": 10204602,
+            "votes": 5746054,
+            "failed": 1221482
+          },
+          "verification_source": {
+            "path": "results-1000-prefix-car/verification.json",
+            "sha256": "00b33027c8ed9457d91a3b8ab44362616c2709dc47b7e8b86ae39f9187fb63c3",
+            "bytes": 99
+          },
+          "total_tps": 1170543.011708784
+        },
+        {
+          "reader": "jetstreamer",
+          "binary_variant": "jetstreamer",
+          "reader_report": {
+            "allocator": "mimalloc",
+            "blocks": 8192,
+            "decoded_bytes": null,
+            "end_slot_exclusive": 432008197,
+            "epoch": 1000,
+            "errors": [],
+            "export_bytes": 3109086212,
+            "export_schema": "car-common-export-v1",
+            "http_base": "https://files.old-faithful.net/",
+            "index_base": "https://files.old-faithful.net/",
+            "metadata_absence_coverage": "unavailable: upstream maps empty metadata to default status",
+            "mode": "decoded",
+            "network_bytes": null,
+            "outer_car_zstd": false,
+            "peak_active_workers": null,
+            "plan_parity": "external comparison required",
+            "processing_workers": 128,
+            "retry_observation": "reported firehose errors invalidate the sample; deliberate connection recycling and lower-level transport retries are not counted here",
+            "sampled_transaction_nodes_from_upstream_stats": 1044,
+            "sampled_upstream_stats_are_final": false,
+            "scan_seconds": 5.726341597,
+            "schema": "jetstreamer-common-export-reference-v1",
+            "sequential": false,
+            "signature_verification": false,
+            "start_slot": 432000000,
+            "stats_tracking_interval_slots": 10000,
+            "total_seconds": 6.823393532,
+            "transaction_callbacks": 10204602,
+            "transactions": 10204602,
+            "upstream_commit": "cffaf3d891b3cbe45a46dd963d6d3571b2aa1a24",
+            "upstream_version": "0.7.0",
+            "valid": true,
+            "workers_with_real_blocks": 128,
+            "worker_counter_totals": {
+              "blocks": 8192,
+              "transaction_callbacks": 10204602,
+              "simple_vote_callbacks": 5746054,
+              "failed_status_callbacks": 1221482
+            }
+          },
+          "report_source": {
+            "path": "results-1000-prefix-jetstreamer/report.json",
+            "sha256": "98c37fc6aa0f2101dec5cb1e54638d9ffad65228be52b4f1916eb80fc14eb507",
+            "bytes": 358486
+          },
+          "process_resources": {
+            "source": {
+              "path": "results-1000-prefix-jetstreamer/resources.txt",
+              "sha256": "1d5d95a1772918998bafd34479899abeee2651dcc10394b8b16af254a3069a32",
+              "bytes": 1143
+            },
+            "user_cpu_seconds": 100.2,
+            "system_cpu_seconds": 11.52,
+            "cpu_seconds": 111.72,
+            "process_seconds": 6.99,
+            "reported_cpu_percent": 1598,
+            "peak_rss_kib": 2221440,
+            "peak_rss_mib": 2169.375,
+            "exit_code": 0,
+            "rounding_note": "GNU time values are rounded; reader timers retain their original precision."
+          },
+          "native_verification": {
+            "output_bytes": 3109086212,
+            "blocks": 8192,
+            "transactions": 10204602,
+            "votes": 5746054,
+            "failed": 1221482
+          },
+          "verification_source": {
+            "path": "results-1000-prefix-jetstreamer/verification.json",
+            "sha256": "00b33027c8ed9457d91a3b8ab44362616c2709dc47b7e8b86ae39f9187fb63c3",
+            "bytes": 99
+          },
+          "total_tps": 1495531.7983849214
+        }
+      ]
+    }
+  },
+  "limitations": [
+    "No accepted full-epoch comparison for epoch 900 exists.",
+    "The initial epoch-900 confirmation series failed; only individually verified preceding cases are valid.",
+    "Each sharded epoch-900 configuration and each epoch-1000 prefix reader has one timing sample.",
+    "Network and cache conditions were not controlled; prefix timings must not be extrapolated to a full epoch.",
+    "The 17 successful epoch-1000 source samples cover only 64 KiB each and do not validate every source byte.",
+    "The diagnostic CAR process was stopped after the first logged error; it has no completed JSON receipt or performance result.",
+    "No source body, transaction rows, or full worker logs are copied into this artifact."
+  ],
+  "evidence_files": [
+    {
+      "path": "control/benchmark-host.json",
+      "sha256": "6b560ff8b3ab38a361ffee18a09acfff1db3827aff7a5d8fb05ad82c271c63a5",
+      "bytes": 6903
+    },
+    {
+      "path": "control/source-preflight.json",
+      "sha256": "7958f0da4dece50acbf4763159daefebaae29aa12c766eea81fc89bb24403694",
+      "bytes": 617
+    },
+    {
+      "path": "control/initial-binary-sha256.txt",
+      "sha256": "17b2fd480d2268d582ff8bf324c7e591ccb155558eb1ed0b4ab6fb4901271c23",
+      "bytes": 188
+    },
+    {
+      "path": "results-initial/status.json",
+      "sha256": "47078477502ec461d0eacafbebf052d5bc82b113a79a3f37cab651a66c16875d",
+      "bytes": 8922445
+    },
+    {
+      "path": "results-full-epoch/status.json",
+      "sha256": "05c588d2fbe34534b5848a00ebb61af45e09383e255d67deb7cd8c97e143cfd4",
+      "bytes": 1051707
+    },
+    {
+      "path": "results-full-epoch-64/status.json",
+      "sha256": "b8a83d191ce7ad8b5c0ea7e3f3464d73cf14c1ac6e183f3f1aa6f71af484e502",
+      "bytes": 1051725
+    },
+    {
+      "path": "results-transport-diagnostic/control.json",
+      "sha256": "a3a81a207889834095c136e171e2c62edd2454fe588f918a25a391134fff37ab",
+      "bytes": 1259
+    },
+    {
+      "path": "control/dataset-1000.json",
+      "sha256": "f14fe03d29983ee8dbe000d842ee292d6bca83f65e3608050596e1762593e7db",
+      "bytes": 2868
+    },
+    {
+      "path": "control/source-epoch-1000-survey.json",
+      "sha256": "2cd18cf7592184fd793bf961dbef6e187d7eab8c5b28d53bdd8b2035db88795c",
+      "bytes": 2941
+    },
+    {
+      "path": "control/epoch-1000-canonical-index-check.json",
+      "sha256": "1f525cf69011ad0011f63bb0e259e8dac1d371807457e74a4458cb161b23fca9",
+      "bytes": 288
+    },
+    {
+      "path": "control/epoch-1000-triton-index-check.json",
+      "sha256": "b13d5cfaaa1fa0562c8fd88d14c39651388b5a078ce791d854cdfc165b57a792",
+      "bytes": 194
+    },
+    {
+      "path": "control/diagnostic-range-http1.headers",
+      "sha256": "fb02ccb318066aa930fd818158ca3e9a36e5ac6d9ec56c50c54e8ee7c819f914",
+      "bytes": 715
+    },
+    {
+      "path": "control/diagnostic-range-http1.stderr",
+      "sha256": "50402493a9ec958e420acd7ec307ea464cd73ed02ea620e63b60f3b8a0e939d9",
+      "bytes": 290
+    },
+    {
+      "path": "control/diagnostic-range-http2.headers",
+      "sha256": "d815ac47994fae27c507c42226b8c6b0c432d38c3e8cec2c44816421af603520",
+      "bytes": 670
+    },
+    {
+      "path": "control/diagnostic-range-http2.stderr",
+      "sha256": "ddfad3a661fc982ad69ee2781c0909601d03b05983c42d19b1a331d86afca5b4",
+      "bytes": 309
+    },
+    {
+      "path": "results-sharded-32/report.json",
+      "sha256": "33dc70c4b411ec56b9afeff34d57b345baeaecc8414360ec5b81c4d8c417c66e",
+      "bytes": 1187008
+    },
+    {
+      "path": "results-sharded-32/resources.txt",
+      "sha256": "ca5811dabfc442bc0deeaf844343577a05cfdc834572f901ab68a591a7d4f9fd",
+      "bytes": 1015
+    },
+    {
+      "path": "results-sharded-32/stderr.log",
+      "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+      "bytes": 0
+    },
+    {
+      "path": "results-sharded-64/report.json",
+      "sha256": "33220c84730eb9874fc07aa78f1ddfccfa58366229861c3717dc64eced49ec78",
+      "bytes": 1193755
+    },
+    {
+      "path": "results-sharded-64/resources.txt",
+      "sha256": "8a66ac0f445908c938748154a2cf77d9317c33799203fa51db207650732a3dd4",
+      "bytes": 1016
+    },
+    {
+      "path": "results-sharded-64/stderr.log",
+      "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+      "bytes": 0
+    },
+    {
+      "path": "results-sharded-128/report.json",
+      "sha256": "133e0fcd57ab6fa731aafa0808f8fce527c8c3bd69702e1ab8adf310468b81be",
+      "bytes": 1207116
+    },
+    {
+      "path": "results-sharded-128/resources.txt",
+      "sha256": "dfb5dbb5a3a4328b79d40b92981a7813b0d8180a4696f436a4af65622f65a48c",
+      "bytes": 1019
+    },
+    {
+      "path": "results-sharded-128/stderr.log",
+      "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+      "bytes": 0
+    },
+    {
+      "path": "results-1000-prefix-car/report.json",
+      "sha256": "490dc89de1560ebb840f21ffb16d30f329a0abb63174274b266cd16df56b59b3",
+      "bytes": 1207932
+    },
+    {
+      "path": "results-1000-prefix-car/resources.txt",
+      "sha256": "eb106b5d804fdeecba1d64cbab7f3027cfddaf047e85d57f11f1e29dd4e4ac48",
+      "bytes": 1043
+    },
+    {
+      "path": "results-1000-prefix-car/verification.json",
+      "sha256": "00b33027c8ed9457d91a3b8ab44362616c2709dc47b7e8b86ae39f9187fb63c3",
+      "bytes": 99
+    },
+    {
+      "path": "results-1000-prefix-car/stderr.log",
+      "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+      "bytes": 0
+    },
+    {
+      "path": "results-1000-prefix-jetstreamer/report.json",
+      "sha256": "98c37fc6aa0f2101dec5cb1e54638d9ffad65228be52b4f1916eb80fc14eb507",
+      "bytes": 358486
+    },
+    {
+      "path": "results-1000-prefix-jetstreamer/resources.txt",
+      "sha256": "1d5d95a1772918998bafd34479899abeee2651dcc10394b8b16af254a3069a32",
+      "bytes": 1143
+    },
+    {
+      "path": "results-1000-prefix-jetstreamer/verification.json",
+      "sha256": "00b33027c8ed9457d91a3b8ab44362616c2709dc47b7e8b86ae39f9187fb63c3",
+      "bytes": 99
+    },
+    {
+      "path": "results-1000-prefix-jetstreamer/stderr.log",
+      "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+      "bytes": 0
+    },
+    {
+      "path": "results-jetstreamer-full-64/report.json",
+      "sha256": "e5c6a3daa6208a01ea9cdc776f9249309f92941bd8c062c680d38fe30cfd2a3a",
+      "bytes": 518256
+    },
+    {
+      "path": "results-jetstreamer-full-64/resources.txt",
+      "sha256": "233e7720016403cf4f5dd2d959d06d2b67cdc8f1903fb445c06ddc5eea22111a",
+      "bytes": 1176
+    },
+    {
+      "path": "results-jetstreamer-full-64/exit.txt",
+      "sha256": "4355a46b19d348dc2f57c046f8ef63d4538ebb936000f3c9ee954a27460dd865",
+      "bytes": 2
+    },
+    {
+      "path": "results-jetstreamer-full-64/stderr.log",
+      "sha256": "28730dc0f921c5ad3c79cdaae8732610065b770218d7edb06a316fc7e95438d6",
+      "bytes": 50
+    },
+    {
+      "path": "results-transport-diagnostic/report.json",
+      "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+      "bytes": 0
+    },
+    {
+      "path": "results-transport-diagnostic/stderr.log",
+      "sha256": "2eec03302d7e9693794208661d1ff8b1a4e55c4fad9d706e5fc68e2b35d54b84",
+      "bytes": 432
+    },
+    {
+      "path": "results-full-epoch/car/report.json",
+      "sha256": "6d04dc05cc85a976e62f04fa99e34b9909372fb056861f7be002bb8db6606210",
+      "bytes": 136
+    },
+    {
+      "path": "results-full-epoch/car/reader.stderr.log",
+      "sha256": "b41adac95e85757f45656772a87b832c0bb5e6a8bb69b37d4d00f78f9f266987",
+      "bytes": 77
+    },
+    {
+      "path": "results-full-epoch-64/car/report.json",
+      "sha256": "fd097284ccc33d19aaa9457130bec1869d6b8a523c4e8408d75f9d9b7e662c6e",
+      "bytes": 137
+    },
+    {
+      "path": "results-full-epoch-64/car/reader.stderr.log",
+      "sha256": "b41adac95e85757f45656772a87b832c0bb5e6a8bb69b37d4d00f78f9f266987",
+      "bytes": 77
+    },
+    {
+      "path": "results-initial/confirm-2-jetstreamer/report.json",
+      "sha256": "6417205b896626522156d31d739d5929566fcb2a9c1a40bd49996d27ae0a46e0",
+      "bytes": 34790
+    },
+    {
+      "path": "control/plan.json",
+      "sha256": "e40cf6f48bf09dc5719db986182ea845b9d5bca9763d4fb216ccc788a6180708",
+      "bytes": 139435
+    },
+    {
+      "path": "control/prefix-plan-1000.json",
+      "sha256": "7aa38f0d65314cd834688b95ddb99a3bb6cdecee8e687032268af33d3e6ac537",
+      "bytes": 160526
+    }
+  ]
+}

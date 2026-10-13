@@ -1,0 +1,9 @@
+{
+  "heartbeat_advanced": true,
+  "external_check_advanced_without_manual_trigger": true,
+  "armed": true,
+  "current_issues": [],
+  "stream_issue": null,
+  "notification_destination_configured": false,
+  "finite_check_only": true
+}

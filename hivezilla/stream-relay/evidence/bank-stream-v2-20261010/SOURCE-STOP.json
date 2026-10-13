@@ -1,0 +1,9 @@
+{
+  "state": "PASSED",
+  "pause_seconds": 8,
+  "stale_observed": true,
+  "native_pid_unchanged": true,
+  "source_clock_not_refreshed": true,
+  "resumed_status": "live",
+  "same_source": true
+}

@@ -1,11 +1,12 @@
 [package]
+description = "Audit recorded Solana token balances and preserve coverage states"
 name = "blockzilla-token-balance-audit"
 version.workspace = true
 edition.workspace = true
 rust-version.workspace = true
 license.workspace = true
 repository.workspace = true
-publish = false
+publish = ["crates-io"]
 
 [dependencies]
 serde = { version = "1.0.229", features = ["derive"] }

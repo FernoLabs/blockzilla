@@ -5,6 +5,7 @@
 //! sanitized before it reaches logs.
 
 mod b2;
+mod compact_archive;
 mod config;
 mod dirfd;
 mod generation;
@@ -22,6 +23,9 @@ use std::path::PathBuf;
 use thiserror::Error;
 
 pub use b2::{B2NativeClient, B2NativeObjectVerifier, NativeSnapshot, account_usage};
+pub use compact_archive::{
+    COMPACT_ARCHIVE_MARKER, COMPACT_ARCHIVE_MAX_FILE_BYTES, upload_compact_archive,
+};
 pub use config::{
     B2ObjectSettings, Provider, StorageSettings, optional_b2_object_settings,
     parse_credentials_file,
@@ -350,6 +354,15 @@ struct Cli {
 
 #[derive(Debug, Subcommand)]
 enum Command {
+    /// Publish a verified sealed execution canary to an isolated R2 prefix; never publish a canonical catalog record.
+    UploadCompactArchive {
+        archive_dir: PathBuf,
+        remote_prefix: String,
+        /// Existing private directory outside the archive, reserved for this one publication.
+        state_dir: PathBuf,
+        #[command(flatten)]
+        storage: StorageArguments,
+    },
     /// Manifest and commit a stopped self-contained WAL generation.
     UploadGeneration {
         generation_dir: PathBuf,
@@ -392,6 +405,19 @@ pub fn run_from_env() -> Result<()> {
 
 fn run(cli: Cli) -> Result<()> {
     let result = match cli.command {
+        Command::UploadCompactArchive {
+            archive_dir,
+            remote_prefix,
+            state_dir,
+            storage,
+        } => {
+            let settings = StorageSettings::load(
+                storage.credentials_file.as_deref(),
+                storage.provider.as_deref().or(Some("r2")),
+            )?;
+            let client = S3Client::new(settings, storage.retries)?;
+            upload_compact_archive(&client, &archive_dir, &remote_prefix, &state_dir)?
+        }
         Command::B2AccountUsage { storage } => {
             config::validate_b2_provider_override(storage.provider.as_deref())?;
             let settings = config::B2Settings::load(storage.credentials_file.as_deref())?;

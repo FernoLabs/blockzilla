@@ -1,0 +1,16 @@
+{
+  "state": "DEPLOYED_PENDING_PUBLIC_CHECK",
+  "session": "/home/ubuntu/live/hivezilla-validator-20260930/captures/direct-agave-live/000000000000000018dd37e5c7e1f5cf-10e3f5",
+  "output": "/home/ubuntu/live/hivezilla-validator-20260930/compact/direct-agave-processed-live/000000000000000018dd37e5c7e1f5cf-10e3f5",
+  "validator_pid": 1106933,
+  "reserve_disk_bytes": 429496729600,
+  "binaries": {
+    "/home/ubuntu/live/hivezilla-validator-20260930/releases/processed-worker-v3-20261010/hivezilla-direct-agave": "88aa596204d8ab746b390fa8de89f2b4e7acd35932a93073da37cd2ac4e2793b",
+    "/home/ubuntu/live/hivezilla-validator-20260930/releases/processed-worker-v3-20261010/libhivezilla_direct_agave.so": "8a8b12577a04796a6d4326685cd8d88034a244833b9a45484b1c43dc09ce98d5",
+    "/home/ubuntu/live/hivezilla-validator-20260930/releases/processed-stream-v1-20261010/hivezilla-stream": "abd32e4c935caa8e307b0a2e2ec408acd49bf7ff2641f47a8a784140fdc480cd",
+    "/home/ubuntu/live/hivezilla-validator-20260930/releases/processed-stream-v1-20261010/blockzilla": "328e5cffef00185525030483081581dcc39399e7975fe5de14119485e7f461cd"
+  },
+  "previous_capture_gap_preserved": true,
+  "local_retention_after_r2": false,
+  "updated_unix_ms": 1791649694997
+}

@@ -1,4 +1,5 @@
 [package]
+publish = ["crates-io"]
 name = "blockzilla-archive-v3"
 version.workspace = true
 edition.workspace = true

@@ -1,0 +1,16 @@
+{
+  "checked_unix_ms": 1791827876524,
+  "source": {
+    "genesis_hash": "5eykt4UsFv8P8NJdTREpY1vzqKqZKvdpKuc147dw2N9d",
+    "node_identity": "J7qpvCEWhdBgPdYRV3s3btWPrRVXa2qnAzgvxWTvtbrQ",
+    "agave_revision": "d688dd0e3a576b048a848e5faf2e8d277f8feb6e",
+    "session_id": "000000000000000018ddd9a6bb6fc50e-282459"
+  },
+  "v1_state": "LIVE",
+  "v1_sequence": 2974,
+  "v1_slot": 456136875,
+  "v2_status": "stale",
+  "v2_slot": 456136908,
+  "live_payload_bytes": 565104,
+  "live_payload_sha256_verified": true
+}

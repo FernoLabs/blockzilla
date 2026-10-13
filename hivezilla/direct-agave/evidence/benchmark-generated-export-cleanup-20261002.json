@@ -1,0 +1,64 @@
+{
+  "schema": "reproducible-benchmark-export-cleanup-v1",
+  "state": "COMPLETE",
+  "source_car": "/home/ubuntu/benchmarks/zilla-triton-20260930/cache-epoch1000/epoch-1000.car",
+  "retained_export": "/home/ubuntu/benchmarks/zilla-triton-20260930/results-dynamic-local-full-epoch-1000-car64-r2/r01-dynamic-p64-w64-c8-m128/transactions.bin",
+  "matching_report_sha256": "5f6c81e5452e03369396c8daaea43ab8f61aee146e832e8cce10bb3e971ffe8f",
+  "comparison_fields": [
+    "epoch",
+    "blocks",
+    "transactions",
+    "valid",
+    "export_bytes",
+    "export_schema",
+    "block_decode_digests",
+    "block_transaction_rows"
+  ],
+  "bytes_to_free": 1052523241512,
+  "candidates": [
+    {
+      "path": "/home/ubuntu/benchmarks/zilla-triton-20260930/results-dynamic-local-memory-epoch1000-r1/r01-car64-disk/transactions.bin",
+      "bytes": 175420540252,
+      "device": 66305,
+      "inode": 246376551,
+      "mtime": 1790781698.987404
+    },
+    {
+      "path": "/home/ubuntu/benchmarks/zilla-triton-20260930/results-dynamic-local-memory-epoch1000-r1/r01-car64-memory/transactions.bin",
+      "bytes": 175420540252,
+      "device": 66305,
+      "inode": 246376557,
+      "mtime": 1790781864.8111095
+    },
+    {
+      "path": "/home/ubuntu/benchmarks/zilla-triton-20260930/results-dynamic-local-memory-epoch1000-r2/r01-car64-disk/transactions.bin",
+      "bytes": 175420540252,
+      "device": 66305,
+      "inode": 246376596,
+      "mtime": 1790782762.3034966
+    },
+    {
+      "path": "/home/ubuntu/benchmarks/zilla-triton-20260930/results-dynamic-local-memory-epoch1000-r2/r01-car64-memory/transactions.bin",
+      "bytes": 175420540252,
+      "device": 66305,
+      "inode": 246376590,
+      "mtime": 1790782602.854674
+    },
+    {
+      "path": "/home/ubuntu/benchmarks/zilla-triton-20260930/results-dynamic-local-full-epoch-1000-64-r1/r01-dynamic-p64-w64-c8-m128/transactions.bin",
+      "bytes": 175420540252,
+      "device": 66305,
+      "inode": 246364171,
+      "mtime": 1790777608.552573
+    },
+    {
+      "path": "/home/ubuntu/benchmarks/zilla-triton-20260930/results-dynamic-local-full-epoch-1000-128-r1/r01-dynamic-p64-w128-c8-m128/transactions.bin",
+      "bytes": 175420540252,
+      "device": 66305,
+      "inode": 246364187,
+      "mtime": 1790778077.4535599
+    }
+  ],
+  "completed_unix": 1790970945,
+  "approval": "User explicitly approved removal of the six prepared duplicate exports."
+}

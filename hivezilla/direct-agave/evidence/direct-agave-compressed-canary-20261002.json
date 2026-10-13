@@ -1,0 +1,188 @@
+{
+  "time": 1790968728.2362342,
+  "session": "/home/ubuntu/live/hivezilla-validator-20260930/captures/direct-agave-compressed-canary-20261002/000000000000000018dacc185fe7e363-90155",
+  "output": "/home/ubuntu/live/hivezilla-validator-20260930/compact/direct-agave-compressed-canary-20261002",
+  "source": [
+    1,
+    "CLOSED",
+    1919068,
+    null,
+    452700939,
+    1819853
+  ],
+  "worker": {
+    "compacted_blocks": 679,
+    "compacted_entries": 916063,
+    "compacted_transactions": 909645,
+    "durable_sequence": 1919068,
+    "first_compact_slot": 452700257,
+    "full_epoch": false,
+    "last_compact_slot": 452700939,
+    "startup_incomplete_roots": [
+      [
+        452700225,
+        414712
+      ],
+      [
+        452700226,
+        414713
+      ],
+      [
+        452700227,
+        414714
+      ],
+      [
+        452700228,
+        414715
+      ],
+      [
+        452700229,
+        414716
+      ],
+      [
+        452700230,
+        414717
+      ],
+      [
+        452700231,
+        414718
+      ],
+      [
+        452700232,
+        414719
+      ],
+      [
+        452700233,
+        414720
+      ],
+      [
+        452700234,
+        414721
+      ],
+      [
+        452700235,
+        414722
+      ],
+      [
+        452700236,
+        414723
+      ],
+      [
+        452700237,
+        414724
+      ],
+      [
+        452700238,
+        414725
+      ],
+      [
+        452700239,
+        414726
+      ],
+      [
+        452700240,
+        414727
+      ],
+      [
+        452700241,
+        414728
+      ],
+      [
+        452700242,
+        414729
+      ],
+      [
+        452700243,
+        414730
+      ],
+      [
+        452700244,
+        414731
+      ],
+      [
+        452700245,
+        414732
+      ],
+      [
+        452700246,
+        414733
+      ],
+      [
+        452700247,
+        414734
+      ],
+      [
+        452700248,
+        414735
+      ],
+      [
+        452700249,
+        414736
+      ],
+      [
+        452700250,
+        414737
+      ],
+      [
+        452700251,
+        414738
+      ],
+      [
+        452700252,
+        414739
+      ],
+      [
+        452700253,
+        414740
+      ],
+      [
+        452700254,
+        414741
+      ],
+      [
+        452700255,
+        414742
+      ],
+      [
+        452700256,
+        414743
+      ]
+    ],
+    "state": "DRAINED",
+    "updated_unix_ms": 1790968399402
+  },
+  "failure": {},
+  "retirement_failure": false,
+  "pending_retirement_after_close": 2,
+  "journal_bytes": 446959616,
+  "free_pages": 66923,
+  "live_samples": [
+    {
+      "time": 1790968240.422255,
+      "durable_events": 324926,
+      "retired_events": 78188,
+      "journal_bytes": 450725328,
+      "compacted_blocks": 29,
+      "last_compact_slot": 452700285,
+      "latest_rooted_slot": 452700349
+    },
+    {
+      "time": 1790968280.4525855,
+      "durable_events": 715067,
+      "retired_events": 572644,
+      "journal_bytes": 452834768,
+      "compacted_blocks": 217,
+      "last_compact_slot": 452700477,
+      "latest_rooted_slot": 452700499
+    },
+    {
+      "time": 1790968352.6221867,
+      "durable_events": 1425104,
+      "retired_events": 1341571,
+      "journal_bytes": 452978968,
+      "compacted_blocks": 505,
+      "last_compact_slot": 452700765,
+      "latest_rooted_slot": 452700766
+    }
+  ]
+}

@@ -1,0 +1,8 @@
+{
+  "removed_failed_derived_copies": 566,
+  "recovered_bytes": 314259931136,
+  "retained_failed_sample": "/home/ubuntu/live/hivezilla-validator-20260930/epoch-runs/epoch-1047-20261001/chunks/000230-1790870012504-606063/work-1790884897164-606063",
+  "raw_capture_preserved": true,
+  "logs_and_receipts_preserved": true,
+  "time_unix": 1790885556.5266004
+}

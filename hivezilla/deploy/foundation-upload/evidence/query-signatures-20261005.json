@@ -1,0 +1,98 @@
+{
+  "recorded_at": "2026-10-05 05:32:21 UTC",
+  "owner_selected_profile": "query-with-signatures",
+  "source_validation": {
+    "profile": "query-with-signatures",
+    "epochs": 1048,
+    "query_bytes": 92898238532602,
+    "bytes_by_file": {
+      "archive-v2-blocks.index": 22400318592,
+      "archive-v2-blocks.zstd": 53764759128193,
+      "archive-v2-meta.wincode": 166063,
+      "block-time-gaps.bin": 403583560,
+      "blockhash_index_v3.bin": 10506759328,
+      "blockhash_registry.bin": 13784788480,
+      "prev_blockhash_tail.bin": 12408000,
+      "registry.bin": 722748781888,
+      "registry.mphf": 277125020431,
+      "registry_counts.bin": 22968424615,
+      "signatures.bin": 38035456748864,
+      "skipped_slots.bin": 1404832,
+      "vote_hash_registry.bin": 28000351080,
+      "blockzilla-compaction-receipt.tsv": 3123,
+      ".hivezilla-pipeline-owned.v1.json": 117388,
+      "registry-first-seen.manifest": 23281,
+      "registry-hot-seed.bin": 69206016,
+      "archive-v2-pre-to-post.candidate.v1.json": 1298138,
+      ".complete-hot-v2-no-access-delete-car": 26,
+      "blockzilla-car-import-receipt.json": 704
+    },
+    "legacy_intents_checked": 8,
+    "legacy_files_unchanged": true,
+    "excluded_files": [
+      "archive-v2-block-access.index",
+      "archive-v2-block-access.wincode",
+      "archive-v2-get-block.index",
+      "poh.wincode",
+      "shredding.wincode"
+    ],
+    "destination": "foundation:solana-archive-data/compact-v2/blockzilla-20261004",
+    "local_source_deletion": false,
+    "remote_deletion": false
+  },
+  "live_verification": {
+    "service": "NRestarts=0\nActiveState=active",
+    "status": {
+      "state": "UPLOADING",
+      "epoch": 1043,
+      "destination": "foundation:solana-archive-data/compact-v2/blockzilla-20261004/epoch-1043",
+      "upload_profile": "query-with-signatures"
+    },
+    "query_complete_epochs": [
+      1044,
+      1045,
+      1046,
+      1047
+    ],
+    "query_complete_bytes": 496152879885,
+    "latest_query_bytes": 131563659105,
+    "latest_query_files": [
+      "archive-v2-blocks.index",
+      "archive-v2-blocks.zstd",
+      "archive-v2-meta.wincode",
+      "block-time-gaps.bin",
+      "blockhash_index_v3.bin",
+      "blockhash_registry.bin",
+      "blockzilla-car-import-receipt.json",
+      "prev_blockhash_tail.bin",
+      "registry.bin",
+      "registry.mphf",
+      "registry_counts.bin",
+      "signatures.bin",
+      "skipped_slots.bin",
+      "vote_hash_registry.bin"
+    ],
+    "latest_retained_cloud_extras": {
+      "shredding.wincode": 1651496568,
+      "BLOCKZILLA-BACKUP-MANIFEST.json": 2268,
+      "poh.wincode": 19788603084
+    },
+    "remote_signature_sample_bytes": 64,
+    "remote_signature_sample_matches": true
+  },
+  "service_enabled_for_boot": true,
+  "active_state_directory": "/volume1/blockzilla/jobs/foundation-archive-upload-20261004/state-query-signatures",
+  "controller": "archive_upload-query-signatures-20261005.py",
+  "query_manifest_filename": "BLOCKZILLA-QUERY-WITH-SIGNATURES-MANIFEST.json",
+  "legacy_state_retained": true,
+  "previous_cloud_extras_retained": true,
+  "total_bucket_usage_not_measured": true,
+  "local_source_deleted": false,
+  "remote_files_deleted": false,
+  "native_backup_enabled": false,
+  "live_compaction_changed": false,
+  "tests": {
+    "passed": 6,
+    "failed": 0
+  }
+}

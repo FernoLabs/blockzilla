@@ -1,0 +1,10 @@
+{
+  "state": "PASS",
+  "blocks": 10,
+  "transactions": 11638,
+  "balances": 49722,
+  "failed_transactions": 1206,
+  "oracle": "finalized local Agave getBlock",
+  "first_slot": 453285485,
+  "last_slot": 453285494
+}

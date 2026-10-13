@@ -1,0 +1,122 @@
+{
+  "checked_unix_ms": 1791666705771,
+  "machine_rebooted": false,
+  "validator_restarted_for_native_v2": true,
+  "previous_compact_blocks": 51801,
+  "intermediate_compact_blocks": 543,
+  "compact_coverage_gap_slot_ranges": [
+    {
+      "first_slot": 455373084,
+      "last_slot": 455375622,
+      "slot_count": 2539
+    },
+    {
+      "first_slot": 455376166,
+      "last_slot": 455377837,
+      "slot_count": 1672
+    }
+  ],
+  "slot_count_without_a_compact_block_in_these_ranges": 4211,
+  "slots_are_not_produced_block_counts": true,
+  "excluded_native_capture_data_retained": true,
+  "recovery_completed": false,
+  "local_rpc_first_available_block": 455323496,
+  "local_rpc_recovery_check": [
+    {
+      "first_slot": 455373084,
+      "last_slot": 455375622,
+      "boundary_full_blocks_readable": 0,
+      "boundary_transactions_readable": 0,
+      "local_rpc_listed_block_slots": 2539
+    },
+    {
+      "first_slot": 455376166,
+      "last_slot": 455377837,
+      "boundary_full_blocks_readable": 0,
+      "boundary_transactions_readable": 0,
+      "local_rpc_listed_block_slots": 1672
+    }
+  ],
+  "current_compact_block_events": 21163,
+  "last_compact_slot": 455399003,
+  "current_capture_failure_marker_set": false,
+  "current_compact_state": "RUNNING",
+  "public_stream_status": "live",
+  "source_lag_ms": 1019,
+  "local_rpc_boundary_read_checks": [
+    {
+      "slot": 455373084,
+      "full_block_readable": false,
+      "rpc_error_code": -32015
+    },
+    {
+      "slot": 455375622,
+      "full_block_readable": false,
+      "rpc_error_code": -32015
+    },
+    {
+      "slot": 455376166,
+      "full_block_readable": false,
+      "rpc_error_code": -32015
+    },
+    {
+      "slot": 455377837,
+      "full_block_readable": false,
+      "rpc_error_code": -32015
+    }
+  ],
+  "full_recovery_proved": false,
+  "higher_transaction_version_boundary_checks": [
+    {
+      "slot": 455373084,
+      "requested_max_transaction_version": 1,
+      "full_block_readable": true,
+      "rpc_error_code": null,
+      "transactions": 1400,
+      "all_transaction_metadata_present": true
+    },
+    {
+      "slot": 455375622,
+      "requested_max_transaction_version": 1,
+      "full_block_readable": true,
+      "rpc_error_code": null,
+      "transactions": 1003,
+      "all_transaction_metadata_present": true
+    },
+    {
+      "slot": 455376166,
+      "requested_max_transaction_version": 1,
+      "full_block_readable": true,
+      "rpc_error_code": null,
+      "transactions": 1155,
+      "all_transaction_metadata_present": true
+    },
+    {
+      "slot": 455377837,
+      "requested_max_transaction_version": 1,
+      "full_block_readable": true,
+      "rpc_error_code": null,
+      "transactions": 836,
+      "all_transaction_metadata_present": true
+    }
+  ],
+  "latest_health": {
+    "checked_unix_ms": 1791666961607,
+    "compact_state": "RUNNING",
+    "last_compact_slot": 455400171,
+    "capture_failure_marker_set": false,
+    "public_stream_status": "live",
+    "source_lag_ms": 859,
+    "backup": {
+      "state": "SAVING",
+      "updated_unix": 1791666960,
+      "blocks_saved": 1344,
+      "blocks_expected": 4754,
+      "errors": 0,
+      "last_saved_slot": 455374427
+    },
+    "origin_memory_max_bytes": 17179869184
+  },
+  "backup_started": true,
+  "backup_path": "/home/ubuntu/live/hivezilla-validator-20260930/reports/bank-v2-restart-recovery-20261010/rpc-blocks"
+}

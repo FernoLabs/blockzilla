@@ -1,0 +1,149 @@
+{
+  "schema": "hivezilla-capture-lag-before-v1",
+  "checked_utc": "2026-10-01T13:56:30.487257+00:00",
+  "progress": {
+    "archive_publication_allowed": false,
+    "archive_verification": "SKIPPED",
+    "capture_error": "/home/ubuntu/live/hivezilla-validator-20260930/bin/hivezilla failed (exit status: 1); log /home/ubuntu/live/hivezilla-validator-20260930/epoch-runs/epoch-1047-20261001/chunks/000025-1790862969534-606063/capture.log",
+    "capture_retries": 19,
+    "capture_state": "CAPTURING",
+    "collected_blocks": 3200,
+    "compact_bytes": 1364978255,
+    "compacted_blocks": 3200,
+    "compaction_error": null,
+    "compaction_state": "WAITING",
+    "counts_basis": "sealed unique finalized block records in the target epoch",
+    "covered_slots": 3210,
+    "end_slot_exclusive": 452736000,
+    "epoch": 1047,
+    "gap_policy": "stop capture rather than count a missing produced block as a skipped slot",
+    "genesis_hash": "5eykt4UsFv8P8NJdTREpY1vzqKqZKvdpKuc147dw2N9d",
+    "last_collected_slot": 452307209,
+    "last_compacted_slot": 452307209,
+    "missing_blocks": 0,
+    "node_identity": "J7qpvCEWhdBgPdYRV3s3btWPrRVXa2qnAzgvxWTvtbrQ",
+    "r2_upload": "DISABLED",
+    "raw_bytes": 3474551946,
+    "run_dir": "/home/ubuntu/live/hivezilla-validator-20260930/epoch-runs/epoch-1047-20261001",
+    "schema": "hivezilla-epoch-progress-v1",
+    "skipped_slots": 10,
+    "slots_in_epoch": 432000,
+    "start_slot": 452304000,
+    "state": "CAPTURING",
+    "updated_unix_ms": 1790862987137
+  },
+  "capture_errors": {
+    "Error: code: 'Internal error', message: \"lagged to send an update\"": 16,
+    "Error: code: 'Internal error', message: \"failed to get replay response\"": 1,
+    "Error: send failed because receiver is gone": 1
+  },
+  "disconnects": [
+    "yellowstone_grpc_geyser_client_disconnects_total{reason=\"client_channel_full\",subscriber_id=\"127.0.0.1\"} 36",
+    "yellowstone_grpc_geyser_client_disconnects_total{reason=\"client_closed\",subscriber_id=\"127.0.0.1\"} 9",
+    "yellowstone_grpc_geyser_client_disconnects_total{reason=\"replay_error\",subscriber_id=\"127.0.0.1\"} 2"
+  ],
+  "recent_seals": [
+    {
+      "capture": "/home/ubuntu/live/hivezilla-validator-20260930/epoch-runs/epoch-1047-20261001/chunks/000019-1790862766035-606063/capture",
+      "elapsed_seconds": 16.626533163,
+      "counts": {
+        "events": 177486,
+        "blocks": 128,
+        "transactions": 175253,
+        "block_entries": 176977,
+        "slots": 381,
+        "entries": 176977,
+        "footers": 0,
+        "parent_updates": 0,
+        "first_slot": 452306442,
+        "last_slot": 452306569
+      },
+      "wal_bytes": 141124837
+    },
+    {
+      "capture": "/home/ubuntu/live/hivezilla-validator-20260930/epoch-runs/epoch-1047-20261001/chunks/000020-1790862805499-606063/capture",
+      "elapsed_seconds": 16.660620428,
+      "counts": {
+        "events": 177471,
+        "blocks": 128,
+        "transactions": 175001,
+        "block_entries": 176962,
+        "slots": 381,
+        "entries": 176962,
+        "footers": 0,
+        "parent_updates": 0,
+        "first_slot": 452306570,
+        "last_slot": 452306697
+      },
+      "wal_bytes": 138692425
+    },
+    {
+      "capture": "/home/ubuntu/live/hivezilla-validator-20260930/epoch-runs/epoch-1047-20261001/chunks/000021-1790862846008-606063/capture",
+      "elapsed_seconds": 15.145270442,
+      "counts": {
+        "events": 180147,
+        "blocks": 128,
+        "transactions": 176186,
+        "block_entries": 179638,
+        "slots": 381,
+        "entries": 179638,
+        "footers": 0,
+        "parent_updates": 0,
+        "first_slot": 452306698,
+        "last_slot": 452306825
+      },
+      "wal_bytes": 137234293
+    },
+    {
+      "capture": "/home/ubuntu/live/hivezilla-validator-20260930/epoch-runs/epoch-1047-20261001/chunks/000022-1790862884897-606063/capture",
+      "elapsed_seconds": 15.036279317,
+      "counts": {
+        "events": 164829,
+        "blocks": 128,
+        "transactions": 163527,
+        "block_entries": 164320,
+        "slots": 381,
+        "entries": 164320,
+        "footers": 0,
+        "parent_updates": 0,
+        "first_slot": 452306826,
+        "last_slot": 452306953
+      },
+      "wal_bytes": 128358139
+    },
+    {
+      "capture": "/home/ubuntu/live/hivezilla-validator-20260930/epoch-runs/epoch-1047-20261001/chunks/000023-1790862905004-606063/capture",
+      "elapsed_seconds": 14.982356101,
+      "counts": {
+        "events": 161608,
+        "blocks": 128,
+        "transactions": 157293,
+        "block_entries": 161099,
+        "slots": 381,
+        "entries": 161099,
+        "footers": 0,
+        "parent_updates": 0,
+        "first_slot": 452306954,
+        "last_slot": 452307081
+      },
+      "wal_bytes": 123728389
+    },
+    {
+      "capture": "/home/ubuntu/live/hivezilla-validator-20260930/epoch-runs/epoch-1047-20261001/chunks/000024-1790862938362-606063/capture",
+      "elapsed_seconds": 14.26922372,
+      "counts": {
+        "events": 160829,
+        "blocks": 128,
+        "transactions": 161416,
+        "block_entries": 160320,
+        "slots": 381,
+        "entries": 160320,
+        "footers": 0,
+        "parent_updates": 0,
+        "first_slot": 452307082,
+        "last_slot": 452307209
+      },
+      "wal_bytes": 129015042
+    }
+  ]
+}

@@ -1,0 +1,209 @@
+{
+  "$schema": "http://json-schema.org/draft-07/schema#",
+  "title": "Proposed Blockzilla bank stream v2 event, head, notice, and gap",
+  "description": "Proposed contract only. Native envelope and cross-field bank/digest checks are specified in blockzilla-confirmed-stream-spec.md.",
+  "oneOf": [
+    { "$ref": "#/definitions/event" },
+    { "$ref": "#/definitions/head" },
+    { "$ref": "#/definitions/notice" },
+    { "$ref": "#/definitions/gap" }
+  ],
+  "definitions": {
+    "counter": { "type": "integer", "minimum": 0, "maximum": 9007199254740991 },
+    "positive_counter": { "type": "integer", "minimum": 1, "maximum": 9007199254740991 },
+    "sha256": { "type": "string", "pattern": "^[0-9a-f]{64}$" },
+    "hash_bytes": {
+      "type": "array", "minItems": 32, "maxItems": 32,
+      "items": { "type": "integer", "minimum": 0, "maximum": 255 }
+    },
+    "hash_base58": { "type": "string", "pattern": "^[1-9A-HJ-NP-Za-km-z]{32,44}$" },
+    "cursor": {
+      "type": "string",
+      "pattern": "^[A-Za-z0-9-]{1,128}:p(0|[1-9][0-9]*):([0-9a-f]{64}|-)$"
+    },
+    "bank": {
+      "type": "object", "additionalProperties": false,
+      "required": ["slot", "bank_id", "blockhash", "parent_slot", "parent_blockhash"],
+      "properties": {
+        "slot": { "$ref": "#/definitions/counter" },
+        "bank_id": { "$ref": "#/definitions/counter" },
+        "blockhash": { "$ref": "#/definitions/hash_bytes" },
+        "parent_slot": { "$ref": "#/definitions/counter" },
+        "parent_blockhash": { "$ref": "#/definitions/hash_bytes" }
+      }
+    },
+    "recent_blockhash": {
+      "type": "object", "additionalProperties": false,
+      "required": ["blockhash", "context_slot", "last_valid_block_height"],
+      "properties": {
+        "blockhash": { "$ref": "#/definitions/hash_base58" },
+        "context_slot": { "$ref": "#/definitions/counter" },
+        "last_valid_block_height": { "$ref": "#/definitions/positive_counter" }
+      }
+    },
+    "event": {
+      "type": "object", "additionalProperties": false,
+      "required": [
+        "sequence", "source_sequence", "kind", "bank", "payload_sha256",
+        "payload_frame_sha256", "commitment", "confirmation_basis", "block_height",
+        "recent_blockhash", "observed_at_unix_ms", "reason"
+      ],
+      "properties": {
+        "sequence": { "$ref": "#/definitions/positive_counter" },
+        "source_sequence": { "$ref": "#/definitions/positive_counter" },
+        "kind": { "enum": ["block", "confirmed", "root", "invalidate"] },
+        "bank": { "$ref": "#/definitions/bank" },
+        "payload_sha256": { "$ref": "#/definitions/sha256" },
+        "payload_frame_sha256": { "anyOf": [{ "$ref": "#/definitions/sha256" }, { "type": "null" }] },
+        "commitment": { "enum": ["processed", "confirmed", "finalized", null] },
+        "confirmation_basis": {
+          "enum": [
+            "operator-trusted-agave-processed-bank-callback",
+            "operator-trusted-agave-confirmed-bank-callback",
+            "operator-trusted-agave-confirmed-ancestor",
+            "operator-trusted-agave-rooted-bank-callback",
+            null
+          ]
+        },
+        "block_height": { "anyOf": [{ "$ref": "#/definitions/counter" }, { "type": "null" }] },
+        "recent_blockhash": { "anyOf": [{ "$ref": "#/definitions/recent_blockhash" }, { "type": "null" }] },
+        "observed_at_unix_ms": { "$ref": "#/definitions/counter" },
+        "reason": { "anyOf": [{ "type": "string", "minLength": 1, "maxLength": 1024 }, { "type": "null" }] }
+      },
+      "allOf": [
+        {
+          "if": { "properties": { "kind": { "const": "block" } } },
+          "then": {
+            "properties": {
+              "commitment": { "const": "processed" },
+              "confirmation_basis": { "const": "operator-trusted-agave-processed-bank-callback" },
+              "block_height": { "$ref": "#/definitions/counter" },
+              "payload_frame_sha256": { "type": "null" },
+              "recent_blockhash": { "type": "null" },
+              "reason": { "type": "null" }
+            }
+          }
+        },
+        {
+          "if": { "properties": { "kind": { "const": "confirmed" } } },
+          "then": {
+            "properties": {
+              "commitment": { "const": "confirmed" },
+              "confirmation_basis": { "enum": ["operator-trusted-agave-confirmed-bank-callback", "operator-trusted-agave-confirmed-ancestor"] },
+              "block_height": { "$ref": "#/definitions/counter" },
+              "payload_frame_sha256": { "$ref": "#/definitions/sha256" },
+              "recent_blockhash": { "$ref": "#/definitions/recent_blockhash" },
+              "reason": { "type": "null" }
+            }
+          }
+        },
+        {
+          "if": { "properties": { "kind": { "const": "root" } } },
+          "then": {
+            "properties": {
+              "commitment": { "const": "finalized" },
+              "confirmation_basis": { "const": "operator-trusted-agave-rooted-bank-callback" },
+              "block_height": { "$ref": "#/definitions/counter" },
+              "payload_frame_sha256": { "$ref": "#/definitions/sha256" },
+              "recent_blockhash": { "$ref": "#/definitions/recent_blockhash" },
+              "reason": { "type": "null" }
+            }
+          }
+        },
+        {
+          "if": { "properties": { "kind": { "const": "invalidate" } } },
+          "then": {
+            "properties": {
+              "commitment": { "type": "null" },
+              "confirmation_basis": { "type": "null" },
+              "block_height": { "type": "null" },
+              "payload_frame_sha256": { "$ref": "#/definitions/sha256" },
+              "recent_blockhash": { "type": "null" },
+              "reason": { "type": "string", "minLength": 1, "maxLength": 1024 }
+            }
+          }
+        }
+      ]
+    },
+    "source": {
+      "type": "object", "additionalProperties": false,
+      "required": ["genesis_hash", "node_identity", "agave_revision", "session_id"],
+      "properties": {
+        "genesis_hash": { "type": "string", "minLength": 1, "maxLength": 128 },
+        "node_identity": { "type": "string", "minLength": 1, "maxLength": 128 },
+        "agave_revision": { "type": "string", "minLength": 1, "maxLength": 128 },
+        "session_id": { "type": "string", "pattern": "^[A-Za-z0-9-]{1,128}$" }
+      }
+    },
+    "confirmed_observation": {
+      "type": "object", "additionalProperties": false,
+      "required": [
+        "bank", "block_height", "payload_sha256", "payload_frame_sha256",
+        "recent_blockhash", "observed_at_unix_ms", "commitment", "event_sequence", "event_cursor"
+      ],
+      "properties": {
+        "bank": { "$ref": "#/definitions/bank" },
+        "block_height": { "$ref": "#/definitions/counter" },
+        "payload_sha256": { "$ref": "#/definitions/sha256" },
+        "payload_frame_sha256": { "$ref": "#/definitions/sha256" },
+        "recent_blockhash": { "$ref": "#/definitions/recent_blockhash" },
+        "observed_at_unix_ms": { "$ref": "#/definitions/counter" },
+        "commitment": { "enum": ["confirmed", "finalized"] },
+        "event_sequence": { "$ref": "#/definitions/positive_counter" },
+        "event_cursor": { "$ref": "#/definitions/cursor" }
+      }
+    },
+    "head": {
+      "type": "object", "additionalProperties": false,
+      "required": [
+        "schema", "profile", "source", "cursor", "earliest_after", "status",
+        "sampled_at_unix_ms", "source_observed_at_unix_ms", "source_lag_ms", "latest_confirmed"
+      ],
+      "properties": {
+        "schema": { "const": "blockzilla-confirmed-head-v1" },
+        "profile": { "const": "native-bank-compact-v2" },
+        "source": { "$ref": "#/definitions/source" },
+        "cursor": { "anyOf": [{ "$ref": "#/definitions/cursor" }, { "type": "null" }] },
+        "earliest_after": { "anyOf": [{ "$ref": "#/definitions/cursor" }, { "type": "null" }] },
+        "status": { "enum": ["starting", "live", "stale", "failed"] },
+        "sampled_at_unix_ms": { "$ref": "#/definitions/counter" },
+        "source_observed_at_unix_ms": { "anyOf": [{ "$ref": "#/definitions/counter" }, { "type": "null" }] },
+        "source_lag_ms": { "anyOf": [{ "$ref": "#/definitions/counter" }, { "type": "null" }] },
+        "latest_confirmed": { "anyOf": [{ "$ref": "#/definitions/confirmed_observation" }, { "type": "null" }] }
+      },
+      "allOf": [{
+        "if": { "properties": { "status": { "const": "live" } } },
+        "then": { "properties": {
+          "cursor": { "$ref": "#/definitions/cursor" },
+          "earliest_after": { "$ref": "#/definitions/cursor" },
+          "source_observed_at_unix_ms": { "$ref": "#/definitions/counter" },
+          "source_lag_ms": { "$ref": "#/definitions/counter" },
+          "latest_confirmed": { "$ref": "#/definitions/confirmed_observation" }
+        } }
+      }]
+    },
+    "notice": {
+      "type": "object", "additionalProperties": false,
+      "required": ["cursor", "sha256", "bytes", "start_slot", "end_slot", "url"],
+      "properties": {
+        "cursor": { "$ref": "#/definitions/cursor" },
+        "sha256": { "$ref": "#/definitions/sha256" },
+        "bytes": { "type": "integer", "minimum": 17, "maximum": 16842768 },
+        "start_slot": { "$ref": "#/definitions/counter" },
+        "end_slot": { "$ref": "#/definitions/counter" },
+        "url": { "type": "string", "pattern": "^/v2/banks/chunks/[0-9a-f]{64}$" }
+      }
+    },
+    "gap": {
+      "type": "object", "additionalProperties": false,
+      "required": ["error", "head"],
+      "properties": {
+        "error": { "enum": [
+          "source_changed", "replay_unavailable", "source_failed", "dependency_unavailable",
+          "invalid_cursor", "cursor_conflict"
+        ] },
+        "head": { "$ref": "#/definitions/head" }
+      }
+    }
+  }
+}

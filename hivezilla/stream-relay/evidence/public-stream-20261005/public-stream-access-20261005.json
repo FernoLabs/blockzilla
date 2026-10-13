@@ -1,0 +1,76 @@
+{
+  "schema": "blockzilla-public-stream-access-v1",
+  "utc": "2026-10-05T21:33:57.710107+00:00",
+  "state": "PASS",
+  "url": "https://stream.blockzilla.dev",
+  "hostname_route": "http://127.0.0.1:8871",
+  "tunnel_id": "0cd18a26-d76a-408c-a1fa-55a1151fa3ae",
+  "checks": [
+    {
+      "route": "/v1/head",
+      "wrong_key_status": 401
+    },
+    {
+      "route": "/v1/blocks",
+      "wrong_key_status": 401
+    },
+    {
+      "route": "/v1/events",
+      "wrong_key_status": 401
+    },
+    {
+      "route": "/v1/chunks/0000000000000000000000000000000000000000000000000000000000000000",
+      "wrong_key_status": 401
+    }
+  ],
+  "head": {
+    "canonical": false,
+    "earliest_after": "000000000000000018daf342ba38d3d0-10e3f5:453700791:8fdd0a3085f17ce8093b58ca695967c00e36aaa992e5d7cccce16f93e6097d46",
+    "error": null,
+    "evidence_included": false,
+    "finalized": true,
+    "genesis_hash": "5eykt4UsFv8P8NJdTREpY1vzqKqZKvdpKuc147dw2N9d",
+    "intake_age_ms": 163,
+    "last_admitted_unix_ms": 1791236037513,
+    "last_slot": 453701078,
+    "latest_cursor": "000000000000000018daf342ba38d3d0-10e3f5:453701078:d021ef7b62cbe36e64d437f2695f625a4d99db486ae987b1d363e98f16e1bcc6",
+    "node_identity": "J7qpvCEWhdBgPdYRV3s3btWPrRVXa2qnAzgvxWTvtbrQ",
+    "profile": "native-compact-projection-v1",
+    "publication_ready": false,
+    "received_bytes": 52793040377,
+    "received_chunks": 71729,
+    "replay_bytes": 134139808,
+    "replay_limit_bytes": 134217728,
+    "retained_chunks": 215,
+    "schema": "blockzilla-stream-head-v1",
+    "stale": false,
+    "state": "LIVE",
+    "upstream_http_version": "HTTP/2.0"
+  },
+  "services": {
+    "hivezilla-validator.service": {
+      "ActiveState": "active",
+      "MainPID": "1106933"
+    },
+    "hivezilla-direct-worker.service": {
+      "ActiveState": "active",
+      "MainPID": "4105319"
+    },
+    "hivezilla-stream-origin.service": {
+      "ActiveState": "active",
+      "MainPID": "3442673"
+    },
+    "hivezilla-stream-relay.service": {
+      "ActiveState": "active",
+      "MainPID": "3442679"
+    },
+    "hivezilla-tunnel.service": {
+      "ActiveState": "active",
+      "MainPID": "480183"
+    },
+    "hivezilla-native-stream-publisher.service": {
+      "ActiveState": "active",
+      "MainPID": "3471654"
+    }
+  }
+}

@@ -11,3 +11,16 @@ condition = "AND"
 regexTarget = "line"
 paths = ['''^docs/benchmarks/replay-runtime-poc-2026-07-28\.md$''']
 regexes = ['''^\s*artifact_key=[0-9a-f]{64}\s*$''']
+
+[[allowlists]]
+description = "Allow source-file SHA-256 digests in the four reader benchmark reports"
+targetRules = ["generic-api-key"]
+condition = "AND"
+regexTarget = "line"
+paths = [
+  '''^docs/benchmarks/artifacts/network-performance-package-20260909\.json$''',
+  '''^docs/benchmarks/artifacts/car-reader-window-20260909\.json$''',
+  '''^docs/benchmarks/artifacts/v2-reader-window-20260909\.json$''',
+  '''^docs/benchmarks/artifacts/v3-reader-window-20260909\.json$''',
+]
+regexes = ['''^\s*"(?:/[^\"]+/)?crates/compact-v2/blockzilla-compact-v2-reader/src/(?:query_keys\.rs|compact_query/indexed_tokens\.rs)"\s*:\s*"[0-9a-f]{64}"\s*,?\s*$''']

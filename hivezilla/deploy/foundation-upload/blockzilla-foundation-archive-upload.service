@@ -1,0 +1,24 @@
+[Unit]
+Description=Foundation Compact V2 query copy with signatures
+StartLimitIntervalSec=3600
+StartLimitBurst=3
+
+[Service]
+Type=simple
+WorkingDirectory=/volume1/blockzilla/jobs/foundation-archive-upload-20261004
+ExecStart=/usr/bin/python3 -u /volume1/blockzilla/jobs/foundation-archive-upload-20261004/archive_upload-query-signatures-fast-20261005.py --root /volume1/blockzilla/archive --state /volume1/blockzilla/jobs/foundation-archive-upload-20261004/state-query-signatures --config /home/ach/.config/blockzilla/foundation-r2/rclone.conf --destination foundation:solana-archive-data/compact-v2/blockzilla-20261004 --epochs all --profile query-with-signatures --future-epoch 1047 --producer-state /volume1/blockzilla/jobs/latest-cars-20261004-e1047 --bandwidth 400M --transfers 2 --upload-concurrency 8 --chunk-size 32M
+Restart=on-failure
+RestartSec=60
+TimeoutStopSec=120
+KillMode=control-group
+Nice=10
+IOSchedulingClass=best-effort
+IOSchedulingPriority=7
+MemoryMax=2G
+CPUQuota=400%
+UMask=0077
+StandardOutput=append:/volume1/blockzilla/jobs/foundation-archive-upload-20261004/upload.log
+StandardError=append:/volume1/blockzilla/jobs/foundation-archive-upload-20261004/upload.log
+
+[Install]
+WantedBy=default.target

@@ -1,0 +1,30 @@
+[Unit]
+Description=Hivezilla compact binary HTTP and SSE relay (local pilot)
+After=network.target hivezilla-stream-origin.service
+Wants=hivezilla-stream-origin.service
+
+[Service]
+User=ubuntu
+Group=ubuntu
+ExecStart=/home/ubuntu/live/hivezilla-validator-20260930/releases/hivezilla-stream-r2-20261005/hivezilla-stream relay --upstream https://127.0.0.1:8870 --upstream-token-file /home/ubuntu/live/hivezilla-validator-20260930/config/stream-20261004/origin-api.key --upstream-ca /home/ubuntu/live/hivezilla-validator-20260930/config/stream-20261004/ca.crt --upstream-identity /home/ubuntu/live/hivezilla-validator-20260930/config/stream-20261004/relay-identity.pem --spool /home/ubuntu/live/hivezilla-validator-20260930/stream-relay-spool-20261005 --bind 127.0.0.1:8871 --token-file /home/ubuntu/live/hivezilla-validator-20260930/config/stream-20261004/client-api.key --cors-origin http://127.0.0.1:8891
+Restart=on-failure
+RestartSec=3
+CPUQuota=100%
+MemoryMax=1G
+TasksMax=128
+LimitNOFILE=1024
+Nice=10
+NoNewPrivileges=true
+ProtectSystem=strict
+ProtectHome=read-only
+ReadWritePaths=/home/ubuntu/live/hivezilla-validator-20260930/stream-relay-spool-20261005
+PrivateTmp=true
+ProtectKernelTunables=true
+ProtectKernelModules=true
+ProtectControlGroups=true
+CapabilityBoundingSet=
+UMask=0077
+TimeoutStopSec=10
+
+[Install]
+WantedBy=multi-user.target

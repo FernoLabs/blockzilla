@@ -101,6 +101,10 @@ impl GatewayDumpSource {
 }
 
 impl RangeSource for GatewayDumpSource {
+    fn recommended_read_concurrency(&self) -> usize {
+        self.http.recommended_read_concurrency()
+    }
+
     fn size(&self, object: &str) -> SourceResult<Option<u64>> {
         Ok(self.objects.get(object).map(|identity| identity.length))
     }
@@ -141,6 +145,13 @@ pub enum DumpSource {
 }
 
 impl RangeSource for DumpSource {
+    fn recommended_read_concurrency(&self) -> usize {
+        match self {
+            Self::Local(source) => source.recommended_read_concurrency(),
+            Self::Gateway(source) => source.recommended_read_concurrency(),
+        }
+    }
+
     fn size(&self, object: &str) -> SourceResult<Option<u64>> {
         match self {
             Self::Local(source) => source.size(object),

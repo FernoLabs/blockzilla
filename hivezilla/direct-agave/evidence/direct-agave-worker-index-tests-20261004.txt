@@ -1,0 +1,79 @@
+   Compiling hivezilla-direct-agave v0.2.0 (/home/ubuntu/benchmarks/zilla-triton-20260930/source/hivezilla/direct-agave)
+    Finished `test` profile [unoptimized + debuginfo] target(s) in 3.55s
+     Running unittests src/lib.rs (/home/ubuntu/benchmarks/zilla-triton-20260930/source/target-agave-197/debug/deps/hivezilla_direct_agave-1664eefdec7ea613)
+
+running 11 tests
+test plugin::tests::native_wire_error_and_absent_metadata_survive_projection ... ok
+test plugin::tests::epoch_rewards_preserve_every_native_type_and_signed_amount ... ok
+test worker::tests::byte_budget_splits_before_count_limit ... ok
+test worker::late_tests::late_identical_event_is_allowed_but_conflict_is_rejected ... ok
+test worker::late_tests::late_other_fork_death_is_allowed_but_competing_root_is_rejected ... ok
+test worker::late_tests::shared_slot_lookup_still_rejects_a_competing_root_in_the_same_chunk ... ok
+test worker::tests::parallel_bank_reads_keep_input_order_and_source_checks ... ok
+test worker::late_tests::retired_journal_uses_compressed_source_for_late_callback_audit ... ok
+test worker::late_tests::existing_capture_recovery_uses_indexed_artifact_lookup ... ok
+test retention::tests::retirement_rejects_tampered_source_without_deletion ... ok
+test retention::tests::retirement_is_bounded_and_ack_follows_durable_delete ... ok
+
+test result: ok. 11 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.02s
+
+     Running unittests src/main.rs (/home/ubuntu/benchmarks/zilla-triton-20260930/source/target-agave-197/debug/deps/hivezilla_direct_agave-a64a5e725268a76b)
+
+running 0 tests
+
+test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+
+     Running tests/engine.rs (/home/ubuntu/benchmarks/zilla-triton-20260930/source/target-agave-197/debug/deps/engine-e1c470ba1e828c50)
+
+running 11 tests
+test compressed_payload_is_bounded_and_corruption_fails ... ok
+test bank_requires_root_metadata_and_dense_entries ... ok
+test duplicate_callbacks_must_be_identical ... ok
+test same_slot_forks_and_cleared_banks_cannot_mix ... ok
+test new_session_records_previous_unclean_session ... ok
+test oversize_event_latches_failure_and_never_resumes ... ok
+test concurrent_capture_is_rejected ... ok
+test queue_saturation_latches_failure_instead_of_silent_drop ... ok
+test journal_commits_and_reopens_without_losing_sequence ... ok
+test disk_reserve_failure_is_visible_with_service_alive ... ok
+test journal_quota_failure_does_not_publish_an_accepted_record ... ok
+
+test result: ok. 11 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.10s
+
+     Running tests/epoch_engine.rs (/home/ubuntu/benchmarks/zilla-triton-20260930/source/target-agave-197/debug/deps/epoch_engine-d06ac3823f9048e6)
+
+running 1 test
+[2m2026-10-04T08:20:52.400975Z[0m [32m INFO[0m [2mblockzilla::archive_v2[0m[2m:[0m Building live pubkey registry from /tmp/.tmpNEetMQ/output/epoch-0/431998-431998.normalized/blocks/live-no-registry-blocks.bin
+[2m2026-10-04T08:20:52.405078Z[0m [32m INFO[0m [2mblockzilla[0m[2m:[0m [Live Archive V2 Registry] Complete: blocks=1 txs=1 | 74571 blk/s, 74571 tx/s | elapsed=0s | slots=431998-431998 (0)
+[2m2026-10-04T08:20:52.406913Z[0m [32m INFO[0m [2mblockzilla::archive_v2[0m[2m:[0m Live pubkey registry built in 0.00s: blocks=1 txs=1 keys=2 registry=/tmp/.tmpNEetMQ/output/epoch-0/.431998-431998.compact.direct-agave-stage/registry.bin counts=/tmp/.tmpNEetMQ/output/epoch-0/.431998-431998.compact.direct-agave-stage/registry_counts.bin
+[2m2026-10-04T08:20:52.406943Z[0m [32m INFO[0m [2mblockzilla::archive_v2[0m[2m:[0m Building missing Archive V2 registry MPHF index in-process: /tmp/.tmpNEetMQ/output/epoch-0/.431998-431998.compact.direct-agave-stage/registry.mphf
+[2m2026-10-04T08:20:52.407482Z[0m [32m INFO[0m [2mblockzilla::archive_v2[0m[2m:[0m Built Archive V2 registry MPHF index in 0.00s: keys=2 path=/tmp/.tmpNEetMQ/output/epoch-0/.431998-431998.compact.direct-agave-stage/registry.mphf
+[2m2026-10-04T08:20:52.407717Z[0m [32m INFO[0m [2mblockzilla[0m[2m:[0m [Archive V2 Live Hot Write] Complete: blocks=1 txs=1 | 6669 blk/s, 6669 tx/s | elapsed=0s | slots=431998-431998 (0)
+[2m2026-10-04T08:20:52.407721Z[0m [32m INFO[0m [2mblockzilla::archive_v2[0m[2m:[0m Archive V2 live hot-block build complete in 0.00s: blocks=1 txs=1 signatures=1 level=1 max_blocks=None uncompressed_bytes=101 compressed_bytes=67 ratio_pct=66.34 nonce_recent_blockhashes=1 blocks_file=/tmp/.tmpNEetMQ/output/epoch-0/.431998-431998.compact.direct-agave-stage/archive-v2-blocks.zstd index=/tmp/.tmpNEetMQ/output/epoch-0/.431998-431998.compact.direct-agave-stage/archive-v2-blocks.index meta=/tmp/.tmpNEetMQ/output/epoch-0/.431998-431998.compact.direct-agave-stage/archive-v2-meta.wincode signatures=/tmp/.tmpNEetMQ/output/epoch-0/.431998-431998.compact.direct-agave-stage/signatures.bin vote_hash_registry=/tmp/.tmpNEetMQ/output/epoch-0/.431998-431998.compact.direct-agave-stage/vote_hash_registry.bin poh=omitted_noncanonical shredding=omitted_noncanonical
+[2m2026-10-04T08:20:52.407726Z[0m [32m INFO[0m [2mblockzilla::archive_v2[0m[2m:[0m Archive V2 live hot timings: optimize_no_registry_total=0.000s tx_decode_compact=0.000s metadata_decode_compact=0.000s metadata_logs_decode_compact=0.000s metadata_pubkey_compact=0.000s rewards_decode_compact=0.000s hot_message_build=0.000s hot_message_encode=0.000s hot_metadata_encode=0.000s hot_signature_write=0.000s hot_block_serialize=0.000s hot_zstd_compress=0.000s hot_block_write=0.000s hot_shredding_write=0.000s zstd_buffer_reserves=1 zstd_buffer_capacity_max=164
+[2m2026-10-04T08:20:52.412920Z[0m [32m INFO[0m [2mblockzilla::archive_v2[0m[2m:[0m Building live pubkey registry from /tmp/.tmpNEetMQ/output/epoch-0/431999-431999.normalized/blocks/live-no-registry-blocks.bin
+[2m2026-10-04T08:20:52.417487Z[0m [32m INFO[0m [2mblockzilla[0m[2m:[0m [Live Archive V2 Registry] Complete: blocks=1 txs=1 | 73470 blk/s, 73470 tx/s | elapsed=0s | slots=431999-431999 (0)
+[2m2026-10-04T08:20:52.418772Z[0m [32m INFO[0m [2mblockzilla::archive_v2[0m[2m:[0m Live pubkey registry built in 0.00s: blocks=1 txs=1 keys=2 registry=/tmp/.tmpNEetMQ/output/epoch-0/.431999-431999.compact.direct-agave-stage/registry.bin counts=/tmp/.tmpNEetMQ/output/epoch-0/.431999-431999.compact.direct-agave-stage/registry_counts.bin
+[2m2026-10-04T08:20:52.418808Z[0m [32m INFO[0m [2mblockzilla::archive_v2[0m[2m:[0m Building missing Archive V2 registry MPHF index in-process: /tmp/.tmpNEetMQ/output/epoch-0/.431999-431999.compact.direct-agave-stage/registry.mphf
+[2m2026-10-04T08:20:52.419242Z[0m [32m INFO[0m [2mblockzilla::archive_v2[0m[2m:[0m Built Archive V2 registry MPHF index in 0.00s: keys=2 path=/tmp/.tmpNEetMQ/output/epoch-0/.431999-431999.compact.direct-agave-stage/registry.mphf
+[2m2026-10-04T08:20:52.419439Z[0m [32m INFO[0m [2mblockzilla[0m[2m:[0m [Archive V2 Live Hot Write] Complete: blocks=1 txs=1 | 8186 blk/s, 8186 tx/s | elapsed=0s | slots=431999-431999 (0)
+[2m2026-10-04T08:20:52.419442Z[0m [32m INFO[0m [2mblockzilla::archive_v2[0m[2m:[0m Archive V2 live hot-block build complete in 0.00s: blocks=1 txs=1 signatures=1 level=1 max_blocks=None uncompressed_bytes=101 compressed_bytes=67 ratio_pct=66.34 nonce_recent_blockhashes=1 blocks_file=/tmp/.tmpNEetMQ/output/epoch-0/.431999-431999.compact.direct-agave-stage/archive-v2-blocks.zstd index=/tmp/.tmpNEetMQ/output/epoch-0/.431999-431999.compact.direct-agave-stage/archive-v2-blocks.index meta=/tmp/.tmpNEetMQ/output/epoch-0/.431999-431999.compact.direct-agave-stage/archive-v2-meta.wincode signatures=/tmp/.tmpNEetMQ/output/epoch-0/.431999-431999.compact.direct-agave-stage/signatures.bin vote_hash_registry=/tmp/.tmpNEetMQ/output/epoch-0/.431999-431999.compact.direct-agave-stage/vote_hash_registry.bin poh=omitted_noncanonical shredding=omitted_noncanonical
+[2m2026-10-04T08:20:52.419448Z[0m [32m INFO[0m [2mblockzilla::archive_v2[0m[2m:[0m Archive V2 live hot timings: optimize_no_registry_total=0.000s tx_decode_compact=0.000s metadata_decode_compact=0.000s metadata_logs_decode_compact=0.000s metadata_pubkey_compact=0.000s rewards_decode_compact=0.000s hot_message_build=0.000s hot_message_encode=0.000s hot_metadata_encode=0.000s hot_signature_write=0.000s hot_block_serialize=0.000s hot_zstd_compress=0.000s hot_block_write=0.000s hot_shredding_write=0.000s zstd_buffer_reserves=1 zstd_buffer_capacity_max=164
+[2m2026-10-04T08:20:52.424134Z[0m [32m INFO[0m [2mblockzilla::archive_v2[0m[2m:[0m Building live pubkey registry from /tmp/.tmpNEetMQ/output/epoch-1/432000-432000.normalized/blocks/live-no-registry-blocks.bin
+[2m2026-10-04T08:20:52.427209Z[0m [32m INFO[0m [2mblockzilla[0m[2m:[0m [Live Archive V2 Registry] Complete: blocks=1 txs=1 | 76982 blk/s, 76982 tx/s | elapsed=0s | slots=432000-432000 (0)
+[2m2026-10-04T08:20:52.428274Z[0m [32m INFO[0m [2mblockzilla::archive_v2[0m[2m:[0m Live pubkey registry built in 0.00s: blocks=1 txs=1 keys=2 registry=/tmp/.tmpNEetMQ/output/epoch-1/.432000-432000.compact.direct-agave-stage/registry.bin counts=/tmp/.tmpNEetMQ/output/epoch-1/.432000-432000.compact.direct-agave-stage/registry_counts.bin
+[2m2026-10-04T08:20:52.428303Z[0m [32m INFO[0m [2mblockzilla::archive_v2[0m[2m:[0m Building missing Archive V2 registry MPHF index in-process: /tmp/.tmpNEetMQ/output/epoch-1/.432000-432000.compact.direct-agave-stage/registry.mphf
+[2m2026-10-04T08:20:52.428883Z[0m [32m INFO[0m [2mblockzilla::archive_v2[0m[2m:[0m Built Archive V2 registry MPHF index in 0.00s: keys=2 path=/tmp/.tmpNEetMQ/output/epoch-1/.432000-432000.compact.direct-agave-stage/registry.mphf
+[2m2026-10-04T08:20:52.429108Z[0m [32m INFO[0m [2mblockzilla[0m[2m:[0m [Archive V2 Live Hot Write] Complete: blocks=1 txs=1 | 7586 blk/s, 7586 tx/s | elapsed=0s | slots=432000-432000 (0)
+[2m2026-10-04T08:20:52.429112Z[0m [32m INFO[0m [2mblockzilla::archive_v2[0m[2m:[0m Archive V2 live hot-block build complete in 0.00s: blocks=1 txs=1 signatures=1 level=1 max_blocks=None uncompressed_bytes=101 compressed_bytes=67 ratio_pct=66.34 nonce_recent_blockhashes=1 blocks_file=/tmp/.tmpNEetMQ/output/epoch-1/.432000-432000.compact.direct-agave-stage/archive-v2-blocks.zstd index=/tmp/.tmpNEetMQ/output/epoch-1/.432000-432000.compact.direct-agave-stage/archive-v2-blocks.index meta=/tmp/.tmpNEetMQ/output/epoch-1/.432000-432000.compact.direct-agave-stage/archive-v2-meta.wincode signatures=/tmp/.tmpNEetMQ/output/epoch-1/.432000-432000.compact.direct-agave-stage/signatures.bin vote_hash_registry=/tmp/.tmpNEetMQ/output/epoch-1/.432000-432000.compact.direct-agave-stage/vote_hash_registry.bin poh=omitted_noncanonical shredding=omitted_noncanonical
+[2m2026-10-04T08:20:52.429118Z[0m [32m INFO[0m [2mblockzilla::archive_v2[0m[2m:[0m Archive V2 live hot timings: optimize_no_registry_total=0.000s tx_decode_compact=0.000s metadata_decode_compact=0.000s metadata_logs_decode_compact=0.000s metadata_pubkey_compact=0.000s rewards_decode_compact=0.000s hot_message_build=0.000s hot_message_encode=0.000s hot_metadata_encode=0.000s hot_signature_write=0.000s hot_block_serialize=0.000s hot_zstd_compress=0.000s hot_block_write=0.000s hot_shredding_write=0.000s zstd_buffer_reserves=1 zstd_buffer_capacity_max=164
+test real_compact_writer_crosses_epoch_and_restart_does_not_duplicate ... ok
+
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.04s
+
+   Doc-tests hivezilla_direct_agave
+
+running 0 tests
+
+test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+

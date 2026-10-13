@@ -1,0 +1,22 @@
+{
+  "no_header": {
+    "status": 401,
+    "error": "unauthorized"
+  },
+  "url_key_rejected": {
+    "status": 401,
+    "error": "unauthorized"
+  },
+  "wrong_source": {
+    "status": 410,
+    "error": "source_changed"
+  },
+  "bad_cursor": {
+    "status": 400,
+    "error": "invalid_cursor"
+  },
+  "missing_dependency": {
+    "status": 410,
+    "error": "dependency_unavailable"
+  }
+}

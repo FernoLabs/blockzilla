@@ -11,16 +11,27 @@ name = "car-decode-reference"
 path = "src/bin/car-decode-reference.rs"
 required-features = ["car-reference"]
 
+[[bin]]
+name = "perf-flamegraph"
+path = "src/bin/perf-flamegraph.rs"
+required-features = ["car-reference"]
+
 [features]
 frame-profiler = ["pprof/frame-pointer"]
-car-reference = ["dep:of-car-reader", "dep:blake3", "dep:quick-protobuf"]
+car-reference = ["dep:of-car-reader", "dep:blake3", "dep:quick-protobuf", "dep:blockzilla-source", "dep:blockzilla-source-http", "dep:crossbeam-channel", "dep:libc", "dep:memmap2", "dep:inferno"]
 reference-mimalloc = ["car-reference", "dep:mimalloc"]
 
 [dependencies]
 of-car-reader = { path = "../../crates/old-faithful/of-car-reader", default-features = false, features = ["query-sdk-http", "zstd-native"], optional = true }
 blake3 = { version = "1.8.7", optional = true }
 quick-protobuf = { version = "0.8.1", optional = true }
+blockzilla-source = { path = "../../crates/source/blockzilla-source", optional = true }
+blockzilla-source-http = { path = "../../crates/source/blockzilla-source-http", optional = true }
+crossbeam-channel = { version = "0.5.17", optional = true }
 mimalloc = { version = "0.1.52", optional = true }
+libc = { version = "0.2.189", optional = true }
+memmap2 = { version = "0.9.11", optional = true }
+inferno = { version = "0.11.21", default-features = false, optional = true }
 anyhow = "1.0.104"
 blockzilla-compact-v2-reader = { path = "../../crates/compact-v2/blockzilla-compact-v2-reader", features = ["http"] }
 blockzilla-archive-v3-reader = { path = "../../crates/archive-v3/blockzilla-archive-v3-reader" }

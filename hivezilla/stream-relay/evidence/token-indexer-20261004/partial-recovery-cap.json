@@ -1,0 +1,37 @@
+{
+  "schema": "blockzilla-token-indexer-partial-recovery-cap-v1",
+  "state": "PASS",
+  "exitStatus": 1,
+  "requestedMaxBlocks": 1,
+  "acceptedPrefixRetained": true,
+  "failureNotHiddenByLimit": true,
+  "error": "Error: Required committed native history is unavailable",
+  "status": {
+    "balances": 242,
+    "blocks": 1,
+    "checkpoint": {
+      "blockhash": "AHHBL16YJjWdPUhf8MUh2KtdaW1gR4TxTy9Wbymq1hrz",
+      "slot": 453293165,
+      "streamCursor": null
+    },
+    "recovery": {
+      "error": "Required committed native history is unavailable",
+      "fromSlot": 453293165,
+      "state": "BLOCKED",
+      "toSlot": 453293360
+    },
+    "sources": [
+      {
+        "agaveRevision": "825efd18292aff6ffcf9daa0f7612f21b3531a72",
+        "canonical": false,
+        "genesisHash": "5eykt4UsFv8P8NJdTREpY1vzqKqZKvdpKuc147dw2N9d",
+        "kind": "native-compact-history",
+        "nodeIdentity": "J7qpvCEWhdBgPdYRV3s3btWPrRVXa2qnAzgvxWTvtbrQ",
+        "publicationReady": false,
+        "session": "000000000000000018daf342ba38d3d0-10e3f5"
+      }
+    ],
+    "transactions": 1327
+  },
+  "liveSourceChanged": false
+}

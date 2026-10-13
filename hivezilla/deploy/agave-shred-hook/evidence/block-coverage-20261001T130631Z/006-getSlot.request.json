@@ -1,0 +1,1 @@
+{"endpoint": "https://api.mainnet-beta.solana.com", "body": {"jsonrpc": "2.0", "id": 6, "method": "getSlot", "params": [{"commitment": "finalized"}]}}

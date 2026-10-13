@@ -1,0 +1,344 @@
+{
+  "schema": "zilla-resident-optimization-cpu-profile-v1",
+  "event": "cpu-clock",
+  "sampling_frequency_hz": 99,
+  "sample_period_ns": 10101010,
+  "units": "Folded weights are CPU-clock nanoseconds, not counts.",
+  "profile_worker_counts": {
+    "parsers": 64,
+    "decoders": 64
+  },
+  "baseline": {
+    "total_weight_ns": 3332949461620,
+    "sample_count_from_periods": 329962,
+    "inclusive_symbols": {
+      "take_byte_buffer": {
+        "weight_ns": 164545452900,
+        "percent": 4.9369321315787875
+      },
+      "byte_buffer_index": {
+        "weight_ns": 0,
+        "percent": 0.0
+      },
+      "copy_bytes_reusing": {
+        "weight_ns": 175838382080,
+        "percent": 5.275759026797025
+      },
+      "retained_capacity_bytes": {
+        "weight_ns": 48797979310,
+        "percent": 1.4641079881925798
+      }
+    },
+    "unresolved_leaf_percent": 12.444160236633309,
+    "unresolved_leaf_by_placeholder_percent": {
+      "[car-decode-reference]": 1.8508191852395124,
+      "[libc.so.6]": 10.587582812566296,
+      "[[vdso]]": 0.005758238827501348
+    }
+  },
+  "selected_A2_plus_B": {
+    "total_weight_ns": 3274717138970,
+    "sample_count_from_periods": 324197,
+    "inclusive_symbols": {
+      "take_byte_buffer": {
+        "weight_ns": 93595958660,
+        "percent": 2.858138724294179
+      },
+      "byte_buffer_index": {
+        "weight_ns": 80303029500,
+        "percent": 2.4522126978349585
+      },
+      "copy_bytes_reusing": {
+        "weight_ns": 108343433260,
+        "percent": 3.30848218829909
+      },
+      "retained_capacity_bytes": {
+        "weight_ns": 40686868280,
+        "percent": 1.2424544335697123
+      }
+    },
+    "unresolved_leaf_percent": 12.39369889295706,
+    "unresolved_leaf_by_placeholder_percent": {
+      "[car-decode-reference]": 1.7103797999364583,
+      "[libc.so.6]": 10.676533095617788,
+      "[[vdso]]": 0.006785997402813721
+    }
+  },
+  "selected_reader_scan_seconds": 40.301254929,
+  "sample_count": 324197,
+  "lost_samples_reported": 0,
+  "selected_top_self_symbols": [
+    {
+      "percent_rounded": 15.69,
+      "command": "car-decode-refe",
+      "dso": "car-decode-reference",
+      "symbol": "_blake3_compress_in_place_avx512"
+    },
+    {
+      "percent_rounded": 9.65,
+      "command": "car-decode-refe",
+      "dso": "car-decode-reference",
+      "symbol": "ZSTD_decompressSequences_default.constprop.0"
+    },
+    {
+      "percent_rounded": 5.37,
+      "command": "car-decode-refe",
+      "dso": "car-decode-reference",
+      "symbol": "<of_car_reader::reader::CarBlockReader<alloc::boxed::Box<dyn std::io::Read>>>::read_until_block_ordered_lossless_inner::{closure#0}"
+    },
+    {
+      "percent_rounded": 4.18,
+      "command": "car-decode-refe",
+      "dso": "car-decode-reference",
+      "symbol": "core::str::converts::from_utf8"
+    },
+    {
+      "percent_rounded": 3.53,
+      "command": "car-decode-refe",
+      "dso": "car-decode-reference",
+      "symbol": "<car_decode_reference::Decoder>::decode"
+    },
+    {
+      "percent_rounded": 3.31,
+      "command": "car-decode-refe",
+      "dso": "car-decode-reference",
+      "symbol": "of_car_reader::versioned_transaction::copy_bytes_reusing"
+    },
+    {
+      "percent_rounded": 2.97,
+      "command": "car-decode-refe",
+      "dso": "car-decode-reference",
+      "symbol": "<minicbor::decode::decoder::Decoder>::unsigned"
+    },
+    {
+      "percent_rounded": 2.66,
+      "command": "car-decode-refe",
+      "dso": "car-decode-reference",
+      "symbol": "_mi_page_malloc_zero"
+    },
+    {
+      "percent_rounded": 2.55,
+      "command": "car-decode-refe",
+      "dso": "car-decode-reference",
+      "symbol": "of_car_reader::metadata_decoder::decode_transaction_status_meta_into"
+    },
+    {
+      "percent_rounded": 2.41,
+      "command": "car-decode-refe",
+      "dso": "car-decode-reference",
+      "symbol": "prost::encoding::string::merge::<&[u8]>"
+    },
+    {
+      "percent_rounded": 2.34,
+      "command": "car-decode-refe",
+      "dso": "car-decode-reference",
+      "symbol": "ZSTD_decompressMultiFrame"
+    },
+    {
+      "percent_rounded": 2.18,
+      "command": "car-decode-refe",
+      "dso": "car-decode-reference",
+      "symbol": "prost::encoding::message::merge_repeated::<of_car_reader::confirmed_block::TokenBalance, &[u8]>"
+    },
+    {
+      "percent_rounded": 1.85,
+      "command": "car-decode-refe",
+      "dso": "car-decode-reference",
+      "symbol": "<of_car_reader::metadata_decoder::ZstdReusableDecoder>::decompress_if_zstd"
+    },
+    {
+      "percent_rounded": 1.68,
+      "command": "car-decode-refe",
+      "dso": "car-decode-reference",
+      "symbol": "prost::encoding::varint::decode_varint_slice"
+    },
+    {
+      "percent_rounded": 1.66,
+      "command": "car-decode-refe",
+      "dso": "car-decode-reference",
+      "symbol": "of_car_reader::versioned_transaction::read_compiled_instructions_reusing"
+    },
+    {
+      "percent_rounded": 1.62,
+      "command": "car-decode-refe",
+      "dso": "car-decode-reference",
+      "symbol": "mi_free"
+    },
+    {
+      "percent_rounded": 1.45,
+      "command": "car-decode-refe",
+      "dso": "car-decode-reference",
+      "symbol": "mi_theap_malloc_aligned"
+    },
+    {
+      "percent_rounded": 1.41,
+      "command": "car-decode-refe",
+      "dso": "car-decode-reference",
+      "symbol": "prost::encoding::uint64::merge::<&[u8]>"
+    },
+    {
+      "percent_rounded": 1.26,
+      "command": "car-decode-refe",
+      "dso": "car-decode-reference",
+      "symbol": "<alloc::raw_vec::RawVecInner>::finish_grow"
+    },
+    {
+      "percent_rounded": 1.24,
+      "command": "car-decode-refe",
+      "dso": "car-decode-reference",
+      "symbol": "<of_car_reader::versioned_transaction::VersionedTransactionReuse>::retained_capacity_bytes"
+    },
+    {
+      "percent_rounded": 1.22,
+      "command": "car-decode-refe",
+      "dso": "car-decode-reference",
+      "symbol": "<minicbor::decode::decoder::Decoder>::array"
+    },
+    {
+      "percent_rounded": 1.2,
+      "command": "car-decode-refe",
+      "dso": "car-decode-reference",
+      "symbol": "of_car_reader::node::decode_node_with_kind"
+    },
+    {
+      "percent_rounded": 1.16,
+      "command": "car-decode-refe",
+      "dso": "car-decode-reference",
+      "symbol": "std::sys::backtrace::__rust_begin_short_backtrace::<car_decode_reference::dynamic::scan_dynamic_profiled<car_decode_reference::resident::platform::ResidentSource>::{closure#2}::{closure#0}::{closure#1}, ()>"
+    },
+    {
+      "percent_rounded": 1.04,
+      "command": "car-decode-refe",
+      "dso": "car-decode-reference",
+      "symbol": "<alloc::raw_vec::RawVecInner<_>>::reserve::do_reserve_and_handle::<alloc::alloc::Global>"
+    },
+    {
+      "percent_rounded": 0.95,
+      "command": "car-decode-refe",
+      "dso": "car-decode-reference",
+      "symbol": "ZSTD_buildFSETable_body_default.isra.0"
+    }
+  ],
+  "limits": [
+    "Both profiles use P64/W64; timing comparisons use unprofiled P32/W128.",
+    "Inclusive shares overlap. Do not add them to self shares.",
+    "Inline expansion and unresolved libc/reader frames limit attribution. Zero lost samples does not prove complete unwinding.",
+    "An increased percentage can result from a lower total CPU cost."
+  ],
+  "artifacts": {
+    "triton-resident-decode-optimization-20260930-cpu-time.svg": {
+      "bytes": 272612,
+      "sha256": "14404a1b7424247f72e7b8721fe85f5c1897990360192adbb140faae4cb102d6"
+    },
+    "triton-resident-decode-optimization-20260930-perf-self.txt": {
+      "bytes": 18006,
+      "sha256": "0ef93c07a7f9d584bda5d5f882bb0f5ebfdaece9a38e4c3c16c1e91337a2fc9f"
+    },
+    "triton-resident-decode-optimization-20260930-cpu.folded.gz": {
+      "bytes": 120081,
+      "sha256": "725323d59fbe7da9388db1d7789c038e5a55b377e57cbbe06433ce50bcda9e2d"
+    }
+  },
+  "conversion": {
+    "state": "PASS",
+    "steps": [
+      {
+        "name": "perf-script-v2",
+        "command": [
+          "sudo",
+          "-n",
+          "perf",
+          "script",
+          "-i",
+          "/home/ubuntu/benchmarks/zilla-triton-20260930/results-opt-floor-profile-v1/floor-stacks-p64-w64/perf.data",
+          "-F",
+          "comm,pid,time,period,event,ip,sym,dso",
+          "--inline"
+        ],
+        "seconds": 123.46600246429443,
+        "exit_code": 0
+      },
+      {
+        "name": "inferno",
+        "command": [
+          "/home/ubuntu/benchmarks/zilla-triton-20260930/resident-converter-bin-v3/perf-flamegraph",
+          "/home/ubuntu/benchmarks/zilla-triton-20260930/results-opt-floor-profile-v1/floor-stacks-p64-w64/perf-inline.script",
+          "/home/ubuntu/benchmarks/zilla-triton-20260930/results-opt-floor-profile-v1/floor-stacks-p64-w64/cpu.folded",
+          "/home/ubuntu/benchmarks/zilla-triton-20260930/results-opt-floor-profile-v1/floor-stacks-p64-w64/cpu.svg"
+        ],
+        "seconds": 3.2808210849761963,
+        "exit_code": 0
+      }
+    ],
+    "artifacts": {
+      "cpu.folded": {
+        "bytes": 9663407,
+        "sha256": "4f22c3584b6fedbce060d1a4e5ce7b1740f12ea47ced7db1b6bb752967dad3a0"
+      },
+      "cpu.folded.gz": {
+        "bytes": 120081,
+        "sha256": "725323d59fbe7da9388db1d7789c038e5a55b377e57cbbe06433ce50bcda9e2d"
+      },
+      "cpu.svg": {
+        "bytes": 268928,
+        "sha256": "cadc1a3e711158ed21c28d41453cde4863944b82a767b5fa937487b4b4bf94e1"
+      },
+      "cpu-time.svg": {
+        "bytes": 272612,
+        "sha256": "14404a1b7424247f72e7b8721fe85f5c1897990360192adbb140faae4cb102d6"
+      },
+      "perf-self-flat.txt": {
+        "bytes": 18006,
+        "sha256": "0ef93c07a7f9d584bda5d5f882bb0f5ebfdaece9a38e4c3c16c1e91337a2fc9f"
+      },
+      "perf.data": {
+        "bytes": 42642046,
+        "sha256": "e6bef4cd02b5995081595c1ec12f034dea40c3d070832e48915b8adc91eeff7e"
+      }
+    },
+    "note": "Conversion v2 script and Inferno steps passed. Final hash read required sudo for root-owned perf.data; raw failure log preserved."
+  },
+  "failed_conversion": {
+    "state": "FAILED",
+    "reason": "perf script option --show-event-period is unsupported; saved trace was converted with explicit fields and --inline. No scan rerun.",
+    "raw_record": {
+      "state": "RUNNING",
+      "steps": [
+        {
+          "name": "perf-report",
+          "command": [
+            "sudo",
+            "-n",
+            "perf",
+            "report",
+            "-i",
+            "/home/ubuntu/benchmarks/zilla-triton-20260930/results-opt-floor-profile-v1/floor-stacks-p64-w64/perf.data",
+            "--stdio",
+            "--no-children",
+            "--percent-limit",
+            "0.3",
+            "--sort",
+            "comm,dso,symbol"
+          ],
+          "seconds": 120.61841130256653,
+          "exit_code": 0
+        },
+        {
+          "name": "perf-script",
+          "command": [
+            "sudo",
+            "-n",
+            "perf",
+            "script",
+            "-i",
+            "/home/ubuntu/benchmarks/zilla-triton-20260930/results-opt-floor-profile-v1/floor-stacks-p64-w64/perf.data",
+            "--show-event-period"
+          ],
+          "seconds": 0.01938462257385254,
+          "exit_code": 129
+        }
+      ]
+    },
+    "stderr": "  Error: unknown option `show-event-period'\n\n Usage: perf script [<options>]\n    or: perf script [<options>] record <script> [<record-options>] <command>\n    or: perf script [<options>] report <script> [script-args]\n    or: perf script [<options>] <script> [<record-options>] <command>\n    or: perf script [<options>] <top-script> [script-args]\n\n    -a, --all-cpus        system-wide collection from all CPUs\n    -c, --comms <comm[,comm...]>\n                          only display events for these comms\n    -C, --cpu <cpu>       list of cpus to profile\n    -d, --debug-mode      do various checks like samples ordering and lost events\n    -D, --dump-raw-trace  dump raw trace in ASCII\n    -F, --fields <str>    comma separated output fields prepend with 'type:'. +field to add and -field to remove.Valid types: hw,sw,trace,raw,synth. Fields: comm,tid,pid,time,cpu,event,trace,ip,sym,dso,dsoff,addr,symoff,srcline,period,iregs,uregs,brstack,brstacksym,flags,data_src,weight,bpf-output,brstackinsn,brstackinsnlen,brstackdisasm,brstackoff,callindent,insn,disasm,insnlen,synth,phys_addr,metric,misc,srccode,ipc,tod,data_page_size,code_page_size,ins_lat,machine_pid,vcpu,cgroup,retire_lat,brcntr\n    -f, --force           don't complain, do it\n    -g, --gen-script <lang>\n                          generate perf-script.xx script in specified language\n    -G, --hide-call-graph\n                          When printing symbols do not display call chain\n    -i, --input <file>    input file name\n    -I, --show-info       display extended information from perf.data file\n    -k, --vmlinux <file>  vmlinux pathname\n    -L, --Latency         show latency attributes (irqs/preemption disabled, etc)\n    -l, --list            list available scripts\n    -s, --script <name>   script file name (lang:script name, script name, or *)\n    -S, --symbols <symbol[,symbol...]>\n                          only consider these symbols\n    -v, --verbose         be more verbose (show symbol address, etc)\n        --addr-range <n>  Use with -S to list traced records within address range\n        --addr2line <path>\n                          addr2line binary to use for line numbers\n        --call-ret-trace[=...]\n                          Decode calls and returns from itrace\n        --call-trace[=...]\n                          Decode calls from itrace\n        --deltatime       Show time stamps relative to previous event\n        --demangle        Enable symbol demangling\n        --demangle-kernel\n                          Enable kernel symbol demangling\n        --dlarg <argument>\n                          filter argument\n        --dlfilter <file>\n                          filter .so file name\n        --dsos <dso[,dso...]>\n                          only consider symbols in these DSOs\n        --dump-unsorted-raw-trace\n                          dump unsorted raw trace in ASCII\n        --full-source-path\n                          Show full source file name path for source lines\n        --graph-function <symbol[,symbol...]>\n                          Only print symbols and callees with --call-trace/--call-ret-trace\n        --guest-code      Guest code can be found in hypervisor process\n        --guestkallsyms <file>\n                          file saving guest os /proc/kallsyms\n        --guestmodules <file>\n                          file saving guest os /proc/modules\n        --guestmount <directory>\n                          guest mount directory under which every guest os instance has a subdir\n        --guestvmlinux <file>\n                          file saving guest os vmlinux\n        --header          Show data header.\n        --header-only     Show only data header.\n        --inline          Show inline function\n        --insn-trace[=<raw|disasm>]\n                          Decode instructions from itrace\n        --itrace[=<opts>]\n                          Instruction Tracing options\n\t\t\t\ti[period]:    \t\tsynthesize instructions events\n\t\t\t\ty[period]:    \t\tsynthesize cycles events (same period as i)\n\t\t\t\tb:\t    \t\tsynthesize branches events\n\t\t\t\tc:\t    \t\tsynthesize branches events (calls only)\n\t\t\t\tr:\t    \t\tsynthesize branches events (returns only)\n\t\t\t\tx:\t    \t\tsynthesize transactions events\n\t\t\t\tw:\t    \t\tsynthesize ptwrite events\n\t\t\t\tp:\t    \t\tsynthesize power events\n\t\t\t\to:\t\t\tsynthesize other events recorded due to the use\n\t\t\t\t\t\t\tof aux-output (refer to perf record)\n\t\t\t\tI:\t\t\tsynthesize interrupt or similar (asynchronous) events\n\t\t\t\t\t\t\t(e.g. Intel PT Event Trace)\n\t\t\t\te[flags]:\t\tsynthesize error events\n\t\t\t\t\t\t\teach flag must be preceded by + or -\n\t\t\t\t\t\t\terror flags are: o (overflow)\n\t\t\t\t\t\t\t\t\t l (data lost)\n\t\t\t\td[flags]:\t\tcreate a debug log\n\t\t\t\t\t\t\teach flag must be preceded by + or -\n\t\t\t\t\t\t\tlog flags are: a (all perf events)\n\t\t\t\t\t\t\t               o (output to stdout)\n\t\t\t\tf:\t    \t\tsynthesize first level cache events\n\t\t\t\tm:\t    \t\tsynthesize last level cache events\n\t\t\t\tt:\t    \t\tsynthesize TLB events\n\t\t\t\ta:\t    \t\tsynthesize remote access events\n\t\t\t\tg[len]:     \t\tsynthesize a call chain (use with i or x)\n\t\t\t\tG[len]:\t\t\tsynthesize a call chain on existing event records\n\t\t\t\tl[len]:     \t\tsynthesize last branch entries (use with i or x)\n\t\t\t\tL[len]:\t\t\tsynthesize last branch entries on existing event records\n\t\t\t\tsNUMBER:    \t\tskip initial number of events\n\t\t\t\tq:\t\t\tquicker (less detailed) decoding\n\t\t\t\tA:\t\t\tapproximate IPC\n\t\t\t\tZ:\t\t\tprefer to ignore timestamps (so-called \"timeless\" decoding)\n\t\t\t\tT:\t\t\tuse the timestamp trace as kernel time\n\t\t\t\tPERIOD[ns|us|ms|i|t]:   specify period to sample stream\n\t\t\t\tconcatenate multiple options. Default is iybxwpe or cewp\n\n        --kallsyms <file>\n                          kallsyms pathname\n        --list-dlfilters  list available dlfilters\n        --max-blocks <n>  Maximum number of code blocks to dump with brstackinsn\n        --max-stack <n>   Set the maximum stack depth when parsing the callchain, anything beyond the specified depth will be ignored. Default: kernel.perf_event_max_stack or 127\n        --merge-callchains\n                          Enable merge deferred user callchains\n        --ns              Use 9 decimal places when displaying time\n        --per-event-dump  Dump trace output to files named by the monitored events\n        --pid <pid[,pid...]>\n                          only consider symbols in these pids\n        --reltime         Show time stamps relative to start\n        --show-bpf-events\n                          Show bpf related events (if recorded)\n        --show-cgroup-events\n                          Show cgroup events (if recorded)\n        --show-kernel-path\n                          Show the path of [kernel.kallsyms]\n        --show-lost-events\n                          Show lost events (if recorded)\n        --show-mmap-events\n                          Show the mmap events\n        --show-namespace-events\n                          Show namespace events (if recorded)\n        --show-on-off-events\n                          Show the on/off switch events, used with --switch-on and --switch-off\n        --show-round-events\n                          Show round events (if recorded)\n        --show-switch-events\n                          Show context switch events (if recorded)\n        --show-task-events\n                          Show the fork/comm/exit events\n        --show-text-poke-events\n                          Show text poke related events (if recorded)\n        --stitch-lbr      Enable LBR callgraph stitching approach\n        --stop-bt <symbol[,symbol...]>\n                          Stop display of callgraph at these symbols\n        --switch-off <event>\n                          Stop considering events after the occurrence of this event\n        --switch-on <event>\n                          Consider events after the occurrence of this event\n        --symfs <directory>\n                          Look for files with symbols relative to this directory\n        --tid <tid[,tid...]>\n                          only consider symbols in these tids\n        --time <str>      Time span of interest (start,stop)\n        --xed[=...]       Run xed disassembler on output\n\n"
+  }
+}

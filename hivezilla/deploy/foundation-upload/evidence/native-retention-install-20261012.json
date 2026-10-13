@@ -1,0 +1,22 @@
+{
+  "state": "ENABLED_FLOW_VERIFIED",
+  "source": "000000000000000018ddd9a6bb6fc50e-282459",
+  "old_source": "000000000000000018dd84835b6e7677-282459",
+  "worker_binary": "/home/ubuntu/live/hivezilla-validator-20260930/releases/native-cloud-retention-fast-r3-20261012/hivezilla-direct-agave",
+  "worker_sha256": "9615147e1152af1ac73b8ccf7029896c22487b122108d1af43f686e8799ede31",
+  "storage_helper_sha256": "c3bef04b73b4ac1e68fa452878fd1711ffa385906164d03770631488aa5c990b",
+  "keep_seconds": 7200,
+  "exact_remote_readback": true,
+  "restore_test_passed": true,
+  "validator_pid_unchanged": true,
+  "owner_approved_native_evidence_scope": true,
+  "feed_and_journal_sequences_kept_separate": true,
+  "bundle_max_bytes": 536870912,
+  "bundle_max_banks": 64,
+  "parallel_bundle_limit": 2,
+  "native_callback_updates_batched_per_bank": true,
+  "bounded_discovery_rows": 16384,
+  "waiting_banks_wait_for_source_footer": true,
+  "flow_checked_unix_ms": 1791843639457,
+  "finite_check_only": true
+}

@@ -1,0 +1,48 @@
+# To display the perf.data header info, please use --header/--header-only options.
+#
+#
+# Total Lost Samples: 0
+#
+# Samples: 1K of event 'cpu/cycles/P'
+# Event count (approx.): 40270460974
+#
+# Overhead  Shared Object           Symbol                                                                                                                                                                                                                                                                                                                                                  IPC   [IPC Coverage]
+# ........  ......................  ......................................................................................................................................................................................................................................................................................................................................................  ....................
+#
+    10.40%  hivezilla-direct-agave  [.] sha2::sha256::x86_sha::compress                                                                                                                                                                                                                                                                                                                     -      -            
+     6.15%  hivezilla-direct-agave  [.] <serde_json::de::Deserializer<serde_json::read::StrRead>>::ignore_integer                                                                                                                                                                                                                                                                           -      -            
+     4.51%  hivezilla-direct-agave  [.] <serde_json::de::Deserializer<serde_json::read::StrRead>>::deserialize_raw_value::<<&serde_json::raw::RawValue as serde_core::de::Deserialize>::deserialize::ReferenceVisitor>                                                                                                                                                                      -      -            
+     3.95%  hivezilla-direct-agave  [.] <serde_json::de::Deserializer<serde_json::read::StrRead>>::ignore_integer                                                                                                                                                                                                                                                                           -      -            
+     3.84%  hivezilla-direct-agave  [.] <serde_json::de::Deserializer<serde_json::read::StrRead>>::parse_integer                                                                                                                                                                                                                                                                            -      -            
+     3.59%  hivezilla-direct-agave  [.] <serde_json::de::SeqAccess<serde_json::read::StrRead> as serde_core::de::SeqAccess>::next_element::<u8>                                                                                                                                                                                                                                             -      -            
+     2.39%  hivezilla-direct-agave  [.] <u8 as serde_core::de::Deserialize>::deserialize::<&mut serde_json::de::Deserializer<serde_json::read::StrRead>>                                                                                                                                                                                                                                    -      -            
+     2.30%  hivezilla-direct-agave  [.] <serde_json::de::MapAccess<serde_json::read::StrRead> as serde_core::de::MapAccess>::next_value::<serde_core::de::ignored_any::IgnoredAny>                                                                                                                                                                                                          -      -            
+     2.10%  hivezilla-direct-agave  [.] ZSTD_decompressSequences_default.constprop.0                                                                                                                                                                                                                                                                                                        -      -            
+     2.06%  hivezilla-direct-agave  [.] <serde_json::de::SeqAccess<_> as serde_core::de::SeqAccess>::next_element_seed::has_next_element::<serde_json::read::StrRead>                                                                                                                                                                                                                       -      -            
+     1.98%  [kernel.kallsyms]       [k] kernel_init_pages                                                                                                                                                                                                                                                                                                                                   -      -            
+     1.93%  hivezilla-direct-agave  [.] <serde_json::de::Deserializer<serde_json::read::StrRead>>::parse_number                                                                                                                                                                                                                                                                             -      -            
+     1.67%  [kernel.kallsyms]       [k] _copy_to_iter                                                                                                                                                                                                                                                                                                                                       -      -            
+            |          
+             --1.29%--_copy_to_iter
+                       copy_page_to_iter
+                       filemap_read
+                       generic_file_read_iter
+                       ext4_file_read_iter
+                       vfs_read
+                       ksys_read
+                       __x64_sys_read
+                       x64_sys_call
+                       do_syscall_64
+                       entry_SYSCALL_64_after_hwframe
+
+     1.66%  hivezilla-direct-agave  [.] <serde_json::read::SliceRead>::skip_to_escape                                                                                                                                                                                                                                                                                                       -      -            
+     1.10%  hivezilla-direct-agave  [.] <&mut serde_json::de::Deserializer<serde_json::read::StrRead> as serde_core::de::Deserializer>::deserialize_tuple::<serde_core::de::impls::ArrayVisitor<[u8; 32]>>                                                                                                                                                                                  -      -            
+     1.08%  blockzilla              [.] 0x00000000004eb6f3                                                                                                                                                                                                                                                                                                                                  -      -            
+            |
+            ---0x5de3a60bd6f3
+
+
+
+#
+# (Cannot load tips.txt file, please install perf!)
+#

@@ -1,0 +1,29 @@
+[Unit]
+Description=Send Foundation machine and pipeline heartbeat
+Wants=network-online.target
+After=network-online.target
+
+[Service]
+Type=oneshot
+User=ubuntu
+Group=ubuntu
+UMask=0077
+EnvironmentFile=/home/ubuntu/live/hivezilla-validator-20260930/config/foundation-watch.env
+ExecStart=/usr/bin/python3 -B /home/ubuntu/live/hivezilla-validator-20260930/deploy/foundation-watch/heartbeat.py --report /home/ubuntu/live/hivezilla-validator-20260930/reports/foundation-watch/STATUS.json
+TimeoutStartSec=25s
+CPUQuota=25%
+MemoryMax=128M
+Nice=19
+IOSchedulingClass=idle
+NoNewPrivileges=yes
+PrivateTmp=yes
+ProtectSystem=strict
+ProtectHome=read-only
+ReadWritePaths=/home/ubuntu/live/hivezilla-validator-20260930/reports/foundation-watch
+ProtectKernelTunables=yes
+ProtectKernelModules=yes
+ProtectControlGroups=yes
+RestrictSUIDSGID=yes
+RestrictAddressFamilies=AF_INET AF_INET6 AF_UNIX
+LockPersonality=yes
+

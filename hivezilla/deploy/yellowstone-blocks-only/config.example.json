@@ -1,0 +1,35 @@
+{
+  "libpath": "/home/ubuntu/live/hivezilla-validator-20260930/releases/yellowstone-blocks-only/libyellowstone_grpc_geyser.so",
+  "log": {
+    "level": "info"
+  },
+  "tokio": {
+    "worker_threads": 8
+  },
+  "grpc": {
+    "listen": [
+      {
+        "address": "127.0.0.1:10000"
+      }
+    ],
+    "compression": {
+      "accept": [
+        "gzip",
+        "zstd"
+      ],
+      "send": [
+        "gzip",
+        "zstd"
+      ]
+    },
+    "max_decoding_message_size": "134_217_728",
+    "channel_capacity": "100_000",
+    "replay_stored_slots": 512,
+    "unary_concurrency_limit": 8,
+    "unary_disabled": false
+  },
+  "prometheus": {
+    "address": "127.0.0.1:8999"
+  },
+  "hivezilla_blocks_only": true
+}

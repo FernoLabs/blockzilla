@@ -1,0 +1,18 @@
+{
+  "state": "PASS",
+  "observed_at": "2026-10-05T14:13:21.243768+00:00",
+  "bucket": "solana-archive-data",
+  "prefix": "native-stream/direct-agave-live-v1/000000000000000018daf342ba38d3d0-10e3f5",
+  "head_sequence": 336,
+  "start_slot": 453600000,
+  "first_produced_slot": 453600000,
+  "last_slot": 453600472,
+  "blocks": 473,
+  "bytes": 303638334,
+  "frame_readback_bytes": 847754,
+  "source_file_matches": 12,
+  "native_epoch": 1050,
+  "canonical": false,
+  "publication_ready": false,
+  "check": "one complete remote frame equals the committed native source objects"
+}

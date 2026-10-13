@@ -6,6 +6,7 @@
 
 #![forbid(unsafe_code)]
 
+pub mod r2;
 pub mod uploader;
 
 use sha2::{Digest, Sha256};
@@ -178,6 +179,11 @@ pub enum Error {
     VersionMismatch(ObjectKey),
     NotFound(ObjectKey),
     LockPoisoned,
+    UnsupportedOperation(&'static str),
+    Backend {
+        operation: &'static str,
+        status: Option<u16>,
+    },
     Io(io::Error),
 }
 
@@ -189,7 +195,7 @@ impl fmt::Display for Error {
             Self::CapacityExceeded(bytes) => {
                 write!(
                     formatter,
-                    "object is too large for the in-memory store: {bytes}"
+                    "object exceeds the configured byte limit: {bytes}"
                 )
             }
             Self::LengthMismatch { expected, actual } => {
@@ -211,6 +217,16 @@ impl fmt::Display for Error {
             Self::VersionMismatch(key) => write!(formatter, "object version mismatch at {key}"),
             Self::NotFound(key) => write!(formatter, "object not found: {key}"),
             Self::LockPoisoned => formatter.write_str("object store lock is poisoned"),
+            Self::UnsupportedOperation(operation) => {
+                write!(formatter, "unsupported object-store operation: {operation}")
+            }
+            Self::Backend { operation, status } => {
+                write!(formatter, "object-store {operation} failed")?;
+                if let Some(status) = status {
+                    write!(formatter, " (HTTP {status})")?;
+                }
+                Ok(())
+            }
             Self::Io(error) => write!(formatter, "object store I/O failed: {error}"),
         }
     }

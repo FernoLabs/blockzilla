@@ -1,0 +1,17 @@
+{
+  "state": "PASSED",
+  "before_sequences": {
+    "origin": 38488,
+    "relay": 38487
+  },
+  "native_pid": 2630745,
+  "source_kept": true,
+  "spools_kept": true,
+  "elapsed_s": 272.352,
+  "at_unix_ms": 1791664888094,
+  "after_sequences": {
+    "origin": 39142,
+    "relay": 39141
+  },
+  "native_pid_unchanged": true
+}

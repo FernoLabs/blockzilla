@@ -1,0 +1,12 @@
+{
+  "libpath": "/home/ubuntu/live/hivezilla-validator-20260930/releases/processed-worker-v3-20261010/libhivezilla_direct_agave.so",
+  "output_root": "/home/ubuntu/live/hivezilla-validator-20260930/captures/direct-agave-live",
+  "genesis_hash": "5eykt4UsFv8P8NJdTREpY1vzqKqZKvdpKuc147dw2N9d",
+  "node_identity": "J7qpvCEWhdBgPdYRV3s3btWPrRVXa2qnAzgvxWTvtbrQ",
+  "queue_events": 65536,
+  "queue_bytes": 1073741824,
+  "max_event_bytes": 16777216,
+  "max_journal_bytes": 68719476736,
+  "reserve_disk_bytes": 429496729600,
+  "commit_interval_ms": 10
+}

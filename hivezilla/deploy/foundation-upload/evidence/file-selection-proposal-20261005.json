@@ -1,0 +1,60 @@
+{
+  "state": "AWAITING_OWNER_SELECTION",
+  "measurement_source": "scope-20261005.json",
+  "epochs": 1048,
+  "profiles": [
+    {
+      "name": "query-with-signatures",
+      "recommended": true,
+      "bytes": 92898238532602,
+      "excluded_files": [
+        "archive-v2-block-access.wincode",
+        "archive-v2-block-access.index",
+        "archive-v2-get-block.index",
+        "poh.wincode",
+        "shredding.wincode"
+      ],
+      "retained_capability": "Read compact blocks and metadata, resolve keys and block hashes, and read transaction signatures",
+      "omitted_capability": "PoH and shredding evidence are not available in this cloud copy; optional serving payloads must be rebuilt or fetched separately"
+    },
+    {
+      "name": "query-without-signatures",
+      "bytes": 54862781783738,
+      "excluded_files": [
+        "archive-v2-block-access.wincode",
+        "archive-v2-block-access.index",
+        "archive-v2-get-block.index",
+        "poh.wincode",
+        "shredding.wincode",
+        "signatures.bin"
+      ],
+      "retained_capability": "Scan compact block messages and metadata and resolve keys and block hashes",
+      "omitted_capability": "Cloud copy cannot supply transaction signature bytes or PoH/shredding evidence; signature-dependent consumers need another source"
+    },
+    {
+      "name": "all-compact-files",
+      "bytes": 105496762499833,
+      "excluded_files": [],
+      "retained_capability": "All stored Compact V2 files and supporting records"
+    }
+  ],
+  "base_reader_files": [
+    "archive-v2-blocks.zstd",
+    "archive-v2-blocks.index",
+    "archive-v2-meta.wincode",
+    "registry.bin"
+  ],
+  "base_reader_bytes": 54509908394736,
+  "important_distinction": "Base reader admission is not proof of complete ledger data, full epoch coverage, or a full signed transaction service.",
+  "source_references": [
+    "crates/compact-v2/blockzilla-compact-v2-reader/src/descriptor.rs",
+    "crates/compact-v2/blockzilla-compact-v2-reader/src/reader.rs",
+    "crates/compact-v2/blockzilla-archive-v2/src/v2/layout.rs"
+  ],
+  "local_files_deleted": false,
+  "remote_files_deleted": false,
+  "existing_cloud_extras_retained": true,
+  "archive_upload_paused": true,
+  "archive_upload_enabled_for_boot": false,
+  "live_compaction_changed": false
+}

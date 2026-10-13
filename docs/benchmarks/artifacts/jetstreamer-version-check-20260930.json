@@ -1,0 +1,63 @@
+{
+  "checked_at_utc": "2026-09-30T09:21:30.228055+00:00",
+  "sources": {
+    "crate": {
+      "url": "https://crates.io/api/v1/crates/jetstreamer-firehose",
+      "result": {
+        "newest_version": "0.7.0",
+        "max_stable_version": "0.7.0",
+        "max_version": "0.7.0",
+        "versions": [
+          {
+            "num": "0.7.0",
+            "created_at": "2026-08-06T15:32:33.789688Z",
+            "yanked": false,
+            "checksum": "5f1723a65ab5811703e3b268893073cf41b1121a7e5912f4e129297af3450e4a"
+          },
+          {
+            "num": "0.6.0",
+            "created_at": "2026-04-30T18:17:25.344338Z",
+            "yanked": false,
+            "checksum": "fb35e6ef2b002c1342aae1de7e6a184512b55417afe9bd23ccede63286dfa5c7"
+          },
+          {
+            "num": "0.5.1",
+            "created_at": "2026-04-09T21:24:02.371613Z",
+            "yanked": false,
+            "checksum": "6e52ad086d65d20d26a24551a802a232dc993b2b7f67bacd608ec4ceb7336e96"
+          },
+          {
+            "num": "0.5.0",
+            "created_at": "2026-03-09T07:14:45.857983Z",
+            "yanked": false,
+            "checksum": "001c4f8b12171c69094413060f79beb4df9e698f7781ac9e1507e6ab3a4c5f88"
+          },
+          {
+            "num": "0.4.1",
+            "created_at": "2026-02-10T23:13:21.046799Z",
+            "yanked": false,
+            "checksum": "f67be4fdd7ad8c2cae84bc989e7efe7dbd6f0647a38b9b6a8274da6eb44edc3d"
+          }
+        ]
+      }
+    },
+    "main": {
+      "url": "https://api.github.com/repos/anza-xyz/jetstreamer/commits/main",
+      "result": {
+        "sha": "048d2cd25af949679c56347440b7cf5a9a900063",
+        "message": "Complete ratatui 0.30 upgrade with matching crossterm (#104)\n\n* Bump ratatui from 0.29.0 to 0.30.2\n\nBumps [ratatui](https://github.com/ratatui/ratatui) from 0.29.0 to 0.30.2.\n- [Release notes](https://github.com/ratatui/ratatui/releases)\n- [Changelog](https://github.com/ratatui/ratatui/blob/main/CHANGELOG.md)\n- [Commits](https://github.com/ratatui/ratatui/compare/v0.29.0...ratatui-v0.30.2)\n\n---\nupdated-dependencies:\n- dependency-name: ratatui\n  dependency-version: 0.30.2\n  dependency-type: direct:production\n  update-type: version-update:semver-minor\n...\n\nSigned-off-by: dependabot[bot] <support@github.com>\n\n* fix: complete ratatui upgrade in workspace manifest\n\n---------\n\nSigned-off-by: dependabot[bot] <support@github.com>\nCo-authored-by: dependabot[bot] <49699333+dependabot[bot]@users.noreply.github.com>",
+        "date": "2026-09-23T19:35:10Z",
+        "html_url": "https://github.com/anza-xyz/jetstreamer/commit/048d2cd25af949679c56347440b7cf5a9a900063"
+      }
+    },
+    "release": {
+      "url": "https://api.github.com/repos/anza-xyz/jetstreamer/releases/latest",
+      "result": {
+        "tag_name": "jetstreamer@v0.7.0",
+        "published_at": "2026-08-06T15:39:35Z",
+        "html_url": "https://github.com/anza-xyz/jetstreamer/releases/tag/jetstreamer%40v0.7.0",
+        "target_commitish": "main"
+      }
+    }
+  }
+}

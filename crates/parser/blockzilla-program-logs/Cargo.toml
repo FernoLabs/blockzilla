@@ -5,7 +5,7 @@ edition.workspace = true
 rust-version.workspace = true
 license.workspace = true
 repository.workspace = true
-publish = false
+publish = ["crates-io"]
 autobins = false
 description = "Known-program log decoding for Solana program output"
 
@@ -27,7 +27,7 @@ known-raydium-amm = []
 known-static-programs = []
 
 [dependencies]
-blockzilla-primitives = { path = "../../blockzilla-primitives" }
+blockzilla-primitives = { path = "../../blockzilla-primitives", version = "0.2.0" }
 data-encoding = "2.11.1"
 serde = { version = "1.0.229", features = ["derive"] }
 solana-pubkey = "4.2.1"

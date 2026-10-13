@@ -1,0 +1,26 @@
+{
+  "schema": "blockzilla-token-indexer-native-rpc-oracle-v1",
+  "state": "PASS",
+  "source": "local finalized Agave getBlock",
+  "slots": [
+    453291096,
+    453291097,
+    453291098,
+    453291387,
+    453291388,
+    453291389
+  ],
+  "blocks": 6,
+  "transactions": 6788,
+  "balances": 2001,
+  "failedTransactions": 956,
+  "checks": [
+    "all primary transaction signatures and execution results",
+    "blockhash and parent slot",
+    "all selected pre and post balance fields",
+    "resolved token account keys",
+    "exact amounts and decimal scale"
+  ],
+  "cryptographicVerification": false,
+  "validatorChanged": false
+}

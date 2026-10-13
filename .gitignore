@@ -6,6 +6,7 @@
 
 # Data directories
 /cache/
+/.blockzilla-cache/
 /blockzilla-v1/
 /blockzilla-v2/
 /local-archive-v2-runs/
@@ -22,6 +23,7 @@ telegram-bot-token
 *.pem
 /replication-pki/
 /pull-pki/
+/hivezilla/deploy/validator-tunnel/access-application.json
 !.env.example
 !**/.env.example
 account-index-local/

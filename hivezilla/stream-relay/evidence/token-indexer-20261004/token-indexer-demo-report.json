@@ -1,0 +1,288 @@
+{
+  "schema": "blockzilla-token-indexer-demo-v1",
+  "state": "PASS",
+  "observedAt": "2026-10-04T15:14:15.000816+00:00",
+  "host": "ubuntu@213.239.141.61",
+  "service": "blockzilla-token-indexer-demo.service",
+  "database": "/home/ubuntu/live/hivezilla-validator-20260930/indexes/token-demo/usdc.sqlite",
+  "binary": "/home/ubuntu/live/hivezilla-validator-20260930/releases/blockzilla-token-indexer-20261004-r2/blockzilla",
+  "continuousProgress": {
+    "first": {
+      "balances": 17795,
+      "blocks": 64,
+      "checkpoint": {
+        "blockhash": "GsNBrzgiw2FThuntjNTpRFoVbGhQxXiev1ZyHfNjixzc",
+        "slot": 453292296,
+        "streamCursor": "000000000000000018daf342ba38d3d0-10e3f5:453292296:6d03fe77b403324c600fcd74add6bcbaf95d6b7b0ce685f145ae76e4030b3e05"
+      },
+      "recovery": null,
+      "sources": [
+        {
+          "agaveRevision": "825efd18292aff6ffcf9daa0f7612f21b3531a72",
+          "canonical": false,
+          "genesisHash": "5eykt4UsFv8P8NJdTREpY1vzqKqZKvdpKuc147dw2N9d",
+          "kind": "native-compact-stream",
+          "nodeIdentity": "J7qpvCEWhdBgPdYRV3s3btWPrRVXa2qnAzgvxWTvtbrQ",
+          "publicationReady": false,
+          "session": "000000000000000018daf342ba38d3d0-10e3f5"
+        }
+      ],
+      "transactions": 75415
+    },
+    "second": {
+      "balances": 98022,
+      "blocks": 344,
+      "checkpoint": {
+        "blockhash": "DRuXsitqjZWnqW4jZqYXdz9fVVd1E4Fje5tqBuW7HQn1",
+        "slot": 453292576,
+        "streamCursor": "000000000000000018daf342ba38d3d0-10e3f5:453292576:847c6e23b73b66f5209b11249915f910a9d3f7f633a9a29e8902c4829a6b26db"
+      },
+      "recovery": null,
+      "sources": [
+        {
+          "agaveRevision": "825efd18292aff6ffcf9daa0f7612f21b3531a72",
+          "canonical": false,
+          "genesisHash": "5eykt4UsFv8P8NJdTREpY1vzqKqZKvdpKuc147dw2N9d",
+          "kind": "native-compact-stream",
+          "nodeIdentity": "J7qpvCEWhdBgPdYRV3s3btWPrRVXa2qnAzgvxWTvtbrQ",
+          "publicationReady": false,
+          "session": "000000000000000018daf342ba38d3d0-10e3f5"
+        }
+      ],
+      "transactions": 404713
+    }
+  },
+  "nativeRecovery": {
+    "historicalBlocks": 292,
+    "liveBlocks": 2,
+    "result": {
+      "balances": 102572,
+      "blocks": 294,
+      "checkpoint": {
+        "blockhash": "6h9XXJSdyhmrw9m4W1ag6yTdqf9GrKuh9WWwBEyomYu8",
+        "slot": 453291389,
+        "streamCursor": "000000000000000018daf342ba38d3d0-10e3f5:453291389:c34b9148a6fc687573ada7ee76290cb6dac3912a9c205c85273137a2a7aba532"
+      },
+      "recovery": {
+        "error": null,
+        "fromSlot": 453291096,
+        "state": "COMPLETE",
+        "toSlot": 453291387
+      },
+      "sources": [
+        {
+          "agaveRevision": "825efd18292aff6ffcf9daa0f7612f21b3531a72",
+          "canonical": false,
+          "genesisHash": "5eykt4UsFv8P8NJdTREpY1vzqKqZKvdpKuc147dw2N9d",
+          "kind": "native-compact-history",
+          "nodeIdentity": "J7qpvCEWhdBgPdYRV3s3btWPrRVXa2qnAzgvxWTvtbrQ",
+          "publicationReady": false,
+          "session": "000000000000000018daf342ba38d3d0-10e3f5"
+        },
+        {
+          "agaveRevision": "825efd18292aff6ffcf9daa0f7612f21b3531a72",
+          "canonical": false,
+          "genesisHash": "5eykt4UsFv8P8NJdTREpY1vzqKqZKvdpKuc147dw2N9d",
+          "kind": "native-compact-stream",
+          "nodeIdentity": "J7qpvCEWhdBgPdYRV3s3btWPrRVXa2qnAzgvxWTvtbrQ",
+          "publicationReady": false,
+          "session": "000000000000000018daf342ba38d3d0-10e3f5"
+        }
+      ],
+      "transactions": 339374
+    }
+  },
+  "unavailableHistoryPreservesPosition": {
+    "balances": 49722,
+    "blocks": 10,
+    "checkpoint": {
+      "blockhash": "3TkCLU8vXi8JF9DixF7XkKBhgHmuvq3J53gsw5ciBiRn",
+      "slot": 453285494,
+      "streamCursor": "000000000000000018daf342ba38d3d0-10e3f5:453285494:67fb5066a9a80d1e10e24f09466d00fdc8ab64801a8a6b35d658d4b4f23b18a1"
+    },
+    "recovery": {
+      "error": "Required Blockzilla history is unavailable for epoch 1049; database progress was retained",
+      "fromSlot": 453285495,
+      "state": "BLOCKED",
+      "toSlot": 453285637
+    },
+    "sources": [
+      {
+        "agaveRevision": "825efd18292aff6ffcf9daa0f7612f21b3531a72",
+        "canonical": false,
+        "genesisHash": "5eykt4UsFv8P8NJdTREpY1vzqKqZKvdpKuc147dw2N9d",
+        "kind": "native-compact-stream",
+        "nodeIdentity": "J7qpvCEWhdBgPdYRV3s3btWPrRVXa2qnAzgvxWTvtbrQ",
+        "publicationReady": false,
+        "session": "000000000000000018daf342ba38d3d0-10e3f5"
+      }
+    ],
+    "transactions": 11638
+  },
+  "publicEpoch900": {
+    "balances": 10326,
+    "blocks": 6,
+    "checkpoint": {
+      "blockhash": "Es3NiYm9FPSppXsoTruDHoSd4GCLceRi4k86b8VKjeei",
+      "slot": 388800005,
+      "streamCursor": null
+    },
+    "recovery": {
+      "error": null,
+      "fromSlot": 388800003,
+      "state": "LIMIT_REACHED",
+      "toSlot": 389231999
+    },
+    "sources": [
+      {
+        "accountKeys": "unavailable",
+        "hashContinuity": "checked-parent-links",
+        "identity": {
+          "binding": "etag-set-7f848afac03e5a7f0addb3490f4db3346d8a1271460fe0eaaa5f862a56613f2f",
+          "block_count": 431858,
+          "cluster_id": "mainnet-beta",
+          "epoch": 900,
+          "first_slot": 388800000,
+          "format": "compact-v2",
+          "label": "etag-set-7f848afac03e5a7f0addb3490f4db3346d8a1271460fe0eaaa5f862a56613f2f",
+          "slots_per_epoch": 432000,
+          "verification": "object-set-bound"
+        },
+        "kind": "blockzilla-history"
+      }
+    ],
+    "transactions": 5969
+  },
+  "tests": {
+    "cli": 9,
+    "nativeDecoder": 11
+  },
+  "build": "development profile; hot decoder, JSON and SQLite dependencies optimized; four build workers; no local Mac build",
+  "publicStreamConfigured": false,
+  "completeEpochProved": false,
+  "binarySha256": "bf48c54745992b167fb730a59167066b9bb4bbf0872ecad1903ada47255e7b79",
+  "restart": {
+    "state": "PASS",
+    "before": {
+      "balances": 335279,
+      "blocks": 1362,
+      "checkpoint": {
+        "blockhash": "EbqzmSj95gNkkHNhFseHjkDLRyMMomJ69uMiVvERMxHC",
+        "slot": 453293594,
+        "streamCursor": "000000000000000018daf342ba38d3d0-10e3f5:453293594:ae1ee3708d1ffbed226ee4fb480260504358c48c1c2a467c30b46f42953adfe0"
+      },
+      "recovery": null,
+      "sources": [
+        {
+          "agaveRevision": "825efd18292aff6ffcf9daa0f7612f21b3531a72",
+          "canonical": false,
+          "genesisHash": "5eykt4UsFv8P8NJdTREpY1vzqKqZKvdpKuc147dw2N9d",
+          "kind": "native-compact-stream",
+          "nodeIdentity": "J7qpvCEWhdBgPdYRV3s3btWPrRVXa2qnAzgvxWTvtbrQ",
+          "publicationReady": false,
+          "session": "000000000000000018daf342ba38d3d0-10e3f5"
+        }
+      ],
+      "transactions": 1632582
+    },
+    "after": {
+      "balances": 367500,
+      "blocks": 1482,
+      "checkpoint": {
+        "blockhash": "ATBamTYMkFQqZp4aQi8oEZ1h1kduFKhxGkuyKuguNAZr",
+        "slot": 453293714,
+        "streamCursor": "000000000000000018daf342ba38d3d0-10e3f5:453293714:d1b6992b46255129a9726f531a0cdb166d96ae626d20af584e6ffa31f1102dcd"
+      },
+      "recovery": null,
+      "sources": [
+        {
+          "agaveRevision": "825efd18292aff6ffcf9daa0f7612f21b3531a72",
+          "canonical": false,
+          "genesisHash": "5eykt4UsFv8P8NJdTREpY1vzqKqZKvdpKuc147dw2N9d",
+          "kind": "native-compact-stream",
+          "nodeIdentity": "J7qpvCEWhdBgPdYRV3s3btWPrRVXa2qnAzgvxWTvtbrQ",
+          "publicationReady": false,
+          "session": "000000000000000018daf342ba38d3d0-10e3f5"
+        }
+      ],
+      "transactions": 1768672
+    },
+    "duplicateRows": false
+  },
+  "partialRecoveryBlockLimitTest": {
+    "schema": "blockzilla-token-indexer-partial-recovery-cap-v1",
+    "state": "PASS",
+    "exitStatus": 1,
+    "requestedMaxBlocks": 1,
+    "acceptedPrefixRetained": true,
+    "failureNotHiddenByLimit": true,
+    "error": "Error: Required committed native history is unavailable",
+    "status": {
+      "balances": 242,
+      "blocks": 1,
+      "checkpoint": {
+        "blockhash": "AHHBL16YJjWdPUhf8MUh2KtdaW1gR4TxTy9Wbymq1hrz",
+        "slot": 453293165,
+        "streamCursor": null
+      },
+      "recovery": {
+        "error": "Required committed native history is unavailable",
+        "fromSlot": 453293165,
+        "state": "BLOCKED",
+        "toSlot": 453293360
+      },
+      "sources": [
+        {
+          "agaveRevision": "825efd18292aff6ffcf9daa0f7612f21b3531a72",
+          "canonical": false,
+          "genesisHash": "5eykt4UsFv8P8NJdTREpY1vzqKqZKvdpKuc147dw2N9d",
+          "kind": "native-compact-history",
+          "nodeIdentity": "J7qpvCEWhdBgPdYRV3s3btWPrRVXa2qnAzgvxWTvtbrQ",
+          "publicationReady": false,
+          "session": "000000000000000018daf342ba38d3d0-10e3f5"
+        }
+      ],
+      "transactions": 1327
+    },
+    "liveSourceChanged": false
+  },
+  "nativeRpcOracle": {
+    "schema": "blockzilla-token-indexer-native-rpc-oracle-v1",
+    "state": "PASS",
+    "source": "local finalized Agave getBlock",
+    "slots": [
+      453291096,
+      453291097,
+      453291098,
+      453291387,
+      453291388,
+      453291389
+    ],
+    "blocks": 6,
+    "transactions": 6788,
+    "balances": 2001,
+    "failedTransactions": 956,
+    "checks": [
+      "all primary transaction signatures and execution results",
+      "blockhash and parent slot",
+      "all selected pre and post balance fields",
+      "resolved token account keys",
+      "exact amounts and decimal scale"
+    ],
+    "cryptographicVerification": false,
+    "validatorChanged": false
+  },
+  "nativeHealth": {
+    "state": "WARNING",
+    "problems": [],
+    "warnings": [
+      "An earlier session ended without a clean close; earlier coverage can have gaps",
+      "Raw shred capture is not current; no complete shred coverage claim"
+    ],
+    "compactLagSlots": 3,
+    "rawShredsState": "FAILED",
+    "rawShredsReason": "hook journal quota reached"
+  },
+  "servicesText": "Id=blockzilla-token-indexer-demo.service\nActiveState=active\nSubState=running\nMainPID=710388\nNRestarts=0\nMemoryCurrent=117497856\nCPUUsageNSec=14611304000\n\nId=hivezilla-validator.service\nActiveState=active\nSubState=running\nMainPID=1106933\nNRestarts=0\nMemoryCurrent=675915161600\nCPUUsageNSec=1596943726533000\n\nId=hivezilla-direct-worker.service\nActiveState=active\nSubState=running\nMainPID=4105319\nNRestarts=1\nMemoryCurrent=34282049536\nCPUUsageNSec=20284915149000\n\nId=hivezilla-shred-hook-recorder.service\nActiveState=active\nSubState=running\nMainPID=1106863\nNRestarts=0\nMemoryCurrent=528617472\nCPUUsageNSec=2929204691000\n\nId=hivezilla-stream-origin.service\nActiveState=active\nSubState=running\nMainPID=4193455\nNRestarts=0\nMemoryCurrent=196972544\nCPUUsageNSec=154402003000\n\nId=hivezilla-stream-relay.service\nActiveState=active\nSubState=running\nMainPID=4193601\nNRestarts=0\nMemoryCurrent=381947904\nCPUUsageNSec=100735130000\n",
+  "nativeServicePidsUnchanged": true
+}

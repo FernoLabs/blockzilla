@@ -1,0 +1,18 @@
+[Unit]
+Description=Check durable Hivezilla direct capture and compact progress
+StartLimitIntervalSec=0
+
+[Service]
+Type=oneshot
+User=ubuntu
+Group=ubuntu
+UMask=0077
+ExecStart=/usr/bin/python3 /home/ubuntu/live/hivezilla-validator-20260930/deploy/processed-stream-20261010/pipeline_health.py --capture-root /home/ubuntu/live/hivezilla-validator-20260930/captures/direct-agave-live --output-root /home/ubuntu/live/hivezilla-validator-20260930/compact/direct-agave-processed-live --shred-root /home/ubuntu/live/hivezilla-validator-20260930/captures/shred-hook-direct-20261002 --report /home/ubuntu/live/hivezilla-validator-20260930/reports/direct-agave-health.json
+TimeoutStartSec=25s
+MemoryMax=128M
+CPUQuota=100%
+NoNewPrivileges=yes
+PrivateTmp=yes
+ProtectSystem=strict
+ProtectHome=read-only
+ReadWritePaths=/home/ubuntu/live/hivezilla-validator-20260930/reports

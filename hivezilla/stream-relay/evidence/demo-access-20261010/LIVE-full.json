@@ -1,0 +1,19 @@
+{
+  "units": {
+    "hivezilla-validator": "active",
+    "hivezilla-direct-worker": "active",
+    "hivezilla-stream-origin": "active",
+    "hivezilla-stream-relay": "active",
+    "hivezilla-processed-stream-publisher": "active",
+    "hivezilla-tunnel": "active"
+  },
+  "validator_pid": "1106933",
+  "checked_unix_ms": 1791654672295,
+  "worker": {
+    "state": "RUNNING",
+    "event_sequence": 45157,
+    "last_compact_slot": 455343872,
+    "source_sequence": 52222314
+  },
+  "current_capture_failure": {}
+}

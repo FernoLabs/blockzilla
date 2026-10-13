@@ -1,0 +1,6 @@
+{
+  "state": "PASSED",
+  "log": "/home/ubuntu/benchmarks/blockzilla-processed-stream-20261010/stream-demo-v4-build.log",
+  "rust_tests": 22,
+  "completed_unix_ms": 1791654585547
+}

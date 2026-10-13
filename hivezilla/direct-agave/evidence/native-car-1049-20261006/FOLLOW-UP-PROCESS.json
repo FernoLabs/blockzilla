@@ -1,0 +1,8 @@
+{
+  "pid": 87716,
+  "epoch": 1049,
+  "kind": "one-off requested CAR comparison",
+  "maximum_runtime_hours": 8,
+  "native_data_leaves_foundation": false,
+  "car_source": "https://files.old-faithful.net/1049/epoch-1049.car"
+}

@@ -1,0 +1,288 @@
+{
+  "schema": "zilla-resident-cpu-profile-analysis-v1",
+  "created_at_utc": "2026-09-30T17:27:53.612044+00:00",
+  "remote_case": "/home/ubuntu/benchmarks/zilla-triton-20260930/results-resident-decode-epoch1000-r2/stacks-p64-w64",
+  "reader_scan_seconds": 41.413174828,
+  "event": "cpu-clock",
+  "sampling_frequency_hz": 99,
+  "sample_count": 329962,
+  "lost_samples_reported": 0,
+  "folded_weight_units": "CPU-clock event period in nanoseconds; not number of samples",
+  "sample_period_ns": 10101010,
+  "folded_total_weight_ns": 3332949461620,
+  "sampled_cpu_seconds_from_periods": 3332.94946162,
+  "sample_count_crosscheck": "Every folded weight is divisible by 10,101,010; the quotient sum equals the 329,962 samples reported by perf record.",
+  "unresolved_leaf": {
+    "sample_count": 41042,
+    "weighted_percent": 12.438401997805808,
+    "by_placeholder": [
+      {
+        "placeholder": "[libc.so.6]",
+        "samples": 34935,
+        "weighted_percent": 10.587582812566296
+      },
+      {
+        "placeholder": "[car-decode-reference]",
+        "samples": 6107,
+        "weighted_percent": 1.8508191852395124
+      }
+    ],
+    "definition": "Leaf consists only of a bracketed module/unknown placeholder after Inferno collapse. Ancestor-only unknowns are not counted."
+  },
+  "encoded_stack_depth": {
+    "unique_encoded_stacks": 2858,
+    "min": 2,
+    "median_weighted": 31,
+    "p95_weighted": 46,
+    "max": 75,
+    "mean_weighted": 31.292591268085417,
+    "depth_one_weighted_percent": 0.0,
+    "limit": "Encoded flamegraph frames include expanded inline calls and Rust type semicolon fragments. These are not physical frame-pointer unwind depths and do not prove complete stacks.",
+    "leading_whitespace_leaf_fragment_weighted_percent": 3.1573332686794235
+  },
+  "top_self_functions": [
+    {
+      "self_percent_rounded": 15.25,
+      "command": "car-decode-refe",
+      "dso": "car-decode-reference",
+      "symbol": "_blake3_compress_in_place_avx512"
+    },
+    {
+      "self_percent_rounded": 9.45,
+      "command": "car-decode-refe",
+      "dso": "car-decode-reference",
+      "symbol": "ZSTD_decompressSequences_default.constprop.0"
+    },
+    {
+      "self_percent_rounded": 5.29,
+      "command": "car-decode-refe",
+      "dso": "car-decode-reference",
+      "symbol": "<of_car_reader::reader::CarBlockReader<alloc::boxed::Box<dyn std::io::Read>>>::read_until_block_ordered_lossless_inner::{closure#0}"
+    },
+    {
+      "self_percent_rounded": 5.27,
+      "command": "car-decode-refe",
+      "dso": "car-decode-reference",
+      "symbol": "of_car_reader::versioned_transaction::copy_bytes_reusing"
+    },
+    {
+      "self_percent_rounded": 4.04,
+      "command": "car-decode-refe",
+      "dso": "car-decode-reference",
+      "symbol": "core::str::converts::from_utf8"
+    },
+    {
+      "self_percent_rounded": 3.46,
+      "command": "car-decode-refe",
+      "dso": "car-decode-reference",
+      "symbol": "<car_decode_reference::Decoder>::decode"
+    },
+    {
+      "self_percent_rounded": 2.78,
+      "command": "car-decode-refe",
+      "dso": "car-decode-reference",
+      "symbol": "<minicbor::decode::decoder::Decoder>::unsigned"
+    },
+    {
+      "self_percent_rounded": 2.62,
+      "command": "car-decode-refe",
+      "dso": "car-decode-reference",
+      "symbol": "_mi_page_malloc_zero"
+    },
+    {
+      "self_percent_rounded": 2.43,
+      "command": "car-decode-refe",
+      "dso": "car-decode-reference",
+      "symbol": "of_car_reader::metadata_decoder::decode_transaction_status_meta_into"
+    },
+    {
+      "self_percent_rounded": 2.38,
+      "command": "car-decode-refe",
+      "dso": "car-decode-reference",
+      "symbol": "prost::encoding::string::merge::<&[u8]>"
+    },
+    {
+      "self_percent_rounded": 2.29,
+      "command": "car-decode-refe",
+      "dso": "car-decode-reference",
+      "symbol": "ZSTD_decompressMultiFrame"
+    },
+    {
+      "self_percent_rounded": 2.01,
+      "command": "car-decode-refe",
+      "dso": "car-decode-reference",
+      "symbol": "prost::encoding::message::merge_repeated::<of_car_reader::confirmed_block::TokenBalance, &[u8]>"
+    },
+    {
+      "self_percent_rounded": 1.76,
+      "command": "car-decode-refe",
+      "dso": "car-decode-reference",
+      "symbol": "<of_car_reader::metadata_decoder::ZstdReusableDecoder>::decompress_if_zstd"
+    },
+    {
+      "self_percent_rounded": 1.6,
+      "command": "car-decode-refe",
+      "dso": "car-decode-reference",
+      "symbol": "mi_free"
+    },
+    {
+      "self_percent_rounded": 1.56,
+      "command": "car-decode-refe",
+      "dso": "car-decode-reference",
+      "symbol": "prost::encoding::varint::decode_varint_slice"
+    },
+    {
+      "self_percent_rounded": 1.54,
+      "command": "car-decode-refe",
+      "dso": "car-decode-reference",
+      "symbol": "of_car_reader::versioned_transaction::read_compiled_instructions_reusing"
+    },
+    {
+      "self_percent_rounded": 1.46,
+      "command": "car-decode-refe",
+      "dso": "car-decode-reference",
+      "symbol": "<of_car_reader::versioned_transaction::VersionedTransactionReuse>::retained_capacity_bytes"
+    },
+    {
+      "self_percent_rounded": 1.38,
+      "command": "car-decode-refe",
+      "dso": "car-decode-reference",
+      "symbol": "mi_theap_malloc_aligned"
+    },
+    {
+      "self_percent_rounded": 1.37,
+      "command": "car-decode-refe",
+      "dso": "car-decode-reference",
+      "symbol": "prost::encoding::uint64::merge::<&[u8]>"
+    },
+    {
+      "self_percent_rounded": 1.24,
+      "command": "car-decode-refe",
+      "dso": "car-decode-reference",
+      "symbol": "<alloc::raw_vec::RawVecInner>::finish_grow"
+    },
+    {
+      "self_percent_rounded": 1.19,
+      "command": "car-decode-refe",
+      "dso": "car-decode-reference",
+      "symbol": "of_car_reader::node::decode_node_with_kind"
+    },
+    {
+      "self_percent_rounded": 1.18,
+      "command": "car-decode-refe",
+      "dso": "car-decode-reference",
+      "symbol": "<minicbor::decode::decoder::Decoder>::array"
+    },
+    {
+      "self_percent_rounded": 1.1,
+      "command": "car-decode-refe",
+      "dso": "car-decode-reference",
+      "symbol": "std::sys::backtrace::__rust_begin_short_backtrace::<car_decode_reference::dynamic::scan_dynamic_profiled<car_decode_reference::resident::platform::ResidentSource>::{closure#2}::{closure#0}::{closure#1}, ()>"
+    },
+    {
+      "self_percent_rounded": 1.02,
+      "command": "car-decode-refe",
+      "dso": "car-decode-reference",
+      "symbol": "<alloc::raw_vec::RawVecInner<_>>::reserve::do_reserve_and_handle::<alloc::alloc::Global>"
+    },
+    {
+      "self_percent_rounded": 0.96,
+      "command": "car-decode-refe",
+      "dso": "car-decode-reference",
+      "symbol": "ZSTD_buildFSETable_body_default.isra.0"
+    }
+  ],
+  "approximate_visible_symbol_groups": [
+    {
+      "group": "Zstd, HUF, and FSE visible self symbols",
+      "summed_rounded_self_percent": 17.7
+    },
+    {
+      "group": "BLAKE3 visible self symbols",
+      "summed_rounded_self_percent": 16.1
+    },
+    {
+      "group": "Metadata/protobuf visible self symbols",
+      "summed_rounded_self_percent": 11.98
+    },
+    {
+      "group": "CAR/CBOR parsing visible self symbols",
+      "summed_rounded_self_percent": 11.35
+    },
+    {
+      "group": "Transaction decode/reuse visible self symbols",
+      "summed_rounded_self_percent": 8.64
+    },
+    {
+      "group": "Allocation visible self symbols",
+      "summed_rounded_self_percent": 8.39
+    },
+    {
+      "group": "Unresolved-address visible self symbols",
+      "summed_rounded_self_percent": 5.34
+    },
+    {
+      "group": "Other visible self symbols",
+      "summed_rounded_self_percent": 4.56
+    },
+    {
+      "group": "UTF-8 validation visible self symbols",
+      "summed_rounded_self_percent": 4.04
+    }
+  ],
+  "category_limit": "Groups sum rounded perf report self percentages only for symbols at or above the 0.3% report threshold. They omit the long tail and are not complete stage attribution. A symbol can represent inlined work; allocator/UTF8 costs may belong to metadata or other callers. Do not sum these groups with inclusive flamegraph shares.",
+  "visible_self_percent_sum_rounded": 88.1,
+  "stack_quality_limit": "Zero lost samples and a nonempty detailed graph do not establish complete stack unwinding. Standard library or libc paths can be unresolved. Names and call depth also reflect inline expansion.",
+  "svg_correction": {
+    "original": {
+      "name": "triton-resident-decode-20260930-r2-cpu.svg",
+      "bytes": 338245,
+      "sha256": "1c46b21cb6e6df7557ac3ba5eee6f5a3d11558f91e1a1c662e8ccfd93870dd2b"
+    },
+    "corrected": {
+      "name": "triton-resident-decode-20260930-r2-cpu-time.svg",
+      "bytes": 346277,
+      "sha256": "4f191554462cc979c754c8c9f7201b641c3ac710983ad248335c4ce203b3268b"
+    },
+    "changes": [
+      "Title now says CPU profile",
+      "Tooltip unit changed from samples to CPU nanoseconds"
+    ],
+    "original_remote_svg_preserved": true,
+    "geometry_and_event_weights_unchanged": true,
+    "xml_parse_and_labels_checked": true
+  },
+  "artifacts": {
+    "folded_original": {
+      "name": "triton-resident-decode-20260930-r2-cpu.folded",
+      "bytes": 10343614,
+      "sha256": "6fd98f971fe03d428bc820a117142fd9bb93ea0fcbb94f8e130e562048677e3a"
+    },
+    "folded_deterministic_gzip": {
+      "name": "triton-resident-decode-20260930-r2-cpu.folded.gz",
+      "bytes": 128901,
+      "sha256": "5ea89a77a6c1d14dbbb9780e90bf43fb5b43a6c44bf29076267576bcbb122d59"
+    },
+    "leaf_report": {
+      "name": "triton-resident-decode-20260930-r2-perf-self.txt",
+      "bytes": 18035,
+      "sha256": "fe3428a3993cd43692463aa29010a90d4710c615aecff4a487694013e536467e"
+    }
+  },
+  "remote_only_raw_files": {
+    "perf.data": 43366486,
+    "perf.script": 1564737274
+  },
+  "profiler_stderr": "Events disabled\nEvents enabled\nEvents disabled\n[ perf record: Woken up 103 times to write data ]\n[ perf record: Captured and wrote 41.216 MB /home/ubuntu/benchmarks/zilla-triton-20260930/results-resident-decode-epoch1000-r2/stacks-p64-w64/perf.data (329962 samples) ]\n",
+  "conversion_stderr": {
+    "perf-report": "",
+    "perf-script": "",
+    "inferno": ""
+  },
+  "conversion_seconds": {
+    "perf-report": 0.568698142,
+    "perf-script": 122.525766159,
+    "inferno": 3.587300071
+  },
+  "interpretation": "This profile is full owned decode and hashing with resident local input and no export. It does not measure Triton network throughput or the equal-output reader comparison."
+}

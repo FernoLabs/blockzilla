@@ -1,0 +1,60 @@
+{
+  "schema": "blockzilla-telegram-command-deployment-v1",
+  "checked_unix_ms": 1791866734027,
+  "worker_version": "670ba00d-a5c3-4608-a553-c305656f143f",
+  "bot_url": "https://t.me/megaloadon_alerts_bot",
+  "webhook_registered": true,
+  "separate_webhook_secret": true,
+  "drop_pending_updates": false,
+  "max_connections": 1,
+  "allowed_updates": [
+    "message"
+  ],
+  "pending_updates": 0,
+  "command_menu_verified": true,
+  "commands": [
+    "status",
+    "help"
+  ],
+  "tests_passed": 44,
+  "real_status_reply_verified": true,
+  "archive_telemetry_received": true,
+  "archive": {
+    "state": "COMPACTING",
+    "epoch": 1051,
+    "updated_unix_ms": 1791866722248,
+    "stage_updated_unix_ms": 1791864756789,
+    "progress_updated_unix_ms": 1791866721684,
+    "progress_percent": 68.4,
+    "bytes_per_second": null,
+    "eta_seconds": 909,
+    "eta_scope": "stage",
+    "paused": false,
+    "epoch_eta_min_seconds": 1447,
+    "epoch_eta_max_seconds": 2184,
+    "queue_eta_min_seconds": 18060,
+    "queue_eta_max_seconds": 26670,
+    "last_completed_epoch": 1050,
+    "last_compact_bytes": 127286509165,
+    "completed_epochs": [
+      1048,
+      1049,
+      1050
+    ],
+    "upload_queue_epochs": [
+      1051,
+      1052,
+      1053,
+      1054
+    ]
+  },
+  "live_slot_lag": 0,
+  "live_event_lag": 264,
+  "heartbeat_and_archive_tests_passed": 26,
+  "last_command_delivery_unix_ms": 1791866629302,
+  "pending_commands": 0,
+  "command_delivery_error": null,
+  "visible_request_id": 733187551,
+  "visible_status_evidence": "Native Telegram app showed the real /status reply with matching request ID, Paris date, archive epoch 1051 at 65.2%, zero live slot lag, and rounded epoch/plan estimates.",
+  "controller_log_read_access": "pending_owner_decision"
+}

@@ -1,0 +1,285 @@
+{
+  "schema": "hivezilla-stream-sdk-live-v1",
+  "state": "PASS",
+  "node": "v24.19.0",
+  "browser": "154.0.8037.97",
+  "wasm_bytes": 638988,
+  "wasm_sha256": "ee89af3711234e0c12c5f1c90f788474827229049d3f207e75f277e882a36c6d",
+  "program": "TokenkegQfeZyiNwAJbNbGKPFXCWuBvf9Ss623VQ5DA",
+  "batches": 3,
+  "blocks": 4,
+  "transactions": 4461,
+  "program_matches": 338,
+  "account_matches": 914,
+  "memory_bytes_after_warmup": 56098816,
+  "repeated_decode_memory_stable": true,
+  "reconnect_checkpoint_test": true,
+  "source_finality": "operator-trusted finalized",
+  "canonical": false,
+  "publication_ready": false,
+  "public_route": false,
+  "rpc_oracle_verified": true,
+  "results": {
+    "node_all": {
+      "rows": [
+        {
+          "cursor": "000000000000000018daf342ba38d3d0-10e3f5:453236700:1f47343024655426566c778c9e83e76487805442b923fdc83f3c3089184cee6d",
+          "digest": "1f47343024655426566c778c9e83e76487805442b923fdc83f3c3089184cee6d",
+          "slots": [
+            453236700
+          ],
+          "transactions": 1397,
+          "matches": 1397,
+          "wireBytes": 496748,
+          "decodeMilliseconds": 47.32916599999999
+        },
+        {
+          "cursor": "000000000000000018daf342ba38d3d0-10e3f5:453236702:ef7f209eacc1e7c2757a88d5ea9dc9fb6fb2dcbe7dc89e63b9cb232de2300ebd",
+          "digest": "ef7f209eacc1e7c2757a88d5ea9dc9fb6fb2dcbe7dc89e63b9cb232de2300ebd",
+          "slots": [
+            453236701,
+            453236702
+          ],
+          "transactions": 2085,
+          "matches": 2085,
+          "wireBytes": 691576,
+          "decodeMilliseconds": 71.44487500000014
+        },
+        {
+          "cursor": "000000000000000018daf342ba38d3d0-10e3f5:453236703:9f7d3fc340b0d1127628454ccbc3a373bd569c0b95d1337b040a0e370496073b",
+          "digest": "9f7d3fc340b0d1127628454ccbc3a373bd569c0b95d1337b040a0e370496073b",
+          "slots": [
+            453236703
+          ],
+          "transactions": 979,
+          "matches": 979,
+          "wireBytes": 371200,
+          "decodeMilliseconds": 24.09983299999999
+        }
+      ],
+      "checkpoints": [
+        "000000000000000018daf342ba38d3d0-10e3f5:453236700:1f47343024655426566c778c9e83e76487805442b923fdc83f3c3089184cee6d",
+        "000000000000000018daf342ba38d3d0-10e3f5:453236702:ef7f209eacc1e7c2757a88d5ea9dc9fb6fb2dcbe7dc89e63b9cb232de2300ebd",
+        "000000000000000018daf342ba38d3d0-10e3f5:453236703:9f7d3fc340b0d1127628454ccbc3a373bd569c0b95d1337b040a0e370496073b"
+      ]
+    },
+    "node_program_binary": {
+      "rows": [
+        {
+          "cursor": "000000000000000018daf342ba38d3d0-10e3f5:453236700:1f47343024655426566c778c9e83e76487805442b923fdc83f3c3089184cee6d",
+          "digest": "1f47343024655426566c778c9e83e76487805442b923fdc83f3c3089184cee6d",
+          "slots": [
+            453236700
+          ],
+          "transactions": 1397,
+          "matches": 108,
+          "wireBytes": 496748,
+          "decodeMilliseconds": 91.17966700000011
+        },
+        {
+          "cursor": "000000000000000018daf342ba38d3d0-10e3f5:453236702:ef7f209eacc1e7c2757a88d5ea9dc9fb6fb2dcbe7dc89e63b9cb232de2300ebd",
+          "digest": "ef7f209eacc1e7c2757a88d5ea9dc9fb6fb2dcbe7dc89e63b9cb232de2300ebd",
+          "slots": [
+            453236701,
+            453236702
+          ],
+          "transactions": 2085,
+          "matches": 166,
+          "wireBytes": 691576,
+          "decodeMilliseconds": 94.04529100000013
+        },
+        {
+          "cursor": "000000000000000018daf342ba38d3d0-10e3f5:453236703:9f7d3fc340b0d1127628454ccbc3a373bd569c0b95d1337b040a0e370496073b",
+          "digest": "9f7d3fc340b0d1127628454ccbc3a373bd569c0b95d1337b040a0e370496073b",
+          "slots": [
+            453236703
+          ],
+          "transactions": 979,
+          "matches": 64,
+          "wireBytes": 371200,
+          "decodeMilliseconds": 48.3215409999998
+        }
+      ],
+      "checkpoints": [
+        "000000000000000018daf342ba38d3d0-10e3f5:453236700:1f47343024655426566c778c9e83e76487805442b923fdc83f3c3089184cee6d",
+        "000000000000000018daf342ba38d3d0-10e3f5:453236702:ef7f209eacc1e7c2757a88d5ea9dc9fb6fb2dcbe7dc89e63b9cb232de2300ebd",
+        "000000000000000018daf342ba38d3d0-10e3f5:453236703:9f7d3fc340b0d1127628454ccbc3a373bd569c0b95d1337b040a0e370496073b"
+      ]
+    },
+    "node_program_sse": {
+      "rows": [
+        {
+          "cursor": "000000000000000018daf342ba38d3d0-10e3f5:453236700:1f47343024655426566c778c9e83e76487805442b923fdc83f3c3089184cee6d",
+          "digest": "1f47343024655426566c778c9e83e76487805442b923fdc83f3c3089184cee6d",
+          "slots": [
+            453236700
+          ],
+          "transactions": 1397,
+          "matches": 108,
+          "wireBytes": 496748,
+          "decodeMilliseconds": 10.288708999999926
+        },
+        {
+          "cursor": "000000000000000018daf342ba38d3d0-10e3f5:453236702:ef7f209eacc1e7c2757a88d5ea9dc9fb6fb2dcbe7dc89e63b9cb232de2300ebd",
+          "digest": "ef7f209eacc1e7c2757a88d5ea9dc9fb6fb2dcbe7dc89e63b9cb232de2300ebd",
+          "slots": [
+            453236701,
+            453236702
+          ],
+          "transactions": 2085,
+          "matches": 166,
+          "wireBytes": 691576,
+          "decodeMilliseconds": 15.784750000000031
+        },
+        {
+          "cursor": "000000000000000018daf342ba38d3d0-10e3f5:453236703:9f7d3fc340b0d1127628454ccbc3a373bd569c0b95d1337b040a0e370496073b",
+          "digest": "9f7d3fc340b0d1127628454ccbc3a373bd569c0b95d1337b040a0e370496073b",
+          "slots": [
+            453236703
+          ],
+          "transactions": 979,
+          "matches": 64,
+          "wireBytes": 371200,
+          "decodeMilliseconds": 7.293290999999954
+        }
+      ],
+      "checkpoints": [
+        "000000000000000018daf342ba38d3d0-10e3f5:453236700:1f47343024655426566c778c9e83e76487805442b923fdc83f3c3089184cee6d",
+        "000000000000000018daf342ba38d3d0-10e3f5:453236702:ef7f209eacc1e7c2757a88d5ea9dc9fb6fb2dcbe7dc89e63b9cb232de2300ebd",
+        "000000000000000018daf342ba38d3d0-10e3f5:453236703:9f7d3fc340b0d1127628454ccbc3a373bd569c0b95d1337b040a0e370496073b"
+      ]
+    },
+    "node_account_binary": {
+      "rows": [
+        {
+          "cursor": "000000000000000018daf342ba38d3d0-10e3f5:453236700:1f47343024655426566c778c9e83e76487805442b923fdc83f3c3089184cee6d",
+          "digest": "1f47343024655426566c778c9e83e76487805442b923fdc83f3c3089184cee6d",
+          "slots": [
+            453236700
+          ],
+          "transactions": 1397,
+          "matches": 292,
+          "wireBytes": 496748,
+          "decodeMilliseconds": 16.871875000000045
+        },
+        {
+          "cursor": "000000000000000018daf342ba38d3d0-10e3f5:453236702:ef7f209eacc1e7c2757a88d5ea9dc9fb6fb2dcbe7dc89e63b9cb232de2300ebd",
+          "digest": "ef7f209eacc1e7c2757a88d5ea9dc9fb6fb2dcbe7dc89e63b9cb232de2300ebd",
+          "slots": [
+            453236701,
+            453236702
+          ],
+          "transactions": 2085,
+          "matches": 439,
+          "wireBytes": 691576,
+          "decodeMilliseconds": 21.459957999999915
+        },
+        {
+          "cursor": "000000000000000018daf342ba38d3d0-10e3f5:453236703:9f7d3fc340b0d1127628454ccbc3a373bd569c0b95d1337b040a0e370496073b",
+          "digest": "9f7d3fc340b0d1127628454ccbc3a373bd569c0b95d1337b040a0e370496073b",
+          "slots": [
+            453236703
+          ],
+          "transactions": 979,
+          "matches": 183,
+          "wireBytes": 371200,
+          "decodeMilliseconds": 6.830582999999933
+        }
+      ],
+      "checkpoints": [
+        "000000000000000018daf342ba38d3d0-10e3f5:453236700:1f47343024655426566c778c9e83e76487805442b923fdc83f3c3089184cee6d",
+        "000000000000000018daf342ba38d3d0-10e3f5:453236702:ef7f209eacc1e7c2757a88d5ea9dc9fb6fb2dcbe7dc89e63b9cb232de2300ebd",
+        "000000000000000018daf342ba38d3d0-10e3f5:453236703:9f7d3fc340b0d1127628454ccbc3a373bd569c0b95d1337b040a0e370496073b"
+      ]
+    },
+    "browser_program_binary": {
+      "rows": [
+        {
+          "cursor": "000000000000000018daf342ba38d3d0-10e3f5:453236700:1f47343024655426566c778c9e83e76487805442b923fdc83f3c3089184cee6d",
+          "digest": "1f47343024655426566c778c9e83e76487805442b923fdc83f3c3089184cee6d",
+          "slots": [
+            453236700
+          ],
+          "transactions": 1397,
+          "matches": 108,
+          "wireBytes": 496748,
+          "decodeMilliseconds": 21.399999976158142
+        },
+        {
+          "cursor": "000000000000000018daf342ba38d3d0-10e3f5:453236702:ef7f209eacc1e7c2757a88d5ea9dc9fb6fb2dcbe7dc89e63b9cb232de2300ebd",
+          "digest": "ef7f209eacc1e7c2757a88d5ea9dc9fb6fb2dcbe7dc89e63b9cb232de2300ebd",
+          "slots": [
+            453236701,
+            453236702
+          ],
+          "transactions": 2085,
+          "matches": 166,
+          "wireBytes": 691576,
+          "decodeMilliseconds": 13
+        },
+        {
+          "cursor": "000000000000000018daf342ba38d3d0-10e3f5:453236703:9f7d3fc340b0d1127628454ccbc3a373bd569c0b95d1337b040a0e370496073b",
+          "digest": "9f7d3fc340b0d1127628454ccbc3a373bd569c0b95d1337b040a0e370496073b",
+          "slots": [
+            453236703
+          ],
+          "transactions": 979,
+          "matches": 64,
+          "wireBytes": 371200,
+          "decodeMilliseconds": 5.100000023841858
+        }
+      ],
+      "checkpoints": [
+        "000000000000000018daf342ba38d3d0-10e3f5:453236700:1f47343024655426566c778c9e83e76487805442b923fdc83f3c3089184cee6d",
+        "000000000000000018daf342ba38d3d0-10e3f5:453236702:ef7f209eacc1e7c2757a88d5ea9dc9fb6fb2dcbe7dc89e63b9cb232de2300ebd",
+        "000000000000000018daf342ba38d3d0-10e3f5:453236703:9f7d3fc340b0d1127628454ccbc3a373bd569c0b95d1337b040a0e370496073b"
+      ]
+    },
+    "browser_program_sse": {
+      "rows": [
+        {
+          "cursor": "000000000000000018daf342ba38d3d0-10e3f5:453236700:1f47343024655426566c778c9e83e76487805442b923fdc83f3c3089184cee6d",
+          "digest": "1f47343024655426566c778c9e83e76487805442b923fdc83f3c3089184cee6d",
+          "slots": [
+            453236700
+          ],
+          "transactions": 1397,
+          "matches": 108,
+          "wireBytes": 496748,
+          "decodeMilliseconds": 10.100000023841858
+        },
+        {
+          "cursor": "000000000000000018daf342ba38d3d0-10e3f5:453236702:ef7f209eacc1e7c2757a88d5ea9dc9fb6fb2dcbe7dc89e63b9cb232de2300ebd",
+          "digest": "ef7f209eacc1e7c2757a88d5ea9dc9fb6fb2dcbe7dc89e63b9cb232de2300ebd",
+          "slots": [
+            453236701,
+            453236702
+          ],
+          "transactions": 2085,
+          "matches": 166,
+          "wireBytes": 691576,
+          "decodeMilliseconds": 14
+        },
+        {
+          "cursor": "000000000000000018daf342ba38d3d0-10e3f5:453236703:9f7d3fc340b0d1127628454ccbc3a373bd569c0b95d1337b040a0e370496073b",
+          "digest": "9f7d3fc340b0d1127628454ccbc3a373bd569c0b95d1337b040a0e370496073b",
+          "slots": [
+            453236703
+          ],
+          "transactions": 979,
+          "matches": 64,
+          "wireBytes": 371200,
+          "decodeMilliseconds": 6.699999928474426
+        }
+      ],
+      "checkpoints": [
+        "000000000000000018daf342ba38d3d0-10e3f5:453236700:1f47343024655426566c778c9e83e76487805442b923fdc83f3c3089184cee6d",
+        "000000000000000018daf342ba38d3d0-10e3f5:453236702:ef7f209eacc1e7c2757a88d5ea9dc9fb6fb2dcbe7dc89e63b9cb232de2300ebd",
+        "000000000000000018daf342ba38d3d0-10e3f5:453236703:9f7d3fc340b0d1127628454ccbc3a373bd569c0b95d1337b040a0e370496073b"
+      ]
+    }
+  },
+  "rpc_oracle_report": "sdk-rpc-oracle-20261004.json",
+  "rpc_oracle_sha256": "beaf6cc9f444a52d14fab056b352e15e3cbdbcfbe16f6baf9f94a4db9cd1943e",
+  "sdk_sha256": "d9f6187c48199d84fda080ab13c57f4517e8b5fe47138353ae6d7381fb2ea172"
+}

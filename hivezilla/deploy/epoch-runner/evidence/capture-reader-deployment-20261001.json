@@ -1,0 +1,50 @@
+{
+  "schema": "hivezilla-capture-reader-deployment-v1",
+  "installed_utc": "2026-10-01T14:01:10.153103+00:00",
+  "restart_performed": false,
+  "service_pids": {
+    "hivezilla-validator-canary.service": "590165",
+    "hivezilla-epoch-1047.service": "606063"
+  },
+  "progress_before_install": {
+    "archive_publication_allowed": false,
+    "archive_verification": "SKIPPED",
+    "capture_error": null,
+    "capture_retries": 22,
+    "capture_state": "CAPTURING",
+    "collected_blocks": 4352,
+    "compact_bytes": 1805679069,
+    "compacted_blocks": 4352,
+    "compaction_error": null,
+    "compaction_state": "WAITING",
+    "counts_basis": "sealed unique finalized block records in the target epoch",
+    "covered_slots": 4362,
+    "end_slot_exclusive": 452736000,
+    "epoch": 1047,
+    "gap_policy": "stop capture rather than count a missing produced block as a skipped slot",
+    "genesis_hash": "5eykt4UsFv8P8NJdTREpY1vzqKqZKvdpKuc147dw2N9d",
+    "last_collected_slot": 452308361,
+    "last_compacted_slot": 452308361,
+    "missing_blocks": 0,
+    "node_identity": "J7qpvCEWhdBgPdYRV3s3btWPrRVXa2qnAzgvxWTvtbrQ",
+    "r2_upload": "DISABLED",
+    "raw_bytes": 4655774008,
+    "run_dir": "/home/ubuntu/live/hivezilla-validator-20260930/epoch-runs/epoch-1047-20261001",
+    "schema": "hivezilla-epoch-progress-v1",
+    "skipped_slots": 10,
+    "slots_in_epoch": 432000,
+    "start_slot": 452304000,
+    "state": "CAPTURING",
+    "updated_unix_ms": 1790863266409
+  },
+  "probe_report": "/home/ubuntu/live/hivezilla-validator-20260930/reports/capture-reader-replay-probe-20261001.json",
+  "tests_passed": 14,
+  "binary_sha256": "3f42fc57dd681099defba18ec36f87ff0b3cd4c0726d7a3434d3d98c8d30aed5",
+  "binary_before_sha256": "f383c02217240c87de7218d0ddcc145c77613292a801502c2bc2d30734cfd9c3",
+  "source_sha256": "ba6a69a38da59c9dea8a1fb178872782170f8f35d6cf88e98ec6237eaeab8181",
+  "disconnects_before_install": [
+    "yellowstone_grpc_geyser_client_disconnects_total{reason=\"client_channel_full\",subscriber_id=\"127.0.0.1\"} 45",
+    "yellowstone_grpc_geyser_client_disconnects_total{reason=\"client_closed\",subscriber_id=\"127.0.0.1\"} 14",
+    "yellowstone_grpc_geyser_client_disconnects_total{reason=\"replay_error\",subscriber_id=\"127.0.0.1\"} 2"
+  ]
+}

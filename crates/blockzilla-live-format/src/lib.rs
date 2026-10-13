@@ -1,4 +1,5 @@
 pub mod candidate_v1;
+pub mod execution_canary_v1;
 pub mod live_producer;
 
 pub use candidate_v1::*;

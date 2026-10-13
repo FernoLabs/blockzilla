@@ -1,0 +1,31 @@
+{
+  "schema": "hivezilla-native-epoch-continuity-v1",
+  "state": "PASSED",
+  "epoch": 1049,
+  "source": "/home/ubuntu/live/hivezilla-validator-20260930/compact/direct-agave-live/000000000000000018daf342ba38d3d0-10e3f5",
+  "first_slot": 453168000,
+  "last_slot": 453599999,
+  "chunks": 302501,
+  "gap_ranges": 82,
+  "boundaries": [
+    {
+      "kind": "predecessor",
+      "slot": 453167999,
+      "matched": true
+    },
+    {
+      "kind": "successor",
+      "slot": 453600000,
+      "matched": true
+    }
+  ],
+  "canonical": false,
+  "independent_consensus_proof": false,
+  "independent_archive_coverage_confirmed": false,
+  "elapsed_seconds": 26.11056334199384,
+  "blocks": 431667,
+  "transactions": 501801592,
+  "signatures": 522157527,
+  "entries": 513081322,
+  "skipped_slots": 333
+}

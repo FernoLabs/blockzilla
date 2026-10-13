@@ -1,4 +1,5 @@
 [package]
+publish = ["crates-io"]
 name = "blockzilla-archive-v3-convert"
 version.workspace = true
 edition.workspace = true
@@ -10,16 +11,16 @@ description = "Convert an Archive V2 generation into canonical Archive V3"
 autobins = false
 
 [dependencies]
-blockzilla-archive-v2 = { path = "../../compact-v2/blockzilla-archive-v2", default-features = false }
-blockzilla-compact = { path = "../../compact-v2/blockzilla-compact", default-features = false }
-blockzilla-primitives = { path = "../../blockzilla-primitives", default-features = false }
-blockzilla-program-logs = { path = "../../parser/blockzilla-program-logs", default-features = false }
-blockzilla-registry = { path = "../../compact-v2/blockzilla-registry", default-features = false }
+blockzilla-archive-v2 = { path = "../../compact-v2/blockzilla-archive-v2", default-features = false, version = "0.2.0" }
+blockzilla-compact = { path = "../../compact-v2/blockzilla-compact", default-features = false, version = "0.2.0" }
+blockzilla-primitives = { path = "../../blockzilla-primitives", default-features = false, version = "0.2.0" }
+blockzilla-program-logs = { path = "../../parser/blockzilla-program-logs", default-features = false, version = "0.2.0" }
+blockzilla-registry = { path = "../../compact-v2/blockzilla-registry", default-features = false, version = "0.2.0" }
 anyhow = "1.0.104"
 clap = { version = "4.6.6", features = ["derive"] }
-blockzilla-archive-v3 = { path = "../blockzilla-archive-v3" }
-blockzilla-archive-v3-reader = { path = "../blockzilla-archive-v3-reader" }
-blockzilla-compact-v2-reader = { path = "../../compact-v2/blockzilla-compact-v2-reader" }
+blockzilla-archive-v3 = { path = "../blockzilla-archive-v3", version = "0.2.0" }
+blockzilla-archive-v3-reader = { path = "../blockzilla-archive-v3-reader", version = "0.2.0" }
+blockzilla-compact-v2-reader = { path = "../../compact-v2/blockzilla-compact-v2-reader", version = "0.2.0" }
 serde = { version = "1.0.229", features = ["derive"] }
 serde_json = "1.0.151"
 wincode = { version = "=0.6.1", features = ["derive"] }

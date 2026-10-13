@@ -1,0 +1,10 @@
+{
+  "block": "id: 000000000000000018dd37e5c7e1f5cf-10e3f5:p45372:987179f18cc524e4f1eaf3541cf4b42fc67796378b81713f2128b6b55c89dd73\nevent: block\ndata: {\"blockhash\":\"3XU6h3Lwemf2WqTSmPK2xcGyx87hvXWejbocv4Sf4Sc9\",\"parent_blockhash\":\"TyUUs5YAR7N8A77rrqccFPfXrBsrVvfNL1YqhSqad58\",\"slot\":455343980}",
+  "control": "id: 000000000000000018dd37e5c7e1f5cf-10e3f5:p45373:1c327109eb747a232f64e359472e50ab6108110d0f8dd6da52a8450c0963fd71\nevent: root\ndata: {\"blockhash\":\"96BXTN3i1Zh2QBMa1Xy4T1jSxYX63MdSMUcnvZmixa2j\",\"slot\":455343949}",
+  "count": "603 messages",
+  "rows": 100,
+  "status": "Connected",
+  "pause_count": "215 messages",
+  "pause_stable": true,
+  "resumed": true
+}

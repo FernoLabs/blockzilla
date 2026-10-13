@@ -1,0 +1,22 @@
+{
+  "date": "2026-10-02",
+  "server": "213.239.141.61",
+  "cloudflare_tunnel_status": "healthy",
+  "cloudflare_ready_connections": 4,
+  "cloudflare_private_route_present": false,
+  "cloudflare_access_application_present": false,
+  "cloudflare_access_creation_status": 403,
+  "cloudflare_access_creation_error": "auth.forbidden",
+  "server_private_relay_updates_received": 64,
+  "external_client": "local Mac",
+  "external_transport": "SSH",
+  "external_endpoint": "http://127.0.0.1:10001",
+  "commitment": "finalized",
+  "include_transactions": true,
+  "blocks_received": 8,
+  "slots": [452578293,452578294,452578295,452578296,452578297,452578298,452578299,452578300],
+  "message_bytes": [3774722,4577883,3296709,1723603,2734313,2294952,2342618,2850260],
+  "seconds": 1.85,
+  "consumer_hetzner_installation": "not performed; host unknown",
+  "cloudflare_end_to_end_test": "not performed; access setup incomplete"
+}

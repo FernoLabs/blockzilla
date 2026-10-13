@@ -5,7 +5,7 @@ edition.workspace = true
 rust-version.workspace = true
 license.workspace = true
 repository.workspace = true
-publish = false
+publish = ["crates-io"]
 description = "Bounded, generation-verified Archive V2 streaming reader"
 autobins = false
 
@@ -14,11 +14,11 @@ default = []
 http = ["dep:reqwest", "dep:url"]
 
 [dependencies]
-blockzilla-archive-v2 = { path = "../../compact-v2/blockzilla-archive-v2", default-features = false }
-blockzilla-compact = { path = "../../compact-v2/blockzilla-compact", default-features = false }
-blockzilla-primitives = { path = "../../blockzilla-primitives", default-features = false }
-blockzilla-program-logs = { path = "../../parser/blockzilla-program-logs", default-features = false }
-blockzilla-registry = { path = "../../compact-v2/blockzilla-registry", default-features = false }
+blockzilla-archive-v2 = { path = "../../compact-v2/blockzilla-archive-v2", default-features = false, features = ["known-program-logs"], version = "0.2.0" }
+blockzilla-compact = { path = "../../compact-v2/blockzilla-compact", default-features = false, features = ["known-program-logs"], version = "0.2.0" }
+blockzilla-primitives = { path = "../../blockzilla-primitives", default-features = false, version = "0.2.0" }
+blockzilla-program-logs = { path = "../../parser/blockzilla-program-logs", default-features = false, features = ["known-program-logs"], version = "0.2.0" }
+blockzilla-registry = { path = "../../compact-v2/blockzilla-registry", default-features = false, version = "0.2.0" }
 rayon = "1.12.0"
 rustix = { version = "1.1.4", features = ["fs"] }
 serde = { version = "1.0.229", features = ["derive"] }

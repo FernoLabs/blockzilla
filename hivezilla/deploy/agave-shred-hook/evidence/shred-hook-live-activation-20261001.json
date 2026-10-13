@@ -1,0 +1,363 @@
+{
+  "schema": "hivezilla-shred-hook-live-activation-v1",
+  "state": "ACTIVE_TEST_PASSED",
+  "completed_utc": "2026-10-01T12:25:15.833755+00:00",
+  "validator_restarted_once": true,
+  "activation_baseline_report": "/home/ubuntu/live/hivezilla-validator-20260930/reports/shred-hook-activation-baseline-20261001.json",
+  "staged_build_report": "/home/ubuntu/live/hivezilla-validator-20260930/reports/shred-hook-staged-build-20261001.json",
+  "artifacts": {
+    "producer_library": {
+      "path": "/home/ubuntu/live/hivezilla-validator-20260930/releases/hivezilla-shred-hook/libhivezilla_shred_hook.so",
+      "sha256": "c97f8fe968614351ad00b049cf435f712b9f1ce3265c4ccec4c75c91427479f2",
+      "bytes": 375832
+    },
+    "recorder_binary": {
+      "path": "/home/ubuntu/live/hivezilla-validator-20260930/releases/hivezilla-shred-hook/hivezilla-shred-hook-recorder",
+      "sha256": "3cc4be6aee164a24cf40719ec5679577128b982a60a2c725a6cd8805ed32e5b2",
+      "bytes": 799776
+    },
+    "validator_binary": {
+      "path": "/home/ubuntu/live/hivezilla-validator-20260930/releases/agave-shred-hook-v4.3.0/agave-validator",
+      "sha256": "9bb753dba4d2c862bd5626afc3256154325579b54617ed53da22f0a3e881b232",
+      "bytes": 82320544
+    },
+    "agave_integration_patch": {
+      "path": "/home/ubuntu/live/hivezilla-validator-20260930/releases/agave-shred-hook-v4.3.0/integration.patch",
+      "sha256": "f41f5cc077b0c9f29668e8eb00d8c1d44f9a30a13e2dfff9eea9e7023dd71e6f",
+      "bytes": 4174
+    },
+    "agave_adapter_source": {
+      "path": "/home/ubuntu/live/hivezilla-validator-20260930/releases/agave-shred-hook-v4.3.0/source/core/src/hivezilla_shred_hook.rs",
+      "sha256": "6a1620d9d255c76f895068eaae29f376d4d72c0d1537dbcd6f30caeebbbe5cc8",
+      "bytes": 5954
+    },
+    "agave_lock": {
+      "path": "/home/ubuntu/live/hivezilla-validator-20260930/releases/agave-shred-hook-v4.3.0/source/Cargo.lock",
+      "sha256": "b04f6310f280512ef0f22464be04691f768880a2517820b0790f723b43350f71",
+      "bytes": 322922
+    },
+    "producer_lock": {
+      "path": "/home/ubuntu/live/hivezilla-validator-20260930/releases/hivezilla-shred-hook/source/Cargo.lock",
+      "sha256": "5b81fc010561b3ca0ae68acd6bf9413d248d2008022187eb5afd8e6a464b5c0d",
+      "bytes": 11619
+    },
+    "abi_source": {
+      "path": "/home/ubuntu/live/hivezilla-validator-20260930/releases/hivezilla-shred-hook/source/hivezilla/shred-hook-abi/src/lib.rs",
+      "sha256": "f7ca94ff30a017acf5a10d61af55ea30f1fb01cece7daaa0d8f7359a37c5845d",
+      "bytes": 1495
+    },
+    "recorder_service": {
+      "path": "/home/ubuntu/live/hivezilla-validator-20260930/releases/hivezilla-shred-hook/hivezilla-shred-hook-recorder.service",
+      "sha256": "be16b3fa6441d19f8efeec67364a7acbbfd738acfd3009fcd75213c33b180b89",
+      "bytes": 1212
+    },
+    "validator_override": {
+      "path": "/home/ubuntu/live/hivezilla-validator-20260930/releases/hivezilla-shred-hook/shred-hook.conf",
+      "sha256": "50873a317d9764a696bb419672c07870d0f146651b0f8a1d8a5bac083de51b33",
+      "bytes": 1764
+    }
+  },
+  "before": {
+    "utc": "2026-10-01T12:24:36.882082+00:00",
+    "monotonic_ns": 148622802449245,
+    "validator": {
+      "ActiveState": "active",
+      "SubState": "running",
+      "DropInPaths": "/etc/systemd/system/hivezilla-validator-canary.service.d/continuous.conf /etc/systemd/system/hivezilla-validator-canary.service.d/shred-hook.conf",
+      "InvocationID": "a1d4c7cc097d4e2eb21f034e2047b323",
+      "Restart": "on-failure",
+      "RuntimeMaxUSec": "infinity",
+      "MainPID": "590165",
+      "NRestarts": "0",
+      "ExecMainStartTimestamp": "Thu 2026-10-01 12:17:50 UTC",
+      "MemoryCurrent": "382855835648",
+      "CPUUsageNSec": "4963404313000",
+      "enabled": "transient",
+      "persistent_boot_link": "/etc/systemd/system/hivezilla-validator-canary.service"
+    },
+    "recorder": {
+      "ActiveState": "active",
+      "SubState": "running",
+      "DropInPaths": "",
+      "InvocationID": "699cd44baf9c4417af60f4a452b94968",
+      "Restart": "on-failure",
+      "RuntimeMaxUSec": "infinity",
+      "MainPID": "590048",
+      "NRestarts": "0",
+      "ExecMainStartTimestamp": "Thu 2026-10-01 12:17:25 UTC",
+      "MemoryCurrent": "536600576",
+      "CPUUsageNSec": "11631684000",
+      "enabled": "enabled",
+      "persistent_boot_link": "/etc/systemd/system/hivezilla-shred-hook-recorder.service"
+    },
+    "executable": "/home/ubuntu/live/hivezilla-validator-20260930/releases/agave-shred-hook-v4.3.0/agave-validator",
+    "identity": "J7qpvCEWhdBgPdYRV3s3btWPrRVXa2qnAzgvxWTvtbrQ",
+    "genesis": "5eykt4UsFv8P8NJdTREpY1vzqKqZKvdpKuc147dw2N9d",
+    "health": "ok",
+    "finalized_slot": 452286812,
+    "current": {
+      "capture_id": "dae740beed881a744a080c1ce52c9df9",
+      "path": "/home/ubuntu/live/hivezilla-validator-20260930/captures/shred-hook-live/dae740beed881a744a080c1ce52c9df9",
+      "producer_pid": 590165
+    },
+    "status": {
+      "schema": "hivezilla-shred-hook-status-v1",
+      "state": "ACTIVE",
+      "reason": "receiving",
+      "updated_unix_ms": 1790857476828,
+      "durable_next_sequence": 2399747,
+      "durable_prefix_hash": "c7ce21ab524c347236f0d310d02759fd7a1644de05602c2d2b91cb44ad8a392b",
+      "journal_bytes": 3132484345,
+      "counts": {
+        "packets": 2399747,
+        "payload_bytes": 2902103417,
+        "turbine_received": 739703,
+        "repair_received": 830511,
+        "repair_accepted": 829533,
+        "data_shreds": 2028883,
+        "coding_shreds": 370224,
+        "other_datagrams": 640,
+        "first_header_slot": 452286276,
+        "max_header_slot": 452286845
+      },
+      "custody_authority": false,
+      "canonical_coverage_verified": false
+    },
+    "free_bytes": 2316904833024
+  },
+  "after": {
+    "utc": "2026-10-01T12:25:06.909570+00:00",
+    "monotonic_ns": 148652829925106,
+    "validator": {
+      "ActiveState": "active",
+      "SubState": "running",
+      "DropInPaths": "/etc/systemd/system/hivezilla-validator-canary.service.d/continuous.conf /etc/systemd/system/hivezilla-validator-canary.service.d/shred-hook.conf",
+      "InvocationID": "a1d4c7cc097d4e2eb21f034e2047b323",
+      "Restart": "on-failure",
+      "RuntimeMaxUSec": "infinity",
+      "MainPID": "590165",
+      "NRestarts": "0",
+      "ExecMainStartTimestamp": "Thu 2026-10-01 12:17:50 UTC",
+      "MemoryCurrent": "380838891520",
+      "CPUUsageNSec": "5250444137000",
+      "enabled": "transient",
+      "persistent_boot_link": "/etc/systemd/system/hivezilla-validator-canary.service"
+    },
+    "recorder": {
+      "ActiveState": "active",
+      "SubState": "running",
+      "DropInPaths": "",
+      "InvocationID": "699cd44baf9c4417af60f4a452b94968",
+      "Restart": "on-failure",
+      "RuntimeMaxUSec": "infinity",
+      "MainPID": "590048",
+      "NRestarts": "0",
+      "ExecMainStartTimestamp": "Thu 2026-10-01 12:17:25 UTC",
+      "MemoryCurrent": "536702976",
+      "CPUUsageNSec": "12434024000",
+      "enabled": "enabled",
+      "persistent_boot_link": "/etc/systemd/system/hivezilla-shred-hook-recorder.service"
+    },
+    "executable": "/home/ubuntu/live/hivezilla-validator-20260930/releases/agave-shred-hook-v4.3.0/agave-validator",
+    "identity": "J7qpvCEWhdBgPdYRV3s3btWPrRVXa2qnAzgvxWTvtbrQ",
+    "genesis": "5eykt4UsFv8P8NJdTREpY1vzqKqZKvdpKuc147dw2N9d",
+    "health": "ok",
+    "finalized_slot": 452286924,
+    "current": {
+      "capture_id": "dae740beed881a744a080c1ce52c9df9",
+      "path": "/home/ubuntu/live/hivezilla-validator-20260930/captures/shred-hook-live/dae740beed881a744a080c1ce52c9df9",
+      "producer_pid": 590165
+    },
+    "status": {
+      "schema": "hivezilla-shred-hook-status-v1",
+      "state": "ACTIVE",
+      "reason": "receiving",
+      "updated_unix_ms": 1790857506894,
+      "durable_next_sequence": 2544567,
+      "durable_prefix_hash": "e97417ed7b80816a3975222e2b4095c667957e3267faf0b29ac67c33e3c158c6",
+      "journal_bytes": 3322404730,
+      "counts": {
+        "packets": 2544567,
+        "payload_bytes": 3078120746,
+        "turbine_received": 883437,
+        "repair_received": 831054,
+        "repair_accepted": 830076,
+        "data_shreds": 2101922,
+        "coding_shreds": 442005,
+        "other_datagrams": 640,
+        "first_header_slot": 452286276,
+        "max_header_slot": 452286958
+      },
+      "custody_authority": false,
+      "canonical_coverage_verified": false
+    },
+    "free_bytes": 2315753160704
+  },
+  "last": {
+    "utc": "2026-10-01T12:25:15.833755+00:00",
+    "monotonic_ns": 148661754110028,
+    "validator": {
+      "ActiveState": "active",
+      "SubState": "running",
+      "DropInPaths": "/etc/systemd/system/hivezilla-validator-canary.service.d/continuous.conf /etc/systemd/system/hivezilla-validator-canary.service.d/shred-hook.conf",
+      "InvocationID": "a1d4c7cc097d4e2eb21f034e2047b323",
+      "Restart": "on-failure",
+      "RuntimeMaxUSec": "infinity",
+      "MainPID": "590165",
+      "NRestarts": "0",
+      "ExecMainStartTimestamp": "Thu 2026-10-01 12:17:50 UTC",
+      "MemoryCurrent": "381739839488",
+      "CPUUsageNSec": "5329795127000",
+      "enabled": "transient",
+      "persistent_boot_link": "/etc/systemd/system/hivezilla-validator-canary.service"
+    },
+    "recorder": {
+      "ActiveState": "active",
+      "SubState": "running",
+      "DropInPaths": "",
+      "InvocationID": "699cd44baf9c4417af60f4a452b94968",
+      "Restart": "on-failure",
+      "RuntimeMaxUSec": "infinity",
+      "MainPID": "590048",
+      "NRestarts": "0",
+      "ExecMainStartTimestamp": "Thu 2026-10-01 12:17:25 UTC",
+      "MemoryCurrent": "536719360",
+      "CPUUsageNSec": "12650566000",
+      "enabled": "enabled",
+      "persistent_boot_link": "/etc/systemd/system/hivezilla-shred-hook-recorder.service"
+    },
+    "executable": "/home/ubuntu/live/hivezilla-validator-20260930/releases/agave-shred-hook-v4.3.0/agave-validator",
+    "identity": "J7qpvCEWhdBgPdYRV3s3btWPrRVXa2qnAzgvxWTvtbrQ",
+    "genesis": "5eykt4UsFv8P8NJdTREpY1vzqKqZKvdpKuc147dw2N9d",
+    "health": "ok",
+    "finalized_slot": 452286959,
+    "current": {
+      "capture_id": "dae740beed881a744a080c1ce52c9df9",
+      "path": "/home/ubuntu/live/hivezilla-validator-20260930/captures/shred-hook-live/dae740beed881a744a080c1ce52c9df9",
+      "producer_pid": 590165
+    },
+    "status": {
+      "schema": "hivezilla-shred-hook-status-v1",
+      "state": "ACTIVE",
+      "reason": "receiving",
+      "updated_unix_ms": 1790857515740,
+      "durable_next_sequence": 2582444,
+      "durable_prefix_hash": "f1cfab7f37e0fb70889b47a9efd471c79a402ee2b9f5094fbf153438c60e0a0e",
+      "journal_bytes": 3372074504,
+      "counts": {
+        "packets": 2582444,
+        "payload_bytes": 3124154216,
+        "turbine_received": 920848,
+        "repair_received": 831287,
+        "repair_accepted": 830309,
+        "data_shreds": 2121176,
+        "coding_shreds": 460628,
+        "other_datagrams": 640,
+        "first_header_slot": 452286276,
+        "max_header_slot": 452286992
+      },
+      "custody_authority": false,
+      "canonical_coverage_verified": false
+    },
+    "free_bytes": 2315540430848
+  },
+  "sample": {
+    "seconds": 30.027475861,
+    "counts_delta": {
+      "packets": 144820,
+      "payload_bytes": 176017329,
+      "turbine_received": 143734,
+      "repair_received": 543,
+      "repair_accepted": 543,
+      "data_shreds": 73039,
+      "coding_shreds": 71781,
+      "other_datagrams": 0
+    },
+    "packets_per_second": 4822.916207488946,
+    "payload_bytes_per_second": 5861875.630665751,
+    "finalized_slot_delta": 112,
+    "cpu": {
+      "validator": {
+        "cpu_seconds": 287.039824,
+        "average_logical_cpu_equivalents": 9.559239189092493
+      },
+      "recorder": {
+        "cpu_seconds": 0.80234,
+        "average_logical_cpu_equivalents": 0.026720194654859006
+      }
+    },
+    "cpu_measurement_is_not_a_baseline_comparison": true
+  },
+  "grpc_capture_path": "/home/ubuntu/live/hivezilla-validator-20260930/captures/grpc-with-shred-hook-20261001T122506Z",
+  "grpc_seal": {
+    "schema": "hivezilla-current-grpc-seal-v1",
+    "state": "SEALED",
+    "generation_id": "92df68c7f0511bfcd111598d3f7a14fa",
+    "source_profile": "validator-finalized-execution-v1",
+    "payload_format": 3,
+    "protobuf_schema": "yellowstone-grpc-proto@14.0.0",
+    "geyser_proto_sha256": "56244cb007a872f28e294eedba0db4ae4bcbfb401035e4fbb8ec9c347d8ee9b3",
+    "storage_proto_sha256": "e5d16ba9a9e83f6ed8c92a96b6b75dfd64c43f897b976011eb3ec5abe2f3c818",
+    "requested_commitment": "finalized",
+    "source_endpoint": "http://127.0.0.1:10000",
+    "validator_identity": {
+      "rpc_endpoint": "http://127.0.0.1:8899",
+      "genesis_hash": "5eykt4UsFv8P8NJdTREpY1vzqKqZKvdpKuc147dw2N9d",
+      "node_identity": "J7qpvCEWhdBgPdYRV3s3btWPrRVXa2qnAzgvxWTvtbrQ"
+    },
+    "cluster_id": "5eykt4UsFv8P8NJdTREpY1vzqKqZKvdpKuc147dw2N9d",
+    "origin_node_id": "J7qpvCEWhdBgPdYRV3s3btWPrRVXa2qnAzgvxWTvtbrQ",
+    "source_id": "self-operated-yellowstone16-shred-hook",
+    "from_slot": null,
+    "subscription_sha256": "29cb2a04bbce1f5668b48f1da1e85b34169c43019f395690c3483e1ff3fce066",
+    "max_record_bytes": 134217728,
+    "counts": {
+      "events": 34744,
+      "blocks": 32,
+      "transactions": 32844,
+      "block_entries": 34522,
+      "slots": 190,
+      "entries": 34522,
+      "footers": 0,
+      "parent_updates": 0,
+      "first_slot": 452286927,
+      "last_slot": 452286990
+    },
+    "stop_reason": "max_blocks",
+    "elapsed_seconds": 8.406209089,
+    "canonical_coverage_verified": false,
+    "independent_consensus_verified": false,
+    "footer_completeness_verified": false,
+    "archive_publication_allowed": false,
+    "files": [
+      {
+        "path": "events.wal",
+        "bytes": 23194824,
+        "sha256": "b7d14429bee9b1fa4531ce2633bc873f2d09e1f8bb3d0ac58792ccd4c4589c4b"
+      },
+      {
+        "path": "validator-rpc-before.json",
+        "bytes": 636,
+        "sha256": "0025fdcfd4304332b6ffc2ee5f8960c5ce4d046d7e15db9d63ec9d9abfeeeacc"
+      },
+      {
+        "path": "validator-rpc-after.json",
+        "bytes": 636,
+        "sha256": "0025fdcfd4304332b6ffc2ee5f8960c5ce4d046d7e15db9d63ec9d9abfeeeacc"
+      }
+    ]
+  },
+  "raw_hook_active": true,
+  "geyser_execution_plugin_implemented": false,
+  "archive_verification_run": false,
+  "r2_publication_run": false,
+  "registered_hivesync_stream": false,
+  "upstream_socket_loss_measured": false,
+  "limits": {
+    "capture_root_bytes": 68719476736,
+    "reserve_free_bytes": 536870912000,
+    "segment_bytes": 67108864,
+    "producer_queue_packets": 65536
+  },
+  "capture_failure_recovery_requires_validator_restart": true
+}

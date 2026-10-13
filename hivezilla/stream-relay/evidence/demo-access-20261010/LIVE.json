@@ -1,0 +1,24 @@
+{
+  "checked_unix_ms": 1791653675801,
+  "units": {
+    "hivezilla-validator.service": "active",
+    "hivezilla-direct-worker.service": "active",
+    "hivezilla-stream-origin.service": "active",
+    "hivezilla-stream-relay.service": "active",
+    "hivezilla-processed-stream-publisher.service": "active",
+    "hivezilla-tunnel.service": "active"
+  },
+  "capture": {
+    "state": "CAPTURING",
+    "durable_sequence": 42061620,
+    "error": null,
+    "latest_rooted_slot": 455339414
+  },
+  "capture_failure": {},
+  "worker": {
+    "state": "RUNNING",
+    "event_sequence": 35665,
+    "last_compact_slot": 455339116,
+    "source_sequence": 41228650
+  }
+}

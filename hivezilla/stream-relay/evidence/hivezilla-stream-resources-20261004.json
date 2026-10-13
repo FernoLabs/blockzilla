@@ -1,0 +1,147 @@
+{
+  "schema": "hivezilla-stream-resource-sample-v1",
+  "updated_unix_ms": 1791104591562,
+  "sample_seconds": 20.005802285973914,
+  "before": [
+    {
+      "Id": "hivezilla-stream-origin.service",
+      "MainPID": "4193455",
+      "NRestarts": "0",
+      "MemoryCurrent": "166002688",
+      "MemoryPeak": "166858752",
+      "CPUUsageNSec": "1680188000"
+    },
+    {
+      "Id": "hivezilla-stream-relay.service",
+      "MainPID": "4193601",
+      "NRestarts": "0",
+      "MemoryCurrent": "333139968",
+      "MemoryPeak": "334610432",
+      "CPUUsageNSec": "1026588000"
+    }
+  ],
+  "after": [
+    {
+      "Id": "hivezilla-stream-origin.service",
+      "MainPID": "4193455",
+      "NRestarts": "0",
+      "MemoryCurrent": "166342656",
+      "MemoryPeak": "166858752",
+      "CPUUsageNSec": "1819526000",
+      "sample_cpu_percent_of_one_core": 0.696487938890059
+    },
+    {
+      "Id": "hivezilla-stream-relay.service",
+      "MainPID": "4193601",
+      "NRestarts": "0",
+      "MemoryCurrent": "332464128",
+      "MemoryPeak": "334610432",
+      "CPUUsageNSec": "1120374000",
+      "sample_cpu_percent_of_one_core": 0.46879399615857176
+    }
+  ],
+  "head": {
+    "canonical": false,
+    "earliest_after": "000000000000000018daf342ba38d3d0-10e3f5:453210106:b4b996ebea833678e99de67b439e340c99fc92ad9260ca33af6d425fcd4fd39f",
+    "error": null,
+    "evidence_included": false,
+    "finalized": true,
+    "genesis_hash": "5eykt4UsFv8P8NJdTREpY1vzqKqZKvdpKuc147dw2N9d",
+    "intake_age_ms": 677,
+    "last_admitted_unix_ms": 1791104590885,
+    "last_slot": 453210432,
+    "latest_cursor": "000000000000000018daf342ba38d3d0-10e3f5:453210432:37c1306f05a49d33c8fa0094b2aa62311842f6887ad6efab43c9506dad2fd8c8",
+    "node_identity": "J7qpvCEWhdBgPdYRV3s3btWPrRVXa2qnAzgvxWTvtbrQ",
+    "profile": "native-compact-projection-v1",
+    "publication_ready": false,
+    "received_bytes": 378041774,
+    "received_chunks": 625,
+    "replay_bytes": 133615934,
+    "replay_limit_bytes": 134217728,
+    "retained_chunks": 235,
+    "schema": "blockzilla-stream-head-v1",
+    "stale": false,
+    "state": "LIVE",
+    "upstream_http_version": "HTTP/2.0"
+  },
+  "native_health": {
+    "schema": "hivezilla-direct-pipeline-health-v1",
+    "updated_unix_ms": 1791104587819,
+    "state": "WARNING",
+    "problems": [],
+    "warnings": [
+      "An earlier session ended without a clean close; earlier coverage can have gaps"
+    ],
+    "canonical": false,
+    "full_epoch": false,
+    "validator": {
+      "health": "ok",
+      "finalized_slot": 453210419,
+      "identity": "J7qpvCEWhdBgPdYRV3s3btWPrRVXa2qnAzgvxWTvtbrQ",
+      "genesis_hash": "5eykt4UsFv8P8NJdTREpY1vzqKqZKvdpKuc147dw2N9d"
+    },
+    "capture": {
+      "session_id": "000000000000000018daf342ba38d3d0-10e3f5",
+      "path": "/home/ubuntu/live/hivezilla-validator-20260930/captures/direct-agave-live/000000000000000018daf342ba38d3d0-10e3f5",
+      "state": "CAPTURING",
+      "node_identity": "J7qpvCEWhdBgPdYRV3s3btWPrRVXa2qnAzgvxWTvtbrQ",
+      "genesis_hash": "5eykt4UsFv8P8NJdTREpY1vzqKqZKvdpKuc147dw2N9d",
+      "validator_pid": 1106933,
+      "writer_live": true,
+      "durable_sequence": 826653262,
+      "latest_rooted_slot": 453210420,
+      "journal_bytes": 5164192202,
+      "journal_limit_bytes": 68719476736,
+      "reserve_disk_bytes": 536870912000,
+      "previous_unclean_sessions": [
+        "000000000000000018daccf4d01ca96d-10e3f5",
+        "000000000000000018daceb49b8b9a08-10e3f5"
+      ],
+      "raw_shred_completeness": false
+    },
+    "worker": {
+      "batches": 246683,
+      "canonical": false,
+      "compacted_blocks": 348880,
+      "compacted_entries": 416633987,
+      "compacted_transactions": 407480709,
+      "durable_sequence": 826651767,
+      "epoch": 1049,
+      "first_compact_slot": 452861384,
+      "full_epoch": false,
+      "last_compact_slot": 453210419,
+      "state": "BUILDING",
+      "updated_unix_ms": 1791104587786
+    },
+    "compact_lag_slots": 1,
+    "worker_status_age_seconds": 0,
+    "free_disk_bytes": 2019807903744,
+    "last_durable_change_unix_ms": 1791104587819,
+    "shreds": {
+      "schema": "hivezilla-shred-hook-status-v1",
+      "state": "ACTIVE",
+      "reason": "receiving",
+      "updated_unix_ms": 1791104587745,
+      "durable_next_sequence": 865498086,
+      "durable_prefix_hash": "2cf818857bb08ece2fee8a12838ec56bfdab56b8141b50f529f57a0b1620d552",
+      "journal_bytes": 1134821014939,
+      "counts": {
+        "packets": 865498086,
+        "payload_bytes": 1051731304699,
+        "turbine_received": 856498307,
+        "repair_received": 4599699,
+        "repair_accepted": 4400080,
+        "data_shreds": 436763673,
+        "coding_shreds": 428536911,
+        "other_datagrams": 197502,
+        "first_header_slot": 452704425,
+        "max_header_slot": 453210453
+      },
+      "custody_authority": false,
+      "canonical_coverage_verified": false
+    }
+  },
+  "client_load_during_sample": "no deliberate fan-out load; one active origin-to-relay feed",
+  "wire_rate_test": "see separate 10-consumer live receipt",
+  "same_machine_pilot": true
+}

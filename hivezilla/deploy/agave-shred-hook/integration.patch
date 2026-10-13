@@ -1,0 +1,122 @@
+diff --git a/Cargo.lock b/Cargo.lock
+index 747661e..d044826 100644
+--- a/Cargo.lock
++++ b/Cargo.lock
+@@ -3560,6 +3560,10 @@ version = "0.6.9"
+ source = "registry+https://github.com/rust-lang/crates.io-index"
+ checksum = "12cb882ccb290b8646e554b157ab0b71e64e8d5bef775cd66b6531e52d302669"
+ 
++[[package]]
++name = "hivezilla-shred-hook-abi"
++version = "0.1.0"
++
+ [[package]]
+ name = "hkdf"
+ version = "0.12.4"
+@@ -8062,9 +8066,11 @@ dependencies = [
+  "dashmap",
+  "futures 0.3.33",
+  "histogram",
++ "hivezilla-shred-hook-abi",
+  "itertools 0.14.0",
+  "lazy-lru",
+  "libc",
++ "libloading",
+  "log",
+  "min-max-heap",
+  "num_cpus",
+diff --git a/core/Cargo.toml b/core/Cargo.toml
+index a449f78..a945745 100644
+--- a/core/Cargo.toml
++++ b/core/Cargo.toml
+@@ -48,6 +48,8 @@ frozen-abi = [
+ ]
+ 
+ [dependencies]
++hivezilla-shred-hook-abi = { path = "../hivezilla-shred-hook-abi" }
++libloading = { workspace = true }
+ agave-banking-stage-ingress-types = { workspace = true }
+ agave-bls-cert-verify = { workspace = true }
+ agave-bls-sigverify = { workspace = true }
+diff --git a/core/src/lib.rs b/core/src/lib.rs
+index 5180157..53fc744 100644
+--- a/core/src/lib.rs
++++ b/core/src/lib.rs
+@@ -33,6 +33,7 @@ mod result;
+ pub mod sample_performance_service;
+ #[cfg(unix)]
+ mod scheduler_bindings_server;
++mod hivezilla_shred_hook;
+ mod shred_fetch_stage;
+ pub mod sigverify;
+ pub mod sigverify_stage;
+diff --git a/core/src/shred_fetch_stage.rs b/core/src/shred_fetch_stage.rs
+index 02cb002..8a02a77 100644
+--- a/core/src/shred_fetch_stage.rs
++++ b/core/src/shred_fetch_stage.rs
+@@ -1,5 +1,8 @@
+ //! The `shred_fetch_stage` pulls shreds from UDP sockets and sends it to a channel.
+ 
++use crate::hivezilla_shred_hook::{self, TapSender};
++use hivezilla_shred_hook_abi::{REPAIR_RECEIVED, TURBINE_RECEIVED};
++
+ use {
+     crate::repair::{repair_service::OutstandingShredRepairs, serve_repair::ServeRepair},
+     solana_gossip::cluster_info::ClusterInfo,
+@@ -35,6 +38,7 @@ pub(crate) const SHRED_FETCH_CHANNEL_SIZE: usize = 1024 * 64;
+ 
+ #[derive(Clone)]
+ struct RepairContext {
++    repair_port: u16,
+     repair_socket: Arc<UdpSocket>,
+     cluster_info: Arc<ClusterInfo>,
+     outstanding_repair_requests: Arc<RwLock<OutstandingShredRepairs>>,
+@@ -95,6 +99,11 @@ impl ShredFetchStage {
+                             &mut outstanding_repair_requests,
+                         ) {
+                             packet.meta_mut().set_discard(true);
++                        } else {
++                            hivezilla_shred_hook::repair_accepted(
++                                packet.as_ref(),
++                                repair_context.repair_port,
++                            );
+                         }
+                     });
+             }
+@@ -148,11 +157,24 @@ impl ShredFetchStage {
+             .into_iter()
+             .enumerate()
+             .map(|(i, socket)| {
++                let kind = if flags.contains(PacketFlags::REPAIR) {
++                    REPAIR_RECEIVED
++                } else {
++                    TURBINE_RECEIVED
++                };
++                let tap = TapSender::new(
++                    packet_sender.clone(),
++                    kind,
++                    socket
++                        .local_addr()
++                        .expect("shred receive socket address")
++                        .port(),
++                );
+                 streamer::receiver(
+                     format!("{receiver_thread_name}{i:02}"),
+                     socket,
+                     exit.clone(),
+-                    packet_sender.clone(),
++                    tap,
+                     recycler.clone(),
+                     receiver_stats.clone(),
+                     Some(Duration::from_millis(5)), // coalesce
+@@ -194,6 +216,10 @@ impl ShredFetchStage {
+     ) -> Self {
+         let recycler = PacketBatchRecycler::new();
+         let repair_context = RepairContext {
++            repair_port: repair_socket
++                .local_addr()
++                .expect("repair receive socket address")
++                .port(),
+             repair_socket: repair_socket.clone(),
+             cluster_info,
+             outstanding_repair_requests,

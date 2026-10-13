@@ -1,0 +1,7 @@
+HEARTBEAT_TOKEN=local-heartbeat-token-only
+ADMIN_TOKEN=local-admin-token-only
+# ALERT_WEBHOOK_URL is a Worker secret. Do not put production URLs here.
+# Direct Telegram delivery uses both TELEGRAM_BOT_TOKEN and TELEGRAM_CHAT_ID.
+# Store their production values as Worker secrets, not in source or this file.
+# Telegram commands also need a separate TELEGRAM_WEBHOOK_SECRET (32+ characters).
+

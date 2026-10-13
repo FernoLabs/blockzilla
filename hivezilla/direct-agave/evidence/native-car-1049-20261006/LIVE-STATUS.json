@@ -1,0 +1,27 @@
+{
+  "checked_at": "2026-10-06T08:06:14.222239+00:00",
+  "units": {
+    "hivezilla-validator.service": {
+      "ActiveState": "active",
+      "SubState": "running",
+      "MainPID": "1106933"
+    },
+    "hivezilla-direct-worker.service": {
+      "ActiveState": "failed",
+      "SubState": "failed",
+      "MainPID": "0"
+    }
+  },
+  "rpc_epoch_info": {
+    "absoluteSlot": 453842665,
+    "blockHeight": 431880493,
+    "epoch": 1050,
+    "slotIndex": 242665,
+    "slotsInEpoch": 432000,
+    "transactionCount": 556660440436
+  },
+  "free_bytes": 595895308288,
+  "epoch_1049_sealed": true,
+  "validator_restarted_by_comparison": false,
+  "capture_restarted_by_comparison": false
+}

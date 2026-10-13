@@ -1,5 +1,31 @@
 # Blockzilla documentation
 
+## Start here
+
+The [user guide](start/overview.md) reads Solana history through Cloudflare.
+The [quick start](start/quick-start.md) installs the CLI and reads real data in
+about 10 minutes, most of it the first compile.
+
+| User guide | Advanced reference |
+| --- | --- |
+| [Quick start](start/quick-start.md) | [File formats](advanced/formats.md) |
+| [Read an archive](start/read-an-archive.md) | [Compact V2 byte layout](reference/archive-v2-hot-block-format.md) |
+| [Live stream](start/live-stream.md) | [Stream transport](../hivezilla/stream-relay/README.md) |
+| [Callbacks](start/callbacks.md) | [Canonical V3](advanced/archive-v3.md) |
+| [Local filters](start/filters.md) | [Data and coverage](advanced/coverage.md) |
+| [Cloudflare reads](start/network.md) | [Reader behavior](reference/archive-reader-formats.md) |
+
+These pages also build into a small [documentation website](../web/blockzilla-docs/README.md).
+The site uses the same Markdown, including the existing V2 format reference.
+
+[Token index in SQLite](start/token-indexer.md), [Token dumper](start/token-dumper.md),
+[Program dumper](start/program-dumper.md), [ClickHouse](start/clickhouse.md), and
+[from Jetstreamer](start/jetstreamer.md) cover application examples. The live
+stream is in private beta and needs a consumer key. The crates.io release is
+pending.
+
+## Engineering documentation
+
 Start with [Archive formats and the read SDK](reference/archive-formats-and-read-sdk.md).
 It is the main product guide for format choice, the common ordered scan API,
 network setup, cache behavior, trust levels, and reader file layouts. The
@@ -7,7 +33,9 @@ network setup, cache behavior, trust levels, and reader file layouts. The
 shared byte sources, top-level indexers, and the remaining V3 migration.
 
 The repository [fixture quick start](../README.md#quick-start-build-and-read-the-fixture)
-is the shortest working path through the project.
+is an offline engineering check. It is not required to use the archive.
+
+Release preparation: [publish the reader and CLI](advanced/publishing.md).
 
 Current guides: [Blockzilla CLI](../blockzilla/cli/README.md),
 [supporting services](architecture/services.md), and
@@ -31,6 +59,12 @@ recommended read-SDK starting point.
   continuous worker dispatch, ordered output, resource limits, and cancellation.
 - [Indexed USDC balances](reference/usdc-indexed-balances-v1.md) documents the
   optional compact balance stream, source-scoped dictionary, and checked expansion.
+- [Hivezilla provider decision](reference/hivezilla-provider-decision-2026-09-26.md)
+  selects Shyft for the first trial, audits the old volume estimate, and defines
+  the checks still needed for complete block capture and recovery.
+- [Live source research](reference/live-source-providers-2026-09-25.md) records
+  the earlier gRPC, shred, bare-metal and repair-source comparison. Its estimates
+  and vendor claims are not live provider test results.
 - [Dependency review](reference/dependency-review-2026-09-06.md) records current
   versions, major-release changes, and required protocol compatibility limits.
 - [JavaScript and build tools](reference/js-dependency-review-2026-09-06.md)
@@ -51,6 +85,15 @@ recommended read-SDK starting point.
   experimental finite-work scheduler and its read-only status boundary.
 - [Blockzilla monitor](../blockzilla/monitor/README.md) documents the
   separate read-only operational UI and API contract.
+- [Hivezilla validator dashboard](../hivezilla/dashboard/README.md) documents
+  the loopback-only Topcoat page for validator metrics and canary status.
+- [Validator Tunnel setup](architecture/hivezilla-validator-tunnel.md) records
+  continuous operation, the prepared private gRPC route, and the Cloudflare
+  access permissions still required for client use.
+- [Yellowstone full-block profile](../hivezilla/deploy/yellowstone-blocks-only/README.md)
+  records the reduced account-copy path, live test, metrics, and rollback files.
+- [Hivezilla raw shred hook](../hivezilla/deploy/agave-shred-hook/README.md)
+  records the staged receive hook, packet preservation test, and restart plan.
 - [External FireWatch local archive indexing](guides/firewatch-local-archive-indexing.md)
   hands off the completed-epoch read SDK and authenticated Range-gateway flow;
   the FireWatch adapter itself remains work for the separate `ferno-watcher` repository.
@@ -73,6 +116,13 @@ recommended read-SDK starting point.
 Archive V2 is pre-1.0. Pin the Git revision used to produce and read an archive.
 
 ## Proposed architecture
+
+- [Local validator execution test](../hivezilla/service/EXECUTION-CANARY.md):
+  finalized current-schema capture, verified Compact V2 test output, and
+  retained raw evidence under a separate source profile.
+- [Live validator test operations](architecture/hivezilla-live-canary-operations.md):
+  pinned Agave and Yellowstone releases, private local endpoints, and bounded
+  startup and capture controls.
 
 - [Blockzilla Index Archive design](design/blockzilla-index-archive.md): the
   design history for the Archive V3 replacement. Use the
@@ -148,6 +198,9 @@ output, and production deployment configuration do not belong here.
 - [CAR to V3: short format story](benchmarks/from-car-to-v3-accepted-results-20260908.md)
 - [Epoch900 network reader pilot](benchmarks/network-reader-epoch900-pilot.md)
 
-Latest reader diagnostic: [epoch 900 network CPU profiles and resource use](benchmarks/epoch900-network-profile-20260908.md).
+Latest reader diagnostic: [full epoch 1000 resident CAR decode profile](benchmarks/triton-resident-decode-profile-20260930.md).
+Follow-up: [measured buffer-search and receipt-hash changes](benchmarks/triton-resident-decode-optimization-20260930.md).
+Next code test: [metadata allocation reuse](benchmarks/triton-resident-metadata-reuse-20260930.md).
+Earlier network diagnostic: [epoch 900 CPU profiles and resource use](benchmarks/epoch900-network-profile-20260908.md).
 
 Latest allocation pass: [CAR metadata allocations and network capacity](benchmarks/car-allocation-network-20260909.md).

@@ -1,0 +1,15 @@
+[Unit]
+Description=Private address for Hivezilla Tunnel services
+Before=hivezilla-private@8766.socket hivezilla-private@10000.socket
+
+[Service]
+Type=oneshot
+RemainAfterExit=yes
+ExecStartPre=-/usr/sbin/nft delete table inet hivezilla_private
+ExecStart=/usr/sbin/nft -f /etc/hivezilla/validator-private.nft
+ExecStart=/usr/sbin/ip address replace 10.253.45.3/32 dev lo
+ExecStop=/usr/sbin/ip address del 10.253.45.3/32 dev lo
+ExecStop=/usr/sbin/nft delete table inet hivezilla_private
+
+[Install]
+WantedBy=multi-user.target

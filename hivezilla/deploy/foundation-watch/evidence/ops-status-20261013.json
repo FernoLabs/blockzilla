@@ -1,0 +1,143 @@
+{
+  "schema": "blockzilla-foundation-finite-ops-check-v1",
+  "checked_unix_ms": 1791864718722,
+  "time_zone": "Europe/Paris",
+  "read_only": true,
+  "archive": {
+    "status": {
+      "state": "REGISTRIES",
+      "epoch": 1051,
+      "updated_unix_ms": 1791863591719
+    },
+    "scope": "car-derived Compact V2 query-with-signatures",
+    "completed_epochs": [
+      1048,
+      1049,
+      1050
+    ],
+    "last_completed_epoch": 1050,
+    "last_completed_unix_seconds": 1791860941,
+    "completed_selected_bytes": 355940089074,
+    "queued_epochs": [
+      1052,
+      1053,
+      1054
+    ],
+    "stage_progress": {
+      "stage": "REGISTRIES",
+      "percent": 99.9,
+      "eta_seconds": 0,
+      "eta_scope": "registry scan only; final registry writes and later stages remain",
+      "log_updated_unix_ms": 1791864718464
+    },
+    "progress_samples": [
+      {
+        "checked_unix_ms": 1791864499871,
+        "stage": "REGISTRIES",
+        "percent": 79.5
+      },
+      {
+        "checked_unix_ms": 1791864531533,
+        "stage": "REGISTRIES",
+        "percent": 82
+      },
+      {
+        "checked_unix_ms": 1791864596754,
+        "stage": "REGISTRIES",
+        "percent": 87.9
+      },
+      {
+        "checked_unix_ms": 1791864718722,
+        "stage": "REGISTRIES",
+        "percent": 99.9
+      }
+    ],
+    "last_upload_bytes": 127286509165,
+    "last_upload_seconds": 937.905,
+    "observed_epoch_stage_seconds": [
+      {
+        "epoch": 1049,
+        "download": 2947.484,
+        "registries": 1055.06,
+        "registry_index": 25.003,
+        "compact": 2675.154,
+        "upload": 704.663
+      },
+      {
+        "epoch": 1050,
+        "download": 3455.286,
+        "registries": 1160.069,
+        "registry_index": 30.003,
+        "compact": 2990.176,
+        "upload": 937.905
+      }
+    ],
+    "planned_remaining_input_bytes": {
+      "1051": 801066633292,
+      "1052": 755949463614,
+      "1053": 627293342751,
+      "1054": 628246747897
+    },
+    "estimates": {
+      "next_epoch_uploaded_seconds_min": 3600,
+      "next_epoch_uploaded_seconds_max": 4500,
+      "queue_complete_seconds_min": 21600,
+      "queue_complete_seconds_max": 28800,
+      "condition": "estimated from the two previous epochs; assumes no live-priority freeze or reserve wait",
+      "exact": false
+    },
+    "sources": {
+      "status": "jobs/car-backfill-20261012/STATUS.json",
+      "stage_log": "jobs/car-backfill-20261012/epoch-1051.log",
+      "upload_log": "jobs/car-backfill-20261012/controller.log",
+      "completion": "jobs/car-backfill-20261012/upload-state/epoch-{epoch}/complete.json"
+    },
+    "limitations": [
+      "Controller status timestamp is stage start; use stage log time to test progress.",
+      "Upload log is root-owned; current ubuntu heartbeat cannot read it.",
+      "Receipts verify selected object sizes and manifest; full CAR archive readback was not requested.",
+      "Estimate is for queued epochs through 1054, not future unpublished CAR files."
+    ]
+  },
+  "live": {
+    "source_session": "000000000000000018ddd9a6bb6fc50e-282459",
+    "compact": {
+      "state": "RUNNING",
+      "last_compact_slot": 456305500,
+      "event_sequence": 339821,
+      "source_sequence": 393264552,
+      "updated_unix_ms": 1791864718545
+    },
+    "publisher": {
+      "sequence": 339673,
+      "blocks": 169857,
+      "bytes": 89262858231
+    },
+    "cold_storage": {
+      "state": "RUNNING",
+      "archived_banks": 102425,
+      "retired_banks": 102425,
+      "freed_bytes_this_run": 353440096256,
+      "keep_seconds": 7200,
+      "pending_bundles": 2,
+      "updated_unix_ms": 1791864718576
+    },
+    "priority": {
+      "state": "BACKGROUND_RUNNING",
+      "slot_lag": 0,
+      "event_lag": 124,
+      "capture_sequence": 393242387,
+      "capture_rooted_slot": 456305459,
+      "healthy": true,
+      "updated_unix_ms": 1791864716258
+    },
+    "finite_progress": {
+      "interval_seconds": 121.968,
+      "compact_events_advanced": 1130,
+      "compact_slot_advanced": 565,
+      "publisher_events_advanced": 1114,
+      "retired_banks_advanced": 1024
+    },
+    "free_disk_bytes_at_first_sample": 1332675944448
+  }
+}

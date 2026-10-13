@@ -1,0 +1,43 @@
+{
+  "schema": "blockzilla-foundation-background-load-check-v1",
+  "source": "000000000000000018ddd9a6bb6fc50e-282459",
+  "validator_pid": 2630745,
+  "samples": [
+    {
+      "unix_ms": 1791841700930,
+      "guard": "BACKGROUND_RUNNING",
+      "slot_lag": 0,
+      "event_lag": 3302,
+      "healthy": true,
+      "compact_slot": 456200133,
+      "event_sequence": 129296,
+      "cloud_sequence": 125990,
+      "cloud_bytes": 34966203306,
+      "live_retired_banks": 22656,
+      "free_disk_bytes": 794003435520,
+      "backfill_freezer": "running"
+    },
+    {
+      "unix_ms": 1791843471257,
+      "state": "BACKGROUND_RUNNING",
+      "updated_unix_ms": 1791843469575,
+      "source": "000000000000000018ddd9a6bb6fc50e-282459",
+      "slot_lag": 0,
+      "event_lag": 129,
+      "healthy": true,
+      "compact_slot": 456208246,
+      "event_sequence": 145498,
+      "cloud_sequence": 145351,
+      "cloud_bytes": 40214769045,
+      "live_retired_banks": 33216,
+      "free_disk_bytes": 762294943744
+    }
+  ],
+  "native_healthy_at_observed_points": true,
+  "cloud_advanced": true,
+  "native_retirement_advanced": true,
+  "cloud_queue_decreased": true,
+  "background_work_resumed": true,
+  "finite_check_only": true,
+  "sampling_note": "The short continuous probe was interrupted. These are two independently observed endpoints; they do not prove uninterrupted health between them."
+}

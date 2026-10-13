@@ -1,0 +1,13 @@
+{
+  "state": "PASSED",
+  "scope": "fixed first-seen CAR importer versus standard CAR importer, first 64 blocks",
+  "blocks": 64,
+  "transactions": 66397,
+  "signatures": 67791,
+  "metadata_mismatches": [],
+  "all_block_hashes_counts_and_ordered_signature_digests_match": true,
+  "unit_tests_passed": 39,
+  "new_v1_regression_tests": 4,
+  "native_sources_changed": false,
+  "nas_production_converter_changed": false
+}

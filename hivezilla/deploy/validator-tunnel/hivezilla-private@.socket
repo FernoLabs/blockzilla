@@ -1,0 +1,13 @@
+[Unit]
+Description=Private Hivezilla TCP port %i
+BindsTo=hivezilla-private-address.service
+After=hivezilla-private-address.service
+PartOf=hivezilla-private-address.service
+
+[Socket]
+ListenStream=10.253.45.3:%i
+NoDelay=yes
+Backlog=4096
+
+[Install]
+WantedBy=sockets.target

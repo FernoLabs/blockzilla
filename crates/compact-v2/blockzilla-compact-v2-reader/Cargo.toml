@@ -1,4 +1,5 @@
 [package]
+publish = ["crates-io"]
 name = "blockzilla-compact-v2-reader"
 version.workspace = true
 edition.workspace = true
@@ -7,7 +8,7 @@ license.workspace = true
 repository.workspace = true
 description = "Bounded, generation-verified Archive V2 streaming reader"
 readme = "README.md"
-include = ["Cargo.toml", "README.md", "src/**", "assets/**"]
+include = ["Cargo.toml", "README.md", "src/**", "assets/**", "examples/**"]
 keywords = ["solana", "archive", "streaming", "indexer"]
 categories = ["database", "filesystem"]
 
@@ -17,11 +18,11 @@ http = ["dep:blockzilla-source-http", "dep:blockzilla-source-cache", "dep:url"]
 
 [dependencies]
 # The reader must decode known-program log variants, including in isolated builds.
-blockzilla-archive-v2 = { path = "../blockzilla-archive-v2", default-features = false, features = ["known-program-logs"] }
-blockzilla-compact = { path = "../blockzilla-compact", default-features = false, features = ["known-program-logs"] }
-blockzilla-primitives = { path = "../../blockzilla-primitives", default-features = false }
-blockzilla-program-logs = { path = "../../parser/blockzilla-program-logs", default-features = false, features = ["known-program-logs"] }
-blockzilla-registry = { path = "../blockzilla-registry", default-features = false }
+blockzilla-archive-v2 = { path = "../blockzilla-archive-v2", default-features = false, features = ["known-program-logs"], version = "0.2.0" }
+blockzilla-compact = { path = "../blockzilla-compact", default-features = false, features = ["known-program-logs"], version = "0.2.0" }
+blockzilla-primitives = { path = "../../blockzilla-primitives", default-features = false, version = "0.2.0" }
+blockzilla-program-logs = { path = "../../parser/blockzilla-program-logs", default-features = false, features = ["known-program-logs"], version = "0.2.0" }
+blockzilla-registry = { path = "../blockzilla-registry", default-features = false, version = "0.2.0" }
 url = { version = "2.5.8", optional = true }
 blockzilla-source = { version = "0.2.0", path = "../../source/blockzilla-source" }
 blockzilla-source-local = { version = "0.2.0", path = "../../source/blockzilla-source-local" }
@@ -47,6 +48,14 @@ tempfile = "3.27.0"
 [[test]]
 name = "compact_v2_public_api"
 path = "tests/compact_v2_public_api.rs"
+required-features = ["http"]
+
+[[example]]
+name = "first_read"
+required-features = ["http"]
+
+[[example]]
+name = "read_epoch"
 required-features = ["http"]
 
 [lints]

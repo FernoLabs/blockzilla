@@ -1,0 +1,34 @@
+{
+  "schema": "hivezilla-direct-reward-fix-release-v1",
+  "deployed_unix": 1791011269,
+  "release": "/home/ubuntu/live/hivezilla-validator-20260930/releases/direct-agave-plugin-rewards-v7-20261003",
+  "plugin_sha256": "e8777a451c986ba932b175710d43f8efbc09b7da8fdf2b0e324a3329d9b729ea",
+  "agave_revision": "825efd18292aff6ffcf9daa0f7612f21b3531a72",
+  "compiler": "rustc 1.97.1 (8bab26f4f 2026-07-14)",
+  "engine_tests_passed": 22,
+  "regression_test": "epoch_rewards_preserve_every_native_type_and_signed_amount",
+  "reward_codes": {
+    "None": 0,
+    "Fee": 1,
+    "Rent": 2,
+    "Staking": 3,
+    "Voting": 4,
+    "DeactivatedStake": 5,
+    "VATDebit": 6
+  },
+  "exhaustive_typed_reward_match": true,
+  "validator_restarted": false,
+  "config": {
+    "libpath": "/home/ubuntu/live/hivezilla-validator-20260930/releases/direct-agave-plugin-rewards-v7-20261003/libhivezilla_direct_agave.so",
+    "output_root": "/home/ubuntu/live/hivezilla-validator-20260930/captures/direct-agave-live",
+    "genesis_hash": "5eykt4UsFv8P8NJdTREpY1vzqKqZKvdpKuc147dw2N9d",
+    "node_identity": "J7qpvCEWhdBgPdYRV3s3btWPrRVXa2qnAzgvxWTvtbrQ",
+    "queue_events": 65536,
+    "queue_bytes": 1073741824,
+    "max_event_bytes": 16777216,
+    "max_journal_bytes": 68719476736,
+    "reserve_disk_bytes": 536870912000,
+    "commit_interval_ms": 10
+  },
+  "worker_release_unchanged": "direct-agave-worker-v6-20261002"
+}

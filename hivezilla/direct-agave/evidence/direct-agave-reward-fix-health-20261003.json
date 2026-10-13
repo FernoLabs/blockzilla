@@ -1,0 +1,88 @@
+{
+  "updated_unix": 1791011555,
+  "health": {
+    "schema": "hivezilla-direct-pipeline-health-v1",
+    "updated_unix_ms": 1791011555085,
+    "state": "WARNING",
+    "problems": [],
+    "warnings": [
+      "An earlier session ended without a clean close; earlier coverage can have gaps"
+    ],
+    "canonical": false,
+    "full_epoch": false,
+    "validator": {
+      "health": "ok",
+      "finalized_slot": 452862429,
+      "identity": "J7qpvCEWhdBgPdYRV3s3btWPrRVXa2qnAzgvxWTvtbrQ",
+      "genesis_hash": "5eykt4UsFv8P8NJdTREpY1vzqKqZKvdpKuc147dw2N9d"
+    },
+    "capture": {
+      "session_id": "000000000000000018daf342ba38d3d0-10e3f5",
+      "path": "/home/ubuntu/live/hivezilla-validator-20260930/captures/direct-agave-live/000000000000000018daf342ba38d3d0-10e3f5",
+      "state": "CAPTURING",
+      "node_identity": "J7qpvCEWhdBgPdYRV3s3btWPrRVXa2qnAzgvxWTvtbrQ",
+      "genesis_hash": "5eykt4UsFv8P8NJdTREpY1vzqKqZKvdpKuc147dw2N9d",
+      "validator_pid": 1106933,
+      "writer_live": true,
+      "durable_sequence": 2228541,
+      "latest_rooted_slot": 452862430,
+      "journal_bytes": 304118202,
+      "journal_limit_bytes": 68719476736,
+      "reserve_disk_bytes": 536870912000,
+      "previous_unclean_sessions": [
+        "000000000000000018daccf4d01ca96d-10e3f5",
+        "000000000000000018daceb49b8b9a08-10e3f5"
+      ],
+      "raw_shred_completeness": false
+    },
+    "worker": {
+      "batches": 621,
+      "canonical": false,
+      "compacted_blocks": 1046,
+      "compacted_entries": 1101735,
+      "compacted_transactions": 1053256,
+      "durable_sequence": 2226674,
+      "epoch": 1048,
+      "first_compact_slot": 452861384,
+      "full_epoch": false,
+      "last_compact_slot": 452862429,
+      "state": "BUILDING",
+      "updated_unix_ms": 1791011555078
+    },
+    "compact_lag_slots": 1,
+    "worker_status_age_seconds": 0,
+    "free_disk_bytes": 2490275536896,
+    "last_durable_change_unix_ms": 1791011555085,
+    "shreds": {
+      "schema": "hivezilla-shred-hook-status-v1",
+      "state": "ACTIVE",
+      "reason": "receiving",
+      "updated_unix_ms": 1791011555015,
+      "durable_next_sequence": 267249985,
+      "durable_prefix_hash": "a21a7b17ce78298b7758412c15bdc0ed75254679651d6383ec70dc75e8678653",
+      "journal_bytes": 350399049215,
+      "counts": {
+        "packets": 267249985,
+        "payload_bytes": 324742465839,
+        "turbine_received": 263037489,
+        "repair_received": 2137674,
+        "repair_accepted": 2074822,
+        "data_shreds": 135575825,
+        "coding_shreds": 131612369,
+        "other_datagrams": 61791,
+        "first_header_slot": 452704425,
+        "max_header_slot": 452862462
+      },
+      "custody_authority": false,
+      "canonical_coverage_verified": false
+    }
+  },
+  "backup": {
+    "state": "SAVING",
+    "updated_unix": 1791011553,
+    "blocks_saved": 2528,
+    "blocks_expected": 85260,
+    "errors": 0,
+    "last_saved_slot": 452778619
+  }
+}

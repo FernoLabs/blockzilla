@@ -1,5 +1,7 @@
 [workspace]
 resolver = "2"
+# The validator plugin has an independent lock file for its exact Agave ABI.
+exclude = ["hivezilla/direct-agave", "hivezilla/stream-relay", "hivezilla/stream-relay/decoder"]
 members = [
     # Shared models, primitives, and byte sources.
     "crates/blockzilla-model",
@@ -39,7 +41,11 @@ members = [
     "blockzilla/archive-gateway",
     "blockzilla/monitor",
     "hivezilla/service",
+    "hivezilla/dashboard",
+    "hivezilla/epoch-runner",
     "hivezilla/protocol",
+    "hivezilla/shred-hook-abi",
+    "hivezilla/shred-hook",
     "hivezilla/object-store",
     "hivezilla/ledger-compat",
     "hivezilla/gossip-compat",
@@ -103,3 +109,22 @@ strip = false
 # builder down to a bounded frame; release settings are unchanged.
 [profile.test.package.blockzilla]
 opt-level = 1
+
+# Source-install consumers must keep up with live blocks even in a development
+# CLI build. Optimize the portable decompressor/codec and the large CLI dispatch.
+[profile.dev.package.blockzilla]
+opt-level = 1
+[profile.dev.package.blockzilla-stream-decoder]
+opt-level = 3
+[profile.dev.package.ruzstd]
+opt-level = 3
+[profile.dev.package.serde_json]
+opt-level = 3
+[profile.dev.package.rusqlite]
+opt-level = 3
+[profile.dev.package.libsqlite3-sys]
+opt-level = 3
+[profile.dev.package.hivezilla-stream]
+opt-level = 3
+[profile.dev.package.sha2]
+opt-level = 3

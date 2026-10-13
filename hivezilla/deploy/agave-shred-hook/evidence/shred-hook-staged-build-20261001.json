@@ -1,0 +1,75 @@
+{
+  "schema": "hivezilla-shred-hook-staged-build-v1",
+  "prepared_utc": "2026-10-01T10:12:04.328842+00:00",
+  "state": "STAGED_NOT_ACTIVATED",
+  "agave_base_revision": "825efd18292aff6ffcf9daa0f7612f21b3531a72",
+  "agave_version": "agave-validator 4.3.0 (src:825efd18; feat:c9ad34d2, client:Agave)",
+  "producer_rust_toolchain": "1.97.1",
+  "recorder_rust_toolchain": "1.98.0",
+  "raw_hook_c_abi": 1,
+  "producer_queue_packets": 65536,
+  "max_packet_bytes": 1232,
+  "tests_passed_linux": 7,
+  "real_fixture_packets_preserved": 256,
+  "real_fixture_report": "/home/ubuntu/live/hivezilla-validator-20260930/reports/shred-hook-fixture-comparison-20261001.json",
+  "validator_pid": 471837,
+  "validator_health": "ok",
+  "validator_restarted": false,
+  "activation_requires_validator_restart": true,
+  "raw_hook_active": false,
+  "geyser_execution_plugin_implemented": false,
+  "archive_verification_run": false,
+  "r2_publication_run": false,
+  "artifacts": {
+    "producer_library": {
+      "path": "/home/ubuntu/live/hivezilla-validator-20260930/releases/hivezilla-shred-hook/libhivezilla_shred_hook.so",
+      "sha256": "c97f8fe968614351ad00b049cf435f712b9f1ce3265c4ccec4c75c91427479f2",
+      "bytes": 375832
+    },
+    "recorder_binary": {
+      "path": "/home/ubuntu/live/hivezilla-validator-20260930/releases/hivezilla-shred-hook/hivezilla-shred-hook-recorder",
+      "sha256": "3cc4be6aee164a24cf40719ec5679577128b982a60a2c725a6cd8805ed32e5b2",
+      "bytes": 799776
+    },
+    "validator_binary": {
+      "path": "/home/ubuntu/live/hivezilla-validator-20260930/releases/agave-shred-hook-v4.3.0/agave-validator",
+      "sha256": "9bb753dba4d2c862bd5626afc3256154325579b54617ed53da22f0a3e881b232",
+      "bytes": 82320544
+    },
+    "agave_integration_patch": {
+      "path": "/home/ubuntu/live/hivezilla-validator-20260930/releases/agave-shred-hook-v4.3.0/integration.patch",
+      "sha256": "f41f5cc077b0c9f29668e8eb00d8c1d44f9a30a13e2dfff9eea9e7023dd71e6f",
+      "bytes": 4174
+    },
+    "agave_adapter_source": {
+      "path": "/home/ubuntu/live/hivezilla-validator-20260930/releases/agave-shred-hook-v4.3.0/source/core/src/hivezilla_shred_hook.rs",
+      "sha256": "6a1620d9d255c76f895068eaae29f376d4d72c0d1537dbcd6f30caeebbbe5cc8",
+      "bytes": 5954
+    },
+    "agave_lock": {
+      "path": "/home/ubuntu/live/hivezilla-validator-20260930/releases/agave-shred-hook-v4.3.0/source/Cargo.lock",
+      "sha256": "b04f6310f280512ef0f22464be04691f768880a2517820b0790f723b43350f71",
+      "bytes": 322922
+    },
+    "producer_lock": {
+      "path": "/home/ubuntu/live/hivezilla-validator-20260930/releases/hivezilla-shred-hook/source/Cargo.lock",
+      "sha256": "5b81fc010561b3ca0ae68acd6bf9413d248d2008022187eb5afd8e6a464b5c0d",
+      "bytes": 11619
+    },
+    "abi_source": {
+      "path": "/home/ubuntu/live/hivezilla-validator-20260930/releases/hivezilla-shred-hook/source/hivezilla/shred-hook-abi/src/lib.rs",
+      "sha256": "f7ca94ff30a017acf5a10d61af55ea30f1fb01cece7daaa0d8f7359a37c5845d",
+      "bytes": 1495
+    },
+    "recorder_service": {
+      "path": "/home/ubuntu/live/hivezilla-validator-20260930/releases/hivezilla-shred-hook/hivezilla-shred-hook-recorder.service",
+      "sha256": "be16b3fa6441d19f8efeec67364a7acbbfd738acfd3009fcd75213c33b180b89",
+      "bytes": 1212
+    },
+    "validator_override": {
+      "path": "/home/ubuntu/live/hivezilla-validator-20260930/releases/hivezilla-shred-hook/shred-hook.conf",
+      "sha256": "50873a317d9764a696bb419672c07870d0f146651b0f8a1d8a5bac083de51b33",
+      "bytes": 1764
+    }
+  }
+}

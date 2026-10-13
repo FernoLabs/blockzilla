@@ -1,0 +1,61 @@
+{
+  "checked_at_utc": "2026-10-05T21:12:49.796381+00:00",
+  "verification": {
+    "schema": "hivezilla-native-epoch-poh-verification-v1",
+    "epoch": 1049,
+    "source": "/home/ubuntu/live/hivezilla-validator-20260930/compact/direct-agave-live/000000000000000018daf342ba38d3d0-10e3f5",
+    "verifier": "/home/ubuntu/live/hivezilla-validator-20260930/releases/native-epoch-verifier-20261005/blockzilla",
+    "workers": 48,
+    "chunks_total": 302501,
+    "blocks_total": 431667,
+    "entries_total": 513081322,
+    "canonical": false,
+    "independent_consensus_proof": false,
+    "independent_archive_coverage_confirmed": false,
+    "ed25519_signature_verification": "not-run",
+    "tick_schedule_verification": "not-run",
+    "continuity_receipt": "/home/ubuntu/live/hivezilla-validator-20260930/reports/native-epoch-1049-verification-20261005/CONTINUITY.json",
+    "resumed_chunks": 0,
+    "state": "VERIFYING_POH",
+    "chunks_verified": 6188,
+    "elapsed_seconds": 166.5181121630594,
+    "blocks_per_second": 53.05729139751782,
+    "blocks_verified": 8835,
+    "entries_verified": 9822597,
+    "transactions_consumed": 9521394,
+    "signatures_hashed": 9872871,
+    "hashes_recomputed": 22097217152,
+    "compressed_bytes_read": 1437538439,
+    "estimated_remaining_seconds": 7969.347640309082
+  },
+  "verification_service": {
+    "ActiveState": "active",
+    "SubState": "running",
+    "MainPID": "30363",
+    "MemoryCurrent": "3146866688",
+    "CPUUsageNSec": "8012574719000",
+    "TasksCurrent": "144"
+  },
+  "measured_verification_core_equivalents": 47.96555064107727,
+  "logical_cpus": 128,
+  "validator_health": "ok",
+  "validator_pid": 1106933,
+  "capture_state": "CAPTURING",
+  "compact_lag_slots": 3,
+  "free_disk_bytes": 798120419328,
+  "tests": {
+    "rust_archive_verifier": {
+      "passed": 44,
+      "failed": 0,
+      "private_umask": "077"
+    },
+    "python_epoch_orchestration": {
+      "passed": 5,
+      "failed": 0
+    }
+  },
+  "source_sha256": {
+    "releases/native-epoch-verifier-20261005/blockzilla": "cd4b3b22c2bef95cd46f9ead3392812f11a6f7042c5cf942057582f016f3a258",
+    "releases/native-epoch-verifier-20261005/verify_epoch.py": "4895fe667c5f9ec214cb6b915889d66340cf85d757ce7e833fbc3d46b123fb13"
+  }
+}

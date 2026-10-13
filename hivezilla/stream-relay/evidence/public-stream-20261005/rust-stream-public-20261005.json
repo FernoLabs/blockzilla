@@ -1,0 +1,97 @@
+{
+  "schema": "blockzilla-rust-public-stream-check-v1",
+  "state": "PASS",
+  "utc": "2026-10-05T21:30:50.568562+00:00",
+  "url": "https://stream.blockzilla.dev",
+  "transport": "SSE notices plus binary chunk GET",
+  "ssh_transport": false,
+  "chunks": 8,
+  "blocks": 12,
+  "transactions": 12817,
+  "wire_bytes": 5188862,
+  "resume_passed": true,
+  "canonical": false,
+  "publication_ready": false,
+  "rows": [
+    {
+      "blocks": 1,
+      "canonical": false,
+      "cursor": "000000000000000018daf342ba38d3d0-10e3f5:453700377:f56dc51ae036327880aadccc4722962662d4d6e28c5f866f17b447a86c79d798",
+      "publicationReady": false,
+      "slot": 453700377,
+      "state": "LIVE",
+      "transactions": 978,
+      "wireBytes": 437703
+    },
+    {
+      "blocks": 1,
+      "canonical": false,
+      "cursor": "000000000000000018daf342ba38d3d0-10e3f5:453700378:0229201957528d03e7737fb902465acf717a6b1195ab52bd0eaefbfdff60cc01",
+      "publicationReady": false,
+      "slot": 453700378,
+      "state": "LIVE",
+      "transactions": 1012,
+      "wireBytes": 432893
+    },
+    {
+      "blocks": 1,
+      "canonical": false,
+      "cursor": "000000000000000018daf342ba38d3d0-10e3f5:453700379:ff887e9fcb46592eb509244d179f6044ccbf57755d812c3628ae997f8663d3a9",
+      "publicationReady": false,
+      "slot": 453700379,
+      "state": "LIVE",
+      "transactions": 983,
+      "wireBytes": 430955
+    },
+    {
+      "blocks": 1,
+      "canonical": false,
+      "cursor": "000000000000000018daf342ba38d3d0-10e3f5:453700380:2b1dfa269b89c04c2698dd7498a1489d12614948fb2ab0490fa5d27bf4996351",
+      "publicationReady": false,
+      "slot": 453700380,
+      "state": "LIVE",
+      "transactions": 1247,
+      "wireBytes": 556474
+    },
+    {
+      "blocks": 2,
+      "canonical": false,
+      "cursor": "000000000000000018daf342ba38d3d0-10e3f5:453700382:a01b14c1e2a37b22896319b645ecf0d4508ed7477cd92923f0a08b4eea753efc",
+      "publicationReady": false,
+      "slot": 453700382,
+      "state": "LIVE",
+      "transactions": 2011,
+      "wireBytes": 759056
+    },
+    {
+      "blocks": 2,
+      "canonical": false,
+      "cursor": "000000000000000018daf342ba38d3d0-10e3f5:453700384:0726e8b0d5751e186f232ac1ebad88d0114d824cec957331b35aad7892e91612",
+      "publicationReady": false,
+      "slot": 453700384,
+      "state": "LIVE",
+      "transactions": 2136,
+      "wireBytes": 805636
+    },
+    {
+      "blocks": 2,
+      "canonical": false,
+      "cursor": "000000000000000018daf342ba38d3d0-10e3f5:453700386:47a1344789eb28533e78bfac41fdd41c3ba2b824381a7f05442e4e9d7cdb7c59",
+      "publicationReady": false,
+      "slot": 453700386,
+      "state": "LIVE",
+      "transactions": 2075,
+      "wireBytes": 906053
+    },
+    {
+      "blocks": 2,
+      "canonical": false,
+      "cursor": "000000000000000018daf342ba38d3d0-10e3f5:453700388:e267b3fd64a1102766b9e21eb21ddc9a3e2d781c91667c99069359ff214a2b14",
+      "publicationReady": false,
+      "slot": 453700388,
+      "state": "LIVE",
+      "transactions": 2375,
+      "wireBytes": 860092
+    }
+  ]
+}

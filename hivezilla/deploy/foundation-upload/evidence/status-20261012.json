@@ -1,0 +1,103 @@
+{
+  "checked_at": "2026-10-12T18:42:59.928139+02:00",
+  "destination_bucket": "solana-archive-data",
+  "archive": {
+    "observed_at": "2026-10-12T18:41:18.598405+02:00",
+    "total_selected_bytes": 92898238532602,
+    "complete_bytes": 92898238532602,
+    "remaining_bytes": 0,
+    "percent_complete": 100,
+    "complete_epochs": 1048,
+    "latest_completed_age_minutes": 720.9,
+    "latest_completions": [
+      {
+        "epoch": 3,
+        "bytes": 2047786145,
+        "completed": 1791779937.779
+      },
+      {
+        "epoch": 2,
+        "bytes": 2020233508,
+        "completed": 1791779976.606
+      },
+      {
+        "epoch": 1,
+        "bytes": 1067920973,
+        "completed": 1791780006.458
+      },
+      {
+        "epoch": 0,
+        "bytes": 248863511,
+        "completed": 1791780026.296
+      }
+    ],
+    "receipt_size_checks": 3,
+    "source": "Foundation bucket object list and query completion manifests",
+    "6h": {
+      "complete_epochs": 0,
+      "mib_per_sec": 0,
+      "eta_days": null,
+      "finish_paris": null
+    },
+    "24h": {
+      "complete_epochs": 261,
+      "mib_per_sec": 65.02,
+      "eta_days": 0,
+      "finish_paris": "2026-10-12T18:41:18.598405+02:00"
+    },
+    "48h": {
+      "complete_epochs": 422,
+      "mib_per_sec": 117.99,
+      "eta_days": 0,
+      "finish_paris": "2026-10-12T18:41:18.598405+02:00"
+    },
+    "recent_open_uploads": [],
+    "completed_at_paris": "2026-10-12T06:40:26.296+02:00",
+    "epoch_range": [
+      0,
+      1047
+    ],
+    "profile": "query-with-signatures",
+    "later_epochs_checked": [
+      1048,
+      1049,
+      1050,
+      1051,
+      1052,
+      1053,
+      1054
+    ],
+    "later_epoch_objects_in_this_prefix": false
+  },
+  "foundation": {
+    "public_v1_state": "FAILED",
+    "public_v2_status": "failed",
+    "current_source": "000000000000000018dd84835b6e7677-282459",
+    "last_native_confirmation_paris": "2026-10-12T12:47:57.702+02:00",
+    "last_confirmed_slot": 456019192,
+    "last_confirmed_epoch": 1055,
+    "current_source_cloud_head_updated_paris": "2026-10-12T16:28:33.388+02:00",
+    "cloud_last_slot": 456019156,
+    "cloud_epoch": 1055,
+    "cloud_blocks": 311864,
+    "cloud_bytes": 151819048051,
+    "cloud_sequence": 623680,
+    "advanced_during_two_checks": false,
+    "destination_prefix": "native-stream/processed/direct-agave-live-v1/",
+    "complete_epoch_query_archive_claim": false,
+    "current_failure_cause_verified": false
+  },
+  "current_public_mainnet_epoch": 1055,
+  "car_source": {
+    "epoch": 1054,
+    "http": 200,
+    "bytes": 628246747897,
+    "url": "https://files.old-faithful.net/1054/epoch-1054.car",
+    "epoch_1055_http": 404
+  },
+  "direct_access": {
+    "nas": "SSH timeout",
+    "foundation": "SSH public-key authentication rejected"
+  },
+  "source": "Foundation R2 object metadata and query manifests; two authenticated public stream head checks; public mainnet epoch RPC; Old Faithful HEAD checks"
+}

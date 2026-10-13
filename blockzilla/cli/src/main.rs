@@ -21,12 +21,15 @@ mod block_time_gaps;
 mod car_acquire;
 mod car_debug;
 mod car_preflight;
+mod dump_tokens;
 mod first_seen_finalization;
 mod genesis_epoch0;
+mod index_tokens;
 mod pre_hot;
 mod predecessor_tail_seed;
 mod scheduler;
 mod split_compact;
+mod stream;
 mod token_events;
 
 pub const BUFFER_SIZE: usize = 256 << 20;
@@ -35,7 +38,7 @@ pub const SLOTS_PER_EPOCH: u64 = 432_000;
 
 #[derive(Parser)]
 #[command(name = "blockzilla")]
-#[command(about = "Build, inspect, and benchmark Blockzilla Archive V2 data")]
+#[command(about = "Stream, build, and inspect Blockzilla archives")]
 #[command(version)]
 struct Cli {
     #[command(subcommand)]
@@ -48,6 +51,18 @@ struct Cli {
 
 #[derive(Subcommand)]
 enum Commands {
+    /// Stream an epoch as ordered JSON block summaries.
+    Stream(stream::StreamArgs),
+
+    /// Dump recorded pre- and post-token balances as JSON Lines.
+    DumpTokens(dump_tokens::DumpTokensArgs),
+
+    /// Index live or historical token balances in a local SQLite database.
+    IndexTokens(index_tokens::IndexArgs),
+
+    /// Query a token index while its writer continues to run.
+    TokenDb(index_tokens::QueryArgs),
+
     /// Build and validate Archive V3 candidates and their derived indexes.
     ArchiveV3 {
         #[command(subcommand)]
@@ -66,6 +81,10 @@ enum Commands {
         /// Stop after N blocks. Intended for local profiling and smoke tests.
         #[arg(long)]
         max_blocks: Option<u64>,
+        /// Verify a native Agave chunk's available-poh.wincode against its source receipt.
+        /// This does not establish independent consensus or complete shred coverage.
+        #[arg(long)]
+        native_agave: bool,
     },
 
     /// Backfill CompactPohEntry::signature_count into an already-built archive's poh.wincode.
@@ -633,6 +652,25 @@ enum Commands {
         /// Skip archive-v2-block-access.wincode and archive-v2-block-access.index generation.
         #[arg(long)]
         no_access: bool,
+    },
+
+    /// Build a bounded, explicitly noncanonical finalized-execution canary from a verified normalization.
+    BuildLiveExecutionCanary {
+        normalized_dir: PathBuf,
+        output_dir: PathBuf,
+        #[arg(long, default_value_t = 1)]
+        level: i32,
+        /// Skip the archive read-back audit; the output remains unverified and noncanonical.
+        #[arg(long)]
+        skip_verification: bool,
+    },
+
+    /// Build a compact projection from a complete rooted Agave callback batch.
+    BuildDirectAgaveCompact {
+        normalized_dir: PathBuf,
+        output_dir: PathBuf,
+        #[arg(long, default_value_t = 1)]
+        level: i32,
     },
 
     /// Disabled legacy live finalizer; retained only to reject old invocations explicitly.
@@ -1401,6 +1439,10 @@ fn main() -> Result<()> {
     let resume = cli.resume;
 
     match cli.command {
+        Commands::Stream(args) => stream::run(args),
+        Commands::DumpTokens(args) => dump_tokens::run(args),
+        Commands::IndexTokens(args) => index_tokens::run(args),
+        Commands::TokenDb(args) => index_tokens::query(args),
         Commands::ArchiveV3 { command } => run_archive_v3(command),
         Commands::Scheduler => unreachable!("scheduler arguments are parsed before the main CLI"),
         Commands::PreflightCar {
@@ -1759,6 +1801,16 @@ fn main() -> Result<()> {
                 )
             }
         }
+        Commands::BuildDirectAgaveCompact { normalized_dir, output_dir, level } => {
+            archive_v2::direct_agave::build(&normalized_dir, &output_dir, level)
+        },
+        Commands::BuildLiveExecutionCanary { normalized_dir, output_dir, level, skip_verification } => {
+            if skip_verification {
+                archive_v2::execution_canary::build_with_options(&normalized_dir, &output_dir, level, true)
+            } else {
+                archive_v2::execution_canary::build(&normalized_dir, &output_dir, level)
+            }
+        },
         Commands::BuildArchiveV2HotBlocksFromLive {
             capture_dir,
             output_dir,
@@ -2099,7 +2151,12 @@ fn main() -> Result<()> {
             archive_dir,
             threads,
             max_blocks,
-        } => archive_verify::verify_archive_v2_poh(&archive_dir, threads, max_blocks).map(|report| {
+            native_agave,
+        } => (if native_agave {
+            archive_verify::verify_direct_agave_available_poh(&archive_dir, threads, max_blocks)
+        } else {
+            archive_verify::verify_archive_v2_poh(&archive_dir, threads, max_blocks)
+        }).map(|report| {
             println!("{}", serde_json::to_string(&report).expect("serialize PoH report"));
         }),
         Commands::MigratePohSignatureCounts { archive_dir, threads } => {

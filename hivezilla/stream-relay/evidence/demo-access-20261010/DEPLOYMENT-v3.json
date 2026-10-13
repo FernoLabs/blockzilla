@@ -1,0 +1,14 @@
+{
+  "state": "COMPLETE",
+  "release": "/home/ubuntu/live/hivezilla-validator-20260930/releases/stream-demo-v3-20261010",
+  "binary_sha256": "ff67c7050e245a7742a81e146914f7c33ba7931f159971df7551e68f031a20e8",
+  "override": "/etc/systemd/system/hivezilla-stream-relay.service.d/20-demo-access.conf",
+  "before_cursor": "000000000000000018dd37e5c7e1f5cf-10e3f5:p38655:d93acdc061edf336f908fd879aa8082b2bafab8fe92347b77f1aa6c568f0f2ac",
+  "validator_pid_before": "1106933",
+  "public_max_requests": 8,
+  "allow_query_api_key": true,
+  "public_blockhashes": true,
+  "after_cursor": "000000000000000018dd37e5c7e1f5cf-10e3f5:p38663:0be6799748212ad3904a56f7122765e26a14830e578c0e2d10cd9e0ba540c5c7",
+  "validator_pid_after": "1106933",
+  "completed_unix_ms": 1791654001921
+}

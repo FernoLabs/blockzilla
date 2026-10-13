@@ -1,0 +1,12 @@
+{
+  "libpath": "/absolute/releases/libhivezilla_direct_agave.so",
+  "output_root": "/absolute/captures/direct-agave",
+  "genesis_hash": "5eykt4UsFv8P8NJdTREpY1vzqKqZKvdpKuc147dw2N9d",
+  "node_identity": "J7qpvCEWhdBgPdYRV3s3btWPrRVXa2qnAzgvxWTvtbrQ",
+  "queue_events": 16384,
+  "queue_bytes": 134217728,
+  "max_event_bytes": 16777216,
+  "max_journal_bytes": 2147483648,
+  "reserve_disk_bytes": 536870912000,
+  "commit_interval_ms": 10
+}

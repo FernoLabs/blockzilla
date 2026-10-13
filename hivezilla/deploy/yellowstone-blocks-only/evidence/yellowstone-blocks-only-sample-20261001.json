@@ -1,0 +1,35 @@
+{
+  "schema": "hivezilla-yellowstone-blocks-only-sample-v1",
+  "before": {
+    "time_utc": "2026-10-01T09:33:48.336700+00:00",
+    "monotonic": 138374.257058996,
+    "metrics": {
+      "hivezilla_account_bytes_skipped_total": 1996914670.0,
+      "hivezilla_account_updates_kept_total": 564.0,
+      "hivezilla_account_updates_skipped_total": 431955.0,
+      "hivezilla_blocks_only": 1.0,
+      "yellowstone_grpc_geyser_message_queue_size": 0.0
+    },
+    "validator_pid": "471837"
+  },
+  "after": {
+    "time_utc": "2026-10-01T09:34:18.344746+00:00",
+    "monotonic": 138404.265109481,
+    "metrics": {
+      "hivezilla_account_bytes_skipped_total": 3658994655.0,
+      "hivezilla_account_updates_kept_total": 1028.0,
+      "hivezilla_account_updates_skipped_total": 780182.0,
+      "hivezilla_blocks_only": 1.0,
+      "yellowstone_grpc_geyser_message_queue_size": 0.0
+    },
+    "validator_pid": "471837"
+  },
+  "elapsed_seconds": 30.008050484990235,
+  "skipped_account_updates": 348227,
+  "kept_account_updates": 464,
+  "skipped_account_percent": 99.86693089296827,
+  "skipped_account_data_bytes": 1662079985,
+  "skipped_account_data_bytes_per_second": 55387802.877476424,
+  "skipped_account_updates_per_second": 11604.452617612733,
+  "scope": "Avoided account payload copying inside the plugin; not a CPU throughput benchmark or network bandwidth measurement."
+}

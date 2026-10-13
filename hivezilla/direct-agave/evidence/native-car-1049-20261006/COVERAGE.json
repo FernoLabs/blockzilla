@@ -1,0 +1,33 @@
+{
+  "schema": "hivezilla-native-car-coverage-v1",
+  "state": "PASSED",
+  "epoch": 1049,
+  "native_blocks": 431667,
+  "car_blocks": 431667,
+  "native_transactions": 501801592,
+  "car_transactions": 501801592,
+  "missing_native_blocks": 0,
+  "extra_native_blocks": 0,
+  "missing_slots": [],
+  "extra_slots": [],
+  "skipped_slots": 333,
+  "source_cid": "bafyreifuhnxnisjespnbkjlv76ttqghtlfcsu65qzxbwnfxn4sqr7vge2i",
+  "source_records": {
+    "1049.recap.yaml": {
+      "url": "https://files.old-faithful.net/1049/1049.recap.yaml",
+      "bytes": 1382,
+      "sha256": "f5f1060ca7d3e8a5096dfcc2b863dda0b61d88757411ab344935464b3e41636f"
+    },
+    "epoch-1049.cid": {
+      "url": "https://files.old-faithful.net/1049/epoch-1049.cid",
+      "bytes": 60,
+      "sha256": "0ae790249f5a42496eed9c193a2b2f985e12c38c07c3b6cf69686795668fa45f"
+    },
+    "1049.slots.txt": {
+      "url": "https://files.old-faithful.net/1049/1049.slots.txt",
+      "bytes": 4316680,
+      "sha256": "3d26e10a342534b640a3b4ff137ad44e4c181758fadc06c2e2d2af190b3461f8"
+    }
+  },
+  "block_content_comparison": "pending CAR import"
+}

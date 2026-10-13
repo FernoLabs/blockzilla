@@ -1,0 +1,21 @@
+<!doctype html>
+<html lang="en">
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Blockzilla live blockhashes</title>
+<link rel="stylesheet" href="/demo.css">
+<script src="/demo.js" defer></script>
+<main>
+  <h1>Blockzilla live blockhashes</h1>
+  <p>Processed blocks, then root and invalidation records. No API key is required.</p>
+  <div class="toolbar">
+    <button id="toggle" type="button">Pause</button>
+    <button id="latest" type="button" hidden>Start from latest</button>
+    <span id="status" role="status">Connecting…</span>
+    <span id="count">0 messages</span>
+  </div>
+  <pre id="messages" aria-label="Complete SSE messages">Waiting for a block…</pre>
+  <p class="help">Complete SSE messages, latest 100 first. A processed block can later be invalidated.</p>
+  <p><a href="/v1/blockhashes">SSE endpoint</a> · <code>/v1/blockhashes</code></p>
+</main>
+</html>

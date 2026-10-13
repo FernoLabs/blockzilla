@@ -1,0 +1,43 @@
+{
+  "utc": "2026-10-02T18:53:33Z",
+  "marker": "/home/ubuntu/live/hivezilla-validator-20260930/compact/direct-agave-canary-20261002/epoch-1047/452695587-452695591.compact/DIRECT-AGAVE-COMPACT.v1.json",
+  "native_rpc_comparison": [
+    {
+      "slot": 452695587,
+      "transactions": 1680,
+      "signatures": 1719,
+      "parent_slot": 452695586,
+      "matches_native_source": true
+    },
+    {
+      "slot": 452695588,
+      "transactions": 1774,
+      "signatures": 1814,
+      "parent_slot": 452695587,
+      "matches_native_source": true
+    },
+    {
+      "slot": 452695589,
+      "transactions": 1700,
+      "signatures": 1722,
+      "parent_slot": 452695588,
+      "matches_native_source": true
+    },
+    {
+      "slot": 452695590,
+      "transactions": 1701,
+      "signatures": 1732,
+      "parent_slot": 452695589,
+      "matches_native_source": true
+    },
+    {
+      "slot": 452695591,
+      "transactions": 1753,
+      "signatures": 1822,
+      "parent_slot": 452695590,
+      "matches_native_source": true
+    }
+  ],
+  "all_match": true,
+  "archive_crypto_verification": "SKIPPED"
+}

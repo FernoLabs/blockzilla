@@ -1,0 +1,56 @@
+{
+  "schema": "blockzilla-heartbeat-archive-status-install-v1",
+  "installed_unix_ms": 1791873716906,
+  "release": "/home/ubuntu/live/hivezilla-validator-20260930/releases/foundation-watch-status-r2-20261013",
+  "sha256": {
+    "heartbeat.py": "0afec0531455fe3b247f5a97ee08912a18d3ffdbdf37aff7f86e6ed442b4a839",
+    "archive_status.py": "fb7adbd6cb6d03fb33dc54974eca3f593d581e6586f5a70be672587fb5e5937f"
+  },
+  "sender_state": "SENT",
+  "sender_errors": [],
+  "collector_read_only": true,
+  "controller_log_owner_preserved": true,
+  "controller_log_group": "ubuntu",
+  "controller_log_mode": "0640",
+  "live_services_restarted": false,
+  "heartbeat_and_archive_tests_passed": 28,
+  "external_status_proof": {
+    "checked_unix_ms": 1791873760250,
+    "sampled_unix_ms": 1791873746970,
+    "errors": [],
+    "issues": [],
+    "archive": {
+      "state": "COMPACTING",
+      "epoch": 1052,
+      "updated_unix_ms": 1791873746970,
+      "stage_updated_unix_ms": 1791872191371,
+      "progress_updated_unix_ms": 1791873744708,
+      "progress_percent": 54.4,
+      "bytes_per_second": null,
+      "eta_seconds": 1300,
+      "eta_scope": "stage",
+      "paused": false,
+      "epoch_eta_min_seconds": 1881,
+      "epoch_eta_max_seconds": 2669,
+      "queue_eta_min_seconds": 11790,
+      "queue_eta_max_seconds": 18182,
+      "last_completed_epoch": 1051,
+      "last_compact_bytes": 123847304697,
+      "completed_epochs": [
+        1048,
+        1049,
+        1050,
+        1051
+      ],
+      "upload_queue_epochs": [
+        1052,
+        1053,
+        1054
+      ]
+    },
+    "live_slot_lag": 0,
+    "live_event_lag": 292,
+    "pending_commands": 0,
+    "command_delivery_error": null
+  }
+}

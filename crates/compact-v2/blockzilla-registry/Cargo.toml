@@ -5,12 +5,12 @@ edition.workspace = true
 rust-version.workspace = true
 license.workspace = true
 repository.workspace = true
-publish = false
+publish = ["crates-io"]
 autobins = false
 description = "Pubkey registry, MPHF key index and blockhash registry"
 
 [dependencies]
-blockzilla-primitives = { path = "../../blockzilla-primitives" }
+blockzilla-primitives = { path = "../../blockzilla-primitives", version = "0.2.0" }
 anyhow = "1.0.104"
 five8 = "1.0.0"
 memmap2 = "0.9.11"

@@ -1,10 +1,26 @@
 # Blockzilla
 
-Blockzilla is a Rust toolkit for turning Solana history into compact, indexed
-archive files for local streaming, scanning, filtering, and historical reads.
+Read Solana history from a compact archive on Cloudflare. The reader runs on
+your machine, downloads only the bytes it needs, and gives your code ordered
+blocks and transactions. You need no validator and no RPC node.
 
-The main product is the `blockzilla` CLI and the Blockzilla archive format. Both are
-pre-1.0, so pin the Git revision used to produce an archive.
+```bash
+git clone --depth 1 https://github.com/FernoLabs/blockzilla.git && cd blockzilla
+cargo install --locked --path blockzilla/cli --bin blockzilla --debug
+blockzilla stream --epoch 200 --max-blocks 5
+```
+
+Start with the [quick start](docs/start/quick-start.md), then the
+[user guide](docs/start/overview.md): [Rust callbacks](docs/start/callbacks.md),
+[token exports](docs/start/token-dumper.md), a
+[token SQLite index](docs/start/token-indexer.md),
+[program dumps](docs/start/program-dumper.md), and the
+[live stream](docs/start/live-stream.md) (private beta). For storage details,
+see [file formats](docs/advanced/formats.md).
+
+This repository also contains the tools that build the archive. The CLI and the
+archive format are pre-1.0, so pin the Git revision that produced an archive.
+The sections below are for contributors.
 
 ## Components
 
@@ -42,18 +58,16 @@ records full-epoch output checks for its frozen build. The later
 [dependency retest](docs/benchmarks/epoch-300-dependency-review-2026-09-06.md)
 checks V2 prefixes after the dependency update.
 
-The shortest working newcomer path is:
+The user read path is:
 
 ```text
-Old Faithful CAR -> Blockzilla -> local archive files
+Blockzilla archive on Cloudflare -> Blockzilla reader -> application or database
 ```
 
-The target system adds independent Hivezilla capture and raw custody,
-Blockzilla scheduling and catalog authority, fenced Hivezilla archive workers,
-cloud replication, Edgezilla serving, and local indexer streaming. See the
-[system schema](docs/architecture/full-system-schema.md) for that direction and
-the [Hivezilla implementation assessment](docs/architecture/hivezilla-v1-implementation-plan.md)
-for the code-to-target gap and ordered build gates.
+The Cloudflare archive serves Compact V2 sample epochs. The live stream is in
+private beta. A crates.io release and a complete historical catalog are later
+milestones. Start with the [user guide](docs/start/overview.md); archive
+production and fixture checks below are for contributors.
 
 ## Quick start: build and read the fixture
 

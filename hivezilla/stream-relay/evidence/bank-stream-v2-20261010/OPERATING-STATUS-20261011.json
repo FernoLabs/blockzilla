@@ -1,0 +1,29 @@
+{
+  "schema": "blockzilla-operating-status-summary-v1",
+  "checked_unix_ms": 1791729431008,
+  "provider_work_complete": false,
+  "validator_running": true,
+  "compact_worker_running": false,
+  "bank_v2_producer_running": false,
+  "live_capture_state": "FAILED",
+  "capture_failure_class": "DISK_RESERVE_REACHED",
+  "disk_free_bytes": 421370728448,
+  "reserve_disk_bytes": 429496729600,
+  "existing_source_preserved": true,
+  "old_benchmark_allocated_bytes": 2102013423616,
+  "restart_backup": {
+    "state": "SAVED",
+    "slot_span": 4754,
+    "blocks_saved": 4754,
+    "transactions_saved": 5170993,
+    "gzip_bytes": 4881783822,
+    "chain_matches_boundaries": true,
+    "compact_gap_rebuilt": false,
+    "raw_shred_coverage_verified": false,
+    "entry_boundaries_preserved": false,
+    "error_count": 0
+  },
+  "recovery_requires_explicit_source_change": true,
+  "local_retirement_after_r2_upload_implemented": false,
+  "measurements_remain_historical": true
+}

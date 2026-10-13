@@ -1,0 +1,570 @@
+{
+  "schema": "hivezilla-native-car-metadata-comparison-v1",
+  "epoch": 1049,
+  "state": "FAILED",
+  "sample_blocks": 146,
+  "sample_transactions": 191421,
+  "mismatches": [
+    {
+      "slot": 453173624,
+      "fields": [
+        "logs"
+      ]
+    },
+    {
+      "slot": 453189252,
+      "fields": [
+        "logs"
+      ]
+    },
+    {
+      "slot": 453209119,
+      "fields": [
+        "logs"
+      ]
+    },
+    {
+      "slot": 453209590,
+      "fields": [
+        "logs"
+      ]
+    },
+    {
+      "slot": 453215982,
+      "fields": [
+        "logs"
+      ]
+    },
+    {
+      "slot": 453228234,
+      "fields": [
+        "logs"
+      ]
+    },
+    {
+      "slot": 453236541,
+      "fields": [
+        "logs"
+      ]
+    },
+    {
+      "slot": 453236848,
+      "fields": [
+        "logs"
+      ]
+    },
+    {
+      "slot": 453260748,
+      "fields": [
+        "logs"
+      ]
+    },
+    {
+      "slot": 453270820,
+      "fields": [
+        "logs"
+      ]
+    },
+    {
+      "slot": 453277672,
+      "fields": [
+        "logs"
+      ]
+    },
+    {
+      "slot": 453286446,
+      "fields": [
+        "logs"
+      ]
+    },
+    {
+      "slot": 453291382,
+      "fields": [
+        "logs"
+      ]
+    },
+    {
+      "slot": 453305085,
+      "fields": [
+        "logs"
+      ]
+    },
+    {
+      "slot": 453311941,
+      "fields": [
+        "logs"
+      ]
+    },
+    {
+      "slot": 453317472,
+      "fields": [
+        "logs"
+      ]
+    },
+    {
+      "slot": 453317708,
+      "fields": [
+        "logs"
+      ]
+    },
+    {
+      "slot": 453318801,
+      "fields": [
+        "logs"
+      ]
+    },
+    {
+      "slot": 453325653,
+      "fields": [
+        "logs"
+      ]
+    },
+    {
+      "slot": 453332509,
+      "fields": [
+        "logs"
+      ]
+    },
+    {
+      "slot": 453339362,
+      "fields": [
+        "logs"
+      ]
+    },
+    {
+      "slot": 453345312,
+      "fields": [
+        "logs"
+      ]
+    },
+    {
+      "slot": 453346217,
+      "fields": [
+        "logs"
+      ]
+    },
+    {
+      "slot": 453353073,
+      "fields": [
+        "logs"
+      ]
+    },
+    {
+      "slot": 453359925,
+      "fields": [
+        "logs"
+      ]
+    },
+    {
+      "slot": 453366777,
+      "fields": [
+        "logs"
+      ]
+    },
+    {
+      "slot": 453373633,
+      "fields": [
+        "logs"
+      ]
+    },
+    {
+      "slot": 453379256,
+      "fields": [
+        "logs"
+      ]
+    },
+    {
+      "slot": 453380489,
+      "fields": [
+        "logs"
+      ]
+    },
+    {
+      "slot": 453387340,
+      "fields": [
+        "logs"
+      ]
+    },
+    {
+      "slot": 453394196,
+      "fields": [
+        "logs"
+      ]
+    },
+    {
+      "slot": 453395180,
+      "fields": [
+        "logs"
+      ]
+    },
+    {
+      "slot": 453396880,
+      "fields": [
+        "logs"
+      ]
+    },
+    {
+      "slot": 453400234,
+      "fields": [
+        "logs"
+      ]
+    },
+    {
+      "slot": 453401062,
+      "fields": [
+        "logs"
+      ]
+    },
+    {
+      "slot": 453407918,
+      "fields": [
+        "logs"
+      ]
+    },
+    {
+      "slot": 453414774,
+      "fields": [
+        "logs"
+      ]
+    },
+    {
+      "slot": 453421626,
+      "fields": [
+        "logs"
+      ]
+    },
+    {
+      "slot": 453423234,
+      "fields": [
+        "logs"
+      ]
+    },
+    {
+      "slot": 453428483,
+      "fields": [
+        "logs"
+      ]
+    },
+    {
+      "slot": 453435335,
+      "fields": [
+        "logs"
+      ]
+    },
+    {
+      "slot": 453442191,
+      "fields": [
+        "logs"
+      ]
+    },
+    {
+      "slot": 453445592,
+      "fields": [
+        "logs"
+      ]
+    },
+    {
+      "slot": 453455899,
+      "fields": [
+        "logs"
+      ]
+    },
+    {
+      "slot": 453463508,
+      "fields": [
+        "logs"
+      ]
+    },
+    {
+      "slot": 453465272,
+      "fields": [
+        "logs"
+      ]
+    },
+    {
+      "slot": 453466132,
+      "fields": [
+        "logs"
+      ]
+    },
+    {
+      "slot": 453466788,
+      "fields": [
+        "logs"
+      ]
+    },
+    {
+      "slot": 453467116,
+      "fields": [
+        "logs"
+      ]
+    },
+    {
+      "slot": 453469623,
+      "fields": [
+        "logs"
+      ]
+    },
+    {
+      "slot": 453470520,
+      "fields": [
+        "logs"
+      ]
+    },
+    {
+      "slot": 453471548,
+      "fields": [
+        "logs"
+      ]
+    },
+    {
+      "slot": 453472060,
+      "fields": [
+        "logs"
+      ]
+    },
+    {
+      "slot": 453472116,
+      "fields": [
+        "logs"
+      ]
+    },
+    {
+      "slot": 453473440,
+      "fields": [
+        "logs"
+      ]
+    },
+    {
+      "slot": 453473728,
+      "fields": [
+        "logs"
+      ]
+    },
+    {
+      "slot": 453476514,
+      "fields": [
+        "logs"
+      ]
+    },
+    {
+      "slot": 453476668,
+      "fields": [
+        "logs"
+      ]
+    },
+    {
+      "slot": 453477396,
+      "fields": [
+        "logs"
+      ]
+    },
+    {
+      "slot": 453480396,
+      "fields": [
+        "logs"
+      ]
+    },
+    {
+      "slot": 453480844,
+      "fields": [
+        "logs"
+      ]
+    },
+    {
+      "slot": 453482672,
+      "fields": [
+        "logs"
+      ]
+    },
+    {
+      "slot": 453484336,
+      "fields": [
+        "logs"
+      ]
+    },
+    {
+      "slot": 453484352,
+      "fields": [
+        "logs"
+      ]
+    },
+    {
+      "slot": 453486136,
+      "fields": [
+        "logs"
+      ]
+    },
+    {
+      "slot": 453489044,
+      "fields": [
+        "logs"
+      ]
+    },
+    {
+      "slot": 453489512,
+      "fields": [
+        "logs"
+      ]
+    },
+    {
+      "slot": 453490164,
+      "fields": [
+        "logs"
+      ]
+    },
+    {
+      "slot": 453490180,
+      "fields": [
+        "logs"
+      ]
+    },
+    {
+      "slot": 453490408,
+      "fields": [
+        "logs"
+      ]
+    },
+    {
+      "slot": 453490748,
+      "fields": [
+        "logs"
+      ]
+    },
+    {
+      "slot": 453491408,
+      "fields": [
+        "logs"
+      ]
+    },
+    {
+      "slot": 453491736,
+      "fields": [
+        "logs"
+      ]
+    },
+    {
+      "slot": 453494244,
+      "fields": [
+        "logs"
+      ]
+    },
+    {
+      "slot": 453494956,
+      "fields": [
+        "logs"
+      ]
+    },
+    {
+      "slot": 453497154,
+      "fields": [
+        "logs"
+      ]
+    },
+    {
+      "slot": 453504006,
+      "fields": [
+        "logs"
+      ]
+    },
+    {
+      "slot": 453505240,
+      "fields": [
+        "logs"
+      ]
+    },
+    {
+      "slot": 453510780,
+      "fields": [
+        "logs"
+      ]
+    },
+    {
+      "slot": 453517721,
+      "fields": [
+        "logs"
+      ]
+    },
+    {
+      "slot": 453522628,
+      "fields": [
+        "logs"
+      ]
+    },
+    {
+      "slot": 453545114,
+      "fields": [
+        "logs"
+      ]
+    },
+    {
+      "slot": 453547140,
+      "fields": [
+        "logs"
+      ]
+    },
+    {
+      "slot": 453552023,
+      "fields": [
+        "logs"
+      ]
+    },
+    {
+      "slot": 453553888,
+      "fields": [
+        "logs"
+      ]
+    },
+    {
+      "slot": 453564724,
+      "fields": [
+        "logs"
+      ]
+    },
+    {
+      "slot": 453565738,
+      "fields": [
+        "logs"
+      ]
+    },
+    {
+      "slot": 453572590,
+      "fields": [
+        "logs"
+      ]
+    },
+    {
+      "slot": 453579442,
+      "fields": [
+        "logs"
+      ]
+    },
+    {
+      "slot": 453582763,
+      "fields": [
+        "logs"
+      ]
+    },
+    {
+      "slot": 453586295,
+      "fields": [
+        "logs"
+      ]
+    },
+    {
+      "slot": 453599999,
+      "fields": [
+        "logs"
+      ]
+    }
+  ],
+  "non_log_mismatches": [],
+  "non_log_fields_match": true,
+  "native_log_truncated_transactions": 294,
+  "car_log_truncated_transactions": 0,
+  "reward_order_differences": 1,
+  "reward_values_compared_in_sorted_order": true,
+  "logs_rendered_before_comparison": true,
+  "whole_epoch_execution_metadata_checked": false,
+  "message_instruction_data_checked": false
+}

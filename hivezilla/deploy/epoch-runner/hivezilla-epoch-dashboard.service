@@ -1,0 +1,21 @@
+[Unit]
+Description=Hivezilla validator and epoch dashboard
+After=network-online.target
+[Service]
+Type=exec
+User=ubuntu
+Group=ubuntu
+WorkingDirectory=/home/ubuntu/live/hivezilla-validator-20260930
+Environment=HOST=127.0.0.1
+Environment=PORT=8766
+Environment=HIVEZILLA_EPOCH_PROGRESS_FILE=/home/ubuntu/live/hivezilla-validator-20260930/reports/epoch-progress.json
+ExecStart=/home/ubuntu/live/hivezilla-validator-20260930/releases/epoch-dashboard-r2-20261001/hivezilla-validator-dashboard
+Restart=on-failure
+RestartSec=3s
+UMask=0077
+NoNewPrivileges=yes
+PrivateTmp=yes
+ProtectSystem=strict
+ProtectHome=read-only
+[Install]
+WantedBy=multi-user.target

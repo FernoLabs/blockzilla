@@ -1,0 +1,61 @@
+{
+  "state": "PASSED",
+  "sampled_collection_seconds": 657.931,
+  "post_collection_verification_included_in_summary_seconds": true,
+  "provider_events_per_second": 13.72,
+  "consumer_events_per_second": 13.818,
+  "decoded_transactions_per_second": 4710.377,
+  "last_120_seconds_callback_to_consumer_ms": {
+    "confirmed_observations": 546,
+    "p50": 1041,
+    "p95": 1563
+  },
+  "head_sample_states": {
+    "live": 123,
+    "stale": 3,
+    "starting": 0,
+    "failed": 0,
+    "unavailable": 0
+  },
+  "public_head_request_unavailable_samples": 0,
+  "minimum_disk_free_bytes": 992534573056,
+  "peak_checkpoint_bytes": 9702568,
+  "resources": {
+    "hivezilla-validator": {
+      "mean_cpu_cores": 10.319,
+      "peak_cgroup_memory_bytes_including_cache": 858990452736,
+      "unavailable_memory_samples": 0,
+      "process_changed": false
+    },
+    "hivezilla-direct-worker": {
+      "mean_cpu_cores": 1.57,
+      "peak_cgroup_memory_bytes_including_cache": 34353983488,
+      "unavailable_memory_samples": 0,
+      "process_changed": false
+    },
+    "hivezilla-bank-v2-producer": {
+      "mean_cpu_cores": 0.207,
+      "peak_cgroup_memory_bytes_including_cache": 116686848,
+      "unavailable_memory_samples": 2,
+      "process_changed": true
+    },
+    "hivezilla-bank-v2-origin": {
+      "mean_cpu_cores": 0.696,
+      "peak_cgroup_memory_bytes_including_cache": 8588787712,
+      "unavailable_memory_samples": 0,
+      "process_changed": false
+    },
+    "hivezilla-stream-relay": {
+      "mean_cpu_cores": 0.574,
+      "peak_cgroup_memory_bytes_including_cache": 10308997120,
+      "unavailable_memory_samples": 0,
+      "process_changed": false
+    },
+    "rust_consumer": {
+      "mean_cpu_cores": 1.294,
+      "peak_rss_bytes": 1311014912,
+      "intentional_restart_count": 1
+    }
+  },
+  "private_data_kept_on_server": true
+}

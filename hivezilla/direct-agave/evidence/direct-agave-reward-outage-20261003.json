@@ -1,0 +1,456 @@
+{
+  "schema": "hivezilla-direct-reward-outage-v1",
+  "updated_unix": 1791011466,
+  "state": "LIVE_CAPTURE_RESTORED_RECOVERY_PENDING",
+  "old_session": "000000000000000018daceb49b8b9a08-10e3f5",
+  "new_session": "000000000000000018daf342ba38d3d0-10e3f5",
+  "failure": {
+    "accepted_events": 66449259,
+    "coverage_complete": false,
+    "durable_sequence": 66449190,
+    "error": "callback conversion failed: unknown reward type Some(\"DeactivatedStake\")",
+    "state": "FAILED"
+  },
+  "old_durable_state": {
+    "state": "FAILED",
+    "durable_sequence": 66449259,
+    "latest_rooted_slot": 452735969,
+    "error": "callback conversion failed: unknown reward type Some(\"DeactivatedStake\")"
+  },
+  "old_cursor": {
+    "session_id": "000000000000000018daceb49b8b9a08-10e3f5",
+    "first_slot": 452710958,
+    "last_slot": 452735968,
+    "last_hash": [
+      133,
+      235,
+      129,
+      88,
+      196,
+      19,
+      135,
+      29,
+      139,
+      205,
+      105,
+      0,
+      222,
+      137,
+      218,
+      109,
+      38,
+      180,
+      161,
+      245,
+      191,
+      179,
+      170,
+      134,
+      193,
+      25,
+      154,
+      245,
+      44,
+      207,
+      121,
+      65
+    ],
+    "batches": 18198,
+    "compacted_blocks": 24999,
+    "compacted_transactions": 32988561,
+    "compacted_entries": 33202669,
+    "updated_unix_ms": 1790977799153,
+    "startup_incomplete_roots": [
+      [
+        452710926,
+        7370
+      ],
+      [
+        452710927,
+        7371
+      ],
+      [
+        452710928,
+        7372
+      ],
+      [
+        452710929,
+        7373
+      ],
+      [
+        452710930,
+        7374
+      ],
+      [
+        452710931,
+        7375
+      ],
+      [
+        452710932,
+        7376
+      ],
+      [
+        452710933,
+        7377
+      ],
+      [
+        452710934,
+        7378
+      ],
+      [
+        452710935,
+        7379
+      ],
+      [
+        452710936,
+        7380
+      ],
+      [
+        452710937,
+        7381
+      ],
+      [
+        452710938,
+        7382
+      ],
+      [
+        452710939,
+        7383
+      ],
+      [
+        452710940,
+        7384
+      ],
+      [
+        452710941,
+        7385
+      ],
+      [
+        452710942,
+        7386
+      ],
+      [
+        452710943,
+        7387
+      ],
+      [
+        452710944,
+        7388
+      ],
+      [
+        452710945,
+        7389
+      ],
+      [
+        452710946,
+        7390
+      ],
+      [
+        452710947,
+        7391
+      ],
+      [
+        452710948,
+        7392
+      ],
+      [
+        452710949,
+        7393
+      ],
+      [
+        452710950,
+        7394
+      ],
+      [
+        452710951,
+        7395
+      ],
+      [
+        452710952,
+        7396
+      ],
+      [
+        452710953,
+        7397
+      ],
+      [
+        452710954,
+        7398
+      ],
+      [
+        452710955,
+        7399
+      ],
+      [
+        452710956,
+        7400
+      ],
+      [
+        452710957,
+        7401
+      ]
+    ]
+  },
+  "last_old_compact_update_unix_ms": 1790977799153,
+  "gap_first_slot": 452735969,
+  "gap_last_slot": 452861383,
+  "gap_slot_span": 125415,
+  "gap_produced_block_count_not_yet_known": true,
+  "native_compact_gap_rebuilt": false,
+  "full_epoch_complete": false,
+  "cause": "Native reward conversion only handled Fee, Rent, Staking, Voting. Agave also supports DeactivatedStake and VATDebit.",
+  "fix": {
+    "schema": "hivezilla-direct-reward-fix-release-v1",
+    "deployed_unix": 1791011269,
+    "release": "/home/ubuntu/live/hivezilla-validator-20260930/releases/direct-agave-plugin-rewards-v7-20261003",
+    "plugin_sha256": "e8777a451c986ba932b175710d43f8efbc09b7da8fdf2b0e324a3329d9b729ea",
+    "agave_revision": "825efd18292aff6ffcf9daa0f7612f21b3531a72",
+    "compiler": "rustc 1.97.1 (8bab26f4f 2026-07-14)",
+    "engine_tests_passed": 22,
+    "regression_test": "epoch_rewards_preserve_every_native_type_and_signed_amount",
+    "reward_codes": {
+      "None": 0,
+      "Fee": 1,
+      "Rent": 2,
+      "Staking": 3,
+      "Voting": 4,
+      "DeactivatedStake": 5,
+      "VATDebit": 6
+    },
+    "exhaustive_typed_reward_match": true,
+    "validator_restarted": false,
+    "config": {
+      "libpath": "/home/ubuntu/live/hivezilla-validator-20260930/releases/direct-agave-plugin-rewards-v7-20261003/libhivezilla_direct_agave.so",
+      "output_root": "/home/ubuntu/live/hivezilla-validator-20260930/captures/direct-agave-live",
+      "genesis_hash": "5eykt4UsFv8P8NJdTREpY1vzqKqZKvdpKuc147dw2N9d",
+      "node_identity": "J7qpvCEWhdBgPdYRV3s3btWPrRVXa2qnAzgvxWTvtbrQ",
+      "queue_events": 65536,
+      "queue_bytes": 1073741824,
+      "max_event_bytes": 16777216,
+      "max_journal_bytes": 68719476736,
+      "reserve_disk_bytes": 536870912000,
+      "commit_interval_ms": 10
+    },
+    "worker_release_unchanged": "direct-agave-worker-v6-20261002"
+  },
+  "raw_manifest": "/home/ubuntu/live/hivezilla-validator-20260930/reports/direct-agave-reward-outage-raw-manifest-20261003.json",
+  "raw_recording_stayed_active": true,
+  "raw_shred_coverage_verified": false,
+  "rpc_recovery_receipt": "/home/ubuntu/live/hivezilla-validator-20260930/recovery/direct-agave-reward-outage-20261003/RECEIPT.json",
+  "rpc_recovery_available_prefix": [
+    452735969,
+    452776091
+  ],
+  "rpc_recovery_status": {
+    "state": "SAVING",
+    "updated_unix": 1791011464,
+    "blocks_saved": 704,
+    "blocks_expected": 85260,
+    "errors": 0,
+    "last_saved_slot": 452776795
+  },
+  "current_health": {
+    "schema": "hivezilla-direct-pipeline-health-v1",
+    "updated_unix_ms": 1791011465227,
+    "state": "WARNING",
+    "problems": [],
+    "warnings": [
+      "An earlier session ended without a clean close; earlier coverage can have gaps"
+    ],
+    "canonical": false,
+    "full_epoch": false,
+    "validator": {
+      "health": "ok",
+      "finalized_slot": 452862087,
+      "identity": "J7qpvCEWhdBgPdYRV3s3btWPrRVXa2qnAzgvxWTvtbrQ",
+      "genesis_hash": "5eykt4UsFv8P8NJdTREpY1vzqKqZKvdpKuc147dw2N9d"
+    },
+    "capture": {
+      "session_id": "000000000000000018daf342ba38d3d0-10e3f5",
+      "path": "/home/ubuntu/live/hivezilla-validator-20260930/captures/direct-agave-live/000000000000000018daf342ba38d3d0-10e3f5",
+      "state": "CAPTURING",
+      "node_identity": "J7qpvCEWhdBgPdYRV3s3btWPrRVXa2qnAzgvxWTvtbrQ",
+      "genesis_hash": "5eykt4UsFv8P8NJdTREpY1vzqKqZKvdpKuc147dw2N9d",
+      "validator_pid": 1106933,
+      "writer_live": true,
+      "durable_sequence": 1520244,
+      "latest_rooted_slot": 452862088,
+      "journal_bytes": 304118202,
+      "journal_limit_bytes": 68719476736,
+      "reserve_disk_bytes": 536870912000,
+      "previous_unclean_sessions": [
+        "000000000000000018daccf4d01ca96d-10e3f5",
+        "000000000000000018daceb49b8b9a08-10e3f5"
+      ],
+      "raw_shred_completeness": false
+    },
+    "worker": {
+      "compacted_blocks": 705,
+      "compacted_entries": 740547,
+      "compacted_transactions": 709621,
+      "durable_sequence": 1519709,
+      "first_compact_slot": 452861384,
+      "full_epoch": false,
+      "last_compact_slot": 452862088,
+      "startup_incomplete_roots": [
+        [
+          452861352,
+          157741
+        ],
+        [
+          452861353,
+          157742
+        ],
+        [
+          452861354,
+          157743
+        ],
+        [
+          452861355,
+          157744
+        ],
+        [
+          452861356,
+          157745
+        ],
+        [
+          452861357,
+          157746
+        ],
+        [
+          452861358,
+          157747
+        ],
+        [
+          452861359,
+          157748
+        ],
+        [
+          452861360,
+          157749
+        ],
+        [
+          452861361,
+          157750
+        ],
+        [
+          452861362,
+          157751
+        ],
+        [
+          452861363,
+          157752
+        ],
+        [
+          452861364,
+          157753
+        ],
+        [
+          452861365,
+          157754
+        ],
+        [
+          452861366,
+          157755
+        ],
+        [
+          452861367,
+          157756
+        ],
+        [
+          452861368,
+          157757
+        ],
+        [
+          452861369,
+          157758
+        ],
+        [
+          452861370,
+          157759
+        ],
+        [
+          452861371,
+          157760
+        ],
+        [
+          452861372,
+          157761
+        ],
+        [
+          452861373,
+          157762
+        ],
+        [
+          452861374,
+          157763
+        ],
+        [
+          452861375,
+          157764
+        ],
+        [
+          452861376,
+          157765
+        ],
+        [
+          452861377,
+          157766
+        ],
+        [
+          452861378,
+          157767
+        ],
+        [
+          452861379,
+          157768
+        ],
+        [
+          452861380,
+          157769
+        ],
+        [
+          452861381,
+          157770
+        ],
+        [
+          452861382,
+          157771
+        ],
+        [
+          452861383,
+          157772
+        ]
+      ],
+      "state": "WAITING",
+      "updated_unix_ms": 1791011465222
+    },
+    "compact_lag_slots": 0,
+    "worker_status_age_seconds": 0,
+    "free_disk_bytes": 2514960236544,
+    "last_durable_change_unix_ms": 1791011465227,
+    "shreds": {
+      "schema": "hivezilla-shred-hook-status-v1",
+      "state": "ACTIVE",
+      "reason": "receiving",
+      "updated_unix_ms": 1791011465196,
+      "durable_next_sequence": 266813125,
+      "durable_prefix_hash": "b1706b666f7f3f54bfa496df729b95899d18512eb473bdbe38bb2743bb0ae7f3",
+      "journal_bytes": 349826255194,
+      "counts": {
+        "packets": 266813125,
+        "payload_bytes": 324211611386,
+        "turbine_received": 262603966,
+        "repair_received": 2135944,
+        "repair_accepted": 2073215,
+        "data_shreds": 135356274,
+        "coding_shreds": 131395182,
+        "other_datagrams": 61669,
+        "first_header_slot": 452704425,
+        "max_header_slot": 452862120
+      },
+      "custody_authority": false,
+      "canonical_coverage_verified": false
+    }
+  }
+}

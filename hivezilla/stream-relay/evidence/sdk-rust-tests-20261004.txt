@@ -1,0 +1,24 @@
+   Compiling blockzilla-stream-decoder v0.1.0 (/home/ubuntu/benchmarks/blockzilla-sdk-20261004/source/hivezilla/stream-relay/decoder)
+    Finished `test` profile [unoptimized + debuginfo] target(s) in 0.63s
+     Running unittests src/lib.rs (/home/ubuntu/benchmarks/blockzilla-sdk-20261004/target-native/debug/deps/blockzilla_stream_decoder-6d640fc8e965819d)
+
+running 10 tests
+test tests::first_parent_tail_is_checked_independently_of_header_placeholder ... ok
+test tests::rejects_invalid_filter_and_preserves_integer_extremes ... ok
+test tests::filters_non_matching_transactions ... ok
+test tests::unknown_dictionary_id_and_truncation_fail ... ok
+test tests::receipt_mode_omits_heavy_details ... ok
+test tests::account_filter_matches_raw_address ... ok
+test tests::resolves_program_and_preserves_large_balances ... ok
+test tests::failed_transactions_are_visible_unless_excluded ... ok
+test tests::includes_loaded_cpi_program_and_accounts ... ok
+test tests::program_filters_bind_to_addresses_after_dictionary_id_changes ... ok
+
+test result: ok. 10 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+
+   Doc-tests blockzilla_stream_decoder
+
+running 0 tests
+
+test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+

@@ -1,0 +1,33 @@
+{
+  "schema": "hivezilla-yellowstone-blocks-only-deployment-v1",
+  "completed_utc": "2026-10-01T09:34:58.748254+00:00",
+  "validator_pid_before": 471837,
+  "validator_pid_after": 471837,
+  "validator_health": "ok",
+  "plugin_name": "yellowstone-grpc-geyser-16.0.0+solana.4.3.0+bfd1d7e-modified",
+  "plugin_profile": "hivezilla_blocks_only",
+  "persisted_config": "/home/ubuntu/live/hivezilla-validator-20260930/config/yellowstone.json",
+  "persisted_config_sha256": "25d730e3f2f2cdbd45a3c92acf4f9e2870229dfe74daed34abceda88404739a3",
+  "rollback_config": "/home/ubuntu/live/hivezilla-validator-20260930/config/yellowstone-stock-20261001.json",
+  "source_build_manifest": "/home/ubuntu/live/hivezilla-validator-20260930/releases/yellowstone-blocks-only/build-manifest.json",
+  "capture_seal": "/home/ubuntu/live/hivezilla-validator-20260930/captures/yellowstone-blocks-only-20261001-0934/CURRENT-GRPC-SEALED.v1.json",
+  "capture_counts": {
+    "events": 36259,
+    "blocks": 32,
+    "transactions": 34376,
+    "block_entries": 36038,
+    "slots": 189,
+    "entries": 36038,
+    "footers": 0,
+    "parent_updates": 0,
+    "first_slot": 452248420,
+    "last_slot": 452248483
+  },
+  "capture_elapsed_seconds": 8.379541145,
+  "sample_report": "/home/ubuntu/live/hivezilla-validator-20260930/reports/yellowstone-blocks-only-sample-20261001.json",
+  "tests_passed": 168,
+  "validator_restarted": false,
+  "archive_verification_run": false,
+  "r2_publication_run": false,
+  "raw_shred_stream_available": false
+}

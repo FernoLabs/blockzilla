@@ -1,0 +1,196 @@
+{
+  "schema": "blockzilla-processed-stream-live-receipt-v1",
+  "state": "PASSED",
+  "checked_unix_ms": 1791651408568,
+  "session": "000000000000000018dd37e5c7e1f5cf-10e3f5",
+  "worker": {
+    "canonical": false,
+    "event_sequence": 15719,
+    "last_compact_slot": 455329139,
+    "profile": "native-processed-compact-v1",
+    "publication_ready": false,
+    "retirement_supported": true,
+    "source_sequence": 17580786,
+    "state": "RUNNING",
+    "updated_unix_ms": 1791651408305
+  },
+  "capture_status": [
+    "CAPTURING",
+    17585156,
+    455329110
+  ],
+  "event_counts": {
+    "block": 7875,
+    "root": 7844
+  },
+  "duplicate_bank_payloads": 0,
+  "last_128_roots": {
+    "count": 128,
+    "published_before_root": 128
+  },
+  "public": {
+    "valid": {
+      "status": 200,
+      "head": {
+        "canonical": false,
+        "earliest_after": "000000000000000018dd37e5c7e1f5cf-10e3f5:p15196:1b0a379f5cf3e5f195d0024d89b2d0c832f948cabc5132ac3ac42a45b4258a13",
+        "error": null,
+        "event_kind": "block",
+        "event_sequence": 15719,
+        "evidence_included": false,
+        "finalized": false,
+        "genesis_hash": "5eykt4UsFv8P8NJdTREpY1vzqKqZKvdpKuc147dw2N9d",
+        "intake_age_ms": 118,
+        "last_admitted_unix_ms": 1791651408352,
+        "last_slot": 455329139,
+        "latest_cursor": "000000000000000018dd37e5c7e1f5cf-10e3f5:p15719:2b871b41ef4149efeefdf774b0323b22073616ce240da8e727644308892763c9",
+        "node_identity": "J7qpvCEWhdBgPdYRV3s3btWPrRVXa2qnAzgvxWTvtbrQ",
+        "profile": "native-processed-compact-v1",
+        "publication_ready": false,
+        "received_bytes": 4008040944,
+        "received_chunks": 15693,
+        "replay_bytes": 133665104,
+        "replay_limit_bytes": 134217728,
+        "retained_chunks": 523,
+        "schema": "blockzilla-stream-head-v1",
+        "stale": false,
+        "state": "LIVE",
+        "upstream_http_version": "HTTP/2.0"
+      }
+    },
+    "wrong": {
+      "status": 401
+    },
+    "missing": {
+      "status": 401
+    }
+  },
+  "rust": {
+    "events": 16,
+    "blocks": 8,
+    "transactions": 8123,
+    "resume_events": 3,
+    "resume_sequence_check": "PASSED",
+    "first_probe_connection_reset_preserved": true
+  },
+  "publisher": {
+    "checkpoint": {
+      "blocks": 3074,
+      "bytes": 1530938087,
+      "cursor": "000000000000000018dd37e5c7e1f5cf-10e3f5:p6117:23ab485d436d60919f2239c50d742d94f4f564b0443db3f2fed4278fd8194bdb",
+      "last_first_slot": 6117,
+      "namespace": "57f6beef58f71b68ac430120437e79363e65aba88ccb6536e805e1351d10f135",
+      "prefix": "native-stream/processed/direct-agave-live-v1/000000000000000018dd37e5c7e1f5cf-10e3f5",
+      "publisher_id": "60ffb6f2a769e326657f14cbea0098b853950cb9874f915cd88c894def112b78",
+      "schema": "blockzilla-native-publisher-checkpoint-v1",
+      "sequence": 6117,
+      "session": "000000000000000018dd37e5c7e1f5cf-10e3f5",
+      "source": "/home/ubuntu/live/hivezilla-validator-20260930/compact/direct-agave-processed-live/000000000000000018dd37e5c7e1f5cf-10e3f5",
+      "start_slot": 1
+    },
+    "last_batch": {
+      "bytes": 15738272,
+      "events": 64,
+      "source_read_ms": 39,
+      "upload_commit_ms": 13199,
+      "upload_workers": 64
+    },
+    "state": "RUNNING",
+    "updated_unix_ms": 1791651401903
+  },
+  "services": {
+    "hivezilla-validator": "active",
+    "hivezilla-direct-worker": "active",
+    "hivezilla-stream-origin": "active",
+    "hivezilla-stream-relay": "active",
+    "hivezilla-processed-stream-publisher": "active",
+    "hivezilla-tunnel": "active"
+  },
+  "validator_pid": 1106933,
+  "health": {
+    "schema": "hivezilla-direct-pipeline-health-v1",
+    "updated_unix_ms": 1791651402838,
+    "state": "WARNING",
+    "problems": [],
+    "warnings": [
+      "An earlier session ended without a clean close; earlier coverage can have gaps",
+      "Raw shred capture is not current; no complete shred coverage claim"
+    ],
+    "canonical": false,
+    "full_epoch": false,
+    "validator": {
+      "health": "ok",
+      "finalized_slot": 455329083,
+      "identity": "J7qpvCEWhdBgPdYRV3s3btWPrRVXa2qnAzgvxWTvtbrQ",
+      "genesis_hash": "5eykt4UsFv8P8NJdTREpY1vzqKqZKvdpKuc147dw2N9d"
+    },
+    "capture": {
+      "session_id": "000000000000000018dd37e5c7e1f5cf-10e3f5",
+      "path": "/home/ubuntu/live/hivezilla-validator-20260930/captures/direct-agave-live/000000000000000018dd37e5c7e1f5cf-10e3f5",
+      "state": "CAPTURING",
+      "node_identity": "J7qpvCEWhdBgPdYRV3s3btWPrRVXa2qnAzgvxWTvtbrQ",
+      "genesis_hash": "5eykt4UsFv8P8NJdTREpY1vzqKqZKvdpKuc147dw2N9d",
+      "validator_pid": 1106933,
+      "writer_live": true,
+      "durable_sequence": 17529457,
+      "latest_rooted_slot": 455329114,
+      "journal_bytes": 1739479006,
+      "journal_limit_bytes": 68719476736,
+      "reserve_disk_bytes": 429496729600,
+      "previous_unclean_sessions": [
+        "000000000000000018daf342ba38d3d0-10e3f5",
+        "000000000000000018daccf4d01ca96d-10e3f5",
+        "000000000000000018daceb49b8b9a08-10e3f5"
+      ],
+      "raw_shred_completeness": false
+    },
+    "worker": {
+      "canonical": false,
+      "event_sequence": 15669,
+      "last_compact_slot": 455329114,
+      "profile": "native-processed-compact-v1",
+      "publication_ready": false,
+      "retirement_supported": true,
+      "source_sequence": 17527460,
+      "state": "RUNNING",
+      "updated_unix_ms": 1791651402767
+    },
+    "compact_lag_slots": 0,
+    "worker_status_age_seconds": 0,
+    "free_disk_bytes": 502730911744,
+    "last_durable_change_unix_ms": 1791651402838,
+    "shreds": {
+      "schema": "hivezilla-shred-hook-status-v1",
+      "state": "FAILED",
+      "reason": "hook journal quota reached",
+      "updated_unix_ms": 1791123879842,
+      "durable_next_sequence": 982697122,
+      "durable_prefix_hash": "b21e9dead78ebfbc426a02ee4628c6f2b451bd3101d334692fc8aa2becf7169b",
+      "journal_bytes": 1288490123111,
+      "counts": {
+        "packets": 982697122,
+        "payload_bytes": 1194149048887,
+        "turbine_received": 972730923,
+        "repair_received": 5097067,
+        "repair_accepted": 4869132,
+        "data_shreds": 495787505,
+        "coding_shreds": 486683986,
+        "other_datagrams": 225631,
+        "first_header_slot": 452704425,
+        "max_header_slot": 453282613
+      },
+      "custody_authority": false,
+      "canonical_coverage_verified": false
+    }
+  },
+  "limitations": [
+    "operator-trusted, noncanonical projection",
+    "partial source session; no full epoch claim",
+    "R2 upload can be behind live; public backfill not implemented",
+    "local compact/evidence retirement after upload not implemented",
+    "client application undo not implemented",
+    "source-session switch remains explicit",
+    "raw shred recording is not current",
+    "Alpenglow completeness gate not implemented"
+  ]
+}

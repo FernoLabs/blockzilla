@@ -1,0 +1,19 @@
+{
+  "state": "PASSED",
+  "epoch": 1049,
+  "scope": "first 64 produced blocks only",
+  "blocks": 64,
+  "transactions": 66397,
+  "signatures": 67791,
+  "mismatches": [],
+  "fields": [
+    "slot",
+    "parent_slot",
+    "blockhash",
+    "parent_blockhash",
+    "transactions",
+    "signature_count",
+    "signature_digest"
+  ],
+  "whole_epoch_content_checked": false
+}

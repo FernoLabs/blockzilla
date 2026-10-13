@@ -5,7 +5,7 @@ edition.workspace = true
 rust-version.workspace = true
 license.workspace = true
 repository.workspace = true
-publish = false
+publish = ["crates-io"]
 autobins = false
 description = "Block candidate and pre-hot live block formats"
 
@@ -17,13 +17,13 @@ known-program-logs = [
 ]
 
 [dependencies]
-blockzilla-archive-v2 = { path = "../compact-v2/blockzilla-archive-v2", default-features = false }
-blockzilla-compact = { path = "../compact-v2/blockzilla-compact", default-features = false }
+blockzilla-archive-v2 = { path = "../compact-v2/blockzilla-archive-v2", default-features = false, version = "0.2.0" }
+blockzilla-compact = { path = "../compact-v2/blockzilla-compact", default-features = false, version = "0.2.0" }
 serde = { version = "1.0.229", features = ["derive"] }
 wincode = { version = "=0.6.1", features = ["derive"] }
 
 [dev-dependencies]
-blockzilla-primitives = { path = "../blockzilla-primitives" }
+blockzilla-primitives = { path = "../blockzilla-primitives", version = "0.2.0" }
 
 [lints]
 workspace = true

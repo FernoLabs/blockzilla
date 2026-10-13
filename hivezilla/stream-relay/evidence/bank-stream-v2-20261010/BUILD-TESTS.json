@@ -1,0 +1,67 @@
+{
+  "groups": {
+    "shared": {
+      "log": "/home/ubuntu/benchmarks/blockzilla-bank-v2-20261010/shared-health-test.log",
+      "exists": true,
+      "results": [
+        "test result: ok. 9 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s",
+        "test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s"
+      ],
+      "error_present": false
+    },
+    "native": {
+      "log": "/home/ubuntu/benchmarks/blockzilla-bank-v2-20261010/native-provider-build.log",
+      "exists": true,
+      "results": [
+        "test result: ok. 8 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s",
+        "test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s",
+        "test result: ok. 13 passed; 0 failed; 2 ignored; 0 measured; 0 filtered out; finished in 0.02s",
+        "test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s",
+        "test result: ok. 11 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.10s",
+        "test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.07s",
+        "test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s",
+        "test result: ok. 2 passed; 0 failed; 0 ignored; 0 measured; 13 filtered out; finished in 0.05s"
+      ],
+      "error_present": false
+    },
+    "relay": {
+      "log": "/home/ubuntu/benchmarks/blockzilla-bank-v2-20261010/checkpoint-limit-test.log",
+      "exists": true,
+      "results": [
+        "test result: ok. 30 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 1.94s",
+        "test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s",
+        "test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s"
+      ],
+      "error_present": false
+    },
+    "decoder": {
+      "log": "/home/ubuntu/benchmarks/blockzilla-bank-v2-20261010/decoder-test.log",
+      "exists": true,
+      "results": [
+        "test result: ok. 13 passed; 0 failed; 1 ignored; 0 measured; 0 filtered out; finished in 0.00s",
+        "test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s"
+      ],
+      "error_present": false
+    },
+    "rust_consumer": {
+      "log": "/home/ubuntu/benchmarks/blockzilla-bank-v2-20261010/bounded-consumer-test.log",
+      "exists": true,
+      "results": [
+        "test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s",
+        "test result: ok. 3 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s"
+      ],
+      "error_present": false
+    },
+    "javascript": {
+      "log": "/home/ubuntu/benchmarks/blockzilla-bank-v2-20261010/javascript-tests-final.log",
+      "exists": true,
+      "results": [
+        "# tests 25",
+        "# pass 25",
+        "# fail 0"
+      ],
+      "error_present": false
+    }
+  },
+  "all_cargo_on_foundation": true
+}

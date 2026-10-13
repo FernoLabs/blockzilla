@@ -1,0 +1,54 @@
+{
+  "state": "PASSED",
+  "seconds": 856.389,
+  "source": {
+    "genesis_hash": "5eykt4UsFv8P8NJdTREpY1vzqKqZKvdpKuc147dw2N9d",
+    "node_identity": "J7qpvCEWhdBgPdYRV3s3btWPrRVXa2qnAzgvxWTvtbrQ",
+    "agave_revision": "d688dd0e3a576b048a848e5faf2e8d277f8feb6e",
+    "session_id": "000000000000000018dd432f0e8f799c-282459"
+  },
+  "start_cursor": "000000000000000018dd432f0e8f799c-282459:p42613:a2b23a333ae0030b17eb66dcef4c230374ba9b0350e35a80f3b2e7f0ba271d92",
+  "events": 9091,
+  "kinds": {
+    "block": 3030,
+    "confirmed": 3030,
+    "root": 3031,
+    "invalidate": 0
+  },
+  "confirmed_ready_observations": 7617,
+  "callback_to_consumer_ms": {
+    "p50": 1048,
+    "p95": 5387
+  },
+  "apply_ms": {
+    "p50": 0,
+    "p95": 13
+  },
+  "callback_to_control_ms": {
+    "p50": 349,
+    "p95": 639
+  },
+  "control_to_consumer_ms": {
+    "p50": 669,
+    "p95": 4854
+  },
+  "decoded_transactions": 3099103,
+  "failed_transactions": 318892,
+  "failed_transactions_missing_error": 0,
+  "transactions_with_resolved_keys": 3099103,
+  "native_tuple_matches": 134,
+  "native_tuple_mismatches": 0,
+  "retained_replay_seconds": 1944.899,
+  "start_cursor_retained": true,
+  "retained_frame_bytes": 4294942749,
+  "head_live_samples": 123,
+  "head_samples": 126,
+  "final_head_status": "live",
+  "consumer_restart": {
+    "after_sequence": 44329,
+    "elapsed_s": 125.171
+  },
+  "exact_resume_no_duplicates": true,
+  "ferno_app_measured": false,
+  "sub_250ms_target_met": false
+}

@@ -1,0 +1,28 @@
+{
+  "name": "Hivezilla validator private access",
+  "type": "self_hosted",
+  "domain": "10.253.45.3",
+  "destinations": [
+    {
+      "type": "private",
+      "cidr": "10.253.45.3/32",
+      "l4_protocol": "tcp"
+    }
+  ],
+  "session_duration": "24h",
+  "app_launcher_visible": false,
+  "policies": [
+    {
+      "name": "Validator owner",
+      "decision": "allow",
+      "precedence": 1,
+      "include": [
+        {
+          "email": {
+            "email": "owner@example.com"
+          }
+        }
+      ]
+    }
+  ]
+}

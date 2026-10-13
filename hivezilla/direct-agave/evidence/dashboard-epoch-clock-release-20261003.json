@@ -1,0 +1,11 @@
+{
+  "schema": "hivezilla-dashboard-epoch-clock-release-v1",
+  "deployed_unix": 1791016817,
+  "release": "/home/ubuntu/live/hivezilla-validator-20260930/releases/direct-agave-dashboard-epoch-clock-v3-20261003",
+  "sha256": "a10d2a65d6c02c99215cf1f5a630b08b8d96a3a55cec7aa51c4772131b8a16cd",
+  "dashboard_tests_passed": 12,
+  "estimate_sample_window": 10,
+  "timezone": "Europe/Paris",
+  "epoch_rpc_commitment": "finalized",
+  "validator_restarted": false
+}

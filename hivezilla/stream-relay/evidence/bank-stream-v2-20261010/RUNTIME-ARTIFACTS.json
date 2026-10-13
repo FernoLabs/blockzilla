@@ -1,0 +1,41 @@
+{
+  "source": {
+    "genesis_hash": "5eykt4UsFv8P8NJdTREpY1vzqKqZKvdpKuc147dw2N9d",
+    "node_identity": "J7qpvCEWhdBgPdYRV3s3btWPrRVXa2qnAzgvxWTvtbrQ",
+    "agave_revision": "d688dd0e3a576b048a848e5faf2e8d277f8feb6e",
+    "session_id": "000000000000000018dd432f0e8f799c-282459"
+  },
+  "artifacts": {
+    "host": {
+      "path": "/home/ubuntu/live/hivezilla-validator-20260930/releases/bank-stream-v2-20261010/agave-validator",
+      "sha256": "105ac32bc7c3c5b11febd7fe9be6a3f1cbf4700238dc4fba9ada699b5ae311b2",
+      "source_snapshot_commit": "d688dd0e3a576b048a848e5faf2e8d277f8feb6e"
+    },
+    "plugin": {
+      "path": "/home/ubuntu/live/hivezilla-validator-20260930/releases/bank-stream-v2-20261010/libhivezilla_direct_agave.so",
+      "sha256": "ca1a3b451758bb42fb88c11b2437e2b67543d4d7d004dd7ca1b4339a41b4ad34",
+      "source_snapshot_commit": "d1c69dc412fa2c3408fca2b95d97fb9f492337cd"
+    },
+    "producer": {
+      "path": "/home/ubuntu/live/hivezilla-validator-20260930/releases/bank-stream-v2-clients-r2-20261010/hivezilla-direct-agave",
+      "sha256": "1ae5a7e2ccb9abe6d963d173a48949619690b8993a59cad3e33e18eafb466c16",
+      "source_snapshot_commit": "c1286dcc7f08c8aa1ab963dedb180daa800beafc"
+    },
+    "transport": {
+      "path": "/home/ubuntu/live/hivezilla-validator-20260930/releases/bank-stream-v2-transport-r10-20261010/hivezilla-stream",
+      "sha256": "1bfc4577e5090d2a073a7114a0dd086f6397f4205e0909fcd20cc701d79846ae",
+      "source_snapshot_commit": "6d1f738af15d301f69b4ffe1e458bdf0beffe1f5"
+    },
+    "consumer": {
+      "path": "/home/ubuntu/live/hivezilla-validator-20260930/releases/bank-stream-v2-consumer-r12-20261010/bank-consumer",
+      "sha256": "71989906c5b03317e04cd9a2ca547db86e5b44b0299d9aaa46cd2806bcf4d99e",
+      "source_snapshot_commit": "6d1f738af15d301f69b4ffe1e458bdf0beffe1f5"
+    },
+    "bank_wasm": {
+      "path": "/home/ubuntu/benchmarks/blockzilla-bank-v2-20261010/provider/hivezilla/stream-relay/client/decoder-banks-v2.wasm",
+      "sha256": "fd5099206f2f541e2f4250ef199da1bb17985c98270a48721ec7cadf6c275b1b",
+      "source_snapshot_commit": "6d1f738af15d301f69b4ffe1e458bdf0beffe1f5"
+    }
+  },
+  "checked_unix_ms": 1791666397556
+}

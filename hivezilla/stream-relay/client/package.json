@@ -1,0 +1,23 @@
+{
+  "name": "@blockzilla/stream-transport",
+  "version": "0.1.0",
+  "type": "module",
+  "private": true,
+  "exports": {
+    ".": "./index.mjs",
+    "./sdk": {
+      "types": "./sdk.d.mts",
+      "default": "./sdk.mjs"
+    },
+    "./banks": {
+      "types": "./banks.d.mts",
+      "default": "./banks.mjs"
+    }
+  },
+  "scripts": {
+    "test": "node --test test.mjs sdk-test.mjs banks-test.mjs"
+  },
+  "engines": {
+    "node": ">=22"
+  }
+}

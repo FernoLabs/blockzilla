@@ -1,0 +1,698 @@
+{
+  "summary": {
+    "status": "PASS",
+    "scope": "Instrumented prefix diagnostic; not a replacement full-epoch timing result",
+    "transactions": 10204602,
+    "total_seconds": 9.626910034,
+    "scan_seconds": 7.967266809,
+    "process_seconds": 9.826374090000172,
+    "sampled_cpu_seconds": 45.84,
+    "output_sha256": "500b5b9bd2eae34df83005fb08ad7298995480be2d2457499313f9b1280ec949",
+    "http": {
+      "body_bytes": 13685878205,
+      "bytes_delivered": 13679645629,
+      "get_requests": 444,
+      "head_requests": 4,
+      "incomplete_body_retries": 0,
+      "request_send_retries": 0,
+      "request_send_retry_limit": 2,
+      "scan_completed": true,
+      "server_error_retries": 0,
+      "snapshot_scope": "after all parser workers joined",
+      "workers_finished": 64
+    },
+    "top_threads": [
+      {
+        "tid": "96584",
+        "name": "reqwest-interna",
+        "cpu_seconds": 5.68,
+        "first_sample": 0.250551600001927,
+        "last_sample": 9.575901001997408,
+        "max_interval_cpu": 1.027169847407783,
+        "wait_samples": {
+          "ep_poll": 16,
+          "0": 22
+        }
+      },
+      {
+        "tid": "96583",
+        "name": "car-decode-refe",
+        "cpu_seconds": 0.76,
+        "first_sample": 0.0002484240030753426,
+        "last_sample": 9.575901001997408,
+        "max_interval_cpu": 0.9982004282701443,
+        "wait_samples": {
+          "0": 5,
+          "futex_do_wait": 33,
+          "rq_qos_wait": 1
+        }
+      },
+      {
+        "tid": "96666",
+        "name": "car-decode-refe",
+        "cpu_seconds": 0.72,
+        "first_sample": 0.7510381960019004,
+        "last_sample": 6.3172426219971385,
+        "max_interval_cpu": 0.39530513015546775,
+        "wait_samples": {
+          "futex_do_wait": 18,
+          "0": 5
+        }
+      },
+      {
+        "tid": "96660",
+        "name": "car-decode-refe",
+        "cpu_seconds": 0.68,
+        "first_sample": 0.7510381960019004,
+        "last_sample": 7.0707581769966055,
+        "max_interval_cpu": 0.35759144426107026,
+        "wait_samples": {
+          "futex_do_wait": 23,
+          "0": 3
+        }
+      },
+      {
+        "tid": "96665",
+        "name": "car-decode-refe",
+        "cpu_seconds": 0.67,
+        "first_sample": 0.7510381960019004,
+        "last_sample": 6.06565599500027,
+        "max_interval_cpu": 0.35618278059942987,
+        "wait_samples": {
+          "futex_do_wait": 19,
+          "0": 3
+        }
+      },
+      {
+        "tid": "96679",
+        "name": "car-decode-refe",
+        "cpu_seconds": 0.65,
+        "first_sample": 0.7510381960019004,
+        "last_sample": 6.3172426219971385,
+        "max_interval_cpu": 0.35618278059942987,
+        "wait_samples": {
+          "futex_do_wait": 22,
+          "0": 1
+        }
+      },
+      {
+        "tid": "96681",
+        "name": "car-decode-refe",
+        "cpu_seconds": 0.64,
+        "first_sample": 0.7510381960019004,
+        "last_sample": 7.0707581769966055,
+        "max_interval_cpu": 0.47387490340485133,
+        "wait_samples": {
+          "futex_do_wait": 22,
+          "0": 4
+        }
+      },
+      {
+        "tid": "96689",
+        "name": "car-decode-refe",
+        "cpu_seconds": 0.62,
+        "first_sample": 0.7510381960019004,
+        "last_sample": 6.568508475997078,
+        "max_interval_cpu": 0.3974774064650295,
+        "wait_samples": {
+          "futex_do_wait": 20,
+          "0": 4
+        }
+      }
+    ]
+  },
+  "diagnostic_command": [
+    "/home/ubuntu/benchmarks/zilla-triton-20260930/source/target/release/car-decode-reference",
+    "--workers",
+    "64",
+    "--plan",
+    "/home/ubuntu/benchmarks/zilla-triton-20260930/control/prefix-plan-1000.json",
+    "--output",
+    "/home/ubuntu/benchmarks/zilla-triton-20260930/results-car-prefix-profile-r1/report.json",
+    "--export",
+    "/home/ubuntu/benchmarks/zilla-triton-20260930/results-car-prefix-profile-r1/transactions.bin",
+    "--url",
+    "https://files.old-faithful.net/1000/epoch-1000.car",
+    "--operator-trusted",
+    "--legacy-http-buffers",
+    "--http-workers",
+    "16",
+    "--http-window-chunks",
+    "16",
+    "--http-chunk-mib",
+    "32",
+    "--parser-workers",
+    "64"
+  ],
+  "binary_sha256": "528dc8112d274f1e168e662fef7624e95fc5259563e8aa07adaa323956bf94ad",
+  "receipt_sha256": "9850d2c31d43a474055bd6619cc14cbd8f5cd29938def4377498552a1a2b9259",
+  "raw_profile_sha256": "2b6ff135e5f927eb2e026a563e985ddaf60c486c47eae483c3a8d28f67def3b2",
+  "native_verification": {
+    "output_bytes": 3109086212,
+    "blocks": 8192,
+    "transactions": 10204602,
+    "votes": 5746054,
+    "failed": 1221482
+  },
+  "sampling_limit": "CPU times are sampled before thread exit; short-lived or final unsampled CPU use may be omitted. This prefix diagnostic is not a full-epoch profile.",
+  "samples": [
+    {
+      "elapsed_seconds": 0.0002484240030753426,
+      "threads_observed": 1,
+      "sampled_busy_logical_cpus": 0,
+      "network_threads": []
+    },
+    {
+      "elapsed_seconds": 0.250551600001927,
+      "threads_observed": 3,
+      "sampled_busy_logical_cpus": 0.03995155059497079,
+      "network_threads": [
+        {
+          "tid": "96584",
+          "name": "reqwest-interna",
+          "cpu_seconds": 0.02,
+          "interval_cpu": null,
+          "wait": "ep_poll"
+        }
+      ]
+    },
+    {
+      "elapsed_seconds": 0.5008591630030423,
+      "threads_observed": 3,
+      "sampled_busy_logical_cpus": 0.0,
+      "network_threads": [
+        {
+          "tid": "96584",
+          "name": "reqwest-interna",
+          "cpu_seconds": 0.02,
+          "interval_cpu": 0.0,
+          "wait": "ep_poll"
+        }
+      ]
+    },
+    {
+      "elapsed_seconds": 0.7510381960019004,
+      "threads_observed": 141,
+      "sampled_busy_logical_cpus": 0.2398282513158242,
+      "network_threads": [
+        {
+          "tid": "96584",
+          "name": "reqwest-interna",
+          "cpu_seconds": 0.08,
+          "interval_cpu": 0.2398282513158242,
+          "wait": "ep_poll"
+        }
+      ]
+    },
+    {
+      "elapsed_seconds": 1.0044992309994996,
+      "threads_observed": 141,
+      "sampled_busy_logical_cpus": 1.1441600875761708,
+      "network_threads": [
+        {
+          "tid": "96584",
+          "name": "reqwest-interna",
+          "cpu_seconds": 0.28,
+          "interval_cpu": 0.7890759224663247,
+          "wait": "0"
+        }
+      ]
+    },
+    {
+      "elapsed_seconds": 1.2576219260008656,
+      "threads_observed": 141,
+      "sampled_busy_logical_cpus": 2.9234834118529207,
+      "network_threads": [
+        {
+          "tid": "96584",
+          "name": "reqwest-interna",
+          "cpu_seconds": 0.54,
+          "interval_cpu": 1.027169847407783,
+          "wait": "0"
+        }
+      ]
+    },
+    {
+      "elapsed_seconds": 1.5108257429965306,
+      "threads_observed": 141,
+      "sampled_busy_logical_cpus": 8.33320771004066,
+      "network_threads": [
+        {
+          "tid": "96584",
+          "name": "reqwest-interna",
+          "cpu_seconds": 0.79,
+          "interval_cpu": 0.9873468850759077,
+          "wait": "0"
+        }
+      ]
+    },
+    {
+      "elapsed_seconds": 1.7650410360001842,
+      "threads_observed": 141,
+      "sampled_busy_logical_cpus": 12.50908221306063,
+      "network_threads": [
+        {
+          "tid": "96584",
+          "name": "reqwest-interna",
+          "cpu_seconds": 1.05,
+          "interval_cpu": 1.0227551494955232,
+          "wait": "0"
+        }
+      ]
+    },
+    {
+      "elapsed_seconds": 2.0182876469989424,
+      "threads_observed": 141,
+      "sampled_busy_logical_cpus": 4.896413006711789,
+      "network_threads": [
+        {
+          "tid": "96584",
+          "name": "reqwest-interna",
+          "cpu_seconds": 1.3,
+          "interval_cpu": 0.9871800416757639,
+          "wait": "0"
+        }
+      ]
+    },
+    {
+      "elapsed_seconds": 2.2714660659985384,
+      "threads_observed": 141,
+      "sampled_busy_logical_cpus": 7.504589085861349,
+      "network_threads": [
+        {
+          "tid": "96584",
+          "name": "reqwest-interna",
+          "cpu_seconds": 1.56,
+          "interval_cpu": 1.0269437696441845,
+          "wait": "0"
+        }
+      ]
+    },
+    {
+      "elapsed_seconds": 2.5246658859978197,
+      "threads_observed": 141,
+      "sampled_busy_logical_cpus": 14.81043706907313,
+      "network_threads": [
+        {
+          "tid": "96584",
+          "name": "reqwest-interna",
+          "cpu_seconds": 1.81,
+          "interval_cpu": 0.987362471271542,
+          "wait": "0"
+        }
+      ]
+    },
+    {
+      "elapsed_seconds": 2.777900610002689,
+      "threads_observed": 141,
+      "sampled_busy_logical_cpus": 8.095256320221635,
+      "network_threads": [
+        {
+          "tid": "96584",
+          "name": "reqwest-interna",
+          "cpu_seconds": 2.06,
+          "interval_cpu": 0.9872263805148336,
+          "wait": "0"
+        }
+      ]
+    },
+    {
+      "elapsed_seconds": 3.031118819002586,
+      "threads_observed": 141,
+      "sampled_busy_logical_cpus": 5.015437100735979,
+      "network_threads": [
+        {
+          "tid": "96584",
+          "name": "reqwest-interna",
+          "cpu_seconds": 2.31,
+          "interval_cpu": 0.9872907678614131,
+          "wait": "0"
+        }
+      ]
+    },
+    {
+      "elapsed_seconds": 3.2843351240007905,
+      "threads_observed": 141,
+      "sampled_busy_logical_cpus": 12.874368418033407,
+      "network_threads": [
+        {
+          "tid": "96584",
+          "name": "reqwest-interna",
+          "cpu_seconds": 2.56,
+          "interval_cpu": 0.9872981915669792,
+          "wait": "0"
+        }
+      ]
+    },
+    {
+      "elapsed_seconds": 3.537569888001599,
+      "threads_observed": 141,
+      "sampled_busy_logical_cpus": 12.952408066648896,
+      "network_threads": [
+        {
+          "tid": "96584",
+          "name": "reqwest-interna",
+          "cpu_seconds": 2.82,
+          "interval_cpu": 1.0267152735758265,
+          "wait": "0"
+        }
+      ]
+    },
+    {
+      "elapsed_seconds": 3.790787054997054,
+      "threads_observed": 141,
+      "sampled_busy_logical_cpus": 3.001376285098558,
+      "network_threads": [
+        {
+          "tid": "96584",
+          "name": "reqwest-interna",
+          "cpu_seconds": 3.07,
+          "interval_cpu": 0.9872948306245256,
+          "wait": "0"
+        }
+      ]
+    },
+    {
+      "elapsed_seconds": 4.04398097700323,
+      "threads_observed": 141,
+      "sampled_busy_logical_cpus": 9.439405105236705,
+      "network_threads": [
+        {
+          "tid": "96584",
+          "name": "reqwest-interna",
+          "cpu_seconds": 3.33,
+          "interval_cpu": 1.026880890109433,
+          "wait": "0"
+        }
+      ]
+    },
+    {
+      "elapsed_seconds": 4.297212366000167,
+      "threads_observed": 137,
+      "sampled_busy_logical_cpus": 16.50664246860232,
+      "network_threads": [
+        {
+          "tid": "96584",
+          "name": "reqwest-interna",
+          "cpu_seconds": 3.57,
+          "interval_cpu": 0.9477498068097018,
+          "wait": "0"
+        }
+      ]
+    },
+    {
+      "elapsed_seconds": 4.55066704100318,
+      "threads_observed": 133,
+      "sampled_busy_logical_cpus": 4.300571689936444,
+      "network_threads": [
+        {
+          "tid": "96584",
+          "name": "reqwest-interna",
+          "cpu_seconds": 3.83,
+          "interval_cpu": 1.0258244398013543,
+          "wait": "0"
+        }
+      ]
+    },
+    {
+      "elapsed_seconds": 4.803790265999851,
+      "threads_observed": 123,
+      "sampled_busy_logical_cpus": 13.037128458059925,
+      "network_threads": [
+        {
+          "tid": "96584",
+          "name": "reqwest-interna",
+          "cpu_seconds": 4.08,
+          "interval_cpu": 0.9876612468227216,
+          "wait": "0"
+        }
+      ]
+    },
+    {
+      "elapsed_seconds": 5.056759409002552,
+      "threads_observed": 109,
+      "sampled_busy_logical_cpus": 8.182816194218178,
+      "network_threads": [
+        {
+          "tid": "96584",
+          "name": "reqwest-interna",
+          "cpu_seconds": 4.33,
+          "interval_cpu": 0.988262825388669,
+          "wait": "0"
+        }
+      ]
+    },
+    {
+      "elapsed_seconds": 5.309438664997288,
+      "threads_observed": 93,
+      "sampled_busy_logical_cpus": 4.986558928392021,
+      "network_threads": [
+        {
+          "tid": "96584",
+          "name": "reqwest-interna",
+          "cpu_seconds": 4.57,
+          "interval_cpu": 0.9498207482651474,
+          "wait": "0"
+        }
+      ]
+    },
+    {
+      "elapsed_seconds": 5.561770977001288,
+      "threads_observed": 87,
+      "sampled_busy_logical_cpus": 9.709418427399651,
+      "network_threads": [
+        {
+          "tid": "96584",
+          "name": "reqwest-interna",
+          "cpu_seconds": 4.78,
+          "interval_cpu": 0.8322358652056843,
+          "wait": "0"
+        }
+      ]
+    },
+    {
+      "elapsed_seconds": 5.813972121002735,
+      "threads_observed": 67,
+      "sampled_busy_logical_cpus": 3.172071257517418,
+      "network_threads": [
+        {
+          "tid": "96584",
+          "name": "reqwest-interna",
+          "cpu_seconds": 4.98,
+          "interval_cpu": 0.7930178143793548,
+          "wait": "0"
+        }
+      ]
+    },
+    {
+      "elapsed_seconds": 6.06565599500027,
+      "threads_observed": 59,
+      "sampled_busy_logical_cpus": 3.4169849118280067,
+      "network_threads": [
+        {
+          "tid": "96584",
+          "name": "reqwest-interna",
+          "cpu_seconds": 5.15,
+          "interval_cpu": 0.675450505826466,
+          "wait": "0"
+        }
+      ]
+    },
+    {
+      "elapsed_seconds": 6.3172426219971385,
+      "threads_observed": 45,
+      "sampled_busy_logical_cpus": 4.014521805296798,
+      "network_threads": [
+        {
+          "tid": "96584",
+          "name": "reqwest-interna",
+          "cpu_seconds": 5.28,
+          "interval_cpu": 0.516720628404538,
+          "wait": "ep_poll"
+        }
+      ]
+    },
+    {
+      "elapsed_seconds": 6.568508475997078,
+      "threads_observed": 39,
+      "sampled_busy_logical_cpus": 1.711334799992773,
+      "network_threads": [
+        {
+          "tid": "96584",
+          "name": "reqwest-interna",
+          "cpu_seconds": 5.39,
+          "interval_cpu": 0.4377833209283821,
+          "wait": "ep_poll"
+        }
+      ]
+    },
+    {
+      "elapsed_seconds": 6.819704524001281,
+      "threads_observed": 35,
+      "sampled_busy_logical_cpus": 1.791429457490788,
+      "network_threads": [
+        {
+          "tid": "96584",
+          "name": "reqwest-interna",
+          "cpu_seconds": 5.47,
+          "interval_cpu": 0.3184763479983625,
+          "wait": "ep_poll"
+        }
+      ]
+    },
+    {
+      "elapsed_seconds": 7.0707581769966055,
+      "threads_observed": 31,
+      "sampled_busy_logical_cpus": 1.6331170453338764,
+      "network_threads": [
+        {
+          "tid": "96584",
+          "name": "reqwest-interna",
+          "cpu_seconds": 5.54,
+          "interval_cpu": 0.2788248613984677,
+          "wait": "0"
+        }
+      ]
+    },
+    {
+      "elapsed_seconds": 7.321532358997501,
+      "threads_observed": 23,
+      "sampled_busy_logical_cpus": 0.6380242125540178,
+      "network_threads": [
+        {
+          "tid": "96584",
+          "name": "reqwest-interna",
+          "cpu_seconds": 5.6,
+          "interval_cpu": 0.23925907970775573,
+          "wait": "ep_poll"
+        }
+      ]
+    },
+    {
+      "elapsed_seconds": 7.572288233997824,
+      "threads_observed": 17,
+      "sampled_busy_logical_cpus": 0.15951769823916895,
+      "network_threads": [
+        {
+          "tid": "96584",
+          "name": "reqwest-interna",
+          "cpu_seconds": 5.63,
+          "interval_cpu": 0.11963827367937697,
+          "wait": "ep_poll"
+        }
+      ]
+    },
+    {
+      "elapsed_seconds": 7.822812238999177,
+      "threads_observed": 17,
+      "sampled_busy_logical_cpus": 0.4390796802063175,
+      "network_threads": [
+        {
+          "tid": "96584",
+          "name": "reqwest-interna",
+          "cpu_seconds": 5.64,
+          "interval_cpu": 0.039916334564209906,
+          "wait": "ep_poll"
+        }
+      ]
+    },
+    {
+      "elapsed_seconds": 8.073228458000813,
+      "threads_observed": 15,
+      "sampled_busy_logical_cpus": 0.5191357034232316,
+      "network_threads": [
+        {
+          "tid": "96584",
+          "name": "reqwest-interna",
+          "cpu_seconds": 5.67,
+          "interval_cpu": 0.11980054694382342,
+          "wait": "ep_poll"
+        }
+      ]
+    },
+    {
+      "elapsed_seconds": 8.323594745001174,
+      "threads_observed": 15,
+      "sampled_busy_logical_cpus": 0.07988295964133217,
+      "network_threads": [
+        {
+          "tid": "96584",
+          "name": "reqwest-interna",
+          "cpu_seconds": 5.67,
+          "interval_cpu": 0.0,
+          "wait": "ep_poll"
+        }
+      ]
+    },
+    {
+      "elapsed_seconds": 8.574096915996051,
+      "threads_observed": 13,
+      "sampled_busy_logical_cpus": 0.43911795080709715,
+      "network_threads": [
+        {
+          "tid": "96584",
+          "name": "reqwest-interna",
+          "cpu_seconds": 5.68,
+          "interval_cpu": 0.03991981370973533,
+          "wait": "ep_poll"
+        }
+      ]
+    },
+    {
+      "elapsed_seconds": 8.824547620002704,
+      "threads_observed": 13,
+      "sampled_busy_logical_cpus": 0.9982004282701443,
+      "network_threads": [
+        {
+          "tid": "96584",
+          "name": "reqwest-interna",
+          "cpu_seconds": 5.68,
+          "interval_cpu": 0.0,
+          "wait": "ep_poll"
+        }
+      ]
+    },
+    {
+      "elapsed_seconds": 9.075025143996754,
+      "threads_observed": 13,
+      "sampled_busy_logical_cpus": 0.9980935455348028,
+      "network_threads": [
+        {
+          "tid": "96584",
+          "name": "reqwest-interna",
+          "cpu_seconds": 5.68,
+          "interval_cpu": 0.0,
+          "wait": "ep_poll"
+        }
+      ]
+    },
+    {
+      "elapsed_seconds": 9.325478972001292,
+      "threads_observed": 13,
+      "sampled_busy_logical_cpus": 0.3593476718525908,
+      "network_threads": [
+        {
+          "tid": "96584",
+          "name": "reqwest-interna",
+          "cpu_seconds": 5.68,
+          "interval_cpu": 0.0,
+          "wait": "ep_poll"
+        }
+      ]
+    },
+    {
+      "elapsed_seconds": 9.575901001997408,
+      "threads_observed": 13,
+      "sampled_busy_logical_cpus": 0.2395955339908817,
+      "network_threads": [
+        {
+          "tid": "96584",
+          "name": "reqwest-interna",
+          "cpu_seconds": 5.68,
+          "interval_cpu": 0.0,
+          "wait": "ep_poll"
+        }
+      ]
+    }
+  ]
+}

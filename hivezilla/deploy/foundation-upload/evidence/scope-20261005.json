@@ -1,0 +1,81 @@
+{
+  "recorded_at": "2026-10-05 04:55:12 UTC",
+  "bucket": "solana-archive-data",
+  "owner_scope": "Only CAR-derived Compact V2 archives",
+  "historical_archive": {
+    "verified_epochs": 1048,
+    "compact_archive_bytes": 105496762499833,
+    "bytes_by_filename": {
+      "archive-v2-blocks.index": 22400318592,
+      "archive-v2-blocks.zstd": 53764759128193,
+      "archive-v2-meta.wincode": 166063,
+      "archive-v2-pre-to-post.candidate.v1.json": 1298138,
+      "blockhash_registry.bin": 13784788480,
+      "poh.wincode": 7511342272900,
+      "prev_blockhash_tail.bin": 12408000,
+      "registry.bin": 722748781888,
+      "registry.mphf": 277125020431,
+      "registry_counts.bin": 22968424615,
+      "shredding.wincode": 648071630809,
+      "signatures.bin": 38035456748864,
+      "vote_hash_registry.bin": 28000351080,
+      "block-time-gaps.bin": 403583560,
+      ".hivezilla-pipeline-owned.v1.json": 117388,
+      "blockhash_index_v3.bin": 10506759328,
+      "skipped_slots.bin": 1404832,
+      "archive-v2-block-access.index": 574804256,
+      "archive-v2-block-access.wincode": 4438431579266,
+      "registry-first-seen.manifest": 23281,
+      "registry-hot-seed.bin": 69206016,
+      "archive-v2-get-block.index": 103680000,
+      "blockzilla-car-import-receipt.json": 704,
+      "blockzilla-compaction-receipt.tsv": 3123,
+      ".complete-hot-v2-no-access-delete-car": 26
+    },
+    "existing_intents_match": true,
+    "raw_car_included": false,
+    "nested_restart_directories_included": false,
+    "state": "UPLOADING",
+    "current_epoch": 1040,
+    "controller": "archive_upload-scope-20261005.py",
+    "service_enabled": true,
+    "completed_epochs": [
+      1041,
+      1042,
+      1043,
+      1044,
+      1045,
+      1046,
+      1047
+    ],
+    "completed_bytes": 1007131291113
+  },
+  "latest_car": {
+    "epoch": 1047,
+    "compaction_completed_at": "2026-10-05T00:49:05+02:00",
+    "upload_complete": true,
+    "archive_bytes": 153003758757,
+    "remote_file_sizes_verified": true
+  },
+  "native_backup": {
+    "state": "STOPPED_BY_OWNER",
+    "service_active": false,
+    "enabled_for_boot": false,
+    "complete_packs": 1931,
+    "pending_packs": 1,
+    "remote_objects_deleted": false,
+    "local_source_deleted": false
+  },
+  "live_compaction": {
+    "validator_restarted": false,
+    "worker_restarted": false,
+    "health_problems": [],
+    "lag_slots_at_sample": 4
+  },
+  "checks": {
+    "tests_passed": 4,
+    "tests_failed": 0,
+    "all_epoch_inventories_checked": true,
+    "existing_intents_match": true
+  }
+}

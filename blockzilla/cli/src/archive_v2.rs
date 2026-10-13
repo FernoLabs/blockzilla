@@ -138,6 +138,8 @@ use crate::{
     },
 };
 
+pub(crate) mod direct_agave;
+pub(crate) mod execution_canary;
 pub(crate) mod registry_reprocess;
 pub(crate) mod repair;
 
@@ -17928,6 +17930,55 @@ fn decode_first_seen_compact_transaction(
     rolling_blockhashes: &RollingBlockhashIndex,
     nonce_recent_blockhashes: &mut u64,
 ) -> Result<OwnedCompactTransaction> {
+    // V1 puts the versioned message before its signatures. The usual ShortU16
+    // signature prefix belongs only to the legacy/V0 transaction envelope.
+    if transaction_bytes.first() == Some(&0x81) {
+        let transaction = wincode::deserialize::<VersionedTransaction<'_>>(transaction_bytes)
+            .map_err(|error| anyhow!("{error}"))?;
+        anyhow::ensure!(
+            transaction.signatures.len() == usize::from(expected_signature_count),
+            "decoded v1 signature count does not match collected count",
+        );
+        let VersionedMessage::V1(message) = transaction.message else {
+            anyhow::bail!("v1 envelope does not contain a v1 message");
+        };
+        // First-seen assignment happens after this decode. Unknown keys must
+        // stay inline here, just as they do for the legacy/V0 fast path.
+        let message = OwnedCompactMessage::V1(OwnedCompactV1Message {
+            header: CompactMessageHeader {
+                num_required_signatures: message.header.num_required_signatures,
+                num_readonly_signed_accounts: message.header.num_readonly_signed_accounts,
+                num_readonly_unsigned_accounts: message.header.num_readonly_unsigned_accounts,
+            },
+            config: CompactTransactionConfig {
+                priority_fee: message.config.priority_fee,
+                compute_unit_limit: message.config.compute_unit_limit,
+                loaded_accounts_data_size_limit: message.config.loaded_accounts_data_size_limit,
+                heap_size: message.config.heap_size,
+            },
+            account_keys: message
+                .account_keys
+                .into_iter()
+                .map(|key| key_index.compact(key))
+                .collect(),
+            recent_blockhash: resolve_recent_blockhash(
+                rolling_blockhashes,
+                message.recent_blockhash,
+                slot,
+                tx_index,
+                nonce_recent_blockhashes,
+            )?,
+            instructions: message
+                .instructions
+                .into_iter()
+                .map(owned_instruction)
+                .collect(),
+        });
+        return Ok(OwnedCompactTransaction {
+            signatures: Vec::new(),
+            message,
+        });
+    }
     let (decoded_signature_count, prefix_len) =
         solana_short_vec::decode_shortu16_len(transaction_bytes)
             .map_err(|()| anyhow!("invalid transaction signature ShortU16 prefix"))?;
@@ -19401,6 +19452,7 @@ struct FirstSeenSignatureCollector<'a> {
     prefix_len: usize,
     count: Option<u8>,
     remaining_signature_bytes: usize,
+    v1_transaction: Option<Vec<u8>>,
 }
 
 impl<'a> FirstSeenSignatureCollector<'a> {
@@ -19411,10 +19463,28 @@ impl<'a> FirstSeenSignatureCollector<'a> {
             prefix_len: 0,
             count: None,
             remaining_signature_bytes: 0,
+            v1_transaction: None,
         }
     }
 
     fn consume(&mut self, chunk: &[u8]) -> Result<bool> {
+        if self.v1_transaction.is_none()
+            && self.prefix_len == 0
+            && self.count.is_none()
+            && chunk.first() == Some(&0x81)
+        {
+            self.v1_transaction = Some(Vec::new());
+        }
+        if let Some(transaction) = &mut self.v1_transaction {
+            // V1 signatures are at the end. Keep the legacy streaming fast path
+            // and bound this cold full-envelope fallback independently.
+            anyhow::ensure!(
+                transaction.len().saturating_add(chunk.len()) <= 65_536,
+                "v1 transaction exceeds signature collection limit",
+            );
+            transaction.extend_from_slice(chunk);
+            return Ok(false);
+        }
         let mut offset = 0usize;
         while self.count.is_none() && offset < chunk.len() {
             anyhow::ensure!(
@@ -19455,6 +19525,16 @@ impl<'a> FirstSeenSignatureCollector<'a> {
     }
 
     fn finish(self) -> Result<u8> {
+        if let Some(bytes) = self.v1_transaction {
+            let transaction = wincode::deserialize::<VersionedTransaction<'_>>(&bytes)
+                .map_err(|error| anyhow!("decode v1 transaction signatures: {error}"))?;
+            let count = u8::try_from(transaction.signatures.len())
+                .context("v1 signature count exceeds hot-row u8 maximum")?;
+            for signature in transaction.signatures {
+                self.output.extend_from_slice(signature);
+            }
+            return Ok(count);
+        }
         let count = self
             .count
             .context("truncated transaction signature ShortU16 prefix")?;
@@ -21681,6 +21761,95 @@ mod tests {
         bytes.extend_from_slice(&[0x63; 32]);
         bytes.push(0);
         bytes
+    }
+
+    fn test_first_seen_v1_transaction_bytes() -> Vec<u8> {
+        let mut bytes = vec![0x81, 1, 0, 0];
+        bytes.extend_from_slice(&0u32.to_le_bytes());
+        bytes.extend_from_slice(&[9; 32]);
+        bytes.extend_from_slice(&[0, 1]); // no instructions, one account
+        bytes.extend_from_slice(&[1; 32]);
+        bytes.extend_from_slice(&[0x81; 64]); // signatures follow the message
+        bytes
+    }
+
+    #[test]
+    fn first_seen_v1_signature_collection_and_message_match_full_decode() {
+        let bytes = test_first_seen_v1_transaction_bytes();
+        let mut output = vec![0xee];
+        let count = collect_first_seen_transaction_signatures(
+            &signature_raw_frame(bytes.clone(), Vec::new()),
+            &HashMap::new(),
+            &mut HashSet::new(),
+            &mut output,
+        )
+        .unwrap();
+        assert_eq!(count, 1);
+        assert_eq!(&output[1..], &[0x81; 64]);
+        let index = KeyIndex::build(vec![[1; 32]]);
+        let rolling = RollingBlockhashIndex::new(300);
+        let direct =
+            decode_first_seen_compact_transaction(42, 7, &bytes, count, &index, &rolling, &mut 0)
+                .unwrap();
+        let decoded = wincode::deserialize::<VersionedTransaction<'_>>(&bytes).unwrap();
+        let full = to_owned_compact_transaction(42, 7, decoded, &index, &rolling, &mut 0).unwrap();
+        assert!(direct.signatures.is_empty());
+        assert_eq!(full.signatures, vec![vec![0x81; 64]]);
+        assert_eq!(
+            wincode::config::serialize(&direct.message, wincode_leb128_config()).unwrap(),
+            wincode::config::serialize(&full.message, wincode_leb128_config()).unwrap(),
+        );
+    }
+
+    #[test]
+    fn first_seen_v1_collector_keeps_message_across_chunks() {
+        let bytes = test_first_seen_v1_transaction_bytes();
+        let mut output = Vec::new();
+        let mut collector = FirstSeenSignatureCollector::new(&mut output);
+        let signature_start = bytes.len() - 64;
+        assert!(!collector.consume(&bytes[..signature_start]).unwrap());
+        assert!(!collector.consume(&bytes[signature_start..]).unwrap());
+        assert_eq!(collector.finish().unwrap(), 1);
+        assert_eq!(output, vec![0x81; 64]);
+    }
+
+    #[test]
+    fn first_seen_v1_decode_keeps_new_keys_inline_until_assignment() {
+        let bytes = test_first_seen_v1_transaction_bytes();
+        let transaction = decode_first_seen_compact_transaction(
+            42,
+            7,
+            &bytes,
+            1,
+            &KeyIndex::build(Vec::new()),
+            &RollingBlockhashIndex::new(300),
+            &mut 0,
+        )
+        .unwrap();
+        let OwnedCompactMessage::V1(message) = transaction.message else {
+            panic!("expected V1 message");
+        };
+        assert_eq!(message.account_keys, vec![CompactPubkey::Raw([1; 32])]);
+    }
+
+    #[test]
+    fn first_seen_v1_truncation_rolls_back_and_buffer_is_bounded() {
+        let mut bytes = test_first_seen_v1_transaction_bytes();
+        bytes.pop();
+        let mut output = vec![0xdd];
+        assert!(
+            collect_first_seen_transaction_signatures(
+                &signature_raw_frame(bytes, Vec::new()),
+                &HashMap::new(),
+                &mut HashSet::new(),
+                &mut output,
+            )
+            .is_err()
+        );
+        assert_eq!(output, vec![0xdd]);
+        let mut collector = FirstSeenSignatureCollector::new(&mut output);
+        assert!(!collector.consume(&[0x81]).unwrap());
+        assert!(collector.consume(&vec![0; 65_536]).is_err());
     }
 
     #[test]

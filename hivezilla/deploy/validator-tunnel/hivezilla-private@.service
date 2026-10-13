@@ -1,0 +1,15 @@
+[Unit]
+Description=Private Hivezilla TCP relay to loopback port %i
+BindsTo=hivezilla-private-address.service
+After=hivezilla-private-address.service
+PartOf=hivezilla-private-address.service hivezilla-private@%i.socket
+
+[Service]
+ExecStart=/usr/lib/systemd/systemd-socket-proxyd 127.0.0.1:%i
+DynamicUser=yes
+NoNewPrivileges=yes
+PrivateTmp=yes
+ProtectSystem=strict
+ProtectHome=yes
+RestrictAddressFamilies=AF_UNIX AF_INET AF_INET6
+UMask=0077

@@ -1,0 +1,82 @@
+{
+  "recorded_at": "2026-10-05 06:45:08 UTC",
+  "profile": "query-with-signatures",
+  "reason": "Owner questioned slow upload and expected much higher capacity",
+  "old_settings": {
+    "transfers": 1,
+    "parts_per_file": 2,
+    "chunk_mib": 64,
+    "bandwidth_ceiling_mib_s": 80,
+    "cpu_cores": 1,
+    "memory_mib": 512
+  },
+  "new_settings": {
+    "transfers": 2,
+    "parts_per_file": 8,
+    "chunk_mib": 32,
+    "bandwidth_ceiling_mib_s": 400,
+    "cpu_cores": 4,
+    "memory_mib": 2048
+  },
+  "bounded_test": {
+    "source": "/volume1/blockzilla/archive/epoch-1038/registry.bin",
+    "bytes": 1224689216,
+    "elapsed_seconds": 13.511759841814637,
+    "returncode": 0,
+    "multipart_concurrency": 8,
+    "chunk_mib": 32,
+    "bandwidth_cap": null,
+    "main_job_kept_running": true,
+    "log": "Running as unit: blockzilla-foundation-speed-registry-20261005.service\n2026/10/05 08:41:17 INFO  :   484.750 MiB / 1.141 GiB, 42%, 114.350 MiB/s, ETA 5s\n2026/10/05 08:41:22 INFO  :     1.102 GiB / 1.141 GiB, 97%, 111.024 MiB/s, ETA 0s\n2026/10/05 08:41:26 INFO  : registry.bin: Multi-thread Copied (new)\n2026/10/05 08:41:26 INFO  :     1.141 GiB / 1.141 GiB, 100%, 89.842 MiB/s, ETA 0s\nFinished with result: success\nMain processes terminated with: code=exited/status=0\nService runtime: 13.343s\nCPU time consumed: 2.812s\n",
+    "remote_size_verified": true,
+    "overall_mib_per_second": 86.43986161332255
+  },
+  "main_sample": {
+    "start_unix": 1791182611.6415052,
+    "net_before": {
+      "tx_bytes": 1407337382149,
+      "rx_bytes": 24361281174735
+    },
+    "cpu_before": "usage_usec 11268674\nuser_usec 8664757\nsystem_usec 2603916\nnice_usec 8492000\nnr_periods 309\nnr_throttled 0\nthrottled_usec 0\nnr_bursts 0\nburst_usec 0\n",
+    "memory_events_before": "low 0\nhigh 0\nmax 0\noom 0\noom_kill 0\noom_group_kill 0\n",
+    "end_unix": 1791182641.6428003,
+    "net_after": {
+      "tx_bytes": 1413555498144,
+      "rx_bytes": 24361287198479
+    },
+    "cpu_after": "usage_usec 23847648\nuser_usec 18252087\nsystem_usec 5595560\nnice_usec 17836000\nnr_periods 609\nnr_throttled 0\nthrottled_usec 0\nnr_bursts 0\nburst_usec 0\n",
+    "memory_events_after": "low 0\nhigh 0\nmax 0\noom 0\noom_kill 0\noom_group_kill 0\n",
+    "memory_current_bytes": 345001984,
+    "status": {
+      "state": "UPLOADING",
+      "epoch": 1039,
+      "destination": "foundation:solana-archive-data/compact-v2/blockzilla-20261004/epoch-1039",
+      "upload_profile": "query-with-signatures"
+    },
+    "network_upload_mib_s": 197.66005111219374,
+    "network_receive_mib_s": 0.19148139852717083,
+    "recent_upload_log": [
+      "2026/10/05 08:43:05 INFO  : blockhash_index_v3.bin: Copied (new)",
+      "2026/10/05 08:43:07 INFO  : blockhash_registry.bin: Copied (new)",
+      "2026/10/05 08:43:07 INFO  : prev_blockhash_tail.bin: Copied (new)",
+      "2026/10/05 08:43:21 INFO  : registry.bin: Multi-thread Copied (new)",
+      "2026/10/05 08:43:29 INFO  : registry.mphf: Multi-thread Copied (new)",
+      "2026/10/05 08:43:31 INFO  :     4.641 GiB / 120.682 GiB, 4%, 153.881 MiB/s, ETA 12m52s (xfr#7/12)",
+      "2026/10/05 08:43:34 INFO  : registry_counts.bin: Copied (new)",
+      "2026/10/05 08:44:01 INFO  :    10.007 GiB / 120.682 GiB, 8%, 181.749 MiB/s, ETA 10m23s (xfr#8/12)"
+    ]
+  },
+  "service": "NRestarts=0\nActiveState=active\nUnitFileState=enabled",
+  "sources": [
+    "https://rclone.org/s3/#multipart-uploads",
+    "https://developers.cloudflare.com/r2/examples/rclone/"
+  ],
+  "cpu_not_throttled": true,
+  "oom_events": 0,
+  "source_profile_changed": false,
+  "local_files_deleted": false,
+  "cloud_files_deleted": false,
+  "sustained_whole_archive_rate_not_established": true,
+  "last_payload_sample_mib_s": 186.461,
+  "tests_passed": 6
+}

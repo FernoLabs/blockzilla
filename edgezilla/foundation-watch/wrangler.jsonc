@@ -1,0 +1,20 @@
+{
+  "$schema": "node_modules/wrangler/config-schema.json",
+  "name": "blockzilla-foundation-watch",
+  "account_id": "8df0426c80fcd1a04ed439f441db9ff8",
+  "main": "src/index.ts",
+  "compatibility_date": "2026-10-12",
+  "compatibility_flags": ["nodejs_compat"],
+  "workers_dev": true,
+  "vars": {
+    "MACHINE_LABEL": "Megaloadon",
+    "TELEGRAM_BOT_USERNAME": "megaloadon_alerts_bot",
+    "STREAM_URL": "https://stream.blockzilla.dev/v1/blockhashes"
+  },
+  "durable_objects": {
+    "bindings": [{ "name": "WATCH", "class_name": "FoundationWatch" }]
+  },
+  "migrations": [{ "tag": "v1", "new_sqlite_classes": ["FoundationWatch"] }],
+  "triggers": { "crons": ["* * * * *"] },
+  "observability": { "enabled": true, "head_sampling_rate": 1 }
+}

@@ -1,0 +1,29 @@
+[Unit]
+Description=Hivezilla direct Agave compact worker
+After=hivezilla-validator.service
+StartLimitIntervalSec=300
+StartLimitBurst=5
+
+[Service]
+Type=simple
+User=ubuntu
+Group=ubuntu
+WorkingDirectory=/home/ubuntu/live/hivezilla-validator-20260930
+UMask=0077
+ExecStart=/usr/bin/python3 /home/ubuntu/live/hivezilla-validator-20260930/deploy/processed-stream-20261010/worker_launcher.py --processed --capture-root /home/ubuntu/live/hivezilla-validator-20260930/captures/direct-agave-live --output-root /home/ubuntu/live/hivezilla-validator-20260930/compact/direct-agave-processed-live --engine /home/ubuntu/live/hivezilla-validator-20260930/releases/processed-worker-v4-20261010/hivezilla-direct-agave --blockzilla /home/ubuntu/live/hivezilla-validator-20260930/releases/processed-stream-v1-20261010/blockzilla
+Restart=on-failure
+RestartPreventExitStatus=1 2
+RestartSec=5s
+TimeoutStopSec=30s
+KillMode=control-group
+CPUQuota=800%
+MemoryMax=16G
+Nice=5
+NoNewPrivileges=yes
+PrivateTmp=yes
+ProtectSystem=strict
+ProtectHome=read-only
+ReadWritePaths=/home/ubuntu/live/hivezilla-validator-20260930/captures/direct-agave-live /home/ubuntu/live/hivezilla-validator-20260930/compact/direct-agave-processed-live
+
+[Install]
+WantedBy=multi-user.target

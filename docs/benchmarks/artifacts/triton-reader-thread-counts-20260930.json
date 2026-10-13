@@ -1,0 +1,318 @@
+{
+  "scope": "Thread-count diagnostics on the same epoch-1000 prefix. Counts are sampled at 0.25 seconds and are not measured full-epoch peaks.",
+  "cases": {
+    "car": {
+      "peak_observed_threads": 141,
+      "peak_elapsed_seconds": 0.7510381960019004,
+      "peak_thread_names": {
+        "car-decode-refe": 129,
+        "reqwest-interna": 1,
+        "tokio-rt-worker": 11
+      },
+      "unique_threads_observed": 141,
+      "summary": {
+        "status": "PASS",
+        "scope": "Instrumented prefix diagnostic; not a replacement full-epoch timing result",
+        "transactions": 10204602,
+        "total_seconds": 9.626910034,
+        "scan_seconds": 7.967266809,
+        "process_seconds": 9.826374090000172,
+        "sampled_cpu_seconds": 45.84,
+        "output_sha256": "500b5b9bd2eae34df83005fb08ad7298995480be2d2457499313f9b1280ec949",
+        "http": {
+          "body_bytes": 13685878205,
+          "bytes_delivered": 13679645629,
+          "get_requests": 444,
+          "head_requests": 4,
+          "incomplete_body_retries": 0,
+          "request_send_retries": 0,
+          "request_send_retry_limit": 2,
+          "scan_completed": true,
+          "server_error_retries": 0,
+          "snapshot_scope": "after all parser workers joined",
+          "workers_finished": 64
+        },
+        "top_threads": [
+          {
+            "tid": "96584",
+            "name": "reqwest-interna",
+            "cpu_seconds": 5.68,
+            "first_sample": 0.250551600001927,
+            "last_sample": 9.575901001997408,
+            "max_interval_cpu": 1.027169847407783,
+            "wait_samples": {
+              "ep_poll": 16,
+              "0": 22
+            }
+          },
+          {
+            "tid": "96583",
+            "name": "car-decode-refe",
+            "cpu_seconds": 0.76,
+            "first_sample": 0.0002484240030753426,
+            "last_sample": 9.575901001997408,
+            "max_interval_cpu": 0.9982004282701443,
+            "wait_samples": {
+              "0": 5,
+              "futex_do_wait": 33,
+              "rq_qos_wait": 1
+            }
+          },
+          {
+            "tid": "96666",
+            "name": "car-decode-refe",
+            "cpu_seconds": 0.72,
+            "first_sample": 0.7510381960019004,
+            "last_sample": 6.3172426219971385,
+            "max_interval_cpu": 0.39530513015546775,
+            "wait_samples": {
+              "futex_do_wait": 18,
+              "0": 5
+            }
+          },
+          {
+            "tid": "96660",
+            "name": "car-decode-refe",
+            "cpu_seconds": 0.68,
+            "first_sample": 0.7510381960019004,
+            "last_sample": 7.0707581769966055,
+            "max_interval_cpu": 0.35759144426107026,
+            "wait_samples": {
+              "futex_do_wait": 23,
+              "0": 3
+            }
+          },
+          {
+            "tid": "96665",
+            "name": "car-decode-refe",
+            "cpu_seconds": 0.67,
+            "first_sample": 0.7510381960019004,
+            "last_sample": 6.06565599500027,
+            "max_interval_cpu": 0.35618278059942987,
+            "wait_samples": {
+              "futex_do_wait": 19,
+              "0": 3
+            }
+          },
+          {
+            "tid": "96679",
+            "name": "car-decode-refe",
+            "cpu_seconds": 0.65,
+            "first_sample": 0.7510381960019004,
+            "last_sample": 6.3172426219971385,
+            "max_interval_cpu": 0.35618278059942987,
+            "wait_samples": {
+              "futex_do_wait": 22,
+              "0": 1
+            }
+          },
+          {
+            "tid": "96681",
+            "name": "car-decode-refe",
+            "cpu_seconds": 0.64,
+            "first_sample": 0.7510381960019004,
+            "last_sample": 7.0707581769966055,
+            "max_interval_cpu": 0.47387490340485133,
+            "wait_samples": {
+              "futex_do_wait": 22,
+              "0": 4
+            }
+          },
+          {
+            "tid": "96689",
+            "name": "car-decode-refe",
+            "cpu_seconds": 0.62,
+            "first_sample": 0.7510381960019004,
+            "last_sample": 6.568508475997078,
+            "max_interval_cpu": 0.3974774064650295,
+            "wait_samples": {
+              "futex_do_wait": 20,
+              "0": 4
+            }
+          }
+        ]
+      },
+      "command": [
+        "/home/ubuntu/benchmarks/zilla-triton-20260930/source/target/release/car-decode-reference",
+        "--workers",
+        "64",
+        "--plan",
+        "/home/ubuntu/benchmarks/zilla-triton-20260930/control/prefix-plan-1000.json",
+        "--output",
+        "/home/ubuntu/benchmarks/zilla-triton-20260930/results-car-prefix-profile-r1/report.json",
+        "--export",
+        "/home/ubuntu/benchmarks/zilla-triton-20260930/results-car-prefix-profile-r1/transactions.bin",
+        "--url",
+        "https://files.old-faithful.net/1000/epoch-1000.car",
+        "--operator-trusted",
+        "--legacy-http-buffers",
+        "--http-workers",
+        "16",
+        "--http-window-chunks",
+        "16",
+        "--http-chunk-mib",
+        "32",
+        "--parser-workers",
+        "64"
+      ],
+      "raw_profile_path": "/home/ubuntu/benchmarks/zilla-triton-20260930/results-car-prefix-profile-r1/profile.json",
+      "raw_profile_sha256": "2b6ff135e5f927eb2e026a563e985ddaf60c486c47eae483c3a8d28f67def3b2",
+      "receipt_sha256": "9850d2c31d43a474055bd6619cc14cbd8f5cd29938def4377498552a1a2b9259"
+    },
+    "jetstreamer": {
+      "peak_observed_threads": 68,
+      "peak_elapsed_seconds": 8.293042533005064,
+      "peak_thread_names": {
+        "jetstreamer-com": 1,
+        "tokio-rt-worker": 67
+      },
+      "unique_threads_observed": 68,
+      "summary": {
+        "status": "PASS",
+        "scope": "Instrumented prefix diagnostic; not a replacement full-epoch timing result",
+        "transactions": 10204602,
+        "total_seconds": 32.062652474,
+        "scan_seconds": 30.665715481,
+        "process_seconds": 32.4439978310038,
+        "sampled_cpu_seconds": 84.12,
+        "output_sha256": "500b5b9bd2eae34df83005fb08ad7298995480be2d2457499313f9b1280ec949",
+        "http": null,
+        "processing_workers": 64,
+        "workers_with_real_blocks": 64,
+        "reported_body_retries": 0,
+        "top_threads": [
+          {
+            "tid": "103700",
+            "name": "tokio-rt-worker",
+            "cpu_seconds": 8.0,
+            "first_sample": 0.2504393340059323,
+            "last_sample": 31.942020356000285,
+            "max_interval_cpu": 0.5950273516691446,
+            "wait_samples": {
+              "ep_poll": 12,
+              "futex_do_wait": 86,
+              "0": 29
+            }
+          },
+          {
+            "tid": "103697",
+            "name": "tokio-rt-worker",
+            "cpu_seconds": 7.42,
+            "first_sample": 0.2504393340059323,
+            "last_sample": 31.942020356000285,
+            "max_interval_cpu": 0.5957084283251997,
+            "wait_samples": {
+              "futex_do_wait": 93,
+              "ep_poll": 6,
+              "0": 28
+            }
+          },
+          {
+            "tid": "103640",
+            "name": "tokio-rt-worker",
+            "cpu_seconds": 7.04,
+            "first_sample": 0.2504393340059323,
+            "last_sample": 31.942020356000285,
+            "max_interval_cpu": 0.5966279993407818,
+            "wait_samples": {
+              "futex_do_wait": 88,
+              "ep_poll": 7,
+              "0": 32
+            }
+          },
+          {
+            "tid": "103691",
+            "name": "tokio-rt-worker",
+            "cpu_seconds": 6.98,
+            "first_sample": 0.2504393340059323,
+            "last_sample": 31.942020356000285,
+            "max_interval_cpu": 0.5566751729164771,
+            "wait_samples": {
+              "0": 27,
+              "futex_do_wait": 96,
+              "ep_poll": 4
+            }
+          },
+          {
+            "tid": "103696",
+            "name": "tokio-rt-worker",
+            "cpu_seconds": 6.53,
+            "first_sample": 0.2504393340059323,
+            "last_sample": 31.942020356000285,
+            "max_interval_cpu": 0.5163243796897287,
+            "wait_samples": {
+              "futex_do_wait": 95,
+              "0": 23,
+              "ep_poll": 9
+            }
+          },
+          {
+            "tid": "103683",
+            "name": "tokio-rt-worker",
+            "cpu_seconds": 6.44,
+            "first_sample": 0.2504393340059323,
+            "last_sample": 31.942020356000285,
+            "max_interval_cpu": 0.5570039226956612,
+            "wait_samples": {
+              "futex_do_wait": 100,
+              "0": 19,
+              "ep_poll": 8
+            }
+          },
+          {
+            "tid": "103695",
+            "name": "tokio-rt-worker",
+            "cpu_seconds": 6.08,
+            "first_sample": 0.2504393340059323,
+            "last_sample": 31.942020356000285,
+            "max_interval_cpu": 0.5159082675514802,
+            "wait_samples": {
+              "futex_do_wait": 88,
+              "0": 30,
+              "ep_poll": 9
+            }
+          },
+          {
+            "tid": "103688",
+            "name": "tokio-rt-worker",
+            "cpu_seconds": 6.06,
+            "first_sample": 0.2504393340059323,
+            "last_sample": 31.942020356000285,
+            "max_interval_cpu": 0.5559945331035203,
+            "wait_samples": {
+              "futex_do_wait": 93,
+              "ep_poll": 2,
+              "0": 32
+            }
+          }
+        ]
+      },
+      "command": [
+        "/home/ubuntu/benchmarks/zilla-triton-20260930/source/bench/jetstreamer-reference/target/release/jetstreamer-common-export-reference",
+        "--epoch",
+        "1000",
+        "--http-base",
+        "https://files.old-faithful.net/",
+        "--index-base",
+        "https://files.old-faithful.net/",
+        "--workers",
+        "64",
+        "--start-slot",
+        "432000000",
+        "--end-slot-exclusive",
+        "432008197",
+        "--plan",
+        "/home/ubuntu/benchmarks/zilla-triton-20260930/control/prefix-plan-1000.json",
+        "--output",
+        "/home/ubuntu/benchmarks/zilla-triton-20260930/results-jetstreamer-prefix-profile-r1/report.json",
+        "--export",
+        "/home/ubuntu/benchmarks/zilla-triton-20260930/results-jetstreamer-prefix-profile-r1/transactions.bin",
+        "--reported-error-policy",
+        "body-transport"
+      ],
+      "raw_profile_path": "/home/ubuntu/benchmarks/zilla-triton-20260930/results-jetstreamer-prefix-profile-r1/profile.json",
+      "raw_profile_sha256": "8b73333a201827b9b4292f31acd866695671249f3db06bd10805de008a83b60b",
+      "receipt_sha256": "7a456949cfdc9a9b3cd4c7c9d3ddedbb5ad85a680451ad513db300bfef6923af"
+    }
+  }
+}

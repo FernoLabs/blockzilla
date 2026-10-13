@@ -62,6 +62,7 @@ use crate::{
 
 mod receiver_bridge;
 pub use receiver_bridge::*;
+pub mod current;
 
 const IDENTITY_SCHEMA_VERSION: u32 = 1;
 const JOURNAL_SCHEMA_VERSION: u32 = 1;
@@ -74,7 +75,7 @@ const PAYLOAD_FORMAT_ZSTD_PROTOBUF_UPDATE_V1: u16 = 2;
 
 /// Keep payload format 2 within the block schema admitted before Yellowstone 12.7.
 /// A future format that retains V1 config needs a separate stream identity.
-fn validate_raw_grpc_update_v1(update: &SubscribeUpdate) -> Result<()> {
+pub(crate) fn validate_raw_grpc_update_v1(update: &SubscribeUpdate) -> Result<()> {
     if let Some(UpdateOneof::Block(block)) = update.update_oneof.as_ref() {
         for (index, row) in block.transactions.iter().enumerate() {
             let message = row.transaction.as_ref().and_then(|tx| tx.message.as_ref());
@@ -2427,6 +2428,33 @@ impl GrpcRawCommittedCursor {
 
     pub fn next_handoff_offset(&self) -> u64 {
         self.next_handoff_offset
+    }
+
+    /// Move only an in-memory conversion scan over a batch this cursor read. This writes no
+    /// progress, creates no durability token, and cannot authorize source retirement. An overflow
+    /// adapter must resume from its own durable catalog after failure, never from this scan.
+    pub(crate) fn advance_overflow_scan(&mut self, batch: &GrpcRawCommittedBatch) -> Result<()> {
+        let tail = batch
+            .records
+            .last()
+            .context("cannot advance an empty overflow scan")?;
+        let physical = tail.durable_local_record().metadata();
+        let expected = self.physical_stream();
+        ensure!(
+            batch.start_frame_id == self.next_frame_id
+                && batch.start_replication_sequence == self.next_replication_sequence
+                && batch.start_handoff_offset == self.next_handoff_offset
+                && tail.stream == self.stream()
+                && physical.cluster_id == expected.cluster_id
+                && physical.source_id == expected.source_id
+                && physical.observation.origin_node_id == expected.origin_node_id
+                && physical.observation.journal_id == expected.journal_id,
+            "overflow scan batch belongs to another source position"
+        );
+        self.next_frame_id = batch.next_frame_id;
+        self.next_replication_sequence = batch.next_replication_sequence;
+        self.next_handoff_offset = batch.next_handoff_offset;
+        Ok(())
     }
 
     pub(crate) fn read_limits(&self) -> GrpcRawCommittedReadLimits {
@@ -7145,6 +7173,7 @@ fn sync_directory(path: &Path) -> Result<()> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    include!("overflow/grpc_tests.rs");
     use blockzilla_archive_v2::WincodeArchiveV2PohRecord;
     use blockzilla_live_format::LiveBlockMissingField;
     use blockzilla_primitives::{WincodeLeb128FramedReader, WincodeLeb128FramedWriter};

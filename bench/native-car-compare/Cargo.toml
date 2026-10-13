@@ -1,0 +1,24 @@
+[package]
+name = "blockzilla-native-car-metadata-check"
+version = "0.1.0"
+edition = "2024"
+publish = false
+
+[workspace]
+
+[dependencies]
+anyhow = "1.0"
+blockzilla-archive-v2 = { path = "../../crates/compact-v2/blockzilla-archive-v2", default-features = false, features = ["known-program-logs"] }
+blockzilla-compact = { path = "../../crates/compact-v2/blockzilla-compact", default-features = false, features = ["known-program-logs"] }
+blockzilla-primitives = { path = "../../crates/blockzilla-primitives", default-features = false }
+memmap2 = "0.9"
+serde_json = "1.0"
+sha2 = "0.10"
+ruzstd = "0.9"
+wincode = "=0.6.1"
+
+[profile.dev]
+opt-level = 1
+
+[profile.dev.package."*"]
+opt-level = 3

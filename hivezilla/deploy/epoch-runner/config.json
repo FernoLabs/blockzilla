@@ -1,0 +1,13 @@
+{
+  "run_dir": "/home/ubuntu/live/hivezilla-validator-20260930/epoch-runs/epoch-1047-20261001",
+  "progress_file": "/home/ubuntu/live/hivezilla-validator-20260930/reports/epoch-progress.json",
+  "hivezilla": "/home/ubuntu/live/hivezilla-validator-20260930/bin/hivezilla",
+  "blockzilla": "/home/ubuntu/live/hivezilla-validator-20260930/releases/epoch-runner-20261001/blockzilla",
+  "epoch": 1047,
+  "start_slot": 452304000,
+  "end_slot_exclusive": 452736000,
+  "genesis_hash": "5eykt4UsFv8P8NJdTREpY1vzqKqZKvdpKuc147dw2N9d",
+  "node_identity": "J7qpvCEWhdBgPdYRV3s3btWPrRVXa2qnAzgvxWTvtbrQ",
+  "batch_blocks": 128,
+  "reserve_free_bytes": 536870912000
+}

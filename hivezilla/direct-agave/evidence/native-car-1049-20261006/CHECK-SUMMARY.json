@@ -1,0 +1,21 @@
+{
+  "schema": "blockzilla-native-car-check-status-v1",
+  "epoch": 1049,
+  "state": "FULL_BLOCK_COMPARISON_PASSED_LOG_CONTENT_DIFFERENCE",
+  "coverage": "COVERAGE.json",
+  "full_native_poh": "POH-RECEIPT.json",
+  "sample_block_content": "PREFIX-CONTENT-RECEIPT.json",
+  "sample_execution_metadata": "PREFIX-METADATA-RECEIPT-V3.json",
+  "importer_fix": "V1-IMPORTER-FIX-RECEIPT.json",
+  "full_car_comparison": "RECEIPT.json",
+  "execution_metadata_sample": "METADATA-RECEIPT.json",
+  "all_epoch_block_identities_and_signature_bytes_verified_against_car": true,
+  "whole_epoch_execution_metadata_checked": false,
+  "metadata_sample_blocks": 146,
+  "metadata_sample_transactions": 191421,
+  "metadata_sample_non_log_fields_match": true,
+  "native_log_truncated_transactions": 294,
+  "all_epoch_block_contents_verified_against_car": false,
+  "canonical_flag_changed": false,
+  "native_data_copied_to_archive_machine": false
+}

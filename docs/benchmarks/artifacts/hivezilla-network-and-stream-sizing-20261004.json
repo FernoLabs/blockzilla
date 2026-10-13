@@ -1,0 +1,144 @@
+{
+  "schema": "hivezilla-network-and-stream-sizing-v1",
+  "measured_date": "2026-10-04",
+  "user_timezone": "Europe/Paris",
+  "host": "ubuntu@213.239.141.61",
+  "limitations": [
+    "Read-only samples. No service restart, firewall change, relay deployment, or public endpoint.",
+    "Host and process samples have different time windows.",
+    "Process probes count successful IPv4/IPv6 UDP and TCP socket payload returns, not all interface overhead; syscall errors are excluded with signed int32 return values. No packet content read.",
+    "Short samples are not peak capacity measurements. Interface link speeds do not prove available Internet bandwidth.",
+    "Compact sizing reads committed file manifests, not traffic from a deployed relay. It includes all projection objects and available PoH; it excludes raw native source evidence and normalization receipts. Projection completeness for a public SDK is not yet established."
+  ],
+  "live_interface_sample": {
+    "interface": "bond0",
+    "start_local": "2026-10-04T09:48:55.025214+02:00",
+    "end_local": "2026-10-04T09:49:25.029452+02:00",
+    "elapsed_seconds": 30.004237988963723,
+    "received_bytes": 557040693,
+    "sent_bytes": 603741742,
+    "rx_mbps": 148.5232034767603,
+    "tx_mbps": 160.97505751609373,
+    "rx_packets": 615291,
+    "tx_packets": 695875,
+    "rx_dropped_delta": 0,
+    "tx_dropped_delta": 0,
+    "rx_errors_delta": 0,
+    "tx_errors_delta": 0,
+    "aggregation": "bond0 only; do not add slave counters to the bond"
+  },
+  "validator_payload_sample": {
+    "pid": 1106933,
+    "elapsed_seconds": 20.579914991,
+    "received_udp_bytes": 375600763,
+    "received_tcp_bytes": 1892,
+    "sent_udp_bytes": 330165807,
+    "sent_tcp_bytes": 4086,
+    "rx_mbps": 146.0074660810828,
+    "tx_mbps": 128.34645552010872,
+    "bpftrace_raw": "elapsed_ns=20579914991\n\n\n@receive_calls[tcp_recvmsg]: 11\n@receive_calls[udp_recvmsg]: 440233\n@received_payload_bytes[tcp_recvmsg]: 1892\n@received_payload_bytes[udp_recvmsg]: 375600763\n@send_calls[tcp_sendmsg]: 8\n@send_calls[udp_sendmsg]: 414133\n@sent_payload_bytes[tcp_sendmsg]: 4086\n@sent_payload_bytes[udp_sendmsg]: 330165807\n"
+  },
+  "historical_interface_sample": {
+    "source": "sysstat /var/log/sysstat/sa03 Average row",
+    "date": "2026-10-03",
+    "interface": "bond0",
+    "rx_kib_per_second": 16041.55,
+    "tx_kib_per_second": 17315.93,
+    "rx_mbps": 131.41237759999999,
+    "tx_mbps": 141.85209856,
+    "estimated_decimal_tb_per_day_rx": 1.41925367808,
+    "estimated_decimal_tb_per_day_tx": 1.532002664448
+  },
+  "projection_size": {
+    "schema": "hivezilla-stream-sizing-sample-v1",
+    "sampled_unix": 1791100204.630829,
+    "session_id": "000000000000000018daf342ba38d3d0-10e3f5",
+    "committed_batches": 790,
+    "blocks": 1116,
+    "transactions": 1343808,
+    "marker_timestamp_span_seconds": 299.2494914531708,
+    "start_slot": 453192929,
+    "end_slot_exclusive": 453194045,
+    "object_names": {
+      "DIRECT-AGAVE-NORMALIZED.v1.json": {
+        "bytes": 1309138,
+        "objects": 790
+      },
+      "archive-v2-blocks.index": {
+        "bytes": 86472,
+        "objects": 790
+      },
+      "archive-v2-blocks.zstd": {
+        "bytes": 216810801,
+        "objects": 790
+      },
+      "archive-v2-meta.wincode": {
+        "bytes": 20540,
+        "objects": 790
+      },
+      "available-poh.wincode": {
+        "bytes": 49140424,
+        "objects": 790
+      },
+      "blockhash_registry.bin": {
+        "bytes": 35712,
+        "objects": 790
+      },
+      "prev_blockhash_tail.bin": {
+        "bytes": 31600,
+        "objects": 790
+      },
+      "registry.bin": {
+        "bytes": 98039616,
+        "objects": 790
+      },
+      "registry.mphf": {
+        "bytes": 37627273,
+        "objects": 790
+      },
+      "registry_counts.bin": {
+        "bytes": 3102778,
+        "objects": 790
+      },
+      "signatures.bin": {
+        "bytes": 88692864,
+        "objects": 790
+      },
+      "source-events.json.zst": {
+        "bytes": 1472403002,
+        "objects": 790
+      },
+      "vote_hash_registry.bin": {
+        "bytes": 72540,
+        "objects": 790
+      }
+    },
+    "marker_bytes": 3834461,
+    "projection_bytes": 493660620,
+    "projection_mbps": 13.197298818527882,
+    "projection_decimal_kb_per_block": 442.34822580645164,
+    "frames_only_mbps": 5.796121489053316,
+    "total_evidence_bundle_mbps": 52.59484988118343,
+    "excluded_from_projection": [
+      "source-events.json.zst",
+      "DIRECT-AGAVE-NORMALIZED.v1.json"
+    ]
+  },
+  "health": {
+    "sample_local": "2026-10-04T09:49:24.788+02:00",
+    "validator_health": "ok",
+    "epoch": 1049,
+    "capture_state": "CAPTURING",
+    "last_compact_slot": 453193894,
+    "compact_lag_slots": 1,
+    "compacted_blocks": 332361,
+    "compacted_transactions": 387680298,
+    "raw_recording_state": "ACTIVE",
+    "raw_journal_bytes": 1095663863761,
+    "raw_quota_bytes": 1288490188800,
+    "free_disk_bytes": 990981988352,
+    "reserve_disk_bytes": 536870912000,
+    "earlier_coverage_gaps": true,
+    "full_epoch": false
+  }
+}

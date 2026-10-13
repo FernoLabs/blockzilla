@@ -1,0 +1,94 @@
+{
+  "schema": "hivezilla-epoch-1047-deployment-v1",
+  "prepared_utc": "2026-10-01T13:30:48.581271+00:00",
+  "epoch_info": {
+    "absoluteSlot": 452301692,
+    "blockHeight": 430340645,
+    "epoch": 1046,
+    "slotIndex": 429692,
+    "slotsInEpoch": 432000,
+    "transactionCount": 554814174722
+  },
+  "progress": {
+    "archive_publication_allowed": false,
+    "archive_verification": "SKIPPED",
+    "capture_error": null,
+    "capture_retries": 0,
+    "capture_state": "ARMED",
+    "collected_blocks": 0,
+    "compact_bytes": 0,
+    "compacted_blocks": 0,
+    "compaction_error": null,
+    "compaction_state": "WAITING",
+    "counts_basis": "sealed unique finalized block records in the target epoch",
+    "covered_slots": 0,
+    "end_slot_exclusive": 452736000,
+    "epoch": 1047,
+    "gap_policy": "stop capture rather than count a missing produced block as a skipped slot",
+    "genesis_hash": "5eykt4UsFv8P8NJdTREpY1vzqKqZKvdpKuc147dw2N9d",
+    "last_collected_slot": null,
+    "last_compacted_slot": null,
+    "missing_blocks": 0,
+    "node_identity": "J7qpvCEWhdBgPdYRV3s3btWPrRVXa2qnAzgvxWTvtbrQ",
+    "r2_upload": "DISABLED",
+    "raw_bytes": 0,
+    "run_dir": "/home/ubuntu/live/hivezilla-validator-20260930/epoch-runs/epoch-1047-20261001",
+    "schema": "hivezilla-epoch-progress-v1",
+    "skipped_slots": 0,
+    "slots_in_epoch": 432000,
+    "start_slot": 452304000,
+    "state": "ARMED",
+    "updated_unix_ms": 1790861447472
+  },
+  "services": "Id=hivezilla-validator-canary.service\nActiveState=active\nRuntimeMaxUSec=infinity\nMainPID=590165\nNRestarts=0\n\nId=hivezilla-epoch-1047.service\nActiveState=active\nRuntimeMaxUSec=infinity\nMainPID=606063\nNRestarts=0\n\nId=hivezilla-epoch-dashboard.service\nActiveState=active\nRuntimeMaxUSec=infinity\nMainPID=606289\nNRestarts=0\n",
+  "collector_tests_passed": 6,
+  "dashboard_tests_passed": 5,
+  "real_preflight_blocks_compacted": 128,
+  "real_preflight_archive_verified": false,
+  "real_preflight_path": "/home/ubuntu/live/hivezilla-validator-20260930/epoch-runs/preflight-20261001",
+  "replay_probe": {
+    "requested_slot": 452299937,
+    "observed_block_slots": [
+      452299937,
+      452299938,
+      452299939,
+      452299940,
+      452299941,
+      452299942,
+      452299943,
+      452299944,
+      452299945,
+      452299946,
+      452299947,
+      452299948,
+      452299949,
+      452299950,
+      452299951,
+      452299952
+    ],
+    "capture": "/home/ubuntu/live/hivezilla-validator-20260930/epoch-runs/replay-probe-20261001",
+    "state": "PASSED"
+  },
+  "artifacts": {
+    "hivezilla-epoch-runner": {
+      "path": "/home/ubuntu/live/hivezilla-validator-20260930/releases/epoch-runner-20261001/hivezilla-epoch-runner",
+      "sha256": "62142b40e6595f0c6124a4483eb7672a292a01f496e1f985e4c735218462a977",
+      "bytes": 668104
+    },
+    "hivezilla-validator-dashboard": {
+      "path": "/home/ubuntu/live/hivezilla-validator-20260930/releases/epoch-runner-20261001/hivezilla-validator-dashboard",
+      "sha256": "63f726da95a085bb3a20bdcc20ea12c1d6fb16f4fb68833a2bf336b3b6e5931d",
+      "bytes": 7225976
+    },
+    "blockzilla": {
+      "path": "/home/ubuntu/live/hivezilla-validator-20260930/releases/epoch-runner-20261001/blockzilla",
+      "sha256": "8b17b1c286aeb09601d9d8d94f6998e9046516d1f53b4fea9138cd998fb4c7e1",
+      "bytes": 17484848
+    }
+  },
+  "raw_shred_test_root_limit_bytes": 68719476736,
+  "full_epoch_raw_shred_capture_enabled": false,
+  "full_epoch_grpc_capture_armed": true,
+  "archive_verification_run": false,
+  "r2_publication_run": false
+}

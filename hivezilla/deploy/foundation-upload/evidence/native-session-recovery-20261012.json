@@ -1,0 +1,36 @@
+{
+  "schema": "blockzilla-native-session-recovery-v1",
+  "state": "RECOVERED_FLOW_VERIFIED",
+  "old_source": {
+    "genesis_hash": "5eykt4UsFv8P8NJdTREpY1vzqKqZKvdpKuc147dw2N9d",
+    "node_identity": "J7qpvCEWhdBgPdYRV3s3btWPrRVXa2qnAzgvxWTvtbrQ",
+    "agave_revision": "d688dd0e3a576b048a848e5faf2e8d277f8feb6e",
+    "session_id": "000000000000000018dd84835b6e7677-282459"
+  },
+  "validator_pid": 2630745,
+  "artifacts": {
+    "/home/ubuntu/live/hivezilla-validator-20260930/releases/bank-stream-v2-20261010/agave-validator": "105ac32bc7c3c5b11febd7fe9be6a3f1cbf4700238dc4fba9ada699b5ae311b2",
+    "/home/ubuntu/live/hivezilla-validator-20260930/releases/bank-stream-v2-20261010/libhivezilla_direct_agave.so": "ca1a3b451758bb42fb88c11b2437e2b67543d4d7d004dd7ca1b4339a41b4ad34"
+  },
+  "old_capture_preserved": true,
+  "gap_rebuilt": false,
+  "started_unix_ms": 1791827536880,
+  "session_id": "000000000000000018ddd9a6bb6fc50e-282459",
+  "source": {
+    "genesis_hash": "5eykt4UsFv8P8NJdTREpY1vzqKqZKvdpKuc147dw2N9d",
+    "node_identity": "J7qpvCEWhdBgPdYRV3s3btWPrRVXa2qnAzgvxWTvtbrQ",
+    "agave_revision": "d688dd0e3a576b048a848e5faf2e8d277f8feb6e",
+    "session_id": "000000000000000018ddd9a6bb6fc50e-282459"
+  },
+  "processed_output": "/home/ubuntu/live/hivezilla-validator-20260930/compact/direct-agave-processed-live/000000000000000018ddd9a6bb6fc50e-282459",
+  "bank_output": "/home/ubuntu/live/hivezilla-validator-20260930/compact/bank-v2-live/000000000000000018ddd9a6bb6fc50e-282459",
+  "origin_spool": "/home/ubuntu/live/hivezilla-validator-20260930/bank-v2-origin-spool/000000000000000018ddd9a6bb6fc50e-282459",
+  "relay_spool": "/home/ubuntu/live/hivezilla-validator-20260930/bank-v2-relay-spool/000000000000000018ddd9a6bb6fc50e-282459",
+  "source_file": "/home/ubuntu/live/hivezilla-validator-20260930/reports/bank-v2-recovery-20261012/expected-source.json",
+  "old_source_drain_unit": "hivezilla-bank-v2-r2-drain-20261011",
+  "validator_pid_unchanged": true,
+  "free_disk_bytes": 638812041216,
+  "updated_unix_ms": 1791827549979,
+  "flow_checked_unix_ms": 1791843639457,
+  "finite_check_only": true
+}

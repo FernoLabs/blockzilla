@@ -3,16 +3,23 @@
 For format choice, source trust, and the common read API, start with
 [`Archive formats and the read SDK`](../../docs/reference/archive-formats-and-read-sdk.md).
 
-`blockzilla-dump` reads immutable Blockzilla Archive V2 generations. It can:
+`blockzilla-dump` reads fixed Compact V2 file sets. It can:
 
 - create a resumable SQLite dump for one program;
 - create a resumable SQLite dump for one recorded token mint;
 - build and query a signer user-to-program index; and
 - verify archive history.
 
-The CLI reads a complete Archive V2 bundle. The current lean conversion sample
-is not a standalone input. It does not contain all source transaction messages
-and signatures.
+Start with the [program dumper guide](../../docs/start/program-dumper.md) for
+installation, source options, SQL queries, and restart rules. For balance JSON
+exports, use the [token dumper](../../docs/start/token-dumper.md). For a live
+SQLite consumer with history recovery, use the
+[token indexer](../../docs/start/token-indexer.md). The
+[live stream guide](../../docs/start/live-stream.md) covers browser/Node filters.
+
+This executable reads historical files, not the live stream. A self-contained
+dump needs source messages, metadata, signatures, and the required registries
+from the same immutable build. A lean input that omits those fields is insufficient.
 
 ## Install
 
@@ -21,7 +28,7 @@ Install the current source version:
 ```console
 git clone https://github.com/FernoLabs/blockzilla.git
 cd blockzilla
-cargo install --locked --path indexer/blockzilla-dump
+cargo install --locked --path indexer/blockzilla-dump --bin blockzilla-dump --debug
 ```
 
 After the crate is published, the install command will be:
@@ -40,6 +47,9 @@ directories:
 ```console
 blockzilla-dump program \
   --archive /data/blockzilla/archive-v2 \
+  --source-generation-prefix my-archive-v1 \
+  --message-schema current \
+  --metadata-schema current-typed-error \
   --epoch 900 \
   --output pump-fun.sqlite
 ```
@@ -51,27 +61,42 @@ export BLOCKZILLA_GATEWAY_URL='https://archive.example.invalid'
 blockzilla-dump program \
   --gateway "$BLOCKZILLA_GATEWAY_URL" \
   --cache "$PWD/blockzilla-cache" \
+  --message-schema current \
+  --metadata-schema current-typed-error \
   --epoch 900 \
   --output pump-fun.sqlite
 ```
 
-The example URL is a placeholder. The public gateway is not deployed. If the
+The example URL is a placeholder. Supply an operator-provided gateway with
+`/v1/epochs/N/files/NAME` routes. The public sample origin uses a different
+`/compact-v2/N/NAME` route and cannot be passed directly to this command. If the
 gateway needs a bearer token, set `BLOCKZILLA_ARCHIVE_TOKEN`.
 
-The gateway mode first downloads and verifies the manifest and the control
-files. It then reads block and signature ranges as needed. A user-program index
-build also downloads and verifies `registry.mphf`. Processing uses the host's
-logical CPU count by default. Use `--threads N` to set a different value.
+The source schema options are required. The values above apply to current
+normalized Compact V2 samples. Select the recorded schema for another build;
+do not infer it from an epoch number. Local sources also require
+`--source-generation-prefix`. Keep that label and the files stable when resuming.
+It is an operator label, not a content hash.
+
+Gateway mode binds object names, sizes, and strong ETags. It caches control and
+registry files, then reads block and signature ranges as needed. It does not
+require a generation manifest in this path. Processing uses the host's logical
+CPU count by default. Use `--threads 4` for a bounded first run.
 
 ## Common operations
 
-The `program` command uses the Pump.fun program by default. It selects an
-actual top-level or recorded CPI invocation. A program address that is only an
-account does not match.
+The `program` command uses the Pump.fun program by default. Add
+`--program ADDRESS` to select another program. It matches top-level instruction
+references and recorded CPI references. A program address that is only an account
+does not match. A top-level reference does not prove a failed execution reached
+that instruction. Failed matching transactions remain visible in compact metadata.
 
 ```console
 blockzilla-dump program \
   --archive /data/blockzilla/archive-v2 \
+  --source-generation-prefix my-archive-v1 \
+  --message-schema current \
+  --metadata-schema current-typed-error \
   --epoch 900 \
   --output pump-fun.sqlite
 ```
@@ -83,6 +108,9 @@ balance. It does not select every SPL Token instruction.
 ```console
 blockzilla-dump token \
   --archive /data/blockzilla/archive-v2 \
+  --source-generation-prefix my-archive-v1 \
+  --message-schema current \
+  --metadata-schema current-typed-error \
   --epoch 900 \
   --output usdc.sqlite
 ```
@@ -92,38 +120,57 @@ Build and query a signer user-to-program index:
 ```console
 blockzilla-dump user-program-index build \
   --archive /data/blockzilla/archive-v2 \
+  --source-generation-prefix my-archive-v1 \
+  --message-schema current \
+  --metadata-schema current-typed-error \
   --epoch 900 \
   --output user-program-index-900
 
 blockzilla-dump user-program-index query \
   --archive /data/blockzilla/archive-v2 \
+  --source-generation-prefix my-archive-v1 \
+  --message-schema current \
+  --metadata-schema current-typed-error \
   --epoch 900 \
   --index user-program-index-900 \
   --user '<SIGNER_PUBKEY>' \
   --json
 ```
 
-The default verification check is blockhash continuity. The other checks are
-off until you request them.
+The separate `verify` command defaults to blockhash continuity. Signature and
+PoH checks are off until you request them. The dump examples do not run this
+verification command.
 
 ```console
 blockzilla-dump verify \
   --archive /data/blockzilla/archive-v2 \
+  --source-generation-prefix my-archive-v1 \
+  --message-schema current \
+  --metadata-schema current-typed-error \
   --epoch 900
 
 blockzilla-dump verify \
   --archive /data/blockzilla/archive-v2 \
+  --source-generation-prefix my-archive-v1 \
+  --message-schema current \
+  --metadata-schema current-typed-error \
   --epoch 900 \
   --signatures
 
 blockzilla-dump verify \
   --archive /data/blockzilla/archive-v2 \
+  --source-generation-prefix my-archive-v1 \
+  --message-schema current \
+  --metadata-schema current-typed-error \
   --epoch 900 \
   --poh \
   --poh-hashes-per-tick '<TRUSTED_VALUE>'
 
 blockzilla-dump verify \
   --archive /data/blockzilla/archive-v2 \
+  --source-generation-prefix my-archive-v1 \
+  --message-schema current \
+  --metadata-schema current-typed-error \
   --epoch-range 900..=1000 \
   --all-checks \
   --poh-hashes-per-tick '<TRUSTED_VALUE>'
@@ -150,13 +197,22 @@ Use `--on-indeterminate record` to save each gap in the SQLite
 partial result. The skip policy does not save the gap rows, but the command
 still reports a partial result and exits with status `2`.
 
-Use `blockzilla-dump status --output FILE` to inspect a resumable dump.
+Use `blockzilla-dump status --output FILE --json` to inspect a resumable dump.
+Repeat the same dump command after an interruption. Matching rows and the next
+block-row position commit together. A changed source or target is rejected.
+This historical checkpoint is separate from a live chunk cursor. See the
+[program guide](../../docs/start/program-dumper.md#query-the-result) for SQL.
+The dump schema is not the live token-index schema; `blockzilla token-db` does
+not query it.
 
 ## Foundation sample epochs
 
 The selected sample epochs are `0`, `100`, `200`, `300`, `400`, `500`, `600`,
-`700`, `800`, `900`, and `1000`. Public complete bundles and a public gateway
-URL are not available until publication is approved.
+`700`, `800`, `900`, and `1000`. The public sample origin serves selected Compact
+V2 epochs. It is not the
+`--gateway` interface above. Obtain a compatible local file set or gateway
+from the operator before running this tool. A sample list does not establish
+continuous historical coverage.
 
 When all complete bundles are available under one source root, scan the exact
 sample set into one SQLite file:
@@ -164,6 +220,9 @@ sample set into one SQLite file:
 ```console
 blockzilla-dump program \
   --archive /data/blockzilla/archive-v2 \
+  --source-generation-prefix my-archive-v1 \
+  --message-schema current \
+  --metadata-schema current-typed-error \
   --epoch 0,100,200,300,400,500,600,700,800,900,1000 \
   --output pump-fun-foundation-samples.sqlite
 ```

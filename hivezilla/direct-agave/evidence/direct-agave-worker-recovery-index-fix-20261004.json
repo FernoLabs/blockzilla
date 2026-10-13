@@ -1,0 +1,107 @@
+{
+  "schema": "hivezilla-worker-recovery-index-fix-v1",
+  "created_unix": 1791101770.540579,
+  "database": "/home/ubuntu/live/hivezilla-validator-20260930/compact/direct-agave-live/000000000000000018daf342ba38d3d0-10e3f5/committed.sqlite",
+  "index": "commits_artifact",
+  "query_plan_before": [
+    [
+      3,
+      0,
+      0,
+      "SCAN commits"
+    ]
+  ],
+  "query_plan_after": [
+    [
+      4,
+      0,
+      0,
+      "SEARCH commits USING INDEX commits_artifact (artifact=?)"
+    ]
+  ],
+  "index_create_seconds": 0.24600327596999705,
+  "no_ledger_or_compact_content_change": true,
+  "validator_restarted": false,
+  "recorder_restarted": false,
+  "health_before": {
+    "schema": "hivezilla-direct-pipeline-health-v1",
+    "updated_unix_ms": 1791101759505,
+    "state": "FAILED",
+    "problems": [
+      "Compact worker status has not changed for more than 120 seconds"
+    ],
+    "warnings": [
+      "An earlier session ended without a clean close; earlier coverage can have gaps",
+      "Compact output is more than 256 rooted slots behind capture"
+    ],
+    "canonical": false,
+    "full_epoch": false,
+    "validator": {
+      "health": "ok",
+      "finalized_slot": 453199866,
+      "identity": "J7qpvCEWhdBgPdYRV3s3btWPrRVXa2qnAzgvxWTvtbrQ",
+      "genesis_hash": "5eykt4UsFv8P8NJdTREpY1vzqKqZKvdpKuc147dw2N9d"
+    },
+    "capture": {
+      "session_id": "000000000000000018daf342ba38d3d0-10e3f5",
+      "path": "/home/ubuntu/live/hivezilla-validator-20260930/captures/direct-agave-live/000000000000000018daf342ba38d3d0-10e3f5",
+      "state": "CAPTURING",
+      "node_identity": "J7qpvCEWhdBgPdYRV3s3btWPrRVXa2qnAzgvxWTvtbrQ",
+      "genesis_hash": "5eykt4UsFv8P8NJdTREpY1vzqKqZKvdpKuc147dw2N9d",
+      "validator_pid": 1106933,
+      "writer_live": true,
+      "durable_sequence": 801315858,
+      "latest_rooted_slot": 453199867,
+      "journal_bytes": 4927148491,
+      "journal_limit_bytes": 68719476736,
+      "reserve_disk_bytes": 536870912000,
+      "previous_unclean_sessions": [
+        "000000000000000018daccf4d01ca96d-10e3f5",
+        "000000000000000018daceb49b8b9a08-10e3f5"
+      ],
+      "raw_shred_completeness": false
+    },
+    "worker": {
+      "batches": 239866,
+      "canonical": false,
+      "compacted_blocks": 337228,
+      "compacted_entries": 402485291,
+      "compacted_transactions": 393644701,
+      "durable_sequence": 798596463,
+      "epoch": 1049,
+      "first_compact_slot": 452861384,
+      "full_epoch": false,
+      "last_compact_slot": 453198761,
+      "state": "BUILDING",
+      "updated_unix_ms": 1791101463077
+    },
+    "compact_lag_slots": 1106,
+    "worker_status_age_seconds": 296,
+    "free_disk_bytes": 961310535680,
+    "last_durable_change_unix_ms": 1791101759505,
+    "shreds": {
+      "schema": "hivezilla-shred-hook-status-v1",
+      "state": "ACTIVE",
+      "reason": "receiving",
+      "updated_unix_ms": 1791101759432,
+      "durable_next_sequence": 846731558,
+      "durable_prefix_hash": "b5ed80eb254312c218671f22eb13171cbd9583e23ee07d82584f0403800947e7",
+      "journal_bytes": 1110214320107,
+      "counts": {
+        "packets": 846731558,
+        "payload_bytes": 1028926237659,
+        "turbine_received": 837884343,
+        "repair_received": 4521309,
+        "repair_accepted": 4325906,
+        "data_shreds": 427313921,
+        "coding_shreds": 419224313,
+        "other_datagrams": 193324,
+        "first_header_slot": 452704425,
+        "max_header_slot": 453199899
+      },
+      "custody_authority": false,
+      "canonical_coverage_verified": false
+    }
+  },
+  "worker_memory_failure": "kernel OOM in worker cgroup at 2026-10-04 08:11:04 UTC; 16 GiB limit; native capture stayed active; precise memory-growth cause not established"
+}

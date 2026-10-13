@@ -1,0 +1,33 @@
+   Compiling hivezilla-stream v0.1.0 (/home/ubuntu/benchmarks/hivezilla-stream-20261004)
+    Finished `test` profile [unoptimized + debuginfo] target(s) in 1.15s
+     Running unittests src/lib.rs (target/debug/deps/hivezilla_stream-d629fa6149057e31)
+
+running 11 tests
+test frame::tests::bounds_are_checked_before_allocation ... ok
+test server::tests::keys_require_bearer_header ... ok
+test server::tests::origin_tls_cannot_disable_client_verification ... ok
+test frame::tests::cursors_do_not_accept_ambiguous_or_foreign_syntax ... ok
+test source::tests::traversal_and_symlinks_are_rejected ... ok
+test frame::tests::corruption_and_missing_dependencies_fail ... ok
+test frame::tests::skipped_slots_are_allowed_but_parent_gaps_are_not ... ok
+test store::tests::durable_restart_and_conflicts ... ok
+test source::tests::audit_alone_cannot_publish_a_pending_artifact ... ok
+test upstream::tests::no_cleartext_remote_or_redirect_credentials ... ok
+test store::tests::slow_cursor_expires_without_blocking_intake ... ok
+
+test result: ok. 11 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.80s
+
+     Running unittests src/main.rs (target/debug/deps/hivezilla_stream-9e6a9fb69f4994f1)
+
+running 0 tests
+
+test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+
+   Doc-tests hivezilla_stream
+
+running 0 tests
+
+test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+
+   Compiling hivezilla-stream v0.1.0 (/home/ubuntu/benchmarks/hivezilla-stream-20261004)
+    Finished `release` profile [optimized] target(s) in 14.81s

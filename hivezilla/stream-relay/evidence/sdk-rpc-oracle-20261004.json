@@ -1,0 +1,21 @@
+{
+  "schema": "hivezilla-stream-sdk-rpc-oracle-v1",
+  "state": "PASS",
+  "blocks": 4,
+  "transactions": 4461,
+  "program_matches": 338,
+  "account_matches": 914,
+  "failed_transactions": 658,
+  "source": "local finalized Agave getBlock",
+  "checks": [
+    "block and parent hashes",
+    "all primary and additional signatures",
+    "execution success",
+    "top-level program references",
+    "recorded CPI programs",
+    "loaded address account filters",
+    "selected transaction order"
+  ],
+  "cryptographic_verification": false,
+  "validator_changed": false
+}

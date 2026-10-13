@@ -1,0 +1,1 @@
+{"state": "PASSED", "commands": [["/home/ubuntu/.cargo/bin/cargo", "+1.98.0", "test", "--offline"], ["/home/ubuntu/.cargo/bin/cargo", "+1.98.0", "build", "--offline", "--release"]], "updated_unix_ms": 1791651144601}

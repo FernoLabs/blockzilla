@@ -1,0 +1,16 @@
+{
+  "state": "PASSED",
+  "host_revision": "d688dd0e3a576b048a848e5faf2e8d277f8feb6e",
+  "plugin_source_commit": "d1c69dc412fa2c3408fca2b95d97fb9f492337cd",
+  "plugin_sha256": "ca1a3b451758bb42fb88c11b2437e2b67543d4d7d004dd7ca1b4339a41b4ad34",
+  "exact_host_running": true,
+  "exact_plugin_loaded": true,
+  "validator_pid": 2630745,
+  "isolated_real_bank_test": {
+    "slot": 17,
+    "block_height": 1,
+    "last_valid_block_height": 151,
+    "confirmed": true,
+    "journal_matches": true
+  }
+}

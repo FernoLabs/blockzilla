@@ -1,0 +1,113 @@
+{
+  "server_time": "2026-10-05T23:08:18.253082+02:00",
+  "setup": {
+    "epoch": 1048,
+    "car_url": "https://files.old-faithful.net/1048/epoch-1048.car",
+    "published_car_bytes": 734710698166,
+    "predecessor_epoch": 1047,
+    "source_controller": "/volume1/blockzilla/jobs/latest-cars-20261004-e1047/run.py",
+    "source_controller_sha256": "260eb3cd7b38f5a29eae158d20e8fec03c2f180be30696fff4428bf15b68015e",
+    "controller_sha256": "70004c983866eb8949c5a35564bcd0e503d73f5adedb5a5467d8ae7c5c9fb23b",
+    "source_helper_sha256": "9b44bdf7834382acbd03d5c150409d1501618b07dfdc7233ba09ee6433502a70",
+    "source_metadata_retry_delay_seconds": 300,
+    "source_metadata_attempts_per_file": 24,
+    "source_retained": true,
+    "workers": 8,
+    "state": "PREPARED",
+    "cloud_upload_plan_changed": false
+  },
+  "source": {
+    "epoch": 1048,
+    "num_transactions": 498029026,
+    "num_slots": 431808,
+    "first_slot": 452736000,
+    "last_slot": 453167999,
+    "car_file_size_bytes": 734710698166,
+    "num_total_missing_tx_meta": 0,
+    "epoch_cid": "bafyreic5hlq6s4vddxiapj5ypbaboetibk4g3u3bqgmn2tdz4bvw26iede",
+    "source_records": {
+      "1048.recap.yaml": {
+        "url": "https://files.old-faithful.net/1048/1048.recap.yaml",
+        "bytes": 1381,
+        "sha256": "f0a0e383d6c7047467021fe020d502c00801a89ea3c1c04cb5221cd3068325ad"
+      },
+      "epoch-1048.cid": {
+        "url": "https://files.old-faithful.net/1048/epoch-1048.cid",
+        "bytes": 60,
+        "sha256": "686b66a8039d4506f21ba37feaefa56fc077017dd98a6a1581c9a6c3a33eddb8"
+      },
+      "1048.slots.txt": {
+        "url": "https://files.old-faithful.net/1048/1048.slots.txt",
+        "bytes": 4318090,
+        "sha256": "b47fca90f04403f7b0cdfeed5c7740210a07e08686ff43feb3a5c122b6c994f2"
+      }
+    },
+    "checked_at": "2026-10-05T23:07:26.056221+02:00"
+  },
+  "download": {
+    "state": "RUNNING",
+    "epoch": 1048,
+    "phase": "download",
+    "pid": 1754190,
+    "command": [
+      "/usr/bin/aria2c",
+      "--continue=true",
+      "--split=4",
+      "--max-connection-per-server=4",
+      "--min-split-size=64M",
+      "--file-allocation=none",
+      "--auto-file-renaming=false",
+      "--allow-overwrite=false",
+      "--always-resume=true",
+      "--max-tries=10",
+      "--retry-wait=15",
+      "--timeout=60",
+      "--summary-interval=30",
+      "--console-log-level=notice",
+      "--user-agent=aria2/1.36.0",
+      "--dir",
+      "/volume1/blockzilla/jobs/latest-cars-20261005-e1048/download-1048",
+      "--out",
+      "epoch-1048.car.part",
+      "https://files.old-faithful.net/1048/epoch-1048.car"
+    ],
+    "log": "/volume1/blockzilla/jobs/latest-cars-20261005-e1048/1048-download.log",
+    "updated_at": "2026-10-05T23:07:26+0200"
+  },
+  "compact": {
+    "state": "WAITING_DOWNLOAD",
+    "epoch": 1048,
+    "completed": [],
+    "updated_at": "2026-10-05T23:07:26+0200"
+  },
+  "download_tail": [
+    "[#098d74 6.9GiB/684GiB(1%) CN:4 DL:245MiB ETA:47m]",
+    "[#098d74 7.1GiB/684GiB(1%) CN:4 DL:235MiB ETA:49m6s]",
+    "[#098d74 7.3GiB/684GiB(1%) CN:4 DL:227MiB ETA:50m47s]",
+    " *** Download Progress Summary as of Mon Oct  5 23:07:57 2026 *** ",
+    "===============================================================================",
+    "[#098d74 7.5GiB/684GiB(1%) CN:4 DL:231MiB ETA:49m48s]",
+    "FILE: /volume1/blockzilla/jobs/latest-cars-20261005-e1048/download-1048/epoch-1048.car.part",
+    "-------------------------------------------------------------------------------",
+    ""
+  ],
+  "service": "MainPID=1754185\nActiveState=active\n",
+  "source_probe": {
+    "checked_at": "2026-10-05T23:03:36.325107+02:00",
+    "http_status": {
+      "1047": 200,
+      "1048": 200,
+      "1049": 404,
+      "1050": 404,
+      "1051": 404
+    },
+    "available_bytes": 734710698166,
+    "local_epoch_1048_before_start": false
+  },
+  "preflight": {
+    "state": "PASS",
+    "known_epoch_metadata_and_full_slot_list": 1047,
+    "mismatched_cid_rejected": true,
+    "whole_car_read": false
+  }
+}

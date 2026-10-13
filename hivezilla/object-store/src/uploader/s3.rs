@@ -167,6 +167,8 @@ fn file_identity(metadata: &fs::Metadata) -> FileIdentity {
 pub enum Payload {
     Empty,
     Bytes(Vec<u8>),
+    /// Reusable bounded bytes without copying the whole body for each HTTP attempt.
+    SharedBytes(Arc<[u8]>),
     File(FilePayload),
 }
 
@@ -176,6 +178,10 @@ impl fmt::Debug for Payload {
             Self::Empty => formatter.write_str("Payload::Empty"),
             Self::Bytes(bytes) => formatter
                 .debug_struct("Payload::Bytes")
+                .field("len", &bytes.len())
+                .finish(),
+            Self::SharedBytes(bytes) => formatter
+                .debug_struct("SharedBytes")
                 .field("len", &bytes.len())
                 .finish(),
             Self::File(source) => formatter
@@ -191,6 +197,10 @@ impl Payload {
         match self {
             Self::Empty => Ok(Body::from(Vec::new())),
             Self::Bytes(bytes) => Ok(Body::from(bytes.clone())),
+            Self::SharedBytes(bytes) => Ok(Body::sized(
+                std::io::Cursor::new(Arc::clone(bytes)),
+                bytes.len() as u64,
+            )),
             Self::File(source) => Ok(Body::sized(source.reader(), source.len())),
         }
     }
@@ -198,7 +208,7 @@ impl Payload {
     fn verify(&self, phase: &str) -> Result<()> {
         match self {
             Self::File(source) => source.verify(phase),
-            Self::Empty | Self::Bytes(_) => Ok(()),
+            Self::Empty | Self::Bytes(_) | Self::SharedBytes(_) => Ok(()),
         }
     }
 }
@@ -344,6 +354,10 @@ impl S3Client {
             host.push_str(&port.to_string());
         }
         let client = Client::builder()
+            .no_gzip()
+            .no_brotli()
+            .no_deflate()
+            .no_zstd()
             .connect_timeout(Duration::from_secs(10))
             .timeout(Duration::from_secs(300))
             .redirect(reqwest::redirect::Policy::none())

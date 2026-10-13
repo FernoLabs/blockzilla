@@ -1,0 +1,11 @@
+{
+  "state": "HEARTBEAT_TIMER_ENABLED",
+  "machine_label": "Argentinosaurus",
+  "external_url": "https://blockzilla-foundation-watch.cheron-augustin.workers.dev",
+  "sender_sha256": "dedecc6cf6b8a0f5de23a8424774e824199acd40bd7579b97fe8b6524f27ac17",
+  "heartbeat_interval_seconds": 30,
+  "missing_heartbeat_timeout_seconds": 90,
+  "read_only_sender": true,
+  "notification_destination_configured": false,
+  "installed_unix_ms": 1791846536319
+}

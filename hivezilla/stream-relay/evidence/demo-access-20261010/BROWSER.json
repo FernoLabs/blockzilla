@@ -1,0 +1,16 @@
+{
+  "url": "https://stream.blockzilla.dev/demo",
+  "state": "PASSED",
+  "checks": [
+    "JSON messages arrive in the real in-app browser",
+    "pause stops display updates",
+    "resume continues from saved cursor",
+    "display retains 100 messages"
+  ],
+  "paused_messages": 220,
+  "resumed_messages": 362,
+  "final_messages": 742,
+  "final_status": "Connected",
+  "retained_rows": 100,
+  "screenshot": "browser.png"
+}

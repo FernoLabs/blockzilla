@@ -1,0 +1,764 @@
+{
+  "schema": "hivezilla-direct-production-rollout-v1",
+  "updated_unix": 1791011466,
+  "host": "213.239.141.61",
+  "root": "/home/ubuntu/live/hivezilla-validator-20260930",
+  "validator_identity": "J7qpvCEWhdBgPdYRV3s3btWPrRVXa2qnAzgvxWTvtbrQ",
+  "agave_revision": "825efd18292aff6ffcf9daa0f7612f21b3531a72",
+  "engine_release": "direct-agave-plugin-rewards-v7-20261003",
+  "cli_release": "direct-agave-cli-zstd-20261002",
+  "dashboard_release": "direct-agave-dashboard-health-v2-20261002",
+  "engine_tests_passed": 22,
+  "dashboard_tests_passed": 10,
+  "deployment_tests_passed": 7,
+  "r2_configured": false,
+  "canonical": false,
+  "full_epoch_complete": false,
+  "services": {
+    "hivezilla-validator.service": {
+      "ActiveState": "active",
+      "FragmentPath": "/etc/systemd/system/hivezilla-validator.service",
+      "UnitFileState": "enabled",
+      "MainPID": "1106933",
+      "NRestarts": "0"
+    },
+    "hivezilla-direct-worker.service": {
+      "ActiveState": "active",
+      "FragmentPath": "/etc/systemd/system/hivezilla-direct-worker.service",
+      "UnitFileState": "enabled",
+      "MainPID": "1414795",
+      "NRestarts": "0"
+    },
+    "hivezilla-direct-health.timer": {
+      "ActiveState": "active",
+      "FragmentPath": "/etc/systemd/system/hivezilla-direct-health.timer",
+      "UnitFileState": "enabled"
+    },
+    "hivezilla-shred-hook-recorder.service": {
+      "ActiveState": "active",
+      "FragmentPath": "/etc/systemd/system/hivezilla-shred-hook-recorder.service",
+      "UnitFileState": "enabled",
+      "MainPID": "1106863",
+      "NRestarts": "0"
+    },
+    "hivezilla-epoch-dashboard.service": {
+      "ActiveState": "active",
+      "FragmentPath": "/etc/systemd/system/hivezilla-epoch-dashboard.service",
+      "UnitFileState": "enabled",
+      "MainPID": "1112256",
+      "NRestarts": "0"
+    },
+    "hivezilla-epoch-1047.service": {
+      "ActiveState": "inactive",
+      "FragmentPath": "/etc/systemd/system/hivezilla-epoch-1047.service",
+      "UnitFileState": "disabled",
+      "MainPID": "0",
+      "NRestarts": "0"
+    },
+    "hivezilla-validator-canary.service": {
+      "ActiveState": "inactive",
+      "FragmentPath": "/run/systemd/transient/hivezilla-validator-canary.service",
+      "UnitFileState": "transient",
+      "MainPID": "0",
+      "NRestarts": "0"
+    },
+    "hivezilla-private@10000.socket": {
+      "ActiveState": "inactive",
+      "FragmentPath": "/etc/systemd/system/hivezilla-private@.socket",
+      "UnitFileState": "disabled"
+    }
+  },
+  "health": {
+    "schema": "hivezilla-direct-pipeline-health-v1",
+    "updated_unix_ms": 1791011465227,
+    "state": "WARNING",
+    "problems": [],
+    "warnings": [
+      "An earlier session ended without a clean close; earlier coverage can have gaps"
+    ],
+    "canonical": false,
+    "full_epoch": false,
+    "validator": {
+      "health": "ok",
+      "finalized_slot": 452862087,
+      "identity": "J7qpvCEWhdBgPdYRV3s3btWPrRVXa2qnAzgvxWTvtbrQ",
+      "genesis_hash": "5eykt4UsFv8P8NJdTREpY1vzqKqZKvdpKuc147dw2N9d"
+    },
+    "capture": {
+      "session_id": "000000000000000018daf342ba38d3d0-10e3f5",
+      "path": "/home/ubuntu/live/hivezilla-validator-20260930/captures/direct-agave-live/000000000000000018daf342ba38d3d0-10e3f5",
+      "state": "CAPTURING",
+      "node_identity": "J7qpvCEWhdBgPdYRV3s3btWPrRVXa2qnAzgvxWTvtbrQ",
+      "genesis_hash": "5eykt4UsFv8P8NJdTREpY1vzqKqZKvdpKuc147dw2N9d",
+      "validator_pid": 1106933,
+      "writer_live": true,
+      "durable_sequence": 1520244,
+      "latest_rooted_slot": 452862088,
+      "journal_bytes": 304118202,
+      "journal_limit_bytes": 68719476736,
+      "reserve_disk_bytes": 536870912000,
+      "previous_unclean_sessions": [
+        "000000000000000018daccf4d01ca96d-10e3f5",
+        "000000000000000018daceb49b8b9a08-10e3f5"
+      ],
+      "raw_shred_completeness": false
+    },
+    "worker": {
+      "compacted_blocks": 705,
+      "compacted_entries": 740547,
+      "compacted_transactions": 709621,
+      "durable_sequence": 1519709,
+      "first_compact_slot": 452861384,
+      "full_epoch": false,
+      "last_compact_slot": 452862088,
+      "startup_incomplete_roots": [
+        [
+          452861352,
+          157741
+        ],
+        [
+          452861353,
+          157742
+        ],
+        [
+          452861354,
+          157743
+        ],
+        [
+          452861355,
+          157744
+        ],
+        [
+          452861356,
+          157745
+        ],
+        [
+          452861357,
+          157746
+        ],
+        [
+          452861358,
+          157747
+        ],
+        [
+          452861359,
+          157748
+        ],
+        [
+          452861360,
+          157749
+        ],
+        [
+          452861361,
+          157750
+        ],
+        [
+          452861362,
+          157751
+        ],
+        [
+          452861363,
+          157752
+        ],
+        [
+          452861364,
+          157753
+        ],
+        [
+          452861365,
+          157754
+        ],
+        [
+          452861366,
+          157755
+        ],
+        [
+          452861367,
+          157756
+        ],
+        [
+          452861368,
+          157757
+        ],
+        [
+          452861369,
+          157758
+        ],
+        [
+          452861370,
+          157759
+        ],
+        [
+          452861371,
+          157760
+        ],
+        [
+          452861372,
+          157761
+        ],
+        [
+          452861373,
+          157762
+        ],
+        [
+          452861374,
+          157763
+        ],
+        [
+          452861375,
+          157764
+        ],
+        [
+          452861376,
+          157765
+        ],
+        [
+          452861377,
+          157766
+        ],
+        [
+          452861378,
+          157767
+        ],
+        [
+          452861379,
+          157768
+        ],
+        [
+          452861380,
+          157769
+        ],
+        [
+          452861381,
+          157770
+        ],
+        [
+          452861382,
+          157771
+        ],
+        [
+          452861383,
+          157772
+        ]
+      ],
+      "state": "WAITING",
+      "updated_unix_ms": 1791011465222
+    },
+    "compact_lag_slots": 0,
+    "worker_status_age_seconds": 0,
+    "free_disk_bytes": 2514960236544,
+    "last_durable_change_unix_ms": 1791011465227,
+    "shreds": {
+      "schema": "hivezilla-shred-hook-status-v1",
+      "state": "ACTIVE",
+      "reason": "receiving",
+      "updated_unix_ms": 1791011465196,
+      "durable_next_sequence": 266813125,
+      "durable_prefix_hash": "b1706b666f7f3f54bfa496df729b95899d18512eb473bdbe38bb2743bb0ae7f3",
+      "journal_bytes": 349826255194,
+      "counts": {
+        "packets": 266813125,
+        "payload_bytes": 324211611386,
+        "turbine_received": 262603966,
+        "repair_received": 2135944,
+        "repair_accepted": 2073215,
+        "data_shreds": 135356274,
+        "coding_shreds": 131395182,
+        "other_datagrams": 61669,
+        "first_header_slot": 452704425,
+        "max_header_slot": 452862120
+      },
+      "custody_authority": false,
+      "canonical_coverage_verified": false
+    }
+  },
+  "cleanup_state": "COMPLETE",
+  "worker_release": "direct-agave-worker-v6-20261002",
+  "worker_sha256": "220fd37dda37d9700cc2dd509b075cda3ae59513c201348285e8c1aadf162d72",
+  "worker_cpu_profile": "/home/ubuntu/live/hivezilla-validator-20260930/reports/direct-agave-worker-cpu-20261002.txt",
+  "worker_speedup_same_data": 1.3819444444444446,
+  "source_durable_state": {
+    "state": "CAPTURING",
+    "durable_sequence": 1529270,
+    "latest_rooted_slot": 452862092,
+    "retired_events": 1460278,
+    "error": null
+  },
+  "cursor": {
+    "session_id": "000000000000000018daf342ba38d3d0-10e3f5",
+    "first_slot": 452861384,
+    "last_slot": 452862091,
+    "last_hash": [
+      199,
+      226,
+      221,
+      177,
+      157,
+      240,
+      197,
+      236,
+      166,
+      175,
+      132,
+      201,
+      187,
+      90,
+      192,
+      128,
+      100,
+      29,
+      232,
+      199,
+      113,
+      49,
+      246,
+      212,
+      1,
+      69,
+      61,
+      219,
+      205,
+      72,
+      114,
+      76
+    ],
+    "batches": 404,
+    "compacted_blocks": 708,
+    "compacted_transactions": 712822,
+    "compacted_entries": 743916,
+    "updated_unix_ms": 1791011466137,
+    "startup_incomplete_roots": [
+      [
+        452861352,
+        157741
+      ],
+      [
+        452861353,
+        157742
+      ],
+      [
+        452861354,
+        157743
+      ],
+      [
+        452861355,
+        157744
+      ],
+      [
+        452861356,
+        157745
+      ],
+      [
+        452861357,
+        157746
+      ],
+      [
+        452861358,
+        157747
+      ],
+      [
+        452861359,
+        157748
+      ],
+      [
+        452861360,
+        157749
+      ],
+      [
+        452861361,
+        157750
+      ],
+      [
+        452861362,
+        157751
+      ],
+      [
+        452861363,
+        157752
+      ],
+      [
+        452861364,
+        157753
+      ],
+      [
+        452861365,
+        157754
+      ],
+      [
+        452861366,
+        157755
+      ],
+      [
+        452861367,
+        157756
+      ],
+      [
+        452861368,
+        157757
+      ],
+      [
+        452861369,
+        157758
+      ],
+      [
+        452861370,
+        157759
+      ],
+      [
+        452861371,
+        157760
+      ],
+      [
+        452861372,
+        157761
+      ],
+      [
+        452861373,
+        157762
+      ],
+      [
+        452861374,
+        157763
+      ],
+      [
+        452861375,
+        157764
+      ],
+      [
+        452861376,
+        157765
+      ],
+      [
+        452861377,
+        157766
+      ],
+      [
+        452861378,
+        157767
+      ],
+      [
+        452861379,
+        157768
+      ],
+      [
+        452861380,
+        157769
+      ],
+      [
+        452861381,
+        157770
+      ],
+      [
+        452861382,
+        157771
+      ],
+      [
+        452861383,
+        157772
+      ]
+    ]
+  },
+  "retirement_failure_present": false,
+  "public_client_stream_configured": false,
+  "health_before_cleanup": {
+    "schema": "hivezilla-direct-pipeline-health-v1",
+    "updated_unix_ms": 1790970810697,
+    "state": "HEALTHY",
+    "problems": [],
+    "warnings": [],
+    "canonical": false,
+    "full_epoch": false,
+    "validator": {
+      "health": "ok",
+      "finalized_slot": 452709929,
+      "identity": "J7qpvCEWhdBgPdYRV3s3btWPrRVXa2qnAzgvxWTvtbrQ",
+      "genesis_hash": "5eykt4UsFv8P8NJdTREpY1vzqKqZKvdpKuc147dw2N9d"
+    },
+    "capture": {
+      "session_id": "000000000000000018daccf4d01ca96d-10e3f5",
+      "path": "/home/ubuntu/live/hivezilla-validator-20260930/captures/direct-agave-live/000000000000000018daccf4d01ca96d-10e3f5",
+      "state": "CAPTURING",
+      "node_identity": "J7qpvCEWhdBgPdYRV3s3btWPrRVXa2qnAzgvxWTvtbrQ",
+      "genesis_hash": "5eykt4UsFv8P8NJdTREpY1vzqKqZKvdpKuc147dw2N9d",
+      "validator_pid": 1106933,
+      "writer_live": true,
+      "durable_sequence": 18114181,
+      "latest_rooted_slot": 452709930,
+      "journal_bytes": 3912056895,
+      "journal_limit_bytes": 68719476736,
+      "reserve_disk_bytes": 536870912000,
+      "previous_unclean_sessions": [],
+      "raw_shred_completeness": false
+    },
+    "worker": {
+      "batches": 999,
+      "canonical": false,
+      "compacted_blocks": 6158,
+      "compacted_entries": 8663020,
+      "compacted_transactions": 8684649,
+      "durable_sequence": 18092257,
+      "epoch": 1047,
+      "first_compact_slot": 452703612,
+      "full_epoch": false,
+      "last_compact_slot": 452709773,
+      "state": "BUILDING",
+      "updated_unix_ms": 1790970809692
+    },
+    "compact_lag_slots": 157,
+    "worker_status_age_seconds": 0,
+    "free_disk_bytes": 1852299546624,
+    "last_durable_change_unix_ms": 1790970810697,
+    "shreds": {
+      "schema": "hivezilla-shred-hook-status-v1",
+      "state": "ACTIVE",
+      "reason": "receiving",
+      "updated_unix_ms": 1790970810630,
+      "durable_next_sequence": 14916157,
+      "durable_prefix_hash": "5d952c7f3964ac8caf00767a649ad9a52f71eda626f912b039f7cf7bc4894c59",
+      "journal_bytes": 19541748277,
+      "counts": {
+        "packets": 14916157,
+        "payload_bytes": 18109764549,
+        "turbine_received": 12778275,
+        "repair_received": 1070541,
+        "repair_accepted": 1067341,
+        "data_shreds": 8516863,
+        "coding_shreds": 6396652,
+        "other_datagrams": 2642,
+        "first_header_slot": 452704425,
+        "max_header_slot": 452709963
+      },
+      "custody_authority": false,
+      "canonical_coverage_verified": false
+    }
+  },
+  "cleanup_receipt": "/home/ubuntu/live/hivezilla-validator-20260930/reports/benchmark-generated-export-cleanup-20261002.json",
+  "config": {
+    "libpath": "/home/ubuntu/live/hivezilla-validator-20260930/releases/direct-agave-plugin-rewards-v7-20261003/libhivezilla_direct_agave.so",
+    "output_root": "/home/ubuntu/live/hivezilla-validator-20260930/captures/direct-agave-live",
+    "genesis_hash": "5eykt4UsFv8P8NJdTREpY1vzqKqZKvdpKuc147dw2N9d",
+    "node_identity": "J7qpvCEWhdBgPdYRV3s3btWPrRVXa2qnAzgvxWTvtbrQ",
+    "queue_events": 65536,
+    "queue_bytes": 1073741824,
+    "max_event_bytes": 16777216,
+    "max_journal_bytes": 68719476736,
+    "reserve_disk_bytes": 536870912000,
+    "commit_interval_ms": 10
+  },
+  "capture_incident": "/home/ubuntu/live/hivezilla-validator-20260930/reports/direct-agave-queue-overflow-20261002.json",
+  "native_compact_gap_rebuilt": false,
+  "rpc_gap_backup": {
+    "state": "SAVED",
+    "blocks_saved": 530,
+    "transactions_saved": 781721,
+    "first_slot": 452710428,
+    "last_slot": 452710957,
+    "receipt": "/home/ubuntu/live/hivezilla-validator-20260930/recovery/direct-agave-queue-overflow-20261002/RECEIPT.json"
+  },
+  "health_before_reward_failure": {
+    "schema": "hivezilla-direct-pipeline-health-v1",
+    "updated_unix_ms": 1790971339904,
+    "state": "WARNING",
+    "problems": [],
+    "warnings": [
+      "An earlier session ended without a clean close; earlier coverage can have gaps"
+    ],
+    "canonical": false,
+    "full_epoch": false,
+    "validator": {
+      "health": "ok",
+      "finalized_slot": 452711899,
+      "identity": "J7qpvCEWhdBgPdYRV3s3btWPrRVXa2qnAzgvxWTvtbrQ",
+      "genesis_hash": "5eykt4UsFv8P8NJdTREpY1vzqKqZKvdpKuc147dw2N9d"
+    },
+    "capture": {
+      "session_id": "000000000000000018daceb49b8b9a08-10e3f5",
+      "path": "/home/ubuntu/live/hivezilla-validator-20260930/captures/direct-agave-live/000000000000000018daceb49b8b9a08-10e3f5",
+      "state": "CAPTURING",
+      "node_identity": "J7qpvCEWhdBgPdYRV3s3btWPrRVXa2qnAzgvxWTvtbrQ",
+      "genesis_hash": "5eykt4UsFv8P8NJdTREpY1vzqKqZKvdpKuc147dw2N9d",
+      "validator_pid": 1106933,
+      "writer_live": true,
+      "durable_sequence": 2842222,
+      "latest_rooted_slot": 452711900,
+      "journal_bytes": 585125968,
+      "journal_limit_bytes": 68719476736,
+      "reserve_disk_bytes": 536870912000,
+      "previous_unclean_sessions": [
+        "000000000000000018daccf4d01ca96d-10e3f5"
+      ],
+      "raw_shred_completeness": false
+    },
+    "worker": {
+      "compacted_blocks": 942,
+      "compacted_entries": 1364349,
+      "compacted_transactions": 1376836,
+      "durable_sequence": 2837896,
+      "first_compact_slot": 452710958,
+      "full_epoch": false,
+      "last_compact_slot": 452711899,
+      "startup_incomplete_roots": [
+        [
+          452710926,
+          7370
+        ],
+        [
+          452710927,
+          7371
+        ],
+        [
+          452710928,
+          7372
+        ],
+        [
+          452710929,
+          7373
+        ],
+        [
+          452710930,
+          7374
+        ],
+        [
+          452710931,
+          7375
+        ],
+        [
+          452710932,
+          7376
+        ],
+        [
+          452710933,
+          7377
+        ],
+        [
+          452710934,
+          7378
+        ],
+        [
+          452710935,
+          7379
+        ],
+        [
+          452710936,
+          7380
+        ],
+        [
+          452710937,
+          7381
+        ],
+        [
+          452710938,
+          7382
+        ],
+        [
+          452710939,
+          7383
+        ],
+        [
+          452710940,
+          7384
+        ],
+        [
+          452710941,
+          7385
+        ],
+        [
+          452710942,
+          7386
+        ],
+        [
+          452710943,
+          7387
+        ],
+        [
+          452710944,
+          7388
+        ],
+        [
+          452710945,
+          7389
+        ],
+        [
+          452710946,
+          7390
+        ],
+        [
+          452710947,
+          7391
+        ],
+        [
+          452710948,
+          7392
+        ],
+        [
+          452710949,
+          7393
+        ],
+        [
+          452710950,
+          7394
+        ],
+        [
+          452710951,
+          7395
+        ],
+        [
+          452710952,
+          7396
+        ],
+        [
+          452710953,
+          7397
+        ],
+        [
+          452710954,
+          7398
+        ],
+        [
+          452710955,
+          7399
+        ],
+        [
+          452710956,
+          7400
+        ],
+        [
+          452710957,
+          7401
+        ]
+      ],
+      "state": "WAITING",
+      "updated_unix_ms": 1790971339501
+    },
+    "compact_lag_slots": 1,
+    "worker_status_age_seconds": 0,
+    "free_disk_bytes": 2893871788032,
+    "last_durable_change_unix_ms": 1790971339904,
+    "shreds": {
+      "schema": "hivezilla-shred-hook-status-v1",
+      "state": "ACTIVE",
+      "reason": "receiving",
+      "updated_unix_ms": 1790971339856,
+      "durable_next_sequence": 19976025,
+      "durable_prefix_hash": "6ad1cb626780463492118b619a1b018f604dc3627ea63ae6e698bfe8dc1d655a",
+      "journal_bytes": 26176563468,
+      "counts": {
+        "packets": 19976025,
+        "payload_bytes": 24258821324,
+        "turbine_received": 17794244,
+        "repair_received": 1092926,
+        "repair_accepted": 1088855,
+        "data_shreds": 11064624,
+        "coding_shreds": 8907902,
+        "other_datagrams": 3499,
+        "first_header_slot": 452704425,
+        "max_header_slot": 452711933
+      },
+      "custody_authority": false,
+      "canonical_coverage_verified": false
+    }
+  },
+  "plugin_sha256": "e8777a451c986ba932b175710d43f8efbc09b7da8fdf2b0e324a3329d9b729ea",
+  "latest_capture_incident": "/home/ubuntu/live/hivezilla-validator-20260930/reports/direct-agave-reward-outage-20261003.json",
+  "latest_native_compact_gap_rebuilt": false
+}

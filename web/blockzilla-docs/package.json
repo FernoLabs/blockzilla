@@ -1,0 +1,13 @@
+{
+  "name": "blockzilla-docs",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "build": "node build.mjs",
+    "dev": "node build.mjs && node serve.mjs",
+    "check": "node build.mjs && node check.mjs"
+  },
+  "engines": { "node": ">=22" },
+  "devDependencies": { "marked": "18.0.14" }
+}

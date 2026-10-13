@@ -1,0 +1,34 @@
+[Unit]
+Description=Hivezilla native compact stream publication to Foundation R2
+After=network-online.target hivezilla-direct-worker.service
+Wants=network-online.target
+StartLimitIntervalSec=3600
+StartLimitBurst=3
+
+[Service]
+User=ubuntu
+Group=ubuntu
+ExecStart=/home/ubuntu/live/hivezilla-validator-20260930/releases/hivezilla-stream-r2-20261005-r2/hivezilla-stream publish --output /home/ubuntu/live/hivezilla-validator-20260930/compact/direct-agave-live/000000000000000018daf342ba38d3d0-10e3f5 --state /home/ubuntu/live/hivezilla-validator-20260930/reports/native-stream-r2-live-20261005 --credentials-file /home/ubuntu/live/hivezilla-validator-20260930/config/foundation-r2/native-stream.env --prefix native-stream/direct-agave-live-v1 --start-slot 453600000
+Restart=on-failure
+RestartSec=30
+CPUQuota=100%
+MemoryMax=512M
+TasksMax=64
+Nice=15
+IOSchedulingClass=best-effort
+IOSchedulingPriority=7
+NoNewPrivileges=true
+ProtectSystem=strict
+ProtectHome=read-only
+ReadWritePaths=/home/ubuntu/live/hivezilla-validator-20260930/reports/native-stream-r2-live-20261005
+ReadWritePaths=/home/ubuntu/live/hivezilla-validator-20260930/compact/direct-agave-live/000000000000000018daf342ba38d3d0-10e3f5/committed.sqlite-shm
+PrivateTmp=true
+ProtectKernelTunables=true
+ProtectKernelModules=true
+ProtectControlGroups=true
+CapabilityBoundingSet=
+UMask=0077
+TimeoutStopSec=10
+
+[Install]
+WantedBy=multi-user.target

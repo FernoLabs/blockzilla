@@ -35,6 +35,12 @@ use hivezilla::{
         ShredSpoolPullRuntimeConfig, ShredSpoolPullServerRuntime, ShredUdpRecordConfig,
         SpoolJournalIdentity, bridge_shred_spool, load_ingest_receiver_config, record_shred_udp,
     },
+    overflow::{
+        OverflowCatalog,
+        commands::{
+            RecoverOverflowSegmentArgs, SpillGrpcRawOverflowArgs, UploadOverflowSegmentArgs,
+        },
+    },
     raw_recorder_support::{RawRecorderSupportArgs, run_raw_recorder_support},
     repair::{EpochRepairCaptureSlice, PrepareEpochRepairConfig, prepare_epoch_repair},
     rpc::{
@@ -81,8 +87,28 @@ enum Command {
     RecordHeliusBlocks(RecordHeliusBlocksArgs),
     /// Durably record confirmed protobuf update envelopes without archive conversion or sidecars.
     RecordGrpcRaw(RecordGrpcRawArgs),
+    /// Record a finite current-schema capture under a separate stream identity.
+    RecordGrpcCurrent(RecordGrpcCurrentArgs),
+    /// Validate a sealed current capture and list the exact captured blocks.
+    InspectGrpcCurrent(InspectGrpcCurrentArgs),
+    /// Normalize a sealed finalized capture with exact local RPC slot coverage.
+    NormalizeCurrentExecution(NormalizeCurrentExecutionArgs),
+    /// Prepare pinned Agave and Yellowstone files for a local validator test.
+    PrepareValidatorCanary(hivezilla::validator_canary_prepare::PrepareValidatorCanaryArgs),
+    /// Start, stop, inspect, or execute a bounded non-voting validator test.
+    ValidatorCanary(hivezilla::validator_canary_ops::ValidatorCanaryArgs),
+    /// Capture and compact one finite finalized sample from the local validator.
+    RunLocalExecutionCanary(hivezilla::validator_canary_run::RunLocalExecutionCanaryArgs),
     /// Inspect or fully validate an independently compressed raw gRPC spool.
     InspectGrpcRaw(InspectGrpcRawArgs),
+    /// Inspect local upload intents and verified overflow ranges without contacting object storage.
+    InspectOverflowIndex(InspectOverflowIndexArgs),
+    /// Upload and verify one sealed V1 overflow segment in R2; retain the source file.
+    UploadOverflowSegment(UploadOverflowSegmentArgs),
+    /// Recover one verified V1 overflow segment from R2 into a new local file.
+    RecoverOverflowSegment(RecoverOverflowSegmentArgs),
+    /// Convert committed gRPC journal records into bounded R2 overflow segments; retain the WAL.
+    SpillGrpcRawOverflow(SpillGrpcRawOverflowArgs),
     /// Replay a raw gRPC spool and require complete, reconstructable PoH entries in every block.
     VerifyGrpcRawPoh(VerifyGrpcRawPohArgs),
     /// Offline, read-only projection of raw blocks into unpromoted ledger candidates.
@@ -141,6 +167,80 @@ struct RunArgs {
 
     #[arg(long)]
     dry_run: bool,
+}
+
+#[derive(Debug, Clone, Copy, ValueEnum)]
+enum CurrentCommitmentArg {
+    Confirmed,
+    Finalized,
+}
+
+#[derive(Debug, Args)]
+struct RecordGrpcCurrentArgs {
+    #[arg(long, default_value = "http://127.0.0.1:10000")]
+    endpoint: String,
+    #[arg(long, default_value = "http://127.0.0.1:8899")]
+    validator_rpc_endpoint: String,
+    /// A new directory; an existing capture is never replaced.
+    #[arg(long)]
+    output_dir: std::path::PathBuf,
+    #[arg(long, default_value_t = 32)]
+    max_blocks: u64,
+    #[arg(long, default_value_t = 300)]
+    timeout_secs: u64,
+    #[arg(long, default_value_t = 60)]
+    idle_timeout_secs: u64,
+    #[arg(long)]
+    from_slot: Option<u64>,
+    #[arg(long, value_enum, default_value_t = CurrentCommitmentArg::Finalized)]
+    commitment: CurrentCommitmentArg,
+    #[arg(long, default_value_t = 1)]
+    compression_level: i32,
+    #[arg(long, default_value_t = 134_217_728)]
+    max_record_bytes: u64,
+    #[arg(long, default_value_t = 4_294_967_296)]
+    max_capture_bytes: u64,
+    #[arg(long, default_value_t = 536_870_912_000)]
+    min_free_bytes: u64,
+    /// Cluster genesis hash.
+    #[arg(long)]
+    cluster_id: String,
+    /// Public validator identity.
+    #[arg(long)]
+    origin_node_id: String,
+    #[arg(long, default_value = "self-operated-yellowstone16")]
+    source_id: String,
+    #[arg(long)]
+    x_token_file: Option<std::path::PathBuf>,
+}
+
+#[derive(Debug, Args)]
+struct InspectGrpcCurrentArgs {
+    #[arg(long)]
+    input: std::path::PathBuf,
+    #[arg(long, default_value_t = 134_217_728)]
+    max_record_bytes: u64,
+}
+
+#[derive(Debug, Args)]
+struct NormalizeCurrentExecutionArgs {
+    #[arg(long)]
+    input: std::path::PathBuf,
+    #[arg(long)]
+    coverage: std::path::PathBuf,
+    #[arg(long)]
+    output: std::path::PathBuf,
+    #[arg(long, default_value_t = 134_217_728)]
+    max_record_bytes: u64,
+    #[arg(long, default_value_t = 4096)]
+    max_blocks: usize,
+}
+
+#[derive(Debug, Args)]
+struct InspectOverflowIndexArgs {
+    /// Existing overflow catalog directory. This command never initializes an absent catalog.
+    #[arg(long)]
+    state_dir: std::path::PathBuf,
 }
 
 #[derive(Debug, Args)]
@@ -1438,12 +1538,116 @@ async fn main() -> Result<()> {
             let report = record_grpc_raw_blocks(args.into()).await?;
             println!("{}", serde_json::to_string_pretty(&report)?);
         }
+        Command::RecordGrpcCurrent(args) => {
+            use hivezilla::grpc_raw::current::{
+                CaptureCommitment, CurrentGrpcConfig, record_current_grpc,
+            };
+            let report = record_current_grpc(CurrentGrpcConfig {
+                endpoint: args.endpoint,
+                validator_rpc_endpoint: Some(args.validator_rpc_endpoint),
+                output_dir: args.output_dir,
+                max_blocks: args.max_blocks,
+                timeout_secs: args.timeout_secs,
+                idle_timeout_secs: args.idle_timeout_secs,
+                from_slot: args.from_slot,
+                commitment: match args.commitment {
+                    CurrentCommitmentArg::Confirmed => CaptureCommitment::Confirmed,
+                    CurrentCommitmentArg::Finalized => CaptureCommitment::Finalized,
+                },
+                compression_level: args.compression_level,
+                max_record_bytes: args.max_record_bytes,
+                max_capture_bytes: args.max_capture_bytes,
+                min_free_bytes: args.min_free_bytes,
+                cluster_id: args.cluster_id,
+                origin_node_id: args.origin_node_id,
+                source_id: args.source_id,
+                x_token_file: args.x_token_file,
+            })
+            .await?;
+            println!("{}", serde_json::to_string_pretty(&report)?);
+        }
+        Command::InspectGrpcCurrent(args) => {
+            use hivezilla::grpc_raw::current::{
+                proto::geyser::subscribe_update::UpdateOneof, read_sealed_current_events,
+            };
+            let mut blocks = Vec::new();
+            let seal =
+                read_sealed_current_events(&args.input, args.max_record_bytes, |event, update| {
+                    if let Some(UpdateOneof::Block(block)) = update.update_oneof {
+                        blocks.push(serde_json::json!({
+                            "slot": block.slot,
+                            "bank_id": block.bank_id,
+                            "executed_transaction_count": block.executed_transaction_count,
+                            "entries_count": block.entries_count,
+                            "source_sequence": event.sequence,
+                            "source_raw_sha256": event.raw_sha256,
+                        }));
+                    }
+                    Ok(())
+                })?;
+            println!(
+                "{}",
+                serde_json::to_string_pretty(&serde_json::json!({
+                    "schema": "hivezilla-current-block-inventory-v1",
+                    "generation_id": seal.generation_id,
+                    "blocks": blocks,
+                }))?
+            );
+        }
+        Command::NormalizeCurrentExecution(args) => {
+            hivezilla::execution_canary::normalize_current_execution(
+                &args.input,
+                &args.coverage,
+                &args.output,
+                args.max_record_bytes,
+                args.max_blocks,
+            )?;
+            println!(
+                "{}",
+                serde_json::json!({"normalized": true, "output": args.output})
+            );
+        }
+        Command::PrepareValidatorCanary(args) => {
+            let report = hivezilla::validator_canary_prepare::run(args).await?;
+            println!("{}", serde_json::to_string_pretty(&report)?);
+        }
+        Command::ValidatorCanary(args) => {
+            let report = hivezilla::validator_canary_ops::run(args).await?;
+            println!("{}", serde_json::to_string_pretty(&report)?);
+        }
+        Command::RunLocalExecutionCanary(args) => {
+            let report = hivezilla::validator_canary_run::run(args).await?;
+            println!("{}", serde_json::to_string_pretty(&report)?);
+        }
         Command::InspectGrpcRaw(args) => {
             let report = inspect_grpc_raw_blocks(
                 args.output_dir,
                 args.max_record_bytes,
                 args.verify_payloads,
             )?;
+            println!("{}", serde_json::to_string_pretty(&report)?);
+        }
+        Command::InspectOverflowIndex(args) => {
+            let report = OverflowCatalog::inspect(&args.state_dir)?;
+            println!("{}", serde_json::to_string_pretty(&report)?);
+        }
+        Command::UploadOverflowSegment(args) => {
+            let report =
+                tokio::task::spawn_blocking(move || hivezilla::overflow::commands::upload(args))
+                    .await??;
+            println!("{}", serde_json::to_string_pretty(&report)?);
+        }
+        Command::RecoverOverflowSegment(args) => {
+            let report =
+                tokio::task::spawn_blocking(move || hivezilla::overflow::commands::recover(args))
+                    .await??;
+            println!("{}", serde_json::to_string_pretty(&report)?);
+        }
+        Command::SpillGrpcRawOverflow(args) => {
+            let report = tokio::task::spawn_blocking(move || {
+                hivezilla::overflow::commands::spill_grpc(args)
+            })
+            .await??;
             println!("{}", serde_json::to_string_pretty(&report)?);
         }
         Command::VerifyGrpcRawPoh(args) => {

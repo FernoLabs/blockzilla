@@ -1,0 +1,14 @@
+{
+  "state": "PASS",
+  "observed_at": "2026-10-05T14:20:25.962293+00:00",
+  "binary_sse_chunk_get_identical": 4,
+  "client_bytes": 3452588,
+  "relay_slot": 453604386,
+  "publisher_restart_before_sequence": 1744,
+  "publisher_restart_after_sequence": 2320,
+  "publisher_blocks": 3249,
+  "publisher_bytes": 1657039933,
+  "publisher_lag_slots": 1137,
+  "publisher_status": "RUNNING",
+  "start_slot": 453600000
+}
