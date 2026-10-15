@@ -11,6 +11,11 @@
 //! that ETag and match the requested `Content-Range`, `Content-Length`, and body
 //! length.
 //!
+//! An HTTP 429 pauses every worker of the stream, then repeats the same range.
+//! A numeric `Retry-After` is the wait, capped at 120 seconds. Any other value
+//! waits 60 seconds. One range allows 10 waits. The bytes of a refused response
+//! are discarded.
+//!
 //! [`OperatorTrustedCarHttpStream`] is an explicit alternative for an
 //! operator-trusted HTTPS object that does not provide an ETag. It does not
 //! create an object binding. It still requires the exact HEAD object length.
@@ -41,7 +46,7 @@ use std::{
         mpsc::{self, Receiver, SyncSender},
     },
     thread::{self, JoinHandle},
-    time::Duration,
+    time::{Duration, Instant},
 };
 
 use reqwest::{
@@ -71,6 +76,9 @@ pub const MAX_HTTP_CHUNK_BYTES: usize = 32 << 20;
 
 const DEFAULT_CONNECT_TIMEOUT: Duration = Duration::from_secs(15);
 const DEFAULT_REQUEST_TIMEOUT: Duration = Duration::from_secs(120);
+const RATE_LIMIT_RETRIES: u32 = 10;
+const RATE_LIMIT_FALLBACK: Duration = Duration::from_secs(60);
+const RATE_LIMIT_MAX_DELAY: Duration = Duration::from_secs(120);
 const OBJECT_BINDING_DOMAIN: &[u8] = b"blockzilla.car-http-object-binding.v1\0";
 
 /// Configuration for [`CarHttpStream`].
@@ -196,6 +204,8 @@ pub struct CarHttpStats {
     pub get_body_bytes_received: u64,
     /// Retries of incomplete bodies; partial bytes are included above.
     pub incomplete_body_retries: u64,
+    /// Repeated ranges after HTTP 429. The refused response is not counted above.
+    pub rate_limit_retries: u64,
     pub chunks_scheduled: u64,
     pub chunks_fetched: u64,
     pub chunks_delivered: u64,
@@ -214,6 +224,7 @@ struct SharedStats {
     get_responses: AtomicU64,
     get_body_bytes_received: AtomicU64,
     incomplete_body_retries: AtomicU64,
+    rate_limit_retries: AtomicU64,
     chunks_scheduled: AtomicU64,
     chunks_fetched: AtomicU64,
     chunks_delivered: AtomicU64,
@@ -243,6 +254,7 @@ impl CarHttpStatsHandle {
             get_responses: self.inner.get_responses.load(Ordering::Relaxed),
             get_body_bytes_received: self.inner.get_body_bytes_received.load(Ordering::Relaxed),
             incomplete_body_retries: self.inner.incomplete_body_retries.load(Ordering::Relaxed),
+            rate_limit_retries: self.inner.rate_limit_retries.load(Ordering::Relaxed),
             chunks_scheduled: self.inner.chunks_scheduled.load(Ordering::Relaxed),
             chunks_fetched: self.inner.chunks_fetched.load(Ordering::Relaxed),
             chunks_delivered: self.inner.chunks_delivered.load(Ordering::Relaxed),
@@ -333,6 +345,12 @@ pub enum CarHttpError {
         method: &'static str,
         expected: u16,
         actual: u16,
+    },
+    #[error("{method} returned HTTP 429; expected {expected}")]
+    RateLimited {
+        method: &'static str,
+        expected: u16,
+        retry_after: Option<String>,
     },
     #[error("{method} response has no {header} header")]
     MissingHeader {
@@ -451,6 +469,7 @@ struct WorkerContext {
     result_tx: mpsc::Sender<ChunkResult>,
     cancel: Arc<AtomicBool>,
     stats: Arc<SharedStats>,
+    rate_limit: Arc<RateLimitGate>,
 }
 
 #[derive(Debug)]
@@ -543,6 +562,7 @@ impl<I: HttpObjectIdentity> OrderedCarHttpStream<I> {
             .map_err(|_| CarHttpError::ArithmeticOverflow("worker handle allocation"))?;
 
         if total_chunks != 0 {
+            let rate_limit = Arc::new(RateLimitGate::new());
             let active_workers = options
                 .workers
                 .min(usize::try_from(total_chunks).unwrap_or(options.workers));
@@ -554,6 +574,7 @@ impl<I: HttpObjectIdentity> OrderedCarHttpStream<I> {
                 let worker_results = result_tx.clone();
                 let worker_cancel = Arc::clone(&cancel);
                 let worker_stats = Arc::clone(&stats.inner);
+                let worker_rate_limit = Arc::clone(&rate_limit);
                 let total_length = content_length;
                 let spawn = thread::Builder::new()
                     .name(format!("car-http-{worker_index}"))
@@ -568,6 +589,7 @@ impl<I: HttpObjectIdentity> OrderedCarHttpStream<I> {
                             result_tx: worker_results,
                             cancel: worker_cancel,
                             stats: worker_stats.clone(),
+                            rate_limit: worker_rate_limit,
                         });
                         worker_stats
                             .workers_finished
@@ -1148,6 +1170,7 @@ fn worker_loop(context: WorkerContext) {
             ChunkWork { task, body },
             &context.stats,
             &context.cancel,
+            &context.rate_limit,
         );
         if context
             .result_tx
@@ -1167,34 +1190,97 @@ fn fetch_range(
     work: ChunkWork,
     stats: &SharedStats,
     cancel: &AtomicBool,
+    rate_limit: &RateLimitGate,
 ) -> Result<Vec<u8>, CarHttpError> {
     let ChunkWork { task, mut body } = work;
-    for attempt in 0..=2 {
-        match fetch_range_attempt(
-            client,
-            url,
-            validation,
-            total_length,
-            task,
-            stats,
-            &mut body,
-        ) {
+    let mut body_attempt = 0u32;
+    let mut rate_limits = 0u32;
+    loop {
+        if !rate_limit.wait(cancel) {
+            return Err(CarHttpError::WorkerProtocol(
+                "cancelled during HTTP 429 wait".into(),
+            ));
+        }
+        match fetch_range_attempt(client, url, validation, total_length, task, stats, &mut body) {
             Ok(()) => return Ok(body),
+            Err(CarHttpError::RateLimited { retry_after, .. }) => {
+                if rate_limits >= RATE_LIMIT_RETRIES || cancel.load(Ordering::Acquire) {
+                    return Err(CarHttpError::RateLimited {
+                        method: "GET",
+                        expected: StatusCode::PARTIAL_CONTENT.as_u16(),
+                        retry_after,
+                    });
+                }
+                rate_limits += 1;
+                add_counter(&stats.rate_limit_retries, 1, "rate_limit_retries")?;
+                let delay = rate_limit_delay(retry_after.as_deref());
+                eprintln!(
+                    "HTTP 429 for bytes {}-{}; waiting {}s before retry {rate_limits}/{RATE_LIMIT_RETRIES}",
+                    task.start,
+                    task.end,
+                    delay.as_secs(),
+                );
+                rate_limit.defer(delay);
+            }
             Err(error) => {
                 let incomplete = matches!(
                     error,
                     CarHttpError::BodyRead(_) | CarHttpError::ShortBody { .. }
                 );
-                if !incomplete || attempt == 2 || cancel.load(Ordering::Acquire) {
+                if !incomplete || body_attempt == 2 || cancel.load(Ordering::Acquire) {
                     return Err(error);
                 }
+                body_attempt += 1;
                 // Discard the partial range. Every attempt repeats all identity
                 // and range checks before its bytes can enter the ordered stream.
                 add_counter(&stats.incomplete_body_retries, 1, "incomplete_body_retries")?;
             }
         }
     }
-    unreachable!("bounded retry loop always returns")
+}
+
+fn rate_limit_delay(header: Option<&str>) -> Duration {
+    let delay = header
+        .map(str::trim)
+        .filter(|value| !value.is_empty() && value.bytes().all(|byte| byte.is_ascii_digit()))
+        .and_then(|value| value.parse::<u64>().ok())
+        .map(Duration::from_secs)
+        .unwrap_or(RATE_LIMIT_FALLBACK);
+    delay.min(RATE_LIMIT_MAX_DELAY)
+}
+
+struct RateLimitGate {
+    until: Mutex<Instant>,
+}
+
+impl RateLimitGate {
+    fn new() -> Self {
+        Self {
+            until: Mutex::new(Instant::now()),
+        }
+    }
+
+    fn defer(&self, delay: Duration) {
+        let next = Instant::now() + delay;
+        let mut until = self.until.lock().expect("rate-limit gate");
+        if next > *until {
+            *until = next;
+        }
+    }
+
+    fn wait(&self, cancel: &AtomicBool) -> bool {
+        loop {
+            if cancel.load(Ordering::Acquire) {
+                return false;
+            }
+            let until = *self.until.lock().expect("rate-limit gate");
+            let now = Instant::now();
+            if now >= until {
+                return true;
+            }
+            thread::sleep((until - now).min(Duration::from_millis(50)));
+        }
+    }
 }
 
 fn fetch_range_attempt(
@@ -1220,6 +1306,9 @@ fn fetch_range_attempt(
         source,
     })?;
     add_counter(&stats.get_responses, 1, "get_responses")?;
+    if response.status() == StatusCode::TOO_MANY_REQUESTS {
+        return Err(rate_limited_error(&response));
+    }
     let is_operator_trusted_full_body = matches!(validation, RangeValidation::OperatorTrusted)
         && response.status() == StatusCode::OK
         && task.start == 0
@@ -1308,6 +1397,21 @@ fn fetch_range_attempt(
     }
     add_counter(&stats.chunks_fetched, 1, "chunks_fetched")?;
     Ok(())
+}
+
+fn rate_limited_error(response: &Response) -> CarHttpError {
+    let retry_after = response
+        .headers()
+        .get("retry-after")
+        .and_then(|value| value.to_str().ok())
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .map(ToOwned::to_owned);
+    CarHttpError::RateLimited {
+        method: "GET",
+        expected: StatusCode::PARTIAL_CONTENT.as_u16(),
+        retry_after,
+    }
 }
 
 fn require_status(
@@ -1464,6 +1568,8 @@ mod tests {
         OperatorTrustedFullBodyShort,
         OperatorTrustedFullBodyLong,
         StrongEtagFullBody,
+        RateLimitOnce,
+        RateLimitAlways,
     }
 
     impl ServerMode {
@@ -1746,6 +1852,21 @@ mod tests {
         assert!(start <= end);
         assert!(end < data.len() as u64);
 
+        if matches!(mode, ServerMode::RateLimitAlways)
+            || (mode == ServerMode::RateLimitOnce && attempt == 0)
+        {
+            write_response(
+                stream,
+                "429 Too Many Requests",
+                &[
+                    ("Content-Length", "0".into()),
+                    ("Retry-After", "0".into()),
+                ],
+                &[],
+            );
+            return;
+        }
+
         match mode {
             ServerMode::OutOfOrder if start == 0 => thread::sleep(Duration::from_millis(100)),
             ServerMode::OutOfOrder => thread::sleep(Duration::from_millis(2)),
@@ -1936,6 +2057,7 @@ mod tests {
                     get_responses: 22,
                     get_body_bytes_received: expected.len() as u64,
                     incomplete_body_retries: 0,
+                    rate_limit_retries: 0,
                     chunks_scheduled: 22,
                     chunks_fetched: 22,
                     chunks_delivered: 22,
@@ -2043,6 +2165,7 @@ mod tests {
                 get_responses: 1,
                 get_body_bytes_received: expected.len() as u64,
                 incomplete_body_retries: 0,
+                rate_limit_retries: 0,
                 chunks_scheduled: 1,
                 chunks_fetched: 1,
                 chunks_delivered: 1,
@@ -2330,6 +2453,45 @@ mod tests {
         assert!(snapshot.get_requests <= 2);
         assert_eq!(snapshot.workers_started, 2);
         assert_eq!(snapshot.workers_finished, 2);
+    }
+
+    #[test]
+    fn rate_limit_delay_uses_retry_after_and_caps_it() {
+        assert_eq!(rate_limit_delay(Some("0")), Duration::from_secs(0));
+        assert_eq!(rate_limit_delay(Some("15")), Duration::from_secs(15));
+        assert_eq!(rate_limit_delay(Some("99999")), RATE_LIMIT_MAX_DELAY);
+        assert_eq!(rate_limit_delay(None), RATE_LIMIT_FALLBACK);
+        assert_eq!(rate_limit_delay(Some("soon")), RATE_LIMIT_FALLBACK);
+    }
+
+    #[test]
+    fn http_429_retries_the_same_range() {
+        let expected = fixture_data(16);
+        let server = TestServer::start(expected.clone(), ServerMode::RateLimitOnce);
+        let mut stream = CarHttpStream::open(&server.url, fixture_options()).unwrap();
+        let mut actual = Vec::new();
+        stream.read_to_end(&mut actual).unwrap();
+        assert_eq!(actual, expected);
+        assert_eq!(stream.stats().rate_limit_retries, 1);
+        assert_eq!(stream.stats().get_requests, 2);
+        assert_eq!(stream.stats().bytes_delivered, expected.len() as u64);
+    }
+
+    #[test]
+    fn repeated_http_429_stops_after_the_retry_budget() {
+        let server = TestServer::start(fixture_data(16), ServerMode::RateLimitAlways);
+        let mut stream = CarHttpStream::open(&server.url, fixture_options()).unwrap();
+        let error = stream.read_to_end(&mut Vec::new()).unwrap_err();
+        assert!(
+            error.to_string().contains("HTTP 429"),
+            "unexpected error: {error}"
+        );
+        assert_eq!(stream.stats().rate_limit_retries, u64::from(RATE_LIMIT_RETRIES));
+        assert_eq!(
+            stream.stats().get_requests,
+            u64::from(RATE_LIMIT_RETRIES) + 1
+        );
+        assert_eq!(stream.stats().bytes_delivered, 0);
     }
 
     #[test]
