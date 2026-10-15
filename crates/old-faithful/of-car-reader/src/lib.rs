@@ -175,6 +175,8 @@
 //!   is enabled.
 //! - [`slot_status`] counts one Jetstreamer `jetstreamer_slot_status` row per
 //!   block. The `clickhouse` feature inserts those rows into a named database.
+//!   `car_slot_status` reads a local CAR, or an HTTPS CAR when `query-sdk-http`
+//!   is enabled.
 
 #[cfg(feature = "archive")]
 pub mod archive;

@@ -38,7 +38,7 @@ required-features = ["zstd-native"]
 [[bin]]
 name = "car_slot_status"
 path = "src/bin/car_slot_status.rs"
-required-features = ["clickhouse"]
+required-features = ["clickhouse", "query-sdk-http"]
 
 [[bench]]
 name = "big_block"
