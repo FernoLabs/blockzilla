@@ -173,6 +173,8 @@
 //!   enabled.
 //! - [`compact_index`] parses compact indexes when the `compact-index` feature
 //!   is enabled.
+//! - [`slot_status`] counts one Jetstreamer `jetstreamer_slot_status` row per
+//!   block. The `clickhouse` feature inserts those rows into a named database.
 
 #[cfg(feature = "archive")]
 pub mod archive;
@@ -196,8 +198,12 @@ pub mod reader;
 pub mod reconstruct;
 pub mod short_vec;
 pub mod slot_ranges;
+pub mod slot_status;
 pub mod stored_transaction;
 pub mod versioned_transaction;
+
+#[cfg(feature = "clickhouse")]
+pub mod clickhouse_slot_status;
 
 pub use car_block_group::{CarBlockGroup, TransactionFrame};
 pub use car_stream::CarStream;
