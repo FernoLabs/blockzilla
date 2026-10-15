@@ -11,10 +11,10 @@
 //! that ETag and match the requested `Content-Range`, `Content-Length`, and body
 //! length.
 //!
-//! An HTTP 429 pauses every worker of the stream, then repeats the same range.
-//! A numeric `Retry-After` is the wait, capped at 120 seconds. Any other value
-//! waits 60 seconds. One range allows 10 waits. The bytes of a refused response
-//! are discarded.
+//! An HTTP 429 or 503 pauses every worker of the stream, then repeats the same
+//! range. A numeric `Retry-After` is the wait, capped at 120 seconds. Any other
+//! value waits 60 seconds. One range allows 10 waits. The bytes of a refused
+//! response are discarded.
 //!
 //! [`OperatorTrustedCarHttpStream`] is an explicit alternative for an
 //! operator-trusted HTTPS object that does not provide an ETag. It does not
@@ -204,7 +204,7 @@ pub struct CarHttpStats {
     pub get_body_bytes_received: u64,
     /// Retries of incomplete bodies; partial bytes are included above.
     pub incomplete_body_retries: u64,
-    /// Repeated ranges after HTTP 429. The refused response is not counted above.
+    /// Repeated ranges after HTTP 429 or 503. The refused response is not counted above.
     pub rate_limit_retries: u64,
     pub chunks_scheduled: u64,
     pub chunks_fetched: u64,
@@ -346,10 +346,11 @@ pub enum CarHttpError {
         expected: u16,
         actual: u16,
     },
-    #[error("{method} returned HTTP 429; expected {expected}")]
+    #[error("{method} returned HTTP {actual}; expected {expected}")]
     RateLimited {
         method: &'static str,
         expected: u16,
+        actual: u16,
         retry_after: Option<String>,
     },
     #[error("{method} response has no {header} header")]
@@ -1198,16 +1199,21 @@ fn fetch_range(
     loop {
         if !rate_limit.wait(cancel) {
             return Err(CarHttpError::WorkerProtocol(
-                "cancelled during HTTP 429 wait".into(),
+                "cancelled during HTTP 429 or 503 wait".into(),
             ));
         }
         match fetch_range_attempt(client, url, validation, total_length, task, stats, &mut body) {
             Ok(()) => return Ok(body),
-            Err(CarHttpError::RateLimited { retry_after, .. }) => {
+            Err(CarHttpError::RateLimited {
+                actual,
+                retry_after,
+                ..
+            }) => {
                 if rate_limits >= RATE_LIMIT_RETRIES || cancel.load(Ordering::Acquire) {
                     return Err(CarHttpError::RateLimited {
                         method: "GET",
                         expected: StatusCode::PARTIAL_CONTENT.as_u16(),
+                        actual,
                         retry_after,
                     });
                 }
@@ -1215,7 +1221,7 @@ fn fetch_range(
                 add_counter(&stats.rate_limit_retries, 1, "rate_limit_retries")?;
                 let delay = rate_limit_delay(retry_after.as_deref());
                 eprintln!(
-                    "HTTP 429 for bytes {}-{}; waiting {}s before retry {rate_limits}/{RATE_LIMIT_RETRIES}",
+                    "HTTP {actual} for bytes {}-{}; waiting {}s before retry {rate_limits}/{RATE_LIMIT_RETRIES}",
                     task.start,
                     task.end,
                     delay.as_secs(),
@@ -1306,8 +1312,8 @@ fn fetch_range_attempt(
         source,
     })?;
     add_counter(&stats.get_responses, 1, "get_responses")?;
-    if response.status() == StatusCode::TOO_MANY_REQUESTS {
-        return Err(rate_limited_error(&response));
+    if let Some(error) = retryable_status_error(&response) {
+        return Err(error);
     }
     let is_operator_trusted_full_body = matches!(validation, RangeValidation::OperatorTrusted)
         && response.status() == StatusCode::OK
@@ -1399,7 +1405,11 @@ fn fetch_range_attempt(
     Ok(())
 }
 
-fn rate_limited_error(response: &Response) -> CarHttpError {
+fn retryable_status_error(response: &Response) -> Option<CarHttpError> {
+    let actual = response.status();
+    if actual != StatusCode::TOO_MANY_REQUESTS && actual != StatusCode::SERVICE_UNAVAILABLE {
+        return None;
+    }
     let retry_after = response
         .headers()
         .get("retry-after")
@@ -1407,11 +1417,12 @@ fn rate_limited_error(response: &Response) -> CarHttpError {
         .map(str::trim)
         .filter(|value| !value.is_empty())
         .map(ToOwned::to_owned);
-    CarHttpError::RateLimited {
+    Some(CarHttpError::RateLimited {
         method: "GET",
         expected: StatusCode::PARTIAL_CONTENT.as_u16(),
+        actual: actual.as_u16(),
         retry_after,
-    }
+    })
 }
 
 fn require_status(
@@ -1570,6 +1581,8 @@ mod tests {
         StrongEtagFullBody,
         RateLimitOnce,
         RateLimitAlways,
+        UnavailableOnce,
+        UnavailableAlways,
     }
 
     impl ServerMode {
@@ -1852,12 +1865,17 @@ mod tests {
         assert!(start <= end);
         assert!(end < data.len() as u64);
 
-        if matches!(mode, ServerMode::RateLimitAlways)
-            || (mode == ServerMode::RateLimitOnce && attempt == 0)
-        {
+        let retryable_status = match mode {
+            ServerMode::RateLimitAlways => Some("429 Too Many Requests"),
+            ServerMode::RateLimitOnce if attempt == 0 => Some("429 Too Many Requests"),
+            ServerMode::UnavailableAlways => Some("503 Service Unavailable"),
+            ServerMode::UnavailableOnce if attempt == 0 => Some("503 Service Unavailable"),
+            _ => None,
+        };
+        if let Some(status) = retryable_status {
             write_response(
                 stream,
-                "429 Too Many Requests",
+                status,
                 &[
                     ("Content-Length", "0".into()),
                     ("Retry-After", "0".into()),
@@ -2484,6 +2502,36 @@ mod tests {
         let error = stream.read_to_end(&mut Vec::new()).unwrap_err();
         assert!(
             error.to_string().contains("HTTP 429"),
+            "unexpected error: {error}"
+        );
+        assert_eq!(stream.stats().rate_limit_retries, u64::from(RATE_LIMIT_RETRIES));
+        assert_eq!(
+            stream.stats().get_requests,
+            u64::from(RATE_LIMIT_RETRIES) + 1
+        );
+        assert_eq!(stream.stats().bytes_delivered, 0);
+    }
+
+    #[test]
+    fn http_503_retries_the_same_range() {
+        let expected = fixture_data(16);
+        let server = TestServer::start(expected.clone(), ServerMode::UnavailableOnce);
+        let mut stream = CarHttpStream::open(&server.url, fixture_options()).unwrap();
+        let mut actual = Vec::new();
+        stream.read_to_end(&mut actual).unwrap();
+        assert_eq!(actual, expected);
+        assert_eq!(stream.stats().rate_limit_retries, 1);
+        assert_eq!(stream.stats().get_requests, 2);
+        assert_eq!(stream.stats().bytes_delivered, expected.len() as u64);
+    }
+
+    #[test]
+    fn repeated_http_503_stops_after_the_retry_budget() {
+        let server = TestServer::start(fixture_data(16), ServerMode::UnavailableAlways);
+        let mut stream = CarHttpStream::open(&server.url, fixture_options()).unwrap();
+        let error = stream.read_to_end(&mut Vec::new()).unwrap_err();
+        assert!(
+            error.to_string().contains("HTTP 503"),
             "unexpected error: {error}"
         );
         assert_eq!(stream.stats().rate_limit_retries, u64::from(RATE_LIMIT_RETRIES));
