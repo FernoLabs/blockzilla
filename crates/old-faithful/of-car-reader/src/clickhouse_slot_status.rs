@@ -3,12 +3,26 @@
 //! The table is `jetstreamer_slot_status`, with the same columns and engine as
 //! Jetstreamer's `--no-plugins` writer. The database comes from the caller.
 //! Jetstreamer's DSN does not select one.
+//!
+//! A full batch is spawned onto the current Tokio runtime and the caller
+//! continues without waiting for ClickHouse. Each insert still uses
+//! `async_insert=1` and `wait_for_async_insert=1`, so an acknowledgement means
+//! the row was flushed. [`SlotStatusSink::finish`] waits until every spawned
+//! insert has succeeded or exhausted its retry horizon.
+
+use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::{Arc, Mutex};
+use std::time::{Duration, Instant};
 
 use clickhouse::Client;
 use serde::Serialize;
 use url::Url;
 
 use crate::slot_status::SlotStatus;
+
+const RETRY_INITIAL: Duration = Duration::from_millis(500);
+const RETRY_MAX: Duration = Duration::from_secs(15);
+const RETRY_HORIZON: Duration = Duration::from_secs(600);
 
 const CREATE_SLOT_STATUS: &str = r#"
 CREATE TABLE IF NOT EXISTS jetstreamer_slot_status (
@@ -38,7 +52,28 @@ pub struct SlotStatusSink {
     client: Client,
     pending: Vec<SlotStatusRow>,
     batch_rows: usize,
-    written: u64,
+    writes: Arc<WriteState>,
+}
+
+struct WriteState {
+    in_flight: AtomicU64,
+    written: AtomicU64,
+    failed: Mutex<Option<String>>,
+}
+
+struct InFlightGuard(Arc<WriteState>);
+
+impl InFlightGuard {
+    fn begin(state: &Arc<WriteState>) -> Self {
+        state.in_flight.fetch_add(1, Ordering::SeqCst);
+        Self(Arc::clone(state))
+    }
+}
+
+impl Drop for InFlightGuard {
+    fn drop(&mut self) {
+        self.0.in_flight.fetch_sub(1, Ordering::SeqCst);
+    }
 }
 
 impl SlotStatusSink {
@@ -64,7 +99,11 @@ impl SlotStatusSink {
             client,
             pending: Vec::with_capacity(batch_rows.max(1)),
             batch_rows: batch_rows.max(1),
-            written: 0,
+            writes: Arc::new(WriteState {
+                in_flight: AtomicU64::new(0),
+                written: AtomicU64::new(0),
+                failed: Mutex::new(None),
+            }),
         })
     }
 
@@ -77,8 +116,13 @@ impl SlotStatusSink {
             .map_err(SlotStatusError::ClickHouse)
     }
 
-    /// Queue one block. A full batch is inserted immediately.
+    /// Queue one block.
+    ///
+    /// A full batch is handed to a background task. This method does not wait
+    /// for ClickHouse. The caller must run on a multi-thread Tokio runtime so
+    /// those tasks progress while the caller blocks on the CAR reader.
     pub async fn push(&mut self, row: SlotStatus) -> Result<(), SlotStatusError> {
+        self.raise_background_error()?;
         self.pending.push(SlotStatusRow {
             slot: row.slot,
             transaction_count: row.transaction_count,
@@ -88,34 +132,111 @@ impl SlotStatusSink {
             block_time: row.block_time,
         });
         if self.pending.len() >= self.batch_rows {
-            self.flush().await?;
+            self.spawn_batch()?;
         }
         Ok(())
     }
 
-    /// Insert every queued row and return the number of rows sent.
+    /// Send any queued rows, wait for every background insert, and return the
+    /// number of rows ClickHouse acknowledged.
     pub async fn finish(&mut self) -> Result<u64, SlotStatusError> {
-        self.flush().await?;
-        Ok(self.written)
+        if !self.pending.is_empty() {
+            self.spawn_batch()?;
+        }
+        loop {
+            if self.writes.in_flight.load(Ordering::SeqCst) == 0 {
+                break;
+            }
+            tokio::time::sleep(Duration::from_millis(50)).await;
+        }
+        self.raise_background_error()?;
+        Ok(self.writes.written.load(Ordering::SeqCst))
     }
 
-    async fn flush(&mut self) -> Result<(), SlotStatusError> {
+    fn spawn_batch(&mut self) -> Result<(), SlotStatusError> {
+        self.raise_background_error()?;
         if self.pending.is_empty() {
             return Ok(());
         }
-        let mut insert = self
-            .client
-            .insert::<SlotStatusRow>("jetstreamer_slot_status")
-            .await
-            .map_err(SlotStatusError::ClickHouse)?;
-        for row in &self.pending {
-            insert.write(row).await.map_err(SlotStatusError::ClickHouse)?;
-        }
-        insert.end().await.map_err(SlotStatusError::ClickHouse)?;
-        self.written += self.pending.len() as u64;
-        self.pending.clear();
+        let rows = std::mem::take(&mut self.pending);
+        self.pending.reserve(self.batch_rows);
+        let row_count = rows.len() as u64;
+        let client = self.client.clone();
+        let writes = Arc::clone(&self.writes);
+        let guard = InFlightGuard::begin(&writes);
+        tokio::spawn(async move {
+            let _guard = guard;
+            match retry_slot_status_insert(client, rows).await {
+                Ok(()) => {
+                    writes.written.fetch_add(row_count, Ordering::SeqCst);
+                }
+                Err(error) => {
+                    eprintln!("{error}");
+                    let mut failed = writes.failed.lock().expect("slot status error lock");
+                    if failed.is_none() {
+                        *failed = Some(error);
+                    }
+                }
+            }
+        });
         Ok(())
     }
+
+    fn raise_background_error(&self) -> Result<(), SlotStatusError> {
+        let failed = self.writes.failed.lock().expect("slot status error lock");
+        match failed.as_ref() {
+            Some(message) => Err(SlotStatusError::Background(message.clone())),
+            None => Ok(()),
+        }
+    }
+}
+
+async fn retry_slot_status_insert(client: Client, rows: Vec<SlotStatusRow>) -> Result<(), String> {
+    let started = Instant::now();
+    let mut delay = RETRY_INITIAL;
+    let mut attempt = 1u32;
+    loop {
+        match insert_slot_status(&client, &rows).await {
+            Ok(()) => {
+                if attempt > 1 {
+                    eprintln!("ClickHouse slot status insert succeeded on attempt {attempt}");
+                }
+                return Ok(());
+            }
+            Err(error) => {
+                if started.elapsed() >= RETRY_HORIZON {
+                    return Err(format!(
+                        "ClickHouse slot status insert still failing after {attempt} attempts: {error}"
+                    ));
+                }
+                eprintln!(
+                    "ClickHouse slot status insert failed (attempt {attempt}); retrying in {:.1}s: {error}",
+                    delay.as_secs_f64()
+                );
+                tokio::time::sleep(delay).await;
+                delay = next_retry_delay(delay);
+                attempt += 1;
+            }
+        }
+    }
+}
+
+fn next_retry_delay(current: Duration) -> Duration {
+    current.saturating_mul(2).min(RETRY_MAX)
+}
+
+async fn insert_slot_status(
+    client: &Client,
+    rows: &[SlotStatusRow],
+) -> Result<(), clickhouse::error::Error> {
+    let mut insert = client
+        .insert::<SlotStatusRow>("jetstreamer_slot_status")
+        .await?;
+    for row in rows {
+        insert.write(row).await?;
+    }
+    insert.end().await?;
+    Ok(())
 }
 
 #[derive(Debug)]
@@ -123,6 +244,7 @@ pub enum SlotStatusError {
     Dsn(String),
     Database(String),
     ClickHouse(clickhouse::error::Error),
+    Background(String),
 }
 
 impl std::fmt::Display for SlotStatusError {
@@ -131,6 +253,7 @@ impl std::fmt::Display for SlotStatusError {
             Self::Dsn(message) => write!(formatter, "ClickHouse DSN: {message}"),
             Self::Database(message) => write!(formatter, "ClickHouse database: {message}"),
             Self::ClickHouse(error) => write!(formatter, "ClickHouse: {error}"),
+            Self::Background(message) => write!(formatter, "{message}"),
         }
     }
 }
@@ -212,5 +335,21 @@ mod tests {
         assert!(check_database_name("jetstreamer").is_ok());
         assert!(check_database_name("").is_err());
         assert!(check_database_name("default.jetstreamer").is_err());
+    }
+
+    #[test]
+    fn retry_delay_doubles_until_fifteen_seconds() {
+        assert_eq!(
+            next_retry_delay(Duration::from_millis(500)),
+            Duration::from_secs(1)
+        );
+        assert_eq!(
+            next_retry_delay(Duration::from_secs(8)),
+            Duration::from_secs(15)
+        );
+        assert_eq!(
+            next_retry_delay(Duration::from_secs(15)),
+            Duration::from_secs(15)
+        );
     }
 }

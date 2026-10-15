@@ -134,21 +134,9 @@ mod tests {
     fn simple_vote_matches_jetstreamer() {
         assert!(is_simple_vote_transaction(&legacy(1, 1, &VOTE_PROGRAM_ID)));
         assert!(is_simple_vote_transaction(&legacy(2, 1, &VOTE_PROGRAM_ID)));
-        assert!(!is_simple_vote_transaction(&legacy(
-            3,
-            1,
-            &VOTE_PROGRAM_ID
-        )));
-        assert!(!is_simple_vote_transaction(&legacy(
-            0,
-            1,
-            &VOTE_PROGRAM_ID
-        )));
-        assert!(!is_simple_vote_transaction(&legacy(
-            1,
-            2,
-            &VOTE_PROGRAM_ID
-        )));
+        assert!(!is_simple_vote_transaction(&legacy(3, 1, &VOTE_PROGRAM_ID)));
+        assert!(!is_simple_vote_transaction(&legacy(0, 1, &VOTE_PROGRAM_ID)));
+        assert!(!is_simple_vote_transaction(&legacy(1, 2, &VOTE_PROGRAM_ID)));
         assert!(!is_simple_vote_transaction(&legacy(1, 1, &OTHER_PROGRAM)));
     }
 

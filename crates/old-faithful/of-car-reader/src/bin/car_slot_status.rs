@@ -73,13 +73,23 @@ struct Args {
     thread_id: u8,
 
     /// Rows per ClickHouse insert.
+    ///
+    /// The reader queues each full batch and continues. It does not wait for
+    /// ClickHouse. `--batch-rows 1` sends one row per block, as Jetstreamer does.
     #[arg(long, default_value_t = 1000)]
     batch_rows: usize,
 }
 
 fn main() -> Result<(), Box<dyn std::error::Error>> {
     let args = Args::parse();
-    let runtime = tokio::runtime::Builder::new_current_thread()
+    // One worker stays inside the blocking CAR read. The others run the
+    // ClickHouse insert tasks spawned by the sink.
+    let workers = std::thread::available_parallelism()
+        .map(|count| count.get())
+        .unwrap_or(2)
+        .max(2);
+    let runtime = tokio::runtime::Builder::new_multi_thread()
+        .worker_threads(workers)
         .enable_all()
         .build()?;
     runtime.block_on(run(args))
@@ -92,7 +102,7 @@ async fn run(args: Args) -> Result<(), Box<dyn std::error::Error>> {
     let started = Instant::now();
     let mut blocks = 0u64;
     let mut transactions = 0u64;
-    let summary = match (&args.input, &args.url) {
+    let scan_result = match (&args.input, &args.url) {
         (Some(input), None) => {
             scan_file(
                 input,
@@ -101,32 +111,41 @@ async fn run(args: Args) -> Result<(), Box<dyn std::error::Error>> {
                 &mut blocks,
                 &mut transactions,
             )
-            .await?
+            .await
         }
         (None, Some(url)) => {
+            let options = args.http_options()?;
             scan_http(
                 &url,
                 args.operator_trusted,
-                args.http_options()?,
+                options,
                 &mut sink,
                 args.thread_id,
                 &mut blocks,
                 &mut transactions,
             )
-            .await?
+            .await
         }
-        _ => return Err("choose one of --input or --url".into()),
+        _ => Err("choose one of --input or --url".into()),
     };
 
-    let written = sink.finish().await?;
-    let elapsed = started.elapsed().as_secs_f64().max(1e-9);
-    eprintln!(
-        "database={} table=jetstreamer_slot_status blocks={blocks} rows={written} transactions={transactions} first_slot={} last_slot={} elapsed={elapsed:.1}s",
-        args.database,
-        summary.first_slot,
-        summary.last_slot,
-    );
-    Ok(())
+    // Drain inserts even when the scan stops, so rows already read are acknowledged.
+    let finish_result = sink
+        .finish()
+        .await
+        .map_err(|error| -> Box<dyn std::error::Error> { error.into() });
+    match (scan_result, finish_result) {
+        (_, Err(error)) => Err(error),
+        (Err(error), Ok(_)) => Err(error),
+        (Ok(summary), Ok(written)) => {
+            let elapsed = started.elapsed().as_secs_f64().max(1e-9);
+            eprintln!(
+                "database={} table=jetstreamer_slot_status blocks={blocks} rows={written} transactions={transactions} first_slot={} last_slot={} elapsed={elapsed:.1}s",
+                args.database, summary.first_slot, summary.last_slot,
+            );
+            Ok(())
+        }
+    }
 }
 
 struct ScanSummary {
@@ -156,13 +175,17 @@ async fn scan_file(
 
 impl Args {
     fn http_options(&self) -> Result<CarHttpOptions, Box<dyn std::error::Error>> {
-        let chunk_mib = self.http_chunk_mib.unwrap_or(DEFAULT_HTTP_CHUNK_BYTES >> 20);
+        let chunk_mib = self
+            .http_chunk_mib
+            .unwrap_or(DEFAULT_HTTP_CHUNK_BYTES >> 20);
         let chunk_bytes = chunk_mib
             .checked_mul(1 << 20)
             .ok_or("http-chunk-mib overflows the byte count")?;
         let options = CarHttpOptions {
             workers: self.http_workers.unwrap_or(DEFAULT_HTTP_WORKERS),
-            window_chunks: self.http_window_chunks.unwrap_or(DEFAULT_HTTP_WINDOW_CHUNKS),
+            window_chunks: self
+                .http_window_chunks
+                .unwrap_or(DEFAULT_HTTP_WINDOW_CHUNKS),
             chunk_bytes,
             ..CarHttpOptions::default()
         };
@@ -221,7 +244,11 @@ async fn scan<R: Read>(
         first_slot: 0,
         last_slot: 0,
     };
-    while car.read_until_block_into(&mut group)? {
+    loop {
+        let produced = tokio::task::block_in_place(|| car.read_until_block_into(&mut group))?;
+        if !produced {
+            break;
+        }
         let row = slot_status_from_group(&mut group, thread_id)?;
         if *blocks == 0 {
             summary.first_slot = row.slot;

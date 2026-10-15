@@ -13,7 +13,7 @@
 //!
 //! An HTTP 429 or 503 pauses every worker of the stream, then repeats the same
 //! range. A numeric `Retry-After` is the wait, capped at 120 seconds. Any other
-//! value waits 60 seconds. One range allows 10 waits. The bytes of a refused
+//! value waits 5 seconds. One range allows 10 waits. The bytes of a refused
 //! response are discarded.
 //!
 //! [`OperatorTrustedCarHttpStream`] is an explicit alternative for an
@@ -77,7 +77,7 @@ pub const MAX_HTTP_CHUNK_BYTES: usize = 32 << 20;
 const DEFAULT_CONNECT_TIMEOUT: Duration = Duration::from_secs(15);
 const DEFAULT_REQUEST_TIMEOUT: Duration = Duration::from_secs(120);
 const RATE_LIMIT_RETRIES: u32 = 10;
-const RATE_LIMIT_FALLBACK: Duration = Duration::from_secs(60);
+const RATE_LIMIT_FALLBACK: Duration = Duration::from_secs(5);
 const RATE_LIMIT_MAX_DELAY: Duration = Duration::from_secs(120);
 const OBJECT_BINDING_DOMAIN: &[u8] = b"blockzilla.car-http-object-binding.v1\0";
 
@@ -1202,7 +1202,15 @@ fn fetch_range(
                 "cancelled during HTTP 429 or 503 wait".into(),
             ));
         }
-        match fetch_range_attempt(client, url, validation, total_length, task, stats, &mut body) {
+        match fetch_range_attempt(
+            client,
+            url,
+            validation,
+            total_length,
+            task,
+            stats,
+            &mut body,
+        ) {
             Ok(()) => return Ok(body),
             Err(CarHttpError::RateLimited {
                 actual,
@@ -1876,10 +1884,7 @@ mod tests {
             write_response(
                 stream,
                 status,
-                &[
-                    ("Content-Length", "0".into()),
-                    ("Retry-After", "0".into()),
-                ],
+                &[("Content-Length", "0".into()), ("Retry-After", "0".into())],
                 &[],
             );
             return;
@@ -2504,7 +2509,10 @@ mod tests {
             error.to_string().contains("HTTP 429"),
             "unexpected error: {error}"
         );
-        assert_eq!(stream.stats().rate_limit_retries, u64::from(RATE_LIMIT_RETRIES));
+        assert_eq!(
+            stream.stats().rate_limit_retries,
+            u64::from(RATE_LIMIT_RETRIES)
+        );
         assert_eq!(
             stream.stats().get_requests,
             u64::from(RATE_LIMIT_RETRIES) + 1
@@ -2534,7 +2542,10 @@ mod tests {
             error.to_string().contains("HTTP 503"),
             "unexpected error: {error}"
         );
-        assert_eq!(stream.stats().rate_limit_retries, u64::from(RATE_LIMIT_RETRIES));
+        assert_eq!(
+            stream.stats().rate_limit_retries,
+            u64::from(RATE_LIMIT_RETRIES)
+        );
         assert_eq!(
             stream.stats().get_requests,
             u64::from(RATE_LIMIT_RETRIES) + 1
