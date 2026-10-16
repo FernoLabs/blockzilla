@@ -247,6 +247,9 @@ async fn scan<R: Read>(
         first_slot: 0,
         last_slot: 0,
     };
+    let mut mark = Instant::now();
+    let mut mark_blocks = 0u64;
+    let mut mark_transactions = 0u64;
     loop {
         let produced = tokio::task::block_in_place(|| car.read_until_block_into(&mut group))?;
         if !produced {
@@ -260,7 +263,16 @@ async fn scan<R: Read>(
         *transactions += u64::from(row.transaction_count);
         *blocks += 1;
         if *blocks % 10_000 == 0 {
-            eprintln!("blocks={blocks} slot={}", row.slot);
+            let window = mark.elapsed().as_secs_f64().max(1e-9);
+            let blocks_per_sec = (*blocks - mark_blocks) as f64 / window;
+            let tx_per_sec = (*transactions - mark_transactions) as f64 / window;
+            eprintln!(
+                "blocks={blocks} slot={} blocks_per_sec={blocks_per_sec:.1} tx_per_sec={tx_per_sec:.0}",
+                row.slot,
+            );
+            mark = Instant::now();
+            mark_blocks = *blocks;
+            mark_transactions = *transactions;
         }
         sink.push(row).await?;
     }
