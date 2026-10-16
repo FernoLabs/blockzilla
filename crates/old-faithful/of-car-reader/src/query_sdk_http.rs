@@ -11,11 +11,14 @@
 //! that ETag and match the requested `Content-Range`, `Content-Length`, and body
 //! length.
 //!
-//! An HTTP 429 or 503 pauses every worker of the stream, then repeats the same
-//! range. A numeric `Retry-After` is the wait, capped at 15 seconds. Any other
-//! value waits 15 seconds. One range allows 10 waits. The bytes of a refused
-//! response are discarded. A HEAD or GET that produces no completed response
-//! within 120 seconds is aborted.
+//! A GET status other than the required `206`, or `200` only for one
+//! full-object operator-trusted read, pauses every worker and repeats that
+//! range. The wait starts at 5 seconds and doubles until 30 seconds. One range
+//! allows 10 waits. Bytes from a refused response are discarded.
+//!
+//! Each HEAD, response-header wait, and body read is aborted after 15 seconds
+//! without completion. A transfer that keeps returning bytes continues past
+//! that limit. The aborted range is fetched again on the same wait schedule.
 //!
 //! [`OperatorTrustedCarHttpStream`] is an explicit alternative for an
 //! operator-trusted HTTPS object that does not provide an ETag. It does not
@@ -32,7 +35,7 @@
 //! this module. It is not a total process-memory bound: TLS, HTTP, channel,
 //! caller, and CAR decoder buffers can coexist with those vectors. Dropping a
 //! stream cancels queued work and joins worker threads. An active request can
-//! keep `Drop` blocked until the configured request timeout.
+//! keep `Drop` blocked until the configured silence limit.
 //!
 //! Use [`CarHttpSession`] when one operation opens more than one object. The
 //! session keeps one connection pool and one security policy for all streams.
@@ -76,10 +79,10 @@ pub const MAX_HTTP_WINDOW_CHUNKS: usize = 16;
 pub const MAX_HTTP_CHUNK_BYTES: usize = 256 << 20;
 
 const DEFAULT_CONNECT_TIMEOUT: Duration = Duration::from_secs(15);
-const DEFAULT_REQUEST_TIMEOUT: Duration = Duration::from_secs(120);
-const RATE_LIMIT_RETRIES: u32 = 10;
-const RATE_LIMIT_FALLBACK: Duration = Duration::from_secs(15);
-const RATE_LIMIT_MAX_DELAY: Duration = Duration::from_secs(15);
+const DEFAULT_REQUEST_TIMEOUT: Duration = Duration::from_secs(15);
+const HTTP_RETRY_LIMIT: u32 = 10;
+const HTTP_RETRY_INITIAL: Duration = Duration::from_secs(5);
+const HTTP_RETRY_MAX: Duration = Duration::from_secs(30);
 const OBJECT_BINDING_DOMAIN: &[u8] = b"blockzilla.car-http-object-binding.v1\0";
 
 /// Configuration for [`CarHttpStream`].
@@ -96,9 +99,10 @@ pub struct CarHttpOptions {
     pub reuse_body_buffers: bool,
     /// TCP and TLS connection timeout.
     pub connect_timeout: Duration,
-    /// Timeout for each complete HEAD or GET request.
+    /// Silence limit for a HEAD, for response headers, and for each body read.
     ///
-    /// A silent request is aborted when this elapses. The default is 120 seconds.
+    /// A read that returns bytes starts this wait again. The default is 15 seconds.
+    /// An active transfer is not stopped at 15 seconds.
     pub request_timeout: Duration,
     /// Permit plain HTTP. Keep this false except for controlled local fixtures.
     pub allow_http: bool,
@@ -207,7 +211,8 @@ pub struct CarHttpStats {
     pub get_body_bytes_received: u64,
     /// Retries of incomplete bodies; partial bytes are included above.
     pub incomplete_body_retries: u64,
-    /// Repeated ranges after HTTP 429 or 503. The refused response is not counted above.
+    /// Repeated ranges after a retryable HTTP status or a silent read.
+    /// The refused response bytes are not counted above.
     pub rate_limit_retries: u64,
     pub chunks_scheduled: u64,
     pub chunks_fetched: u64,
@@ -348,13 +353,6 @@ pub enum CarHttpError {
         method: &'static str,
         expected: u16,
         actual: u16,
-    },
-    #[error("{method} returned HTTP {actual}; expected {expected}")]
-    RateLimited {
-        method: &'static str,
-        expected: u16,
-        actual: u16,
-        retry_after: Option<String>,
     },
     #[error("{method} response has no {header} header")]
     MissingHeader {
@@ -1110,24 +1108,26 @@ fn pin_object(
     url: &Url,
     stats: &SharedStats,
 ) -> Result<(u64, String), CarHttpError> {
-    add_counter(&stats.head_requests, 1, "head_requests")?;
-    let response = client
-        .head(url.clone())
-        .header(ACCEPT_ENCODING, "identity")
-        .send()
-        .map_err(|source| CarHttpError::Request {
-            method: "HEAD",
-            source,
-        })?;
-    add_counter(&stats.head_responses, 1, "head_responses")?;
-    require_status("HEAD", &response, StatusCode::OK)?;
-    require_identity_coding("HEAD", response.headers())?;
-    let content_length = parse_u64_header("HEAD", response.headers(), &CONTENT_LENGTH)?;
-    let etag = single_header_string("HEAD", response.headers(), &ETAG)?;
-    if !is_strong_ascii_etag(&etag) {
-        return Err(CarHttpError::InvalidStrongEtag);
-    }
-    Ok((content_length, etag))
+    retry_transient(stats, || {
+        add_counter(&stats.head_requests, 1, "head_requests")?;
+        let response = client
+            .head(url.clone())
+            .header(ACCEPT_ENCODING, "identity")
+            .send()
+            .map_err(|source| CarHttpError::Request {
+                method: "HEAD",
+                source,
+            })?;
+        add_counter(&stats.head_responses, 1, "head_responses")?;
+        require_status("HEAD", &response, StatusCode::OK)?;
+        require_identity_coding("HEAD", response.headers())?;
+        let content_length = parse_u64_header("HEAD", response.headers(), &CONTENT_LENGTH)?;
+        let etag = single_header_string("HEAD", response.headers(), &ETAG)?;
+        if !is_strong_ascii_etag(&etag) {
+            return Err(CarHttpError::InvalidStrongEtag);
+        }
+        Ok((content_length, etag))
+    })
 }
 
 fn admit_operator_trusted_object(
@@ -1135,19 +1135,39 @@ fn admit_operator_trusted_object(
     url: &Url,
     stats: &SharedStats,
 ) -> Result<u64, CarHttpError> {
-    add_counter(&stats.head_requests, 1, "head_requests")?;
-    let response = client
-        .head(url.clone())
-        .header(ACCEPT_ENCODING, "identity")
-        .send()
-        .map_err(|source| CarHttpError::Request {
-            method: "HEAD",
-            source,
-        })?;
-    add_counter(&stats.head_responses, 1, "head_responses")?;
-    require_status("HEAD", &response, StatusCode::OK)?;
-    require_identity_coding("HEAD", response.headers())?;
-    parse_u64_header("HEAD", response.headers(), &CONTENT_LENGTH)
+    retry_transient(stats, || {
+        add_counter(&stats.head_requests, 1, "head_requests")?;
+        let response = client
+            .head(url.clone())
+            .header(ACCEPT_ENCODING, "identity")
+            .send()
+            .map_err(|source| CarHttpError::Request {
+                method: "HEAD",
+                source,
+            })?;
+        add_counter(&stats.head_responses, 1, "head_responses")?;
+        require_status("HEAD", &response, StatusCode::OK)?;
+        require_identity_coding("HEAD", response.headers())?;
+        parse_u64_header("HEAD", response.headers(), &CONTENT_LENGTH)
+    })
+}
+
+fn retry_transient<T>(
+    stats: &SharedStats,
+    mut operation: impl FnMut() -> Result<T, CarHttpError>,
+) -> Result<T, CarHttpError> {
+    let mut retries = 0u32;
+    loop {
+        match operation() {
+            Ok(value) => return Ok(value),
+            Err(error) if is_transient_http(&error) && retries < HTTP_RETRY_LIMIT => {
+                retries += 1;
+                note_http_retry(stats, retries, &error)?;
+                thread::sleep(retry_wait(http_retry_backoff(retries)));
+            }
+            Err(error) => return Err(error),
+        }
+    }
 }
 
 fn worker_loop(context: WorkerContext) {
@@ -1202,7 +1222,7 @@ fn fetch_range(
     loop {
         if !rate_limit.wait(cancel) {
             return Err(CarHttpError::WorkerProtocol(
-                "cancelled during HTTP 429 or 503 wait".into(),
+                "cancelled during HTTP retry wait".into(),
             ));
         }
         match fetch_range_attempt(
@@ -1215,29 +1235,13 @@ fn fetch_range(
             &mut body,
         ) {
             Ok(()) => return Ok(body),
-            Err(CarHttpError::RateLimited {
-                actual,
-                retry_after,
-                ..
-            }) => {
-                if rate_limits >= RATE_LIMIT_RETRIES || cancel.load(Ordering::Acquire) {
-                    return Err(CarHttpError::RateLimited {
-                        method: "GET",
-                        expected: StatusCode::PARTIAL_CONTENT.as_u16(),
-                        actual,
-                        retry_after,
-                    });
+            Err(error) if is_transient_http(&error) => {
+                if rate_limits >= HTTP_RETRY_LIMIT || cancel.load(Ordering::Acquire) {
+                    return Err(error);
                 }
                 rate_limits += 1;
-                add_counter(&stats.rate_limit_retries, 1, "rate_limit_retries")?;
-                let delay = rate_limit_delay(retry_after.as_deref());
-                eprintln!(
-                    "HTTP {actual} for bytes {}-{}; waiting {}s before retry {rate_limits}/{RATE_LIMIT_RETRIES}",
-                    task.start,
-                    task.end,
-                    delay.as_secs(),
-                );
-                rate_limit.defer(delay);
+                note_http_retry(stats, rate_limits, &error)?;
+                rate_limit.defer(retry_wait(http_retry_backoff(rate_limits)));
             }
             Err(error) => {
                 let incomplete = matches!(
@@ -1256,14 +1260,69 @@ fn fetch_range(
     }
 }
 
-fn rate_limit_delay(header: Option<&str>) -> Duration {
-    let delay = header
-        .map(str::trim)
-        .filter(|value| !value.is_empty() && value.bytes().all(|byte| byte.is_ascii_digit()))
-        .and_then(|value| value.parse::<u64>().ok())
-        .map(Duration::from_secs)
-        .unwrap_or(RATE_LIMIT_FALLBACK);
-    delay.min(RATE_LIMIT_MAX_DELAY)
+fn http_retry_backoff(attempt: u32) -> Duration {
+    let mut delay = HTTP_RETRY_INITIAL;
+    for _ in 1..attempt.max(1) {
+        if delay >= HTTP_RETRY_MAX {
+            return HTTP_RETRY_MAX;
+        }
+        delay = delay.saturating_mul(2).min(HTTP_RETRY_MAX);
+    }
+    delay
+}
+
+/// The production wait is [`http_retry_backoff`]. Tests record that schedule and
+/// skip the sleep so a ten-attempt failure does not block the suite for minutes.
+fn retry_wait(delay: Duration) -> Duration {
+    #[cfg(test)]
+    {
+        let _ = delay;
+        Duration::ZERO
+    }
+    #[cfg(not(test))]
+    {
+        delay
+    }
+}
+
+fn note_http_retry(
+    stats: &SharedStats,
+    attempt: u32,
+    error: &CarHttpError,
+) -> Result<(), CarHttpError> {
+    add_counter(&stats.rate_limit_retries, 1, "rate_limit_retries")?;
+    let delay = http_retry_backoff(attempt);
+    eprintln!(
+        "{error}; waiting {}s before retry {attempt}/{HTTP_RETRY_LIMIT}",
+        delay.as_secs()
+    );
+    Ok(())
+}
+
+fn is_transient_http(error: &CarHttpError) -> bool {
+    match error {
+        CarHttpError::Status { .. } => true,
+        CarHttpError::Request { source, .. } => source.is_timeout(),
+        CarHttpError::BodyRead(error) => is_idle_timeout_io(error),
+        _ => false,
+    }
+}
+
+fn is_idle_timeout_io(error: &io::Error) -> bool {
+    if error.kind() == io::ErrorKind::TimedOut {
+        return true;
+    }
+    let mut current = error.get_ref().map(|err| err as &dyn std::error::Error);
+    while let Some(err) = current {
+        if err
+            .downcast_ref::<reqwest::Error>()
+            .is_some_and(reqwest::Error::is_timeout)
+        {
+            return true;
+        }
+        current = err.source();
+    }
+    false
 }
 
 struct RateLimitGate {
@@ -1323,13 +1382,14 @@ fn fetch_range_attempt(
         source,
     })?;
     add_counter(&stats.get_responses, 1, "get_responses")?;
-    if let Some(error) = retryable_status_error(&response) {
-        return Err(error);
-    }
-    let is_operator_trusted_full_body = matches!(validation, RangeValidation::OperatorTrusted)
-        && response.status() == StatusCode::OK
+    let accept_full_object = matches!(validation, RangeValidation::OperatorTrusted)
         && task.start == 0
         && task.end.checked_add(1) == Some(total_length);
+    if let Some(error) = retryable_status_error(&response, accept_full_object) {
+        return Err(error);
+    }
+    let is_operator_trusted_full_body =
+        accept_full_object && response.status() == StatusCode::OK;
     if !is_operator_trusted_full_body {
         require_status("GET", &response, StatusCode::PARTIAL_CONTENT)?;
     }
@@ -1416,23 +1476,15 @@ fn fetch_range_attempt(
     Ok(())
 }
 
-fn retryable_status_error(response: &Response) -> Option<CarHttpError> {
+fn retryable_status_error(response: &Response, accept_full_object: bool) -> Option<CarHttpError> {
     let actual = response.status();
-    if actual != StatusCode::TOO_MANY_REQUESTS && actual != StatusCode::SERVICE_UNAVAILABLE {
+    if actual == StatusCode::PARTIAL_CONTENT || (accept_full_object && actual == StatusCode::OK) {
         return None;
     }
-    let retry_after = response
-        .headers()
-        .get("retry-after")
-        .and_then(|value| value.to_str().ok())
-        .map(str::trim)
-        .filter(|value| !value.is_empty())
-        .map(ToOwned::to_owned);
-    Some(CarHttpError::RateLimited {
+    Some(CarHttpError::Status {
         method: "GET",
         expected: StatusCode::PARTIAL_CONTENT.as_u16(),
         actual: actual.as_u16(),
-        retry_after,
     })
 }
 
@@ -1594,6 +1646,9 @@ mod tests {
         RateLimitAlways,
         UnavailableOnce,
         UnavailableAlways,
+        BadGatewayOnce,
+        BadGatewayAlways,
+        IdleOnce,
     }
 
     impl ServerMode {
@@ -1730,11 +1785,12 @@ mod tests {
         state: &ServerState,
     ) {
         stream
-            .set_read_timeout(Some(Duration::from_secs(2)))
+            .set_read_timeout(Some(Duration::from_secs(5)))
             .expect("fixture read timeout");
         stream
-            .set_write_timeout(Some(Duration::from_secs(2)))
+            .set_write_timeout(Some(Duration::from_secs(5)))
             .expect("fixture write timeout");
+        stream.set_nodelay(true).expect("fixture nodelay");
         let Some(request) = read_request(&mut stream) else {
             return;
         };
@@ -1876,11 +1932,32 @@ mod tests {
         assert!(start <= end);
         assert!(end < data.len() as u64);
 
+        if mode == ServerMode::IdleOnce && attempt == 0 {
+            let body = &data[start as usize..=end as usize];
+            write!(stream, "HTTP/1.1 206 Partial Content\r\n").expect("idle status");
+            write!(
+                stream,
+                "Content-Range: bytes {start}-{end}/{}\r\n",
+                data.len()
+            )
+            .expect("idle content range");
+            write!(stream, "Content-Length: {}\r\n", body.len()).expect("idle length");
+            write!(stream, "ETag: {FIXTURE_ETAG}\r\n").expect("idle etag");
+            write!(stream, "Connection: close\r\n\r\n").expect("idle header end");
+            stream.flush().expect("flush idle headers");
+            thread::sleep(Duration::from_millis(1_500));
+            let _ = stream.write_all(body);
+            let _ = stream.flush();
+            return;
+        }
+
         let retryable_status = match mode {
             ServerMode::RateLimitAlways => Some("429 Too Many Requests"),
             ServerMode::RateLimitOnce if attempt == 0 => Some("429 Too Many Requests"),
             ServerMode::UnavailableAlways => Some("503 Service Unavailable"),
             ServerMode::UnavailableOnce if attempt == 0 => Some("503 Service Unavailable"),
+            ServerMode::BadGatewayAlways => Some("502 Bad Gateway"),
+            ServerMode::BadGatewayOnce if attempt == 0 => Some("502 Bad Gateway"),
             _ => None,
         };
         if let Some(status) = retryable_status {
@@ -2016,7 +2093,7 @@ mod tests {
         assert_eq!(options.window_chunks, 8);
         assert_eq!(options.chunk_bytes, 32 << 20);
         assert_eq!(options.body_window_bytes().unwrap(), 256 << 20);
-        assert_eq!(options.request_timeout, Duration::from_secs(120));
+        assert_eq!(options.request_timeout, Duration::from_secs(15));
         assert!(!options.allow_http);
     }
 
@@ -2406,7 +2483,10 @@ mod tests {
         assert!(error.to_string().contains("HTTP 302"));
         thread::sleep(Duration::from_millis(10));
         assert_eq!(server.state.redirected_requests.load(Ordering::Relaxed), 0);
-        assert_eq!(server.state.requests.load(Ordering::Relaxed), 1);
+        assert_eq!(
+            server.state.requests.load(Ordering::Relaxed),
+            usize::try_from(HTTP_RETRY_LIMIT).unwrap() + 1
+        );
     }
 
     #[test]
@@ -2483,12 +2563,12 @@ mod tests {
     }
 
     #[test]
-    fn rate_limit_delay_uses_retry_after_and_caps_it() {
-        assert_eq!(rate_limit_delay(Some("0")), Duration::from_secs(0));
-        assert_eq!(rate_limit_delay(Some("15")), Duration::from_secs(15));
-        assert_eq!(rate_limit_delay(Some("99999")), RATE_LIMIT_MAX_DELAY);
-        assert_eq!(rate_limit_delay(None), RATE_LIMIT_FALLBACK);
-        assert_eq!(rate_limit_delay(Some("soon")), RATE_LIMIT_FALLBACK);
+    fn http_retry_backoff_doubles_from_five_seconds_to_thirty() {
+        assert_eq!(http_retry_backoff(1), Duration::from_secs(5));
+        assert_eq!(http_retry_backoff(2), Duration::from_secs(10));
+        assert_eq!(http_retry_backoff(3), Duration::from_secs(20));
+        assert_eq!(http_retry_backoff(4), Duration::from_secs(30));
+        assert_eq!(http_retry_backoff(10), Duration::from_secs(30));
     }
 
     #[test]
@@ -2515,11 +2595,11 @@ mod tests {
         );
         assert_eq!(
             stream.stats().rate_limit_retries,
-            u64::from(RATE_LIMIT_RETRIES)
+            u64::from(HTTP_RETRY_LIMIT)
         );
         assert_eq!(
             stream.stats().get_requests,
-            u64::from(RATE_LIMIT_RETRIES) + 1
+            u64::from(HTTP_RETRY_LIMIT) + 1
         );
         assert_eq!(stream.stats().bytes_delivered, 0);
     }
@@ -2548,13 +2628,64 @@ mod tests {
         );
         assert_eq!(
             stream.stats().rate_limit_retries,
-            u64::from(RATE_LIMIT_RETRIES)
+            u64::from(HTTP_RETRY_LIMIT)
         );
         assert_eq!(
             stream.stats().get_requests,
-            u64::from(RATE_LIMIT_RETRIES) + 1
+            u64::from(HTTP_RETRY_LIMIT) + 1
         );
         assert_eq!(stream.stats().bytes_delivered, 0);
+    }
+
+    #[test]
+    fn http_502_retries_the_same_range() {
+        let expected = fixture_data(16);
+        let server = TestServer::start(expected.clone(), ServerMode::BadGatewayOnce);
+        let mut stream = CarHttpStream::open(&server.url, fixture_options()).unwrap();
+        let mut actual = Vec::new();
+        stream.read_to_end(&mut actual).unwrap();
+        assert_eq!(actual, expected);
+        assert_eq!(stream.stats().rate_limit_retries, 1);
+        assert_eq!(stream.stats().get_requests, 2);
+        assert_eq!(stream.stats().bytes_delivered, expected.len() as u64);
+    }
+
+    #[test]
+    fn repeated_http_502_stops_after_the_retry_budget() {
+        let server = TestServer::start(fixture_data(16), ServerMode::BadGatewayAlways);
+        let mut stream = CarHttpStream::open(&server.url, fixture_options()).unwrap();
+        let error = stream.read_to_end(&mut Vec::new()).unwrap_err();
+        assert!(
+            error.to_string().contains("HTTP 502"),
+            "unexpected error: {error}"
+        );
+        assert_eq!(
+            stream.stats().rate_limit_retries,
+            u64::from(HTTP_RETRY_LIMIT)
+        );
+        assert_eq!(
+            stream.stats().get_requests,
+            u64::from(HTTP_RETRY_LIMIT) + 1
+        );
+        assert_eq!(stream.stats().bytes_delivered, 0);
+    }
+
+    #[test]
+    fn idle_timeout_retries_the_same_range() {
+        let expected = fixture_data(16);
+        let server = TestServer::start(expected.clone(), ServerMode::IdleOnce);
+        let options = CarHttpOptions {
+            request_timeout: Duration::from_millis(500),
+            ..fixture_options()
+        };
+        let mut stream = CarHttpStream::open(&server.url, options).unwrap();
+        let mut actual = Vec::new();
+        stream.read_to_end(&mut actual).unwrap();
+        assert_eq!(actual, expected);
+        assert_eq!(stream.stats().rate_limit_retries, 1);
+        assert_eq!(stream.stats().get_requests, 2);
+        assert_eq!(stream.stats().incomplete_body_retries, 0);
+        assert_eq!(stream.stats().bytes_delivered, expected.len() as u64);
     }
 
     #[test]
