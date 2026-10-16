@@ -734,6 +734,7 @@ dependencies = [
  "bs58",
  "bytes",
  "clap 4.6.6",
+ "clickhouse",
  "data-encoding",
  "gxhash",
  "hashbrown 0.17.1",

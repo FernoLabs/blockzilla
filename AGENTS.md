@@ -8,3 +8,4 @@
   [the deployment record](hivezilla/deploy/direct-agave/README.md). Check live
   reports when current machine status is needed. Older handoff files are history.
 - Use ASD-STE100 Simplified Technical English when communicating with the user.
+- After each code change, list every modified file and the reason for that change.
