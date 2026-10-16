@@ -56,7 +56,10 @@ struct Args {
     #[arg(long, requires = "url", conflicts_with = "input")]
     http_window_chunks: Option<usize>,
 
-    /// Bytes in one range, in mebibytes. The default and the maximum are 32.
+    /// Bytes in one range, in mebibytes. The default is 32 and the maximum is 256.
+    ///
+    /// `--http-workers 1 --http-window-chunks 2 --http-chunk-mib 256` keeps one
+    /// 256 MiB range in flight inside a 512 MiB window.
     #[arg(long, requires = "url", conflicts_with = "input")]
     http_chunk_mib: Option<usize>,
 
@@ -391,8 +394,13 @@ mod tests {
         .unwrap();
         assert!(args.http_options().is_err());
         args.http_workers = Some(1);
-        args.http_chunk_mib = Some(33);
+        args.http_chunk_mib = Some(257);
         assert!(args.http_options().is_err());
+        args.http_chunk_mib = Some(256);
+        args.http_window_chunks = Some(2);
+        let matched = args.http_options().unwrap();
+        assert_eq!(matched.chunk_bytes, 256 << 20);
+        assert_eq!(matched.body_window_bytes().unwrap(), 512 << 20);
         args.http_chunk_mib = Some(32);
         args.http_window_chunks = Some(1);
         args.http_workers = Some(4);

@@ -136,7 +136,7 @@ struct Args {
     /// Maximum number of HTTP range bodies in flight (1..=16).
     #[arg(long, default_value_t = 8)]
     http_window_chunks: usize,
-    /// Range body size in MiB: 1..=128 for indexed input, 1..=32 for SDK input.
+    /// Range body size in MiB: 1..=128 for indexed input, 1..=256 for SDK input.
     #[arg(long, default_value_t = 32)]
     http_chunk_mib: usize,
     /// Allocate each HTTP range body separately for a controlled comparison.
@@ -1113,8 +1113,7 @@ mod tests {
             vec!["--http-window-chunks", "0"],
             vec!["--http-window-chunks", "17"],
             vec!["--http-chunk-mib", "0"],
-            vec!["--http-chunk-mib", "33"],
-            vec!["--http-chunk-mib", "128"],
+            vec!["--http-chunk-mib", "257"],
         ] {
             assert!(parse(&extra).http_settings().is_err(), "accepted {extra:?}");
         }

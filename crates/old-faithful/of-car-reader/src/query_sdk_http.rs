@@ -12,9 +12,10 @@
 //! length.
 //!
 //! An HTTP 429 or 503 pauses every worker of the stream, then repeats the same
-//! range. A numeric `Retry-After` is the wait, capped at 120 seconds. Any other
-//! value waits 5 seconds. One range allows 10 waits. The bytes of a refused
-//! response are discarded.
+//! range. A numeric `Retry-After` is the wait, capped at 15 seconds. Any other
+//! value waits 15 seconds. One range allows 10 waits. The bytes of a refused
+//! response are discarded. A HEAD or GET that produces no completed response
+//! within 120 seconds is aborted.
 //!
 //! [`OperatorTrustedCarHttpStream`] is an explicit alternative for an
 //! operator-trusted HTTPS object that does not provide an ETag. It does not
@@ -71,14 +72,14 @@ pub const DEFAULT_HTTP_CHUNK_BYTES: usize = 32 << 20;
 pub const MAX_HTTP_WORKERS: usize = 16;
 /// Maximum allowed number of scheduled, active, or buffered chunks.
 pub const MAX_HTTP_WINDOW_CHUNKS: usize = 16;
-/// Maximum allowed range size: 32 MiB.
-pub const MAX_HTTP_CHUNK_BYTES: usize = 32 << 20;
+/// Maximum allowed range size: 256 MiB.
+pub const MAX_HTTP_CHUNK_BYTES: usize = 256 << 20;
 
 const DEFAULT_CONNECT_TIMEOUT: Duration = Duration::from_secs(15);
 const DEFAULT_REQUEST_TIMEOUT: Duration = Duration::from_secs(120);
 const RATE_LIMIT_RETRIES: u32 = 10;
-const RATE_LIMIT_FALLBACK: Duration = Duration::from_secs(5);
-const RATE_LIMIT_MAX_DELAY: Duration = Duration::from_secs(120);
+const RATE_LIMIT_FALLBACK: Duration = Duration::from_secs(15);
+const RATE_LIMIT_MAX_DELAY: Duration = Duration::from_secs(15);
 const OBJECT_BINDING_DOMAIN: &[u8] = b"blockzilla.car-http-object-binding.v1\0";
 
 /// Configuration for [`CarHttpStream`].
@@ -96,6 +97,8 @@ pub struct CarHttpOptions {
     /// TCP and TLS connection timeout.
     pub connect_timeout: Duration,
     /// Timeout for each complete HEAD or GET request.
+    ///
+    /// A silent request is aborted when this elapses. The default is 120 seconds.
     pub request_timeout: Duration,
     /// Permit plain HTTP. Keep this false except for controlled local fixtures.
     pub allow_http: bool,
@@ -2013,6 +2016,7 @@ mod tests {
         assert_eq!(options.window_chunks, 8);
         assert_eq!(options.chunk_bytes, 32 << 20);
         assert_eq!(options.body_window_bytes().unwrap(), 256 << 20);
+        assert_eq!(options.request_timeout, Duration::from_secs(120));
         assert!(!options.allow_http);
     }
 

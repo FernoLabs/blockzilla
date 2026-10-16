@@ -72,7 +72,7 @@ capacity without publishing partial data.
 Use `--http-workers 8` to test more concurrent requests with the default
 eight-chunk, 256 MiB HTTP body window. For more requests, set both
 `--http-workers 16 --http-window-chunks 16`. Use `--http-chunk-mib` to set each
-range size from 1 to 32 MiB. The window must contain at least as many chunks as
+range size from 1 to 256 MiB. The window must contain at least as many chunks as
 there are HTTP workers. Both counts are limited to 16. The receipt records the
 selected counts, range size, and total body window. These flags change the
 probe only; the SDK default remains four workers.
@@ -125,7 +125,7 @@ Thus 32 parsers can issue at most 32 concurrent requests. `--http-workers` and
 `--http-window-chunks` apply only to the default single-parser transport.
 `--http-chunk-mib` sets the body size in both modes. Indexed input accepts 1 to
 128 MiB; the default remains 32 MiB. The static single-parser SDK transport
-keeps its 32 MiB maximum. The buffer reuse flag is honored in both modes.
+accepts 1 to 256 MiB. The buffer reuse flag is honored in both modes.
 
 The raw index and CAR header are fetched inside timed setup. Every index row
 is checked for bounds and overlap. The selected epoch prefix must form one
