@@ -38,6 +38,7 @@ const VOTE_PROGRAM_ID: [u8; 32] = [
 const RETRY_INITIAL: Duration = Duration::from_millis(500);
 const RETRY_MAX: Duration = Duration::from_secs(15);
 const RETRY_HORIZON: Duration = Duration::from_secs(600);
+const DEFAULT_MAX_IN_FLIGHT: u64 = 128;
 
 #[derive(Parser, Debug)]
 #[command(
@@ -76,17 +77,25 @@ struct Args {
     /// Value stored in `thread_id`. A single reader uses 0.
     #[arg(long, default_value_t = 0)]
     thread_id: u8,
-    /// Rows per ClickHouse insert.
-    ///
-    /// The reader queues each full batch and continues. It does not wait for
-    /// ClickHouse. `--batch-rows 1` sends one row per block.
+    /// Rows per ClickHouse insert. One full batch is one HTTP request.
     #[arg(long, default_value_t = 1000)]
     batch_rows: usize,
+    /// ClickHouse HTTP requests allowed at the same time.
+    ///
+    /// The reader waits when this many batches are still in flight. The cap
+    /// counts requests, so it stays independent of `--batch-rows`.
+    #[arg(long, default_value_t = DEFAULT_MAX_IN_FLIGHT, value_parser = clap::value_parser!(u64).range(1..))]
+    max_in_flight: u64,
 }
 
 fn main() -> Result<()> {
     let args = Args::parse();
-    let mut sink = SlotStatusSink::connect(&args.clickhouse_dsn, &args.database, args.batch_rows)?;
+    let mut sink = SlotStatusSink::connect(
+        &args.clickhouse_dsn,
+        &args.database,
+        args.batch_rows,
+        args.max_in_flight,
+    )?;
     let workers = std::thread::available_parallelism()
         .map(|count| count.get())
         .unwrap_or(2)
@@ -226,7 +235,10 @@ fn scan<S: RangeSource>(
         None => block_count,
     };
     let threads = usize::from(args.threads);
-    eprintln!("Scanning {end} blocks with {threads} decode workers into {TABLE}");
+    eprintln!(
+        "Scanning {end} blocks with {threads} decode workers into {TABLE}, batch_rows={}, max_in_flight={}",
+        args.batch_rows, args.max_in_flight
+    );
 
     let mut blocks = 0u64;
     let mut transactions = 0u64;
@@ -470,6 +482,7 @@ struct SlotStatusSink {
     client: clickhouse::Client,
     pending: Vec<StatusRow>,
     batch_rows: usize,
+    max_in_flight: u64,
     writes: Arc<WriteState>,
 }
 
@@ -501,7 +514,7 @@ struct ClickHouseEndpoint {
 }
 
 impl SlotStatusSink {
-    fn connect(dsn: &str, database: &str, batch_rows: usize) -> Result<Self> {
+    fn connect(dsn: &str, database: &str, batch_rows: usize, max_in_flight: u64) -> Result<Self> {
         check_identifier("database", database)?;
         check_identifier("table", TABLE)?;
         let endpoint = split_clickhouse_dsn(dsn)?;
@@ -520,6 +533,7 @@ impl SlotStatusSink {
             client,
             pending: Vec::with_capacity(batch_rows.max(1)),
             batch_rows: batch_rows.max(1),
+            max_in_flight: max_in_flight.max(1),
             writes: Arc::new(WriteState {
                 in_flight: AtomicU64::new(0),
                 written: AtomicU64::new(0),
@@ -555,6 +569,10 @@ impl SlotStatusSink {
         self.raise_background_error()?;
         if self.pending.is_empty() {
             return Ok(());
+        }
+        while self.writes.in_flight.load(Ordering::SeqCst) >= self.max_in_flight {
+            self.raise_background_error()?;
+            std::thread::sleep(Duration::from_millis(1));
         }
         let rows = std::mem::take(&mut self.pending);
         self.pending.reserve(self.batch_rows);
