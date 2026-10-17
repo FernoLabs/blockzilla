@@ -722,6 +722,7 @@ dependencies = [
  "blockzilla-archive-v3-convert",
  "blockzilla-compact",
  "blockzilla-compact-v2-reader",
+ "blockzilla-get-block",
  "blockzilla-live-format",
  "blockzilla-log-parser",
  "blockzilla-model",

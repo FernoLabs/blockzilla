@@ -45,6 +45,10 @@ name = "archive-v2-slot-status"
 path = "src/bin/archive_v2_slot_status.rs"
 
 [[bin]]
+name = "archive-v2-metadata"
+path = "src/bin/archive_v2_metadata.rs"
+
+[[bin]]
 name = "car-log-audit"
 path = "src/bin/car_log_audit.rs"
 required-features = ["diagnostic-tools"]
@@ -141,6 +145,7 @@ bytes = "1.11"
 rusqlite = { version = "=0.40.2", features = ["bundled", "fallible_uint"] }
 blockzilla-model = { version = "0.2.0", path = "../../crates/blockzilla-model" }
 blockzilla-compact-v2-reader = { path = "../../crates/compact-v2/blockzilla-compact-v2-reader", features = ["http"], version = "0.2.0" }
+blockzilla-get-block = { path = "../../edgezilla/get-block", default-features = false, version = "0.2.0" }
 blockzilla-archive-v3-convert = { path = "../../crates/archive-v3/blockzilla-archive-v3-convert", version = "0.2.0" }
 blockzilla-archive-v2 = { path = "../../crates/compact-v2/blockzilla-archive-v2", default-features = false, version = "0.2.0" }
 blockzilla-compact = { path = "../../crates/compact-v2/blockzilla-compact", default-features = false, version = "0.2.0" }

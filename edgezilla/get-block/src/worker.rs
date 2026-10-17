@@ -3715,69 +3715,22 @@ async fn stream_metadata_value(
     meta: Option<&CompactMetaV1>,
     include_rewards: bool,
 ) -> std::result::Result<(), String> {
-    let Some(meta) = meta else {
-        w.raw(b"null");
-        return Ok(());
-    };
-
-    let decoded_err = meta.err.as_ref();
-
-    w.raw(b"{\"err\":");
-    stream_optional_transaction_error(w, decoded_err)?;
-    w.raw(b",\"status\":");
-    stream_transaction_status(w, decoded_err)?;
-    w.raw(b",\"fee\":");
-    w.u64(meta.fee);
-    w.raw(b",\"preBalances\":");
-    w.u64_array(&meta.pre_balances);
-    w.raw(b",\"postBalances\":");
-    w.u64_array(&meta.post_balances);
-    w.raw(b",\"preTokenBalances\":");
-    stream_token_balances_value(w, resolver, &meta.pre_token_balances, false).await?;
-    w.raw(b",\"postTokenBalances\":");
-    stream_token_balances_value(w, resolver, &meta.post_token_balances, false).await?;
-    w.raw(b",\"logMessages\":");
-    stream_log_messages_value(w, resolver, meta.logs.as_ref()).await?;
-    w.raw(b",\"innerInstructions\":");
-    stream_inner_instructions_value(w, meta.inner_instructions.as_deref());
-    w.raw(b",\"loadedAddresses\":{\"writable\":");
-    stream_compact_pubkey_array_value(w, resolver, &meta.loaded_writable_addresses).await?;
-    w.raw(b",\"readonly\":");
-    stream_compact_pubkey_array_value(w, resolver, &meta.loaded_readonly_addresses).await?;
-    w.raw(b"}");
-    if let Some(return_data) = &meta.return_data {
-        w.raw(b",\"returnData\":");
-        stream_return_data_value(w, resolver, return_data).await?;
-    }
-    w.raw(b",\"rewards\":");
-    if include_rewards {
-        stream_compact_rewards_value(w, resolver, &meta.rewards).await?;
-    } else {
-        w.raw(b"null");
-    }
-    if let Some(value) = meta.compute_units_consumed {
-        w.raw(b",\"computeUnitsConsumed\":");
-        w.u64(value);
-    }
-    if let Some(value) = meta.cost_units {
-        w.raw(b",\"costUnits\":");
-        w.u64(value);
-    }
-    w.raw(b"}");
-    Ok(())
+    crate::metadata_json::stream_metadata_value(w, resolver, meta, include_rewards).await
 }
 
-async fn stream_return_data_value(
-    w: &mut JsonByteWriter,
-    resolver: &mut Resolver<'_>,
-    return_data: &CompactReturnData,
-) -> std::result::Result<(), String> {
-    w.raw(b"{\"programId\":");
-    stream_resolved_pubkey_value(w, resolver, return_data.program_id).await?;
-    w.raw(b",\"data\":[");
-    w.string(&BASE64.encode(&return_data.data))?;
-    w.raw(br#","base64"]}"#);
-    Ok(())
+impl crate::metadata_json::MetadataJsonWrite for JsonByteWriter {
+    fn raw(&mut self, bytes: &[u8]) {
+        self.write_raw(bytes);
+    }
+}
+
+impl crate::metadata_json::MetadataPubkeyResolver for Resolver<'_> {
+    async fn resolve_pubkey_bytes(
+        &mut self,
+        key: CompactPubkey,
+    ) -> std::result::Result<[u8; 32], String> {
+        Resolver::resolve_pubkey_bytes(self, key).await
+    }
 }
 
 async fn stream_account_metadata_value(
@@ -3877,23 +3830,6 @@ fn stream_ui_token_amount_value(
     w.raw(b",\"uiAmountString\":");
     w.string(&ui_amount_string(amount, decimals))?;
     w.raw(b"}");
-    Ok(())
-}
-
-async fn stream_log_messages_value(
-    w: &mut JsonByteWriter,
-    resolver: &mut Resolver<'_>,
-    logs: Option<&CompactLogStream>,
-) -> std::result::Result<(), String> {
-    let Some(logs) = logs else {
-        w.raw(b"null");
-        return Ok(());
-    };
-    if let Some(rendered) = render_logs_with_resolver(resolver, logs).await {
-        w.json(&rendered)?;
-    } else {
-        w.raw(b"[]");
-    }
     Ok(())
 }
 
@@ -4198,44 +4134,6 @@ fn nonce_action_name(
         NonceAction::Initialize => "Initialize",
         NonceAction::Authorize => "Authorize",
     }
-}
-
-fn stream_inner_instructions_value(
-    w: &mut JsonByteWriter,
-    inner_instructions: Option<&[CompactInnerInstructions]>,
-) {
-    let Some(inner_instructions) = inner_instructions else {
-        w.raw(b"null");
-        return;
-    };
-    w.raw(b"[");
-    for (index, group) in inner_instructions.iter().enumerate() {
-        if index > 0 {
-            w.raw(b",");
-        }
-        w.raw(b"{\"index\":");
-        w.u64(u64::from(group.index));
-        w.raw(b",\"instructions\":[");
-        for (instruction_index, instruction) in group.instructions.iter().enumerate() {
-            if instruction_index > 0 {
-                w.raw(b",");
-            }
-            w.raw(b"{\"programIdIndex\":");
-            w.u64(u64::from(instruction.program_id_index));
-            w.raw(b",\"accounts\":");
-            w.u8_array(&instruction.accounts);
-            w.raw(b",\"data\":");
-            let data = base58_bytes(&instruction.data);
-            w.raw(b"\"");
-            w.raw(data.as_bytes());
-            w.raw(b"\"");
-            w.raw(b",\"stackHeight\":");
-            w.option_u64(instruction.stack_height.map(u64::from));
-            w.raw(b"}");
-        }
-        w.raw(b"]}");
-    }
-    w.raw(b"]");
 }
 
 async fn stream_compact_rewards_value(
