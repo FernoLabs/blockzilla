@@ -1,10 +1,11 @@
 //! Write one `car_tx_metadata` row per Old Faithful CAR transaction.
 //!
-//! One thread reads the local CAR in file order and decodes transaction
-//! metadata with `transaction_metadata`. The JSON uses the same get-transaction
-//! field order as Compact V2 `stream_metadata_value`. The transaction message
-//! is not decoded. The table is created beforehand. This binary does not run
-//! `CREATE TABLE`.
+//! One thread reads the local CAR in file order. That thread keeps a single
+//! `Read` stream. Decode workers take each completed block, call
+//! `transaction_metadata`, and render JSON in the same get-transaction field
+//! order as Compact V2 `stream_metadata_value`. The transaction message is not
+//! decoded. Finished blocks are published in file order. The table is created
+//! beforehand. This binary does not run `CREATE TABLE`.
 //!
 //! Expected columns, in the database selected by `--database`:
 //!
@@ -18,12 +19,15 @@
 //! ORDER BY (slot, tx_index)
 //! ```
 
+use std::collections::HashMap;
 use std::fs::File;
 use std::io::{BufReader, Read};
 use std::num::NonZeroU32;
 use std::path::PathBuf;
 use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::mpsc::{Receiver, SyncSender, sync_channel};
 use std::sync::{Arc, Mutex};
+use std::thread;
 use std::time::{Duration, Instant};
 
 use anyhow::{Context, Result, bail};
@@ -43,6 +47,8 @@ const RETRY_INITIAL: Duration = Duration::from_millis(500);
 const RETRY_MAX: Duration = Duration::from_secs(15);
 const RETRY_HORIZON: Duration = Duration::from_secs(600);
 const DEFAULT_MAX_IN_FLIGHT: u64 = 128;
+/// Completed blocks retained per decode worker before the reader waits.
+const BLOCKS_IN_FLIGHT_PER_WORKER: usize = 4;
 
 #[derive(Parser, Debug)]
 #[command(
@@ -56,6 +62,13 @@ struct Args {
     /// Read at most this many blocks. Omit to scan the file.
     #[arg(long)]
     max_blocks: Option<NonZeroU32>,
+    /// Decode workers (1 through 64).
+    #[arg(
+        long,
+        default_value_t = 4,
+        value_parser = clap::value_parser!(u16).range(1..=64)
+    )]
+    threads: u16,
     /// ClickHouse HTTP URL. User and password may be included.
     #[arg(long)]
     clickhouse_dsn: String,
@@ -123,8 +136,9 @@ struct ScanSummary {
 }
 
 fn scan(args: &Args, sink: &mut MetadataSink) -> Result<ScanSummary> {
+    let threads = usize::from(args.threads);
     eprintln!(
-        "source={} batch_rows={} max_in_flight={}",
+        "source={} decode_workers={threads} batch_rows={} max_in_flight={}",
         args.input.display(),
         args.batch_rows,
         args.max_in_flight
@@ -135,21 +149,160 @@ fn scan(args: &Args, sink: &mut MetadataSink) -> Result<ScanSummary> {
     if is_zstd(&args.input) {
         let decoder = zstd::Decoder::with_buffer(file)
             .with_context(|| format!("Cannot decompress {}", args.input.display()))?;
-        scan_reader(decoder, args.max_blocks, sink)
+        scan_reader(decoder, args.max_blocks, threads, sink)
     } else {
-        scan_reader(file, args.max_blocks, sink)
+        scan_reader(file, args.max_blocks, threads, sink)
     }
 }
 
-fn scan_reader<R: Read>(
+fn scan_reader<R: Read + Send>(
     reader: R,
     max_blocks: Option<NonZeroU32>,
+    threads: usize,
     sink: &mut MetadataSink,
 ) -> Result<ScanSummary> {
+    let threads = threads.max(1);
+    let in_flight = threads.saturating_mul(BLOCKS_IN_FLIGHT_PER_WORKER);
+    let (recycle_tx, recycle_rx) = sync_channel(in_flight);
+    for _ in 0..in_flight {
+        recycle_tx
+            .send(CarBlockGroup::without_rewards())
+            .expect("block pool has room for its initial groups");
+    }
+    let (job_tx, job_rx) = sync_channel(in_flight);
+    let (result_tx, result_rx) = sync_channel(in_flight);
+    let jobs = Arc::new(Mutex::new(job_rx));
+
+    let (published, sent) = thread::scope(|scope| {
+        let read_handle = scope.spawn(move || read_blocks(reader, max_blocks, job_tx, recycle_rx));
+        for _ in 0..threads {
+            let jobs = Arc::clone(&jobs);
+            let results = result_tx.clone();
+            let recycle = recycle_tx.clone();
+            scope.spawn(move || decode_worker(jobs, results, recycle));
+        }
+        drop(result_tx);
+        drop(recycle_tx);
+        let published = publish_decoded(result_rx, sink);
+        let sent = read_handle
+            .join()
+            .unwrap_or_else(|_| Err(anyhow::anyhow!("CAR read thread panicked")));
+        (published, sent)
+    });
+
+    match (published, sent) {
+        (Err(error), _) => Err(error),
+        (Ok(_), Err(error)) => Err(error),
+        (Ok(summary), Ok(sent)) => {
+            if summary.blocks != sent {
+                bail!("published {} blocks but the reader queued {sent}", summary.blocks);
+            }
+            Ok(summary)
+        }
+    }
+}
+
+struct BlockJob {
+    seq: u64,
+    group: CarBlockGroup,
+}
+
+struct DecodedBlock {
+    seq: u64,
+    slot: u64,
+    rows: Vec<TxMetadataRow>,
+}
+
+fn read_blocks<R: Read>(
+    reader: R,
+    max_blocks: Option<NonZeroU32>,
+    jobs: SyncSender<BlockJob>,
+    groups: Receiver<CarBlockGroup>,
+) -> Result<u64> {
     let limit = max_blocks.map(|value| u64::from(value.get()));
     let mut car = CarBlockReader::with_capacity(reader, CAR_BUF);
     car.skip_header().context("Cannot skip the CAR header")?;
-    let mut group = CarBlockGroup::without_rewards();
+    let mut sent = 0u64;
+    loop {
+        if limit.is_some_and(|limit| sent >= limit) {
+            break;
+        }
+        let Ok(mut group) = groups.recv() else {
+            return Ok(sent);
+        };
+        let produced = car
+            .read_until_block_into(&mut group)
+            .context("Cannot read the next CAR block")?;
+        if !produced {
+            break;
+        }
+        if jobs.send(BlockJob { seq: sent, group }).is_err() {
+            return Ok(sent);
+        }
+        sent += 1;
+    }
+    Ok(sent)
+}
+
+fn decode_worker(
+    jobs: Arc<Mutex<Receiver<BlockJob>>>,
+    results: SyncSender<Result<DecodedBlock>>,
+    groups: SyncSender<CarBlockGroup>,
+) {
+    loop {
+        let job = {
+            let guard = jobs.lock().unwrap_or_else(|error| error.into_inner());
+            guard.recv()
+        };
+        let Ok(mut job) = job else {
+            return;
+        };
+        let decoded = decode_group(job.seq, &mut job.group);
+        job.group.clear();
+        let _ = groups.send(job.group);
+        if results.send(decoded).is_err() {
+            return;
+        }
+    }
+}
+
+fn decode_group(seq: u64, group: &mut CarBlockGroup) -> Result<DecodedBlock> {
+    let slot = group.slot.context("CAR block has no slot")?;
+    let mut metadata = group.transaction_metadata();
+    let mut rows = Vec::new();
+    let mut position = 0u32;
+    while let Some(tx) = metadata
+        .next_metadata()
+        .with_context(|| format!("slot {slot} metadata decode failed"))?
+    {
+        if tx.slot != slot {
+            bail!(
+                "transaction {position} slot {} differs from block slot {slot}",
+                tx.slot
+            );
+        }
+        let tx_index = canonical_tx_index(position, tx.index)
+            .with_context(|| format!("slot {slot} transaction {position}"))?;
+        let rendered = render_metadata(tx.metadata)
+            .with_context(|| format!("slot {slot} transaction {tx_index}"))?;
+        rows.push(TxMetadataRow {
+            slot,
+            tx_index,
+            metadata: rendered,
+        });
+        position = position
+            .checked_add(1)
+            .context("transaction position exceeds u32")?;
+    }
+    Ok(DecodedBlock { seq, slot, rows })
+}
+
+fn publish_decoded(
+    results: Receiver<Result<DecodedBlock>>,
+    sink: &mut MetadataSink,
+) -> Result<ScanSummary> {
+    let mut pending = HashMap::new();
+    let mut next = 0u64;
     let mut blocks = 0u64;
     let mut transactions = 0u64;
     let mut with_metadata = 0u64;
@@ -159,68 +312,38 @@ fn scan_reader<R: Read>(
     let mut mark_blocks = 0u64;
     let mut mark_transactions = 0u64;
 
-    loop {
-        if limit.is_some_and(|limit| blocks >= limit) {
-            break;
-        }
-        let produced = car
-            .read_until_block_into(&mut group)
-            .context("Cannot read the next CAR block")?;
-        if !produced {
-            break;
-        }
-        let slot = group
-            .slot
-            .context("CAR block has no slot")?;
-        if first_slot.is_none() {
-            first_slot = Some(slot);
-        }
-        last_slot = slot;
-        blocks += 1;
-
-        let mut metadata = group.transaction_metadata();
-        let mut position = 0u32;
-        while let Some(tx) = metadata
-            .next_metadata()
-            .with_context(|| format!("slot {slot} metadata decode failed"))?
-        {
-            if tx.slot != slot {
-                bail!(
-                    "transaction {position} slot {} differs from block slot {slot}",
-                    tx.slot
+    while let Ok(block) = results.recv() {
+        let block = block?;
+        pending.insert(block.seq, block);
+        for block in drain_ready(&mut pending, &mut next) {
+            if first_slot.is_none() {
+                first_slot = Some(block.slot);
+            }
+            last_slot = block.slot;
+            blocks += 1;
+            for row in block.rows {
+                if row.metadata != "null" {
+                    with_metadata += 1;
+                }
+                transactions += 1;
+                sink.queue(row)?;
+            }
+            if blocks % 10_000 == 0 {
+                let window = mark.elapsed().as_secs_f64().max(1e-9);
+                let blocks_per_sec = (blocks - mark_blocks) as f64 / window;
+                let tx_per_sec = (transactions - mark_transactions) as f64 / window;
+                eprintln!(
+                    "blocks={blocks} slot={last_slot} transactions={transactions} blocks_per_sec={blocks_per_sec:.1} tx_per_sec={tx_per_sec:.0}"
                 );
+                mark = Instant::now();
+                mark_blocks = blocks;
+                mark_transactions = transactions;
             }
-            let tx_index = canonical_tx_index(position, tx.index)
-                .with_context(|| format!("slot {slot} transaction {position}"))?;
-            let rendered = render_metadata(tx.metadata)
-                .with_context(|| format!("slot {slot} transaction {tx_index}"))?;
-            if rendered != "null" {
-                with_metadata += 1;
-            }
-            transactions += 1;
-            sink.queue(TxMetadataRow {
-                slot,
-                tx_index,
-                metadata: rendered,
-            })?;
-            position = position
-                .checked_add(1)
-                .context("transaction position exceeds u32")?;
-        }
-
-        if blocks % 10_000 == 0 {
-            let window = mark.elapsed().as_secs_f64().max(1e-9);
-            let blocks_per_sec = (blocks - mark_blocks) as f64 / window;
-            let tx_per_sec = (transactions - mark_transactions) as f64 / window;
-            eprintln!(
-                "blocks={blocks} slot={last_slot} transactions={transactions} blocks_per_sec={blocks_per_sec:.1} tx_per_sec={tx_per_sec:.0}"
-            );
-            mark = Instant::now();
-            mark_blocks = blocks;
-            mark_transactions = transactions;
         }
     }
-
+    if !pending.is_empty() {
+        bail!("decode workers stopped before block {next}");
+    }
     Ok(ScanSummary {
         blocks,
         transactions,
@@ -228,6 +351,15 @@ fn scan_reader<R: Read>(
         first_slot: first_slot.unwrap_or(0),
         last_slot,
     })
+}
+
+fn drain_ready<T>(pending: &mut HashMap<u64, T>, next: &mut u64) -> Vec<T> {
+    let mut ready = Vec::new();
+    while let Some(item) = pending.remove(next) {
+        ready.push(item);
+        *next += 1;
+    }
+    ready
 }
 
 fn canonical_tx_index(position: u32, declared: Option<u64>) -> Result<u32> {
@@ -1104,6 +1236,17 @@ mod tests {
         let json = render_metadata(Some(&meta)).unwrap();
         assert!(json.contains(r#""logMessages":["Log truncated"]"#));
         assert!(!json.contains(&"x".repeat(20)));
+    }
+
+    #[test]
+    fn ready_blocks_publish_in_file_order() {
+        let mut pending = HashMap::from([(2u64, "c"), (0, "a")]);
+        let mut next = 0u64;
+        assert_eq!(drain_ready(&mut pending, &mut next), vec!["a"]);
+        pending.insert(1, "b");
+        assert_eq!(drain_ready(&mut pending, &mut next), vec!["b", "c"]);
+        assert_eq!(next, 3);
+        assert!(pending.is_empty());
     }
 
     #[test]
