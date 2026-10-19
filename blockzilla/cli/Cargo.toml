@@ -49,6 +49,10 @@ name = "archive-v2-metadata"
 path = "src/bin/archive_v2_metadata.rs"
 
 [[bin]]
+name = "car-tx-metadata"
+path = "src/bin/car_tx_metadata.rs"
+
+[[bin]]
 name = "car-log-audit"
 path = "src/bin/car_log_audit.rs"
 required-features = ["diagnostic-tools"]
