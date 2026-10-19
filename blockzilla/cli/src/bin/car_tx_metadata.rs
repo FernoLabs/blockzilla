@@ -308,9 +308,38 @@ fn decode_error(
     if err.err.is_empty() {
         return Ok(None);
     }
-    wincode::deserialize_exact::<StoredTransactionError>(&err.err)
-        .context("transaction error payload is not exact stored-error bytes")
-        .map(Some)
+    match wincode::deserialize_exact::<StoredTransactionError>(&err.err) {
+        Ok(decoded) => Ok(Some(decoded)),
+        Err(decode_err) => decode_legacy_unit_borsh_io_error(&err.err)
+            .map(Some)
+            .ok_or(decode_err)
+            .context(format!(
+                "transaction error payload is not exact stored-error bytes (len={})",
+                err.err.len()
+            )),
+    }
+}
+
+/// Old archives encode `BorshIoError` as a unit variant: nine bytes, no string.
+/// The JSON is the same string `"BorshIoError"` as the current stored form.
+fn decode_legacy_unit_borsh_io_error(bytes: &[u8]) -> Option<StoredTransactionError> {
+    const TRANSACTION_ERROR_INSTRUCTION_ERROR: u32 = 8;
+    const INSTRUCTION_ERROR_BORSH_IO_ERROR: u32 = 44;
+
+    if bytes.len() != 9 {
+        return None;
+    }
+    let transaction_error_tag = u32::from_le_bytes(bytes[0..4].try_into().ok()?);
+    let instruction_error_tag = u32::from_le_bytes(bytes[5..9].try_into().ok()?);
+    if transaction_error_tag != TRANSACTION_ERROR_INSTRUCTION_ERROR
+        || instruction_error_tag != INSTRUCTION_ERROR_BORSH_IO_ERROR
+    {
+        return None;
+    }
+    Some(StoredTransactionError::InstructionError(
+        bytes[4],
+        InstructionError::BorshIoError(String::new()),
+    ))
 }
 
 fn write_optional_error<W: MetadataJsonWrite>(
@@ -1035,6 +1064,30 @@ mod tests {
         assert!(json.contains(r#""commission":null"#));
         assert!(json.contains(r#""computeUnitsConsumed":2100"#));
         assert!(json.contains(r#""costUnits":3428"#));
+    }
+
+    #[test]
+    fn legacy_unit_borsh_io_error_matches_get_transaction_text() {
+        let meta = TransactionStatusMeta {
+            err: Some(of_car_reader::confirmed_block::TransactionError {
+                err: vec![8, 0, 0, 0, 2, 44, 0, 0, 0],
+            }),
+            ..TransactionStatusMeta::default()
+        };
+        let json = render_metadata(Some(&meta)).unwrap();
+        assert!(json.contains(r#""err":{"InstructionError":[2,"BorshIoError"]}"#));
+        assert!(json.contains(r#""status":{"Err":{"InstructionError":[2,"BorshIoError"]}}"#));
+    }
+
+    #[test]
+    fn malformed_stored_error_still_fails() {
+        let meta = TransactionStatusMeta {
+            err: Some(of_car_reader::confirmed_block::TransactionError {
+                err: vec![8, 0, 0, 0, 2, 44, 0, 0],
+            }),
+            ..TransactionStatusMeta::default()
+        };
+        assert!(render_metadata(Some(&meta)).is_err());
     }
 
     #[test]
