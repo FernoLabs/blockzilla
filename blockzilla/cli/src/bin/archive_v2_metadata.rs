@@ -5,6 +5,7 @@
 //! balances, fees, log lines, and base58 addresses. The `CompactMetaV1` is
 //! dropped before the ordered window publishes the row. The table is created
 //! beforehand. This binary does not run `CREATE TABLE`.
+//! `--clickhouse false` still builds every JSON row, then drops it.
 //!
 //! Expected columns, in database `blockzilla`:
 //!
@@ -28,6 +29,7 @@ use std::task::{Context as TaskContext, Poll};
 use std::time::{Duration, Instant};
 
 use anyhow::{Context, Result, bail};
+use clap::ArgAction;
 use blockzilla_archive_v2::{
     ARCHIVE_V2_GENESIS_BIN_FILE, ARCHIVE_V2_PUBKEY_REGISTRY_FILE, ARCHIVE_V2_TX_FLAG_HAS_METADATA,
     ARCHIVE_V2_TX_FLAG_METADATA_RAW_FALLBACK, ArchiveV2HotTxRow,
@@ -81,12 +83,17 @@ struct Args {
     /// Read at most this many block rows. Omit to scan the epoch.
     #[arg(long)]
     max_blocks: Option<NonZeroU32>,
+    /// Insert the JSON rows into ClickHouse.
+    ///
+    /// Pass false to build every row and drop it before the insert.
+    #[arg(long, default_value_t = true, action = ArgAction::Set)]
+    clickhouse: bool,
     /// ClickHouse HTTP URL. User and password may be included.
-    #[arg(long)]
-    clickhouse_dsn: String,
+    #[arg(long, required_if_eq("clickhouse", "true"))]
+    clickhouse_dsn: Option<String>,
     /// Database that receives `archive_v2_tx_metadata`.
-    #[arg(long)]
-    database: String,
+    #[arg(long, required_if_eq("clickhouse", "true"))]
+    database: Option<String>,
     /// Rows per ClickHouse insert. One full batch is one HTTP request.
     #[arg(long, default_value_t = 1000)]
     batch_rows: usize,
@@ -100,12 +107,7 @@ struct Args {
 
 fn main() -> Result<()> {
     let args = Args::parse();
-    let mut sink = MetadataSink::connect(
-        &args.clickhouse_dsn,
-        &args.database,
-        args.batch_rows,
-        args.max_in_flight,
-    )?;
+    let mut sink = MetadataSink::connect(&args)?;
     let workers = std::thread::available_parallelism()
         .map(|count| count.get())
         .unwrap_or(2)
@@ -128,8 +130,10 @@ fn main() -> Result<()> {
         (Ok(summary), Ok(written)) => {
             let elapsed = started.elapsed().as_secs_f64().max(1e-9);
             eprintln!(
-                "database={} table={TABLE} blocks={} rows={written} transactions={} with_metadata={} without_metadata={} first_slot={} last_slot={} elapsed={elapsed:.1}s",
-                args.database,
+                "clickhouse={} database={} table={} blocks={} rows={written} transactions={} with_metadata={} without_metadata={} first_slot={} last_slot={} elapsed={elapsed:.1}s",
+                args.clickhouse,
+                args.database.as_deref().unwrap_or("-"),
+                if args.clickhouse { TABLE } else { "-" },
                 summary.blocks,
                 summary.transactions,
                 summary.with_metadata,
@@ -237,10 +241,16 @@ fn scan<S: RangeSource>(
         None => block_count,
     };
     let threads = usize::from(args.threads);
-    eprintln!(
-        "Scanning {end} blocks with {threads} decode workers into {TABLE}, batch_rows={}, max_in_flight={}",
-        args.batch_rows, args.max_in_flight
-    );
+    if args.clickhouse {
+        eprintln!(
+            "Scanning {end} blocks with {threads} decode workers into {TABLE}, batch_rows={}, max_in_flight={}",
+            args.batch_rows, args.max_in_flight
+        );
+    } else {
+        eprintln!(
+            "Scanning {end} blocks with {threads} decode workers, ClickHouse writes disabled"
+        );
+    }
 
     let mut blocks = 0u64;
     let mut transactions = 0u64;
@@ -545,11 +555,16 @@ struct TxMetadataRow {
 }
 
 struct MetadataSink {
-    client: clickhouse::Client,
+    mode: SinkMode,
     pending: Vec<TxMetadataRow>,
     batch_rows: usize,
     max_in_flight: u64,
     writes: Arc<WriteState>,
+}
+
+enum SinkMode {
+    ClickHouse(clickhouse::Client),
+    Discard,
 }
 
 struct WriteState {
@@ -580,7 +595,17 @@ struct ClickHouseEndpoint {
 }
 
 impl MetadataSink {
-    fn connect(dsn: &str, database: &str, batch_rows: usize, max_in_flight: u64) -> Result<Self> {
+    fn connect(args: &Args) -> Result<Self> {
+        if !args.clickhouse {
+            eprintln!("ClickHouse writes disabled; decoded rows are discarded");
+            return Ok(Self::discard());
+        }
+        let database = args.database.as_deref().context(
+            "pass --database, or --clickhouse false to decode without inserting",
+        )?;
+        let dsn = args.clickhouse_dsn.as_deref().context(
+            "pass --clickhouse-dsn, or --clickhouse false to decode without inserting",
+        )?;
         check_identifier("database", database)?;
         check_identifier("table", TABLE)?;
         let endpoint = split_clickhouse_dsn(dsn)?;
@@ -596,10 +621,10 @@ impl MetadataSink {
             client = client.with_password(password);
         }
         Ok(Self {
-            client,
-            pending: Vec::with_capacity(batch_rows.max(1)),
-            batch_rows: batch_rows.max(1),
-            max_in_flight: max_in_flight.max(1),
+            mode: SinkMode::ClickHouse(client),
+            pending: Vec::with_capacity(args.batch_rows.max(1)),
+            batch_rows: args.batch_rows.max(1),
+            max_in_flight: args.max_in_flight.max(1),
             writes: Arc::new(WriteState {
                 in_flight: AtomicU64::new(0),
                 written: AtomicU64::new(0),
@@ -608,7 +633,26 @@ impl MetadataSink {
         })
     }
 
+    fn discard() -> Self {
+        Self {
+            mode: SinkMode::Discard,
+            pending: Vec::new(),
+            batch_rows: 1,
+            max_in_flight: 1,
+            writes: Arc::new(WriteState {
+                in_flight: AtomicU64::new(0),
+                written: AtomicU64::new(0),
+                failed: Mutex::new(None),
+            }),
+        }
+    }
+
     fn queue(&mut self, row: TxMetadataRow) -> Result<()> {
+        if matches!(self.mode, SinkMode::Discard) {
+            self.writes.written.fetch_add(1, Ordering::SeqCst);
+            drop(row);
+            return Ok(());
+        }
         self.raise_background_error()?;
         self.pending.push(row);
         if self.pending.len() >= self.batch_rows {
@@ -618,6 +662,9 @@ impl MetadataSink {
     }
 
     async fn finish(&mut self) -> Result<u64> {
+        if matches!(self.mode, SinkMode::Discard) {
+            return Ok(self.writes.written.load(Ordering::SeqCst));
+        }
         if !self.pending.is_empty() {
             self.spawn_batch()?;
         }
@@ -640,10 +687,13 @@ impl MetadataSink {
             self.raise_background_error()?;
             std::thread::sleep(Duration::from_millis(1));
         }
+        let SinkMode::ClickHouse(client) = &self.mode else {
+            return Ok(());
+        };
+        let client = client.clone();
         let rows = std::mem::take(&mut self.pending);
         self.pending.reserve(self.batch_rows);
         let row_count = rows.len() as u64;
-        let client = self.client.clone();
         let writes = Arc::clone(&self.writes);
         let guard = InFlightGuard::begin(&writes);
         tokio::spawn(async move {
@@ -931,6 +981,26 @@ mod tests {
         assert_eq!(TABLE, "archive_v2_tx_metadata");
         assert!(check_identifier("table", TABLE).is_ok());
         assert!(check_identifier("table", "archive-v2").is_err());
+    }
+
+    #[test]
+    fn discard_mode_drops_each_row() {
+        let mut sink = MetadataSink::discard();
+        sink.queue(TxMetadataRow {
+            slot: 1,
+            tx_index: 0,
+            metadata: "x".repeat(64),
+        })
+        .unwrap();
+        sink.queue(TxMetadataRow {
+            slot: 1,
+            tx_index: 1,
+            metadata: "null".to_string(),
+        })
+        .unwrap();
+        assert!(sink.pending.is_empty());
+        assert!(matches!(sink.mode, SinkMode::Discard));
+        assert_eq!(sink.writes.written.load(Ordering::SeqCst), 2);
     }
 
     #[test]
