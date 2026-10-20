@@ -1,0 +1,935 @@
+{
+  "schema": "blockzilla-compact-v2-readonly-status-v1",
+  "checked_date": "2026-10-16",
+  "display_timezone": "Europe/Paris",
+  "latest_check_local": "2026-10-16T12:46:20+02:00",
+  "host": "Megaloadon / Foundation",
+  "production_changes": false,
+  "conclusion": {
+    "live_compact_v2": "Healthy in the finite checks. The confirmed head and cloud publisher advanced.",
+    "full_native_epoch": "Epoch 1057 has complete rooted block coverage and uploaded native compact/custody data.",
+    "standalone_query_archive": "The main Compact V2 query archive prefix for epoch 1057 is empty.",
+    "current_cold_storage": "Active but stalled. No banks have been archived or retired from the current source."
+  },
+  "live": {
+    "snapshot": {
+      "utc": "2026-10-16T10:44:54Z",
+      "heartbeat": {
+        "schema": "blockzilla-foundation-heartbeat-v1",
+        "machine_id": "foundation",
+        "sampled_unix_ms": 1792147494471,
+        "monotonic_ms": 1438640391,
+        "boot_id": "5caa7ddd-4731-4b83-8233-6b3c6a2e203d",
+        "free_disk_bytes": 1457818955776,
+        "capture_reserve_bytes": 429496729600,
+        "mem_available_bytes": 984046661632,
+        "capture": {
+          "session": "000000000000000018deede1d641da13-275b05",
+          "state": "CAPTURING",
+          "durable_sequence": 153048281,
+          "latest_rooted_slot": 457608706,
+          "updated_unix_ms": null
+        },
+        "compact": {
+          "state": "RUNNING",
+          "last_compact_slot": 457608736,
+          "event_sequence": 150744,
+          "source_sequence": 153047037,
+          "updated_unix_ms": 1792147494460
+        },
+        "publisher": {
+          "state": "RUNNING",
+          "sequence": 150632,
+          "updated_unix_ms": 1792147492645
+        },
+        "cold_storage": {
+          "state": "RUNNING",
+          "retired_banks": 0,
+          "updated_unix_ms": 1792147487734
+        },
+        "services": {
+          "hivezilla-validator.service": "active",
+          "hivezilla-direct-worker.service": "active",
+          "hivezilla-bank-v2-producer.service": "active",
+          "hivezilla-bank-v2-r2-publisher.service": "active",
+          "hivezilla-native-cold-storage-20261012-live.service": "active",
+          "hivezilla-live-priority-20261012.service": "active"
+        },
+        "rpc": {
+          "healthy": true,
+          "finalized_slot": 457608706
+        },
+        "errors": [],
+        "archive": {
+          "state": "COMPLETE",
+          "epoch": 1054,
+          "updated_unix_ms": 1792147494471,
+          "stage_updated_unix_ms": 1791888439162,
+          "progress_updated_unix_ms": null,
+          "progress_percent": null,
+          "bytes_per_second": null,
+          "eta_seconds": null,
+          "eta_scope": null,
+          "paused": false,
+          "epoch_eta_min_seconds": null,
+          "epoch_eta_max_seconds": null,
+          "queue_eta_min_seconds": null,
+          "queue_eta_max_seconds": null,
+          "last_completed_epoch": 1054,
+          "last_compact_bytes": 122250037731,
+          "completed_epochs": [
+            1048,
+            1049,
+            1050,
+            1051,
+            1052,
+            1053,
+            1054
+          ],
+          "upload_queue_epochs": []
+        }
+      },
+      "current_processed_cloud_checkpoint": {
+        "schema": "blockzilla-native-publisher-checkpoint-v1",
+        "source": "/home/ubuntu/live/hivezilla-validator-20260930/compact/direct-agave-processed-live/000000000000000018deede1d641da13-275b05",
+        "namespace": "57f6beef58f71b68ac430120437e79363e65aba88ccb6536e805e1351d10f135",
+        "prefix": "native-stream/processed/direct-agave-live-v1/000000000000000018deede1d641da13-275b05",
+        "session": "000000000000000018deede1d641da13-275b05",
+        "publisher_id": "5c1a1c73ebf3b8e3b82a7b5c4f5f7837db5821d5371fe50bf99ae2ff9e67cf49",
+        "start_slot": 1,
+        "sequence": 150632,
+        "last_first_slot": 150632,
+        "cursor": "000000000000000018deede1d641da13-275b05:p150632:60d1b1a44a39341d5eb605b0f1199f34413f9dc04c1ec6b773649bacdccc2f2d",
+        "blocks": 75334,
+        "bytes": 32218596338
+      },
+      "validator_pid": 2579205
+    },
+    "public_v2": {
+      "utc": "2026-10-16T10:41:11Z",
+      "source": {
+        "genesis_hash": "5eykt4UsFv8P8NJdTREpY1vzqKqZKvdpKuc147dw2N9d",
+        "node_identity": "J7qpvCEWhdBgPdYRV3s3btWPrRVXa2qnAzgvxWTvtbrQ",
+        "agave_revision": "d688dd0e3a576b048a848e5faf2e8d277f8feb6e",
+        "session_id": "000000000000000018deede1d641da13-275b05"
+      },
+      "v2_before": {
+        "status": "live",
+        "confirmed_slot": 457607677,
+        "source_lag_ms": 854,
+        "cursor": "000000000000000018deede1d641da13-275b05:p222951:5be31a8ab2f6a2015fe7dc278b2ffa563af5e35e0238ae11f028d7dab1eb0538"
+      },
+      "v2_after": {
+        "status": "live",
+        "confirmed_slot": 457607703,
+        "source_lag_ms": 787,
+        "cursor": "000000000000000018deede1d641da13-275b05:p223029:c00e2d6b4a5a16b7371508d8c0feffe25f72c6bce4eaba494a047131c9e801d0"
+      },
+      "confirmed_slot_advanced": true,
+      "payload": {
+        "http_status": 200,
+        "content_type": "application/vnd.blockzilla.stream.v2",
+        "bytes": 385003,
+        "sha256": "4e5193a4b9110098e318320754850152d0cf3352670f0f0431550383e8c217ff",
+        "digest_verified": true,
+        "source_and_confirmed_bank_match": true,
+        "all_object_hashes_verified": true,
+        "objects": 12,
+        "slot": 457607677
+      }
+    },
+    "checks": {
+      "required_services_active": true,
+      "heartbeat_errors": [],
+      "rooted_compact_slot_lag": 0,
+      "cloud_event_queue": 112,
+      "confirmed_slot_advanced": true,
+      "sample_payload_hashes_pass": true
+    }
+  },
+  "bucket": {
+    "name": "solana-archive-data",
+    "metadata_access_http_status": 200,
+    "root_prefixes": [
+      "compact-v2/",
+      "native-backup/",
+      "native-custody/",
+      "native-stream/"
+    ],
+    "capacity_fault_observed": false,
+    "data_storage_per_bucket_limit": "Unlimited",
+    "objects_per_bucket_limit": "Unlimited",
+    "official_limits_url": "https://developers.cloudflare.com/r2/platform/limits/",
+    "total_current_bucket_bytes": null,
+    "metrics_limit": "The existing token cannot read this Foundation account's storage metrics. No full bucket object scan was made.",
+    "note": "The R2 storage limit does not exclude account restrictions or individual upload failures. The active stream publisher advanced during this check."
+  },
+  "car_query_archives": {
+    "completed_epochs_from": 0,
+    "completed_epochs_through": 1054,
+    "initial_batch_epochs_0_through_1047_selected_bytes": 92898238532602,
+    "recent_batch": {
+      "utc": "2026-10-16T10:44:05Z",
+      "car_backfill_completed": [
+        {
+          "epoch": 1048,
+          "bytes": 112620833984,
+          "files": null,
+          "destination": "foundation:solana-archive-data/compact-v2/blockzilla-20261004/epoch-1048",
+          "schema": "blockzilla-stored-compact-backup-v1",
+          "upload_profile": "query-with-signatures",
+          "completed_unix_seconds": 1791844867,
+          "remote_file_sizes_verified": true
+        },
+        {
+          "epoch": 1049,
+          "bytes": 116032745925,
+          "files": null,
+          "destination": "foundation:solana-archive-data/compact-v2/blockzilla-20261004/epoch-1049",
+          "schema": "blockzilla-stored-compact-backup-v1",
+          "upload_profile": "query-with-signatures",
+          "completed_unix_seconds": 1791852321,
+          "remote_file_sizes_verified": true
+        },
+        {
+          "epoch": 1050,
+          "bytes": 127286509165,
+          "files": null,
+          "destination": "foundation:solana-archive-data/compact-v2/blockzilla-20261004/epoch-1050",
+          "schema": "blockzilla-stored-compact-backup-v1",
+          "upload_profile": "query-with-signatures",
+          "completed_unix_seconds": 1791860941,
+          "remote_file_sizes_verified": true
+        },
+        {
+          "epoch": 1051,
+          "bytes": 123847304697,
+          "files": null,
+          "destination": "foundation:solana-archive-data/compact-v2/blockzilla-20261004/epoch-1051",
+          "schema": "blockzilla-stored-compact-backup-v1",
+          "upload_profile": "query-with-signatures",
+          "completed_unix_seconds": 1791868569,
+          "remote_file_sizes_verified": true
+        },
+        {
+          "epoch": 1052,
+          "bytes": 120118719277,
+          "files": null,
+          "destination": "foundation:solana-archive-data/compact-v2/blockzilla-20261004/epoch-1052",
+          "schema": "blockzilla-stored-compact-backup-v1",
+          "upload_profile": "query-with-signatures",
+          "completed_unix_seconds": 1791875817,
+          "remote_file_sizes_verified": true
+        },
+        {
+          "epoch": 1053,
+          "bytes": 99672115118,
+          "files": null,
+          "destination": "foundation:solana-archive-data/compact-v2/blockzilla-20261004/epoch-1053",
+          "schema": "blockzilla-stored-compact-backup-v1",
+          "upload_profile": "query-with-signatures",
+          "completed_unix_seconds": 1791882217,
+          "remote_file_sizes_verified": true
+        },
+        {
+          "epoch": 1054,
+          "bytes": 122250037731,
+          "files": null,
+          "destination": "foundation:solana-archive-data/compact-v2/blockzilla-20261004/epoch-1054",
+          "schema": "blockzilla-stored-compact-backup-v1",
+          "upload_profile": "query-with-signatures",
+          "completed_unix_seconds": 1791888398,
+          "remote_file_sizes_verified": true
+        }
+      ],
+      "selected_bytes": 821828265897
+    },
+    "completed_selected_query_bytes": 93720066798499,
+    "queue_empty": true,
+    "note": "These archives came from CAR inputs. The byte total is the selected completed query data, not total bucket usage. Completion receipts check selected object sizes and the final manifest; they do not record a full payload readback."
+  },
+  "native_epoch_1057": {
+    "epoch": 1057,
+    "source": "000000000000000018de229d3fc8a9d9-275b05",
+    "slot_start": 456624000,
+    "slot_end_exclusive": 457056000,
+    "rooted": {
+      "blocks": 431601,
+      "min_slot": 456624000,
+      "max_slot": 457055999
+    },
+    "cold_custody": {
+      "banks": 431601,
+      "min_slot": 456624000,
+      "max_slot": 457055999,
+      "retired_banks": 431601
+    },
+    "rooted_missing_cold": 0,
+    "cold_extra": 0,
+    "rooted_missing_uploaded_block": 0,
+    "uploaded_processed_candidates": 431623,
+    "independent_finalized_slot_coverage": {
+      "utc": "2026-10-16T10:42:17Z",
+      "endpoint": "https://api.mainnet-beta.solana.com",
+      "method": "getBlocks",
+      "commitment": "finalized",
+      "start_slot": 456624000,
+      "end_slot_inclusive": 457055999,
+      "requested_slots": 432000,
+      "http_status": 200,
+      "response_bytes": 4316046,
+      "response_sha256": "6405e88656841520f46679a9d6923af1b2dfcfac210b85b36b79be57172924f6",
+      "produced_blocks": 431601,
+      "first_slot": 456624000,
+      "last_slot": 457055999,
+      "produced_slot_list_sha256": "54de45af6a981af945653c143625a1e7d678399cc52ad2e157eb4ec670188ed2",
+      "native_compare": {
+        "native_rooted_rows": 431601,
+        "native_unique_slots": 431601,
+        "missing_count": 0,
+        "extra_count": 0,
+        "missing_first20": [],
+        "extra_first20": [],
+        "exact_slot_coverage_match": true
+      }
+    },
+    "parent_chain": {
+      "checked_epoch_blocks": 431601,
+      "checked_predecessor_and_successor": [
+        {
+          "bank_id": 123548,
+          "blockhash": [
+            239,
+            95,
+            72,
+            34,
+            55,
+            217,
+            108,
+            27,
+            80,
+            11,
+            74,
+            22,
+            33,
+            13,
+            250,
+            242,
+            192,
+            195,
+            183,
+            200,
+            220,
+            41,
+            217,
+            206,
+            3,
+            144,
+            149,
+            43,
+            196,
+            108,
+            231,
+            145
+          ],
+          "parent_blockhash": [
+            66,
+            33,
+            59,
+            6,
+            114,
+            191,
+            35,
+            15,
+            203,
+            124,
+            42,
+            71,
+            148,
+            242,
+            29,
+            237,
+            111,
+            148,
+            109,
+            151,
+            39,
+            84,
+            183,
+            181,
+            207,
+            236,
+            83,
+            22,
+            161,
+            50,
+            137,
+            224
+          ],
+          "parent_slot": 456623998,
+          "slot": 456623999
+        },
+        {
+          "bank_id": 555174,
+          "blockhash": [
+            145,
+            58,
+            73,
+            20,
+            162,
+            76,
+            236,
+            69,
+            69,
+            120,
+            159,
+            142,
+            22,
+            118,
+            175,
+            22,
+            170,
+            120,
+            238,
+            233,
+            36,
+            84,
+            30,
+            190,
+            202,
+            227,
+            51,
+            48,
+            94,
+            19,
+            132,
+            210
+          ],
+          "parent_blockhash": [
+            61,
+            120,
+            77,
+            40,
+            95,
+            80,
+            171,
+            16,
+            241,
+            203,
+            153,
+            213,
+            209,
+            89,
+            83,
+            233,
+            250,
+            195,
+            69,
+            221,
+            115,
+            170,
+            61,
+            88,
+            5,
+            188,
+            58,
+            246,
+            234,
+            27,
+            184,
+            50
+          ],
+          "parent_slot": 457055999,
+          "slot": 457056000
+        }
+      ],
+      "mismatch_count": 0,
+      "mismatch_examples": [],
+      "skipped_slots_in_epoch": 399
+    },
+    "upload_readback_gate": {
+      "deployed_path": "/home/ubuntu/live/hivezilla-validator-20260930/releases/storage-recovery-20261013-742b6735b4bbb606/cold_storage.py",
+      "sha256": "05d02ddd9b7949db360f9a295d004f033b978d10c97d02f781bd9c5fb372581b",
+      "full_remote_readback_before_index_commit": true,
+      "method": "PUT immutable bundle; GET entire bundle; compare exact length and SHA256; commit archive DB; then retire originals",
+      "matching_source_lines": [
+        [
+          115,
+          "def put_verified(self, key, path, sha):"
+        ],
+        [
+          133,
+          "raise RuntimeError(\"remote_bundle_readback_mismatch\")"
+        ],
+        [
+          148,
+          "raise RuntimeError(\"remote_bundle_readback_mismatch\")"
+        ],
+        [
+          279,
+          "remote.put_verified(key, path, sha)"
+        ],
+        [
+          286,
+          "db.execute(\"INSERT INTO archives(slot,bank,record) VALUES(?,?,?)\","
+        ],
+        [
+          288,
+          "db.commit()  # Recovery index commits strictly after full remote readback."
+        ]
+      ]
+    },
+    "fresh_bucket_metadata": {
+      "artifacts": {
+        "database": {
+          "path": "/Users/augustin/Developement/ferno/blockzilla-v1/benchmark-results/car-grpc-20261016/native-epoch-1057-custody-bundle-keys-20261016.json",
+          "sha256": "d74960a95fbec942e8e41ea89b0c5465fad0b0dc6ddf2fce7e6e4875a330e019"
+        },
+        "head": {
+          "path": "/Users/augustin/Developement/ferno/blockzilla-v1/benchmark-results/car-grpc-20261016/native-epoch-1057-remote-metadata-20261016-r1/stream-head-and-last-commit.json",
+          "sha256": "baa3f5ef33001a0bfe63a967c724b39713a437488c4e69054b545c07d9a9cc34"
+        },
+        "inventory": {
+          "path": "/Users/augustin/Developement/ferno/blockzilla-v1/benchmark-results/car-grpc-20261016/native-epoch-1057-remote-metadata-20261016-r1/remote-custody-inventory.json",
+          "sha256": "0f84715c66e8595888f33d4b71553714fdb17941840fa115488d3551bc802bd9"
+        }
+      },
+      "bad_key_count": 0,
+      "bad_keys": [],
+      "bad_tar_size_count": 0,
+      "bad_tar_sizes": [],
+      "bucket": "solana-archive-data",
+      "checked_utc": "2026-10-16T10:46:07.209103+00:00",
+      "custody_sample_heads": [
+        {
+          "content_length": 180776960,
+          "etag": "\"eff0e679d90fe8e65a260dea0c3b768b\"",
+          "key": "native-custody/processed-v1/000000000000000018de229d3fc8a9d9-275b05/58d1cd3851a31f6bbc884cdb973167b44ef69d9bfcb17008b04d6dd02e182607.tar",
+          "last_modified": "Wed, 14 Oct 2026 01:40:52 GMT",
+          "metadata_matches_db": true,
+          "sha256_metadata": "58d1cd3851a31f6bbc884cdb973167b44ef69d9bfcb17008b04d6dd02e182607",
+          "size_matches_list": true
+        },
+        {
+          "content_length": 189501440,
+          "etag": "\"9f3e167e9d175e6f1978c6f6a0eadeec\"",
+          "key": "native-custody/processed-v1/000000000000000018de229d3fc8a9d9-275b05/44d76d26bbce8f934d626101d4327c01d9f9faf993ad8808e9912fb031685862.tar",
+          "last_modified": "Thu, 15 Oct 2026 17:21:33 GMT",
+          "metadata_matches_db": true,
+          "sha256_metadata": "44d76d26bbce8f934d626101d4327c01d9f9faf993ad8808e9912fb031685862",
+          "size_matches_list": true
+        }
+      ],
+      "db_epoch_banks": 431601,
+      "epoch": 1057,
+      "epoch_bundle_count": 6746,
+      "limits": [
+        "Fresh S3 LIST verifies current object names, lengths and ETags; it does not rehash bundle payload bytes.",
+        "Sample HEAD SHA256 values are object metadata, not an independent fresh payload hash.",
+        "Original full GET readback and index commit ordering remain supported by the separate durable local audit.",
+        "Epoch bundle byte sum includes any other-epoch records in a boundary bundle.",
+        "Source objects outside the exact epoch key set are reported separately; this audit does not label them unexpected.",
+        "Stream HEAD aggregates source events across epochs and is not an epoch-level query archive manifest."
+      ],
+      "list_pages": 12,
+      "main_query_archive_prefix_probe": {
+        "key_count": 0,
+        "max_keys": 1,
+        "objects": [],
+        "prefix": "compact-v2/blockzilla-20261004/epoch-1057/",
+        "truncated": "false"
+      },
+      "missing_epoch_keys": [],
+      "missing_epoch_keys_count": 0,
+      "pass": true,
+      "read_only": true,
+      "remote_epoch_bundle_bytes": 1194769479680,
+      "remote_source_bytes": 2109661880320,
+      "remote_source_objects": 11819,
+      "request_count": 17,
+      "requests": [
+        {
+          "http_status": 200,
+          "key": "native-stream/processed/direct-agave-live-v1/000000000000000018de229d3fc8a9d9-275b05/HEAD.json",
+          "method": "GET",
+          "operation": "GET",
+          "response_bytes": 1339,
+          "utc": "2026-10-16T10:45:45.427820+00:00"
+        },
+        {
+          "http_status": 200,
+          "key": "native-stream/processed/direct-agave-live-v1/000000000000000018de229d3fc8a9d9-275b05/commits/00000000000001913216.json",
+          "method": "GET",
+          "operation": "GET",
+          "response_bytes": 1505,
+          "utc": "2026-10-16T10:45:46.230542+00:00"
+        },
+        {
+          "http_status": 200,
+          "key": "",
+          "method": "GET",
+          "operation": "LIST",
+          "response_bytes": 337692,
+          "utc": "2026-10-16T10:45:46.918023+00:00"
+        },
+        {
+          "http_status": 200,
+          "key": "",
+          "method": "GET",
+          "operation": "LIST",
+          "response_bytes": 338056,
+          "utc": "2026-10-16T10:45:48.495444+00:00"
+        },
+        {
+          "http_status": 200,
+          "key": "",
+          "method": "GET",
+          "operation": "LIST",
+          "response_bytes": 338057,
+          "utc": "2026-10-16T10:45:50.196170+00:00"
+        },
+        {
+          "http_status": 200,
+          "key": "",
+          "method": "GET",
+          "operation": "LIST",
+          "response_bytes": 338057,
+          "utc": "2026-10-16T10:45:51.620445+00:00"
+        },
+        {
+          "http_status": 200,
+          "key": "",
+          "method": "GET",
+          "operation": "LIST",
+          "response_bytes": 338057,
+          "utc": "2026-10-16T10:45:53.221676+00:00"
+        },
+        {
+          "http_status": 200,
+          "key": "",
+          "method": "GET",
+          "operation": "LIST",
+          "response_bytes": 338057,
+          "utc": "2026-10-16T10:45:54.608650+00:00"
+        },
+        {
+          "http_status": 200,
+          "key": "",
+          "method": "GET",
+          "operation": "LIST",
+          "response_bytes": 338057,
+          "utc": "2026-10-16T10:45:56.283693+00:00"
+        },
+        {
+          "http_status": 200,
+          "key": "",
+          "method": "GET",
+          "operation": "LIST",
+          "response_bytes": 338057,
+          "utc": "2026-10-16T10:45:57.870267+00:00"
+        },
+        {
+          "http_status": 200,
+          "key": "",
+          "method": "GET",
+          "operation": "LIST",
+          "response_bytes": 338057,
+          "utc": "2026-10-16T10:45:59.714857+00:00"
+        },
+        {
+          "http_status": 200,
+          "key": "",
+          "method": "GET",
+          "operation": "LIST",
+          "response_bytes": 338057,
+          "utc": "2026-10-16T10:46:01.251640+00:00"
+        },
+        {
+          "http_status": 200,
+          "key": "",
+          "method": "GET",
+          "operation": "LIST",
+          "response_bytes": 338057,
+          "utc": "2026-10-16T10:46:02.214350+00:00"
+        },
+        {
+          "http_status": 200,
+          "key": "",
+          "method": "GET",
+          "operation": "LIST",
+          "response_bytes": 276687,
+          "utc": "2026-10-16T10:46:03.958495+00:00"
+        },
+        {
+          "http_status": 200,
+          "key": "native-custody/processed-v1/000000000000000018de229d3fc8a9d9-275b05/58d1cd3851a31f6bbc884cdb973167b44ef69d9bfcb17008b04d6dd02e182607.tar",
+          "method": "HEAD",
+          "operation": "HEAD",
+          "response_bytes": 0,
+          "utc": "2026-10-16T10:46:05.575798+00:00"
+        },
+        {
+          "http_status": 200,
+          "key": "native-custody/processed-v1/000000000000000018de229d3fc8a9d9-275b05/44d76d26bbce8f934d626101d4327c01d9f9faf993ad8808e9912fb031685862.tar",
+          "method": "HEAD",
+          "operation": "HEAD",
+          "response_bytes": 0,
+          "utc": "2026-10-16T10:46:06.135405+00:00"
+        },
+        {
+          "http_status": 200,
+          "key": "",
+          "method": "GET",
+          "operation": "LIST",
+          "response_bytes": 288,
+          "utc": "2026-10-16T10:46:06.682298+00:00"
+        }
+      ],
+      "schema": "blockzilla-native-epoch-cloud-fresh-metadata-audit-v1",
+      "source": "000000000000000018de229d3fc8a9d9-275b05",
+      "source_keys_outside_epoch_set_count": 5073,
+      "stream_head": {
+        "blocks": 956649,
+        "bytes": 441402891986,
+        "canonical": false,
+        "commit_pattern": "native-stream/processed/direct-agave-live-v1/000000000000000018de229d3fc8a9d9-275b05/commits/SEQUENCE_20_DIGITS.json",
+        "coverage": "from_explicit_event_start_with_sequence_checks",
+        "event": {
+          "bank": {
+            "bank_id": 958720,
+            "blockhash": [
+              190,
+              1,
+              59,
+              32,
+              217,
+              174,
+              39,
+              131,
+              208,
+              164,
+              163,
+              44,
+              97,
+              165,
+              144,
+              50,
+              131,
+              141,
+              153,
+              109,
+              230,
+              241,
+              175,
+              212,
+              14,
+              1,
+              226,
+              39,
+              243,
+              157,
+              236,
+              142
+            ],
+            "parent_blockhash": [
+              179,
+              12,
+              15,
+              111,
+              231,
+              149,
+              68,
+              17,
+              34,
+              49,
+              97,
+              64,
+              192,
+              127,
+              13,
+              92,
+              102,
+              135,
+              213,
+              41,
+              181,
+              114,
+              25,
+              180,
+              129,
+              163,
+              240,
+              95,
+              135,
+              250,
+              182,
+              33
+            ],
+            "parent_slot": 457459625,
+            "slot": 457459626
+          },
+          "kind": "root",
+          "payload_sha256": "4e7cb55c83fdb30f4694bbc8b00da1e661929919e245c57552f459fb4ad3d6dc",
+          "reason": null,
+          "sequence": 1913216,
+          "source_sequence": 2149111154
+        },
+        "evidence_included": false,
+        "first_available_after": "000000000000000018de229d3fc8a9d9-275b05:p0:-",
+        "last_commit": "native-stream/processed/direct-agave-live-v1/000000000000000018de229d3fc8a9d9-275b05/commits/00000000000001913216.json",
+        "last_slot": 457459626,
+        "latest_cursor": "000000000000000018de229d3fc8a9d9-275b05:p1913216:0e31691a97ad42eba3b0dd76b6c3f36c2a5c1313d8271dcaa81797a7fc5e1961",
+        "profile": "native-processed-compact-v1",
+        "publication_ready": false,
+        "schema": "blockzilla-native-stream-catalog-v1",
+        "sequence": 1913216,
+        "session": "000000000000000018de229d3fc8a9d9-275b05",
+        "start_slot": 1
+      },
+      "stream_head_matches_local_checkpoint": true,
+      "stream_last_commit": {
+        "after": "000000000000000018de229d3fc8a9d9-275b05:p1913215:4ebdd92cade38dedc3ee819e4e1108bead418f7b5ddbed853430a77cfe37cad0",
+        "agave_revision": "d688dd0e3a576b048a848e5faf2e8d277f8feb6e",
+        "bytes": 1056,
+        "canonical": false,
+        "cursor": "000000000000000018de229d3fc8a9d9-275b05:p1913216:0e31691a97ad42eba3b0dd76b6c3f36c2a5c1313d8271dcaa81797a7fc5e1961",
+        "event": {
+          "bank": {
+            "bank_id": 958720,
+            "blockhash": [
+              190,
+              1,
+              59,
+              32,
+              217,
+              174,
+              39,
+              131,
+              208,
+              164,
+              163,
+              44,
+              97,
+              165,
+              144,
+              50,
+              131,
+              141,
+              153,
+              109,
+              230,
+              241,
+              175,
+              212,
+              14,
+              1,
+              226,
+              39,
+              243,
+              157,
+              236,
+              142
+            ],
+            "parent_blockhash": [
+              179,
+              12,
+              15,
+              111,
+              231,
+              149,
+              68,
+              17,
+              34,
+              49,
+              97,
+              64,
+              192,
+              127,
+              13,
+              92,
+              102,
+              135,
+              213,
+              41,
+              181,
+              114,
+              25,
+              180,
+              129,
+              163,
+              240,
+              95,
+              135,
+              250,
+              182,
+              33
+            ],
+            "parent_slot": 457459625,
+            "slot": 457459626
+          },
+          "kind": "root",
+          "payload_sha256": "4e7cb55c83fdb30f4694bbc8b00da1e661929919e245c57552f459fb4ad3d6dc",
+          "reason": null,
+          "sequence": 1913216,
+          "source_sequence": 2149111154
+        },
+        "evidence_included": false,
+        "first_slot": 457459626,
+        "genesis_hash": "5eykt4UsFv8P8NJdTREpY1vzqKqZKvdpKuc147dw2N9d",
+        "last_slot": 457459626,
+        "node_identity": "J7qpvCEWhdBgPdYRV3s3btWPrRVXa2qnAzgvxWTvtbrQ",
+        "object": "native-stream/processed/direct-agave-live-v1/000000000000000018de229d3fc8a9d9-275b05/chunks/457459626-0e31691a97ad42eba3b0dd76b6c3f36c2a5c1313d8271dcaa81797a7fc5e1961.frame",
+        "produced_blocks": null,
+        "profile": "native-processed-compact-v1",
+        "publication_ready": false,
+        "schema": "blockzilla-native-stream-commit-v1",
+        "sequence": 1913216,
+        "session": "000000000000000018de229d3fc8a9d9-275b05",
+        "sha256": "0e31691a97ad42eba3b0dd76b6c3f36c2a5c1313d8271dcaa81797a7fc5e1961"
+      }
+    },
+    "scope": "Native processed compact frames plus rooted custody. This is not a standalone epoch Compact V2 query archive.",
+    "proof_limits": [
+      "The original custody upload committed its local index only after a full remote bundle length and SHA-256 check.",
+      "The new bucket check confirms all 6746 expected keys, object lengths and the small stream head. It does not repeat the full bundle payload readback.",
+      "The 6746 bundle objects total 1194769479680 bytes. A boundary bundle can contain banks from an adjacent epoch.",
+      "The audit checked produced-slot coverage and native parent links. It did not run a new full epoch PoH or Ed25519 signature check.",
+      "The existing native canonical=false and publication_ready=false flags remain unchanged. Runtime log truncation limits still apply.",
+      "Four other objects exist in this source's custody prefix beyond the earlier source database bundle count. Their purpose was not classified. They do not change the exact epoch 1057 key membership result."
+    ]
+  },
+  "current_cold_storage": {
+    "checked_at_utc": "2026-10-16T10:46:20Z",
+    "source": "000000000000000018deede1d641da13-275b05",
+    "pid": 2996042,
+    "active": true,
+    "correct_source_in_process_arguments_and_database_handles": true,
+    "archived_banks": 0,
+    "retired_banks": 0,
+    "pending_bundles": 0,
+    "keep_seconds": 7200,
+    "eligible_old_banks_sampled": 6,
+    "sampled_gates_passed": [
+      "Rooted bank with dirty=0 and retirement_enqueued=1.",
+      "Marker age about 16264 seconds, above the 7200 second keep period.",
+      "Processed cloud and replay positions are beyond the bank's last event.",
+      "Bank v2 replay position is beyond the bank's last event.",
+      "No unacknowledged native source event remains.",
+      "Custody is complete and finalized."
+    ],
+    "candidate_query": {
+      "rows": 128,
+      "seconds": 0.0016
+    },
+    "observed_fault": "The current helper has made no archive progress despite eligible old banks. Its status timestamp remains fresh.",
+    "likely_cause": "The scan cursor advances past skipped banks and resets only after an empty candidate page. Continuous new input can prevent a reset, so old banks are not revisited.",
+    "cause_limit": "This cause is inferred from the installed code and observed gate checks. The runtime cursor value is not exposed.",
+    "repair_performed": false
+  },
+  "evidence_files": [
+    "benchmark-results/car-grpc-20261016/native-epoch-1057-cloud-audit-20261016.json",
+    "benchmark-results/car-grpc-20261016/native-epoch-1057-rooted-slots-20261016.json",
+    "benchmark-results/car-grpc-20261016/native-epoch-1057-custody-bundle-keys-20261016.json",
+    "benchmark-results/car-grpc-20261016/native-epoch-1057-remote-metadata-20261016-r1/RESULT.json"
+  ]
+}

@@ -275,3 +275,17 @@ index 2e571e8..7425fa5 100644
 +        assert!(tuple.confirmed);
 +    }
  }
+diff --git a/rpc/src/slot_status_notifier.rs b/rpc/src/slot_status_notifier.rs
+--- a/rpc/src/slot_status_notifier.rs
++++ b/rpc/src/slot_status_notifier.rs
+@@ -6,3 +6,10 @@
+ pub trait SlotStatusNotifierInterface {
++    /// Blockzilla v2: exact bank state at frozen and confirmed boundaries.
++    fn notify_bank_state_v2(
++        &self,
++        _state: &crate::optimistically_confirmed_bank_tracker::NativeBankStateV2,
++    ) {
++    }
++
+     /// Notified when a slot is optimistically confirmed
+     fn notify_slot_confirmed(&self, slot: Slot, parent: Option<Slot>, bank_id: BankId);

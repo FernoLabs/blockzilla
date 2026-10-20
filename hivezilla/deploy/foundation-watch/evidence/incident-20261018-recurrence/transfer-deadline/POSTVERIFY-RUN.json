@@ -1,0 +1,18 @@
+{
+  "attempt": 1,
+  "completed_unix_ms": 1792321592477,
+  "data_mutations": [],
+  "live_final_sha256": "42fdf2a5b40a1db78abf25799aba2ef456a1f3d4a3970559cbb9aa45ed6ebc95",
+  "package": "/home/ubuntu/live/hivezilla-validator-20260930/reports/native-recovery-20261018/recurrence/transfer-deadline/postverify",
+  "package_manifest_sha256": "64c1e7ff097fcb39bc088d2ed42511ce753282e8ae1dfa1c9fd7287a9534d108",
+  "postverify_sha256": "486a393c1c913231651040a3e5e7834c1d2d73f9a284bbc0b94fcfce609f29be",
+  "registry_changes": [],
+  "schema": "blockzilla-transfer-postverify-run-v1",
+  "service_actions": [],
+  "started_unix_ms": 1792321582886,
+  "state": "PASSED",
+  "test_log_sha256": "69f1edde4b1c0d648c298cbe6c75e877335cfc9f872a3ff1917012a4363637a0",
+  "tests_count": 8,
+  "tests_passed": true,
+  "updated_unix_ms": 1792321592477
+}

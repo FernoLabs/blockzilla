@@ -1,0 +1,1412 @@
+{
+  "head_installation": {
+    "state": "ACTIVE",
+    "started_unix_ms": 1792314091030,
+    "source": {
+      "genesis_hash": "5eykt4UsFv8P8NJdTREpY1vzqKqZKvdpKuc147dw2N9d",
+      "node_identity": "J7qpvCEWhdBgPdYRV3s3btWPrRVXa2qnAzgvxWTvtbrQ",
+      "agave_revision": "87167f3906bdf5111e99ead64d8f4098b7874e33",
+      "session_id": "000000000000000018df884b2474cf8e-20b258"
+    },
+    "source_pin_sha256": "ddfe097a2915a946c0917adcc135a2c7d997b1517d578044bfea80aadd7ea315",
+    "release": "/home/ubuntu/live/hivezilla-validator-20260930/releases/bank-head-health-20261018-c319ba5d-e769871d5197",
+    "binary_sha256": "e769871d519750a187814a82e1a1f3e48cfc9bde0948410674a70dca7c97d1b7",
+    "old_origin_pid": "917181",
+    "protected_pids": {
+      "hivezilla-validator": "2142808",
+      "hivezilla-direct-worker": "916425",
+      "hivezilla-bank-v2-producer": "917148",
+      "hivezilla-stream-origin": "917180",
+      "hivezilla-stream-relay": "917317",
+      "hivezilla-bank-v2-r2-publisher": "917318",
+      "hivezilla-shred-hook-recorder": "2142799"
+    },
+    "old_command": [
+      "/home/ubuntu/live/hivezilla-validator-20260930/releases/bank-stream-v2-transport-r10-20261010/hivezilla-stream",
+      "bank-origin",
+      "--output",
+      "/home/ubuntu/live/hivezilla-validator-20260930/compact/bank-v2-live/000000000000000018df884b2474cf8e-20b258",
+      "--spool",
+      "/home/ubuntu/live/hivezilla-validator-20260930/bank-v2-origin-spool/000000000000000018df884b2474cf8e-20b258",
+      "--replay-mib",
+      "4096",
+      "--bind",
+      "127.0.0.1:8880",
+      "--token-file",
+      "/home/ubuntu/live/hivezilla-validator-20260930/config/stream-20261004/origin-api.key",
+      "--tls-cert",
+      "/home/ubuntu/live/hivezilla-validator-20260930/config/stream-20261004/origin.crt",
+      "--tls-key",
+      "/home/ubuntu/live/hivezilla-validator-20260930/config/stream-20261004/origin.key",
+      "--client-ca",
+      "/home/ubuntu/live/hivezilla-validator-20260930/config/stream-20261004/ca.crt",
+      "--max-requests",
+      "8"
+    ],
+    "command": [
+      "/home/ubuntu/live/hivezilla-validator-20260930/releases/bank-head-health-20261018-c319ba5d-e769871d5197/hivezilla-stream",
+      "bank-origin",
+      "--output",
+      "/home/ubuntu/live/hivezilla-validator-20260930/compact/bank-v2-live/000000000000000018df884b2474cf8e-20b258",
+      "--spool",
+      "/home/ubuntu/live/hivezilla-validator-20260930/bank-v2-origin-spool/000000000000000018df884b2474cf8e-20b258",
+      "--replay-mib",
+      "4096",
+      "--bind",
+      "127.0.0.1:8880",
+      "--token-file",
+      "/home/ubuntu/live/hivezilla-validator-20260930/config/stream-20261004/origin-api.key",
+      "--tls-cert",
+      "/home/ubuntu/live/hivezilla-validator-20260930/config/stream-20261004/origin.crt",
+      "--tls-key",
+      "/home/ubuntu/live/hivezilla-validator-20260930/config/stream-20261004/origin.key",
+      "--client-ca",
+      "/home/ubuntu/live/hivezilla-validator-20260930/config/stream-20261004/ca.crt",
+      "--max-requests",
+      "8"
+    ],
+    "before_confirmed_sequence": 180604,
+    "status_interval_ms": 1000,
+    "head_health_expiry_ms": 5000,
+    "retirement_cap_changes": [],
+    "completed_unix_ms": 1792314135000,
+    "origin_pid": "1834760",
+    "protected_pids_unchanged": true,
+    "private_head_and_frame": {
+      "status": "live",
+      "source_lag_ms": 4631,
+      "cursor": "000000000000000018df884b2474cf8e-20b258:p181158:813c8b3f113c84f865ef18e0c76414335c6e856bd0c3a9614d9d3338c50479da",
+      "payload_len": 665697,
+      "payload_frame_sha256": "37802bc71550d660ad7834d1e4eb932c462170c84e05fff05c15048e9ceeebd3",
+      "slot": 458377691,
+      "bank_id": 613190,
+      "block_height": 436412953,
+      "blockhash": "BvKEKYZ8CiVQyp9FYQXEV4V2ijWGA25nvRtLXWofGS5f",
+      "parent_slot": 458377690,
+      "parent_blockhash": "9WXy7gVH5u11UoAKwKPnpVAkmoXPAr3pDQmdgKiDBZUn",
+      "last_valid_block_height": 436413103,
+      "rpc_bank_match": true
+    },
+    "confirmed_sequence": 181210,
+    "validator_restarted": false,
+    "source_changed": false
+  },
+  "head_build": {
+    "active_temporary_archive_count": 0,
+    "admission_free_disk_bytes": 643379019776,
+    "admission_minimum_free_bytes": 601295421440,
+    "binary": "/home/ubuntu/live/hivezilla-validator-20260930/releases/bank-head-health-20261018-c319ba5d-e769871d5197/hivezilla-stream",
+    "binary_sha256": "e769871d519750a187814a82e1a1f3e48cfc9bde0948410674a70dca7c97d1b7",
+    "build_flags": "-C target-cpu=x86-64 -C target-feature=+aes,+sse2",
+    "commands": [
+      {
+        "argv": [
+          "ionice",
+          "-c3",
+          "nice",
+          "-n",
+          "19",
+          "/home/ubuntu/.rustup/toolchains/1.98.0-x86_64-unknown-linux-gnu/bin/cargo",
+          "test",
+          "--lib",
+          "--locked",
+          "--offline",
+          "-j",
+          "4"
+        ],
+        "completed_unix_ms": 1792313907820,
+        "cwd": "/home/ubuntu/benchmarks/bank-head-health-20261018-c319ba5d/provider/hivezilla/stream-relay",
+        "log": "/home/ubuntu/live/hivezilla-validator-20260930/reports/native-recovery-20261018/recurrence/head-health/lib-tests.log",
+        "log_sha256": "c70619538ef57cb7e60de84cfad3374f40ffeefdb83ada2c19f11fafcc83d5ca",
+        "phase": "TESTING",
+        "returncode": 0,
+        "started_unix_ms": 1792313882770
+      },
+      {
+        "argv": [
+          "ionice",
+          "-c3",
+          "nice",
+          "-n",
+          "19",
+          "/home/ubuntu/.rustup/toolchains/1.98.0-x86_64-unknown-linux-gnu/bin/cargo",
+          "build",
+          "--release",
+          "--bin",
+          "hivezilla-stream",
+          "--locked",
+          "--offline",
+          "-j",
+          "4"
+        ],
+        "completed_unix_ms": 1792313988119,
+        "cwd": "/home/ubuntu/benchmarks/bank-head-health-20261018-c319ba5d/provider/hivezilla/stream-relay",
+        "log": "/home/ubuntu/live/hivezilla-validator-20260930/reports/native-recovery-20261018/recurrence/head-health/release-build.log",
+        "log_sha256": "78d71a224f2b789a921ac2953fab8e0f136eae655a2e58bc9fc693f44b1cbfa3",
+        "phase": "BUILDING",
+        "returncode": 0,
+        "started_unix_ms": 1792313907847
+      }
+    ],
+    "completed_unix_ms": 1792313988261,
+    "donor_manifest_sha256": "d5279e48e1073e62e6df3a58e7a9354bf8f72a71f134d0d91f853af632d5063b",
+    "free_disk_bytes": 644366856192,
+    "patch_manifest_sha256": "97e4717c449c2ac6c07070183ee6d9378f66975736f031965a3274587c619be2",
+    "patch_sha256": "c319ba5d6243b0526527371a1bdfcc54ed14bc477378fd7d5b2d94c72c5a6539",
+    "previous_attempts": [
+      {
+        "reason": "Additional runtime snapshot-overlap check stopped the compiler. Admission had passed. Resume retains the required disk guards; regular later incremental snapshots do not stop an admitted build.",
+        "receipt": "/home/ubuntu/live/hivezilla-validator-20260930/reports/native-recovery-20261018/recurrence/head-health/attempt-1/BUILD.json",
+        "test_log": "/home/ubuntu/live/hivezilla-validator-20260930/reports/native-recovery-20261018/recurrence/head-health/attempt-1/lib-tests.log"
+      }
+    ],
+    "release": "/home/ubuntu/live/hivezilla-validator-20260930/releases/bank-head-health-20261018-c319ba5d-e769871d5197",
+    "release_manifest_sha256": "a2bc63ef0b9cd1deca32acc98d6b5080d20272a35f06b32f0a9f14ae503a0944",
+    "report": "/home/ubuntu/live/hivezilla-validator-20260930/reports/native-recovery-20261018/recurrence/head-health",
+    "resumed_unix_ms": 1792313882770,
+    "retirement_cap_changes": [],
+    "schema": "blockzilla-bank-head-health-build-v1",
+    "service_operations": [],
+    "source_files": 963,
+    "source_manifest_sha256": "0099305fcfc27cb0ef00ec684260909636867c43ee436e0863f56772f2044dd4",
+    "stage": "/home/ubuntu/benchmarks/bank-head-health-20261018-c319ba5d",
+    "started_unix_ms": 1792313784954,
+    "state": "READY_NOT_ACTIVE",
+    "target_allocated_bytes": 1653977088,
+    "target_budget_bytes": 34359738368,
+    "tests_count": 33,
+    "tests_failed": 0,
+    "tests_log_sha256": "c70619538ef57cb7e60de84cfad3374f40ffeefdb83ada2c19f11fafcc83d5ca",
+    "tests_passed": true,
+    "toolchain": {
+      "cargo": "cargo 1.98.0 (797e8a9bc 2026-08-05)",
+      "rustc": "rustc 1.98.0 (88d9e12ae 2026-08-18)"
+    },
+    "transport_lib_tests": 33,
+    "updated_unix_ms": 1792313988287,
+    "verified_unix_ms": 1792314024211
+  },
+  "head_flow": {
+    "schema": "blockzilla-bank-head-cadence-flow-v1",
+    "state": "PASSED",
+    "elapsed_seconds": 120.043,
+    "source": {
+      "genesis_hash": "5eykt4UsFv8P8NJdTREpY1vzqKqZKvdpKuc147dw2N9d",
+      "node_identity": "J7qpvCEWhdBgPdYRV3s3btWPrRVXa2qnAzgvxWTvtbrQ",
+      "agave_revision": "87167f3906bdf5111e99ead64d8f4098b7874e33",
+      "session_id": "000000000000000018df884b2474cf8e-20b258"
+    },
+    "samples": [
+      {
+        "sampled_unix_ms": 1792314231868,
+        "status": "live",
+        "source_lag_ms": 810,
+        "confirmed_slot": 458378164
+      },
+      {
+        "sampled_unix_ms": 1792314232878,
+        "status": "live",
+        "source_lag_ms": 669,
+        "confirmed_slot": 458378169
+      },
+      {
+        "sampled_unix_ms": 1792314233889,
+        "status": "live",
+        "source_lag_ms": 522,
+        "confirmed_slot": 458378175
+      },
+      {
+        "sampled_unix_ms": 1792314234983,
+        "status": "live",
+        "source_lag_ms": 551,
+        "confirmed_slot": 458378179
+      },
+      {
+        "sampled_unix_ms": 1792314236013,
+        "status": "live",
+        "source_lag_ms": 706,
+        "confirmed_slot": 458378182
+      },
+      {
+        "sampled_unix_ms": 1792314237014,
+        "status": "live",
+        "source_lag_ms": 820,
+        "confirmed_slot": 458378185
+      },
+      {
+        "sampled_unix_ms": 1792314238015,
+        "status": "live",
+        "source_lag_ms": 742,
+        "confirmed_slot": 458378190
+      },
+      {
+        "sampled_unix_ms": 1792314239172,
+        "status": "live",
+        "source_lag_ms": 541,
+        "confirmed_slot": 458378195
+      },
+      {
+        "sampled_unix_ms": 1792314240181,
+        "status": "live",
+        "source_lag_ms": 654,
+        "confirmed_slot": 458378200
+      },
+      {
+        "sampled_unix_ms": 1792314241317,
+        "status": "live",
+        "source_lag_ms": 631,
+        "confirmed_slot": 458378205
+      },
+      {
+        "sampled_unix_ms": 1792314242318,
+        "status": "live",
+        "source_lag_ms": 765,
+        "confirmed_slot": 458378210
+      },
+      {
+        "sampled_unix_ms": 1792314243473,
+        "status": "live",
+        "source_lag_ms": 608,
+        "confirmed_slot": 458378215
+      },
+      {
+        "sampled_unix_ms": 1792314244513,
+        "status": "live",
+        "source_lag_ms": 603,
+        "confirmed_slot": 458378220
+      },
+      {
+        "sampled_unix_ms": 1792314245559,
+        "status": "live",
+        "source_lag_ms": 631,
+        "confirmed_slot": 458378225
+      },
+      {
+        "sampled_unix_ms": 1792314246641,
+        "status": "live",
+        "source_lag_ms": 640,
+        "confirmed_slot": 458378230
+      },
+      {
+        "sampled_unix_ms": 1792314247642,
+        "status": "live",
+        "source_lag_ms": 734,
+        "confirmed_slot": 458378235
+      },
+      {
+        "sampled_unix_ms": 1792314248761,
+        "status": "live",
+        "source_lag_ms": 913,
+        "confirmed_slot": 458378239
+      },
+      {
+        "sampled_unix_ms": 1792314249762,
+        "status": "live",
+        "source_lag_ms": 701,
+        "confirmed_slot": 458378245
+      },
+      {
+        "sampled_unix_ms": 1792314250770,
+        "status": "live",
+        "source_lag_ms": 918,
+        "confirmed_slot": 458378249
+      },
+      {
+        "sampled_unix_ms": 1792314251824,
+        "status": "live",
+        "source_lag_ms": 607,
+        "confirmed_slot": 458378256
+      },
+      {
+        "sampled_unix_ms": 1792314252898,
+        "status": "live",
+        "source_lag_ms": 633,
+        "confirmed_slot": 458378261
+      },
+      {
+        "sampled_unix_ms": 1792314254076,
+        "status": "live",
+        "source_lag_ms": 694,
+        "confirmed_slot": 458378266
+      },
+      {
+        "sampled_unix_ms": 1792314255165,
+        "status": "live",
+        "source_lag_ms": 578,
+        "confirmed_slot": 458378271
+      },
+      {
+        "sampled_unix_ms": 1792314256166,
+        "status": "live",
+        "source_lag_ms": 809,
+        "confirmed_slot": 458378275
+      },
+      {
+        "sampled_unix_ms": 1792314257221,
+        "status": "live",
+        "source_lag_ms": 645,
+        "confirmed_slot": 458378280
+      },
+      {
+        "sampled_unix_ms": 1792314258273,
+        "status": "live",
+        "source_lag_ms": 722,
+        "confirmed_slot": 458378285
+      },
+      {
+        "sampled_unix_ms": 1792314259372,
+        "status": "live",
+        "source_lag_ms": 737,
+        "confirmed_slot": 458378290
+      },
+      {
+        "sampled_unix_ms": 1792314260509,
+        "status": "live",
+        "source_lag_ms": 688,
+        "confirmed_slot": 458378295
+      },
+      {
+        "sampled_unix_ms": 1792314261510,
+        "status": "live",
+        "source_lag_ms": 938,
+        "confirmed_slot": 458378299
+      },
+      {
+        "sampled_unix_ms": 1792314262649,
+        "status": "live",
+        "source_lag_ms": 554,
+        "confirmed_slot": 458378305
+      },
+      {
+        "sampled_unix_ms": 1792314263694,
+        "status": "live",
+        "source_lag_ms": 614,
+        "confirmed_slot": 458378310
+      },
+      {
+        "sampled_unix_ms": 1792314264833,
+        "status": "live",
+        "source_lag_ms": 820,
+        "confirmed_slot": 458378314
+      },
+      {
+        "sampled_unix_ms": 1792314266000,
+        "status": "live",
+        "source_lag_ms": 811,
+        "confirmed_slot": 458378320
+      },
+      {
+        "sampled_unix_ms": 1792314267315,
+        "status": "live",
+        "source_lag_ms": 586,
+        "confirmed_slot": 458378326
+      },
+      {
+        "sampled_unix_ms": 1792314268321,
+        "status": "live",
+        "source_lag_ms": 638,
+        "confirmed_slot": 458378331
+      },
+      {
+        "sampled_unix_ms": 1792314269496,
+        "status": "live",
+        "source_lag_ms": 524,
+        "confirmed_slot": 458378337
+      },
+      {
+        "sampled_unix_ms": 1792314270554,
+        "status": "live",
+        "source_lag_ms": 649,
+        "confirmed_slot": 458378341
+      },
+      {
+        "sampled_unix_ms": 1792314271555,
+        "status": "live",
+        "source_lag_ms": 526,
+        "confirmed_slot": 458378347
+      },
+      {
+        "sampled_unix_ms": 1792314272556,
+        "status": "live",
+        "source_lag_ms": 715,
+        "confirmed_slot": 458378351
+      },
+      {
+        "sampled_unix_ms": 1792314273564,
+        "status": "live",
+        "source_lag_ms": 667,
+        "confirmed_slot": 458378356
+      },
+      {
+        "sampled_unix_ms": 1792314274565,
+        "status": "live",
+        "source_lag_ms": 862,
+        "confirmed_slot": 458378360
+      },
+      {
+        "sampled_unix_ms": 1792314275651,
+        "status": "live",
+        "source_lag_ms": 615,
+        "confirmed_slot": 458378367
+      },
+      {
+        "sampled_unix_ms": 1792314276734,
+        "status": "live",
+        "source_lag_ms": 806,
+        "confirmed_slot": 458378372
+      },
+      {
+        "sampled_unix_ms": 1792314278049,
+        "status": "live",
+        "source_lag_ms": 793,
+        "confirmed_slot": 458378377
+      },
+      {
+        "sampled_unix_ms": 1792314279059,
+        "status": "live",
+        "source_lag_ms": 791,
+        "confirmed_slot": 458378382
+      },
+      {
+        "sampled_unix_ms": 1792314280260,
+        "status": "live",
+        "source_lag_ms": 724,
+        "confirmed_slot": 458378387
+      },
+      {
+        "sampled_unix_ms": 1792314281336,
+        "status": "live",
+        "source_lag_ms": 754,
+        "confirmed_slot": 458378391
+      },
+      {
+        "sampled_unix_ms": 1792314282386,
+        "status": "live",
+        "source_lag_ms": 1141,
+        "confirmed_slot": 458378394
+      },
+      {
+        "sampled_unix_ms": 1792314283387,
+        "status": "live",
+        "source_lag_ms": 1224,
+        "confirmed_slot": 458378399
+      },
+      {
+        "sampled_unix_ms": 1792314284553,
+        "status": "live",
+        "source_lag_ms": 1570,
+        "confirmed_slot": 458378403
+      },
+      {
+        "sampled_unix_ms": 1792314285758,
+        "status": "live",
+        "source_lag_ms": 1645,
+        "confirmed_slot": 458378407
+      },
+      {
+        "sampled_unix_ms": 1792314286759,
+        "status": "live",
+        "source_lag_ms": 1720,
+        "confirmed_slot": 458378411
+      },
+      {
+        "sampled_unix_ms": 1792314287994,
+        "status": "live",
+        "source_lag_ms": 1891,
+        "confirmed_slot": 458378416
+      },
+      {
+        "sampled_unix_ms": 1792314289045,
+        "status": "live",
+        "source_lag_ms": 847,
+        "confirmed_slot": 458378425
+      },
+      {
+        "sampled_unix_ms": 1792314290141,
+        "status": "live",
+        "source_lag_ms": 930,
+        "confirmed_slot": 458378429
+      },
+      {
+        "sampled_unix_ms": 1792314291142,
+        "status": "live",
+        "source_lag_ms": 904,
+        "confirmed_slot": 458378434
+      },
+      {
+        "sampled_unix_ms": 1792314292143,
+        "status": "live",
+        "source_lag_ms": 982,
+        "confirmed_slot": 458378439
+      },
+      {
+        "sampled_unix_ms": 1792314293341,
+        "status": "live",
+        "source_lag_ms": 1165,
+        "confirmed_slot": 458378443
+      },
+      {
+        "sampled_unix_ms": 1792314294342,
+        "status": "live",
+        "source_lag_ms": 825,
+        "confirmed_slot": 458378449
+      },
+      {
+        "sampled_unix_ms": 1792314295343,
+        "status": "live",
+        "source_lag_ms": 881,
+        "confirmed_slot": 458378455
+      },
+      {
+        "sampled_unix_ms": 1792314296415,
+        "status": "live",
+        "source_lag_ms": 573,
+        "confirmed_slot": 458378461
+      },
+      {
+        "sampled_unix_ms": 1792314297434,
+        "status": "live",
+        "source_lag_ms": 859,
+        "confirmed_slot": 458378464
+      },
+      {
+        "sampled_unix_ms": 1792314298435,
+        "status": "live",
+        "source_lag_ms": 558,
+        "confirmed_slot": 458378471
+      },
+      {
+        "sampled_unix_ms": 1792314299552,
+        "status": "live",
+        "source_lag_ms": 981,
+        "confirmed_slot": 458378475
+      },
+      {
+        "sampled_unix_ms": 1792314300808,
+        "status": "live",
+        "source_lag_ms": 561,
+        "confirmed_slot": 458378482
+      },
+      {
+        "sampled_unix_ms": 1792314301924,
+        "status": "live",
+        "source_lag_ms": 914,
+        "confirmed_slot": 458378485
+      },
+      {
+        "sampled_unix_ms": 1792314303005,
+        "status": "live",
+        "source_lag_ms": 1393,
+        "confirmed_slot": 458378489
+      },
+      {
+        "sampled_unix_ms": 1792314304281,
+        "status": "live",
+        "source_lag_ms": 1080,
+        "confirmed_slot": 458378495
+      },
+      {
+        "sampled_unix_ms": 1792314305298,
+        "status": "live",
+        "source_lag_ms": 1262,
+        "confirmed_slot": 458378499
+      },
+      {
+        "sampled_unix_ms": 1792314306299,
+        "status": "live",
+        "source_lag_ms": 705,
+        "confirmed_slot": 458378506
+      },
+      {
+        "sampled_unix_ms": 1792314307373,
+        "status": "live",
+        "source_lag_ms": 689,
+        "confirmed_slot": 458378511
+      },
+      {
+        "sampled_unix_ms": 1792314308484,
+        "status": "live",
+        "source_lag_ms": 671,
+        "confirmed_slot": 458378516
+      },
+      {
+        "sampled_unix_ms": 1792314309509,
+        "status": "live",
+        "source_lag_ms": 834,
+        "confirmed_slot": 458378520
+      },
+      {
+        "sampled_unix_ms": 1792314310510,
+        "status": "live",
+        "source_lag_ms": 765,
+        "confirmed_slot": 458378525
+      },
+      {
+        "sampled_unix_ms": 1792314311510,
+        "status": "live",
+        "source_lag_ms": 540,
+        "confirmed_slot": 458378531
+      },
+      {
+        "sampled_unix_ms": 1792314312525,
+        "status": "live",
+        "source_lag_ms": 580,
+        "confirmed_slot": 458378536
+      },
+      {
+        "sampled_unix_ms": 1792314313588,
+        "status": "live",
+        "source_lag_ms": 867,
+        "confirmed_slot": 458378539
+      },
+      {
+        "sampled_unix_ms": 1792314314589,
+        "status": "live",
+        "source_lag_ms": 647,
+        "confirmed_slot": 458378544
+      },
+      {
+        "sampled_unix_ms": 1792314315691,
+        "status": "live",
+        "source_lag_ms": 839,
+        "confirmed_slot": 458378548
+      },
+      {
+        "sampled_unix_ms": 1792314316705,
+        "status": "live",
+        "source_lag_ms": 562,
+        "confirmed_slot": 458378555
+      },
+      {
+        "sampled_unix_ms": 1792314317860,
+        "status": "live",
+        "source_lag_ms": 762,
+        "confirmed_slot": 458378559
+      },
+      {
+        "sampled_unix_ms": 1792314318979,
+        "status": "live",
+        "source_lag_ms": 967,
+        "confirmed_slot": 458378563
+      },
+      {
+        "sampled_unix_ms": 1792314320018,
+        "status": "live",
+        "source_lag_ms": 686,
+        "confirmed_slot": 458378569
+      },
+      {
+        "sampled_unix_ms": 1792314321019,
+        "status": "live",
+        "source_lag_ms": 1043,
+        "confirmed_slot": 458378573
+      },
+      {
+        "sampled_unix_ms": 1792314322223,
+        "status": "live",
+        "source_lag_ms": 838,
+        "confirmed_slot": 458378579
+      },
+      {
+        "sampled_unix_ms": 1792314323320,
+        "status": "live",
+        "source_lag_ms": 873,
+        "confirmed_slot": 458378584
+      },
+      {
+        "sampled_unix_ms": 1792314324481,
+        "status": "live",
+        "source_lag_ms": 927,
+        "confirmed_slot": 458378588
+      },
+      {
+        "sampled_unix_ms": 1792314325482,
+        "status": "live",
+        "source_lag_ms": 815,
+        "confirmed_slot": 458378595
+      },
+      {
+        "sampled_unix_ms": 1792314326598,
+        "status": "live",
+        "source_lag_ms": 896,
+        "confirmed_slot": 458378600
+      },
+      {
+        "sampled_unix_ms": 1792314327804,
+        "status": "live",
+        "source_lag_ms": 628,
+        "confirmed_slot": 458378606
+      },
+      {
+        "sampled_unix_ms": 1792314328869,
+        "status": "live",
+        "source_lag_ms": 900,
+        "confirmed_slot": 458378610
+      },
+      {
+        "sampled_unix_ms": 1792314329954,
+        "status": "live",
+        "source_lag_ms": 934,
+        "confirmed_slot": 458378615
+      },
+      {
+        "sampled_unix_ms": 1792314331022,
+        "status": "live",
+        "source_lag_ms": 836,
+        "confirmed_slot": 458378620
+      },
+      {
+        "sampled_unix_ms": 1792314332034,
+        "status": "live",
+        "source_lag_ms": 881,
+        "confirmed_slot": 458378624
+      },
+      {
+        "sampled_unix_ms": 1792314333064,
+        "status": "live",
+        "source_lag_ms": 913,
+        "confirmed_slot": 458378630
+      },
+      {
+        "sampled_unix_ms": 1792314334256,
+        "status": "live",
+        "source_lag_ms": 891,
+        "confirmed_slot": 458378635
+      },
+      {
+        "sampled_unix_ms": 1792314335256,
+        "status": "live",
+        "source_lag_ms": 666,
+        "confirmed_slot": 458378641
+      },
+      {
+        "sampled_unix_ms": 1792314336361,
+        "status": "live",
+        "source_lag_ms": 587,
+        "confirmed_slot": 458378646
+      },
+      {
+        "sampled_unix_ms": 1792314337362,
+        "status": "live",
+        "source_lag_ms": 932,
+        "confirmed_slot": 458378649
+      },
+      {
+        "sampled_unix_ms": 1792314338363,
+        "status": "live",
+        "source_lag_ms": 876,
+        "confirmed_slot": 458378654
+      },
+      {
+        "sampled_unix_ms": 1792314339364,
+        "status": "live",
+        "source_lag_ms": 583,
+        "confirmed_slot": 458378659
+      },
+      {
+        "sampled_unix_ms": 1792314340365,
+        "status": "live",
+        "source_lag_ms": 783,
+        "confirmed_slot": 458378663
+      },
+      {
+        "sampled_unix_ms": 1792314341574,
+        "status": "live",
+        "source_lag_ms": 692,
+        "confirmed_slot": 458378668
+      },
+      {
+        "sampled_unix_ms": 1792314342575,
+        "status": "live",
+        "source_lag_ms": 840,
+        "confirmed_slot": 458378672
+      },
+      {
+        "sampled_unix_ms": 1792314343584,
+        "status": "live",
+        "source_lag_ms": 889,
+        "confirmed_slot": 458378677
+      },
+      {
+        "sampled_unix_ms": 1792314344655,
+        "status": "live",
+        "source_lag_ms": 860,
+        "confirmed_slot": 458378682
+      },
+      {
+        "sampled_unix_ms": 1792314345756,
+        "status": "live",
+        "source_lag_ms": 682,
+        "confirmed_slot": 458378688
+      },
+      {
+        "sampled_unix_ms": 1792314346816,
+        "status": "live",
+        "source_lag_ms": 995,
+        "confirmed_slot": 458378691
+      },
+      {
+        "sampled_unix_ms": 1792314347846,
+        "status": "live",
+        "source_lag_ms": 889,
+        "confirmed_slot": 458378696
+      },
+      {
+        "sampled_unix_ms": 1792314348847,
+        "status": "live",
+        "source_lag_ms": 628,
+        "confirmed_slot": 458378702
+      },
+      {
+        "sampled_unix_ms": 1792314349908,
+        "status": "live",
+        "source_lag_ms": 601,
+        "confirmed_slot": 458378707
+      },
+      {
+        "sampled_unix_ms": 1792314350909,
+        "status": "live",
+        "source_lag_ms": 579,
+        "confirmed_slot": 458378712
+      }
+    ],
+    "faults": []
+  },
+  "readback_installation": {
+    "state": "ACTIVE",
+    "release": "/home/ubuntu/live/hivezilla-validator-20260930/releases/readback-retry-20261018-e5db5eeaf39a4f88",
+    "started_unix_ms": 1792312688248,
+    "source": {
+      "genesis_hash": "5eykt4UsFv8P8NJdTREpY1vzqKqZKvdpKuc147dw2N9d",
+      "node_identity": "J7qpvCEWhdBgPdYRV3s3btWPrRVXa2qnAzgvxWTvtbrQ",
+      "agave_revision": "87167f3906bdf5111e99ead64d8f4098b7874e33",
+      "session_id": "000000000000000018df884b2474cf8e-20b258"
+    },
+    "protected_pids": {
+      "hivezilla-validator": "2142808",
+      "hivezilla-direct-worker": "916425",
+      "hivezilla-bank-v2-producer": "917148",
+      "hivezilla-bank-v2-origin": "917181",
+      "hivezilla-stream-origin": "917180",
+      "hivezilla-stream-relay": "917317",
+      "hivezilla-bank-v2-r2-publisher": "917318",
+      "hivezilla-shred-hook-recorder": "2142799"
+    },
+    "old_command": [
+      "/usr/bin/python3",
+      "/home/ubuntu/live/hivezilla-validator-20260930/releases/storage-protection-20261018-94c2aaca04758c49/cold_storage.py",
+      "archive",
+      "--output",
+      "/home/ubuntu/live/hivezilla-validator-20260930/compact/direct-agave-processed-live/000000000000000018df884b2474cf8e-20b258",
+      "--bank-output",
+      "/home/ubuntu/live/hivezilla-validator-20260930/compact/bank-v2-live/000000000000000018df884b2474cf8e-20b258",
+      "--capture",
+      "/home/ubuntu/live/hivezilla-validator-20260930/captures/direct-agave-live/000000000000000018df884b2474cf8e-20b258",
+      "--publisher-state",
+      "/home/ubuntu/live/hivezilla-validator-20260930/reports/native-processed-r2-bank-v2/000000000000000018df884b2474cf8e-20b258",
+      "--credentials-file",
+      "/home/ubuntu/live/hivezilla-validator-20260930/config/native-cold-storage.env",
+      "--v1-spool",
+      "/home/ubuntu/live/hivezilla-validator-20260930/stream-relay-spool-bank-v2/000000000000000018df884b2474cf8e-20b258",
+      "--bank-origin-spool",
+      "/home/ubuntu/live/hivezilla-validator-20260930/bank-v2-origin-spool/000000000000000018df884b2474cf8e-20b258",
+      "--keep-seconds",
+      "7200",
+      "--retire",
+      "--follow"
+    ],
+    "command": [
+      "/usr/bin/python3",
+      "/home/ubuntu/live/hivezilla-validator-20260930/releases/readback-retry-20261018-e5db5eeaf39a4f88/cold_storage.py",
+      "archive",
+      "--output",
+      "/home/ubuntu/live/hivezilla-validator-20260930/compact/direct-agave-processed-live/000000000000000018df884b2474cf8e-20b258",
+      "--bank-output",
+      "/home/ubuntu/live/hivezilla-validator-20260930/compact/bank-v2-live/000000000000000018df884b2474cf8e-20b258",
+      "--capture",
+      "/home/ubuntu/live/hivezilla-validator-20260930/captures/direct-agave-live/000000000000000018df884b2474cf8e-20b258",
+      "--publisher-state",
+      "/home/ubuntu/live/hivezilla-validator-20260930/reports/native-processed-r2-bank-v2/000000000000000018df884b2474cf8e-20b258",
+      "--credentials-file",
+      "/home/ubuntu/live/hivezilla-validator-20260930/config/native-cold-storage.env",
+      "--v1-spool",
+      "/home/ubuntu/live/hivezilla-validator-20260930/stream-relay-spool-bank-v2/000000000000000018df884b2474cf8e-20b258",
+      "--bank-origin-spool",
+      "/home/ubuntu/live/hivezilla-validator-20260930/bank-v2-origin-spool/000000000000000018df884b2474cf8e-20b258",
+      "--keep-seconds",
+      "7200",
+      "--retire",
+      "--follow"
+    ],
+    "helper_sha256": "5a320696a79da06a8f8e5ddd550e9d53da808b37119407c8708a44bd4c64c923",
+    "tests_on_host": 29,
+    "cap_changes": [],
+    "old_source_extra_retirement_started": false,
+    "completed_unix_ms": 1792312719509,
+    "live_pid": "1725066",
+    "protected_pids_unchanged": true,
+    "storage_jobs": {
+      "schema": "blockzilla-storage-jobs-status-v1",
+      "updated_unix_ms": 1792312719096,
+      "active_source": {
+        "genesis_hash": "5eykt4UsFv8P8NJdTREpY1vzqKqZKvdpKuc147dw2N9d",
+        "node_identity": "J7qpvCEWhdBgPdYRV3s3btWPrRVXa2qnAzgvxWTvtbrQ",
+        "agave_revision": "87167f3906bdf5111e99ead64d8f4098b7874e33",
+        "session_id": "000000000000000018df884b2474cf8e-20b258"
+      },
+      "registry_sha256": "0836d5da479c399eb99a5b5aad2c61b3e096378054449060de33b6d32b696442",
+      "state": "HEALTHY",
+      "issues": [],
+      "jobs": [
+        {
+          "unit": "hivezilla-native-cold-storage-20261012-live.service",
+          "source": {
+            "node_identity": "J7qpvCEWhdBgPdYRV3s3btWPrRVXa2qnAzgvxWTvtbrQ",
+            "genesis_hash": "5eykt4UsFv8P8NJdTREpY1vzqKqZKvdpKuc147dw2N9d",
+            "agave_revision": "87167f3906bdf5111e99ead64d8f4098b7874e33",
+            "session_id": "000000000000000018df884b2474cf8e-20b258"
+          },
+          "state": "RUNNING",
+          "issues": [],
+          "max_archived_banks": null,
+          "retryable": false,
+          "active_state": "active",
+          "invocation_id": "a32902d542b24702936d0e522110a167",
+          "frozen": false,
+          "archived_banks": 17095,
+          "retired_banks": 17095,
+          "remaining_banks": null,
+          "status_age_ms": 44,
+          "storage_progress": "TRANSFERRING",
+          "last_archive_progress_unix_ms": 1792312575799
+        },
+        {
+          "unit": "hivezilla-native-cold-storage-20261016-source-18de229d.service",
+          "source": {
+            "node_identity": "J7qpvCEWhdBgPdYRV3s3btWPrRVXa2qnAzgvxWTvtbrQ",
+            "genesis_hash": "5eykt4UsFv8P8NJdTREpY1vzqKqZKvdpKuc147dw2N9d",
+            "agave_revision": "d688dd0e3a576b048a848e5faf2e8d277f8feb6e",
+            "session_id": "000000000000000018de229d3fc8a9d9-275b05"
+          },
+          "state": "COMPLETE",
+          "issues": [],
+          "max_archived_banks": 785546,
+          "retryable": false,
+          "active_state": "inactive",
+          "invocation_id": "6a90e6a6a71e4342bc283a59b7b690b1",
+          "frozen": false,
+          "archived_banks": 785546,
+          "retired_banks": 785546,
+          "remaining_banks": 0
+        }
+      ]
+    }
+  },
+  "live": {
+    "checks": {
+      "capture": {
+        "details": {
+          "closed": false,
+          "durable_sequence": 120287698,
+          "failure_state": null,
+          "latest_rooted_slot": 458378787,
+          "state": "CAPTURING",
+          "writer_lock_held": true
+        },
+        "state": "PASSED"
+      },
+      "private_head_and_frame": {
+        "details": {
+          "bank_id": 614312,
+          "block_height": 436414075,
+          "blockhash": "EsBkjmka4Wxdhq3wDfp3EUnr1qLHmk8EcLPLTtBMKhY6",
+          "cursor": "000000000000000018df884b2474cf8e-20b258:p184523:50177ba1dec90098a239c033d753f1b1921fa05a2d40443f8b813b8e48b7d6bc",
+          "last_valid_block_height": 436414225,
+          "parent_blockhash": "7wTJ1zk4xiFThFVk1JSaB6ZtCUCpPvekgGhzmXACamJe",
+          "parent_slot": 458378812,
+          "payload_frame_sha256": "dd0c8e079a724fb078dd11566355c142de0aac2e4365dfee4662b2f3d1b32433",
+          "payload_len": 729886,
+          "rpc_bank_match": true,
+          "slot": 458378813,
+          "source_lag_ms": 1125,
+          "status": "live"
+        },
+        "state": "PASSED"
+      },
+      "processed": {
+        "details": {
+          "event_sequence": 123011,
+          "lag_slots": 0,
+          "last_compact_slot": 458378816,
+          "source_sequence": 120284407,
+          "state": "RUNNING",
+          "updated_unix_ms": 1792314372510
+        },
+        "state": "PASSED"
+      },
+      "public_sse": {
+        "details": {
+          "advancing": true,
+          "block_events": 5,
+          "elapsed_seconds": 1.226,
+          "slots": [
+            458378818,
+            458378819,
+            458378820,
+            458378821,
+            458378822
+          ]
+        },
+        "state": "PASSED"
+      },
+      "publisher": {
+        "details": {
+          "blocks": 61461,
+          "bytes": 25531045512,
+          "cursor": "000000000000000018df884b2474cf8e-20b258:p122891:5769d05f454c7e65868c20d802fcadf900151f5b9bb56d11c05e11616154f0a2",
+          "sequence": 122891,
+          "state": "RUNNING",
+          "updated_unix_ms": 1792314370279
+        },
+        "state": "PASSED"
+      },
+      "rpc": {
+        "details": {
+          "finalized_slot": 458378786,
+          "genesis_hash": "5eykt4UsFv8P8NJdTREpY1vzqKqZKvdpKuc147dw2N9d",
+          "health": "ok",
+          "identity": "J7qpvCEWhdBgPdYRV3s3btWPrRVXa2qnAzgvxWTvtbrQ",
+          "version": "4.3.2"
+        },
+        "state": "PASSED"
+      },
+      "services": {
+        "details": {
+          "livecold": {
+            "active_state": "active",
+            "pid": 1725066,
+            "sub_state": "running",
+            "unit": "hivezilla-native-cold-storage-20261012-live.service"
+          },
+          "producer": {
+            "active_state": "active",
+            "pid": 917148,
+            "sub_state": "running",
+            "unit": "hivezilla-bank-v2-producer.service"
+          },
+          "rawrecorder": {
+            "active_state": "active",
+            "pid": 2142799,
+            "sub_state": "running",
+            "unit": "hivezilla-shred-hook-recorder.service"
+          },
+          "relay": {
+            "active_state": "active",
+            "pid": 917317,
+            "sub_state": "running",
+            "unit": "hivezilla-stream-relay.service"
+          },
+          "v1origin": {
+            "active_state": "active",
+            "pid": 917180,
+            "sub_state": "running",
+            "unit": "hivezilla-stream-origin.service"
+          },
+          "v2origin": {
+            "active_state": "active",
+            "pid": 1834760,
+            "sub_state": "running",
+            "unit": "hivezilla-bank-v2-origin.service"
+          },
+          "v2publisher": {
+            "active_state": "active",
+            "pid": 917318,
+            "sub_state": "running",
+            "unit": "hivezilla-bank-v2-r2-publisher.service"
+          },
+          "validator": {
+            "active_state": "active",
+            "pid": 2142808,
+            "sub_state": "running",
+            "unit": "hivezilla-validator.service"
+          },
+          "worker": {
+            "active_state": "active",
+            "pid": 916425,
+            "sub_state": "running",
+            "unit": "hivezilla-direct-worker.service"
+          }
+        },
+        "state": "PASSED"
+      },
+      "source": {
+        "details": {
+          "exact_source_loaded": true
+        },
+        "state": "PASSED"
+      },
+      "validator": {
+        "details": {
+          "full_snapshots": "1",
+          "incremental_snapshots": "1",
+          "no_voting": true,
+          "pid": 2142808,
+          "source_pid_match": true
+        },
+        "state": "PASSED"
+      }
+    },
+    "completed_at_unix_ms": 1792314373861,
+    "pids": {
+      "livecold": 1725066,
+      "producer": 917148,
+      "rawrecorder": 2142799,
+      "relay": 917317,
+      "v1origin": 917180,
+      "v2origin": 1834760,
+      "v2publisher": 917318,
+      "validator": 2142808,
+      "worker": 916425
+    },
+    "sampled_at_unix_ms": 1792314372586,
+    "schema": "blockzilla-agave-upgrade-live-sample-v1",
+    "source": {
+      "agave_revision": "87167f3906bdf5111e99ead64d8f4098b7874e33",
+      "genesis_hash": "5eykt4UsFv8P8NJdTREpY1vzqKqZKvdpKuc147dw2N9d",
+      "node_identity": "J7qpvCEWhdBgPdYRV3s3btWPrRVXa2qnAzgvxWTvtbrQ",
+      "session_id": "000000000000000018df884b2474cf8e-20b258"
+    },
+    "state": "PASSED"
+  },
+  "capacity": {
+    "active_temporary_archive_count": 0,
+    "capacity_state": "WARNING",
+    "capture_reserve_bytes": 429496729600,
+    "deleted_files": [],
+    "estimated_seconds_to_capture_reserve": 238385.407,
+    "estimated_seconds_to_snapshot_headroom_exhaustion": 87498.856,
+    "forecast_is_guarantee": false,
+    "forecast_min_observation_seconds": 60,
+    "forecast_observed_seconds": 570.042,
+    "forecast_ready": true,
+    "forecast_samples": 20,
+    "forecast_window_seconds": 600,
+    "free_disk_bytes": 641587634176,
+    "limits": [
+      "Archive allocation is a write-budget observation, not a size bound.",
+      "Forecasts use recent measured growth; future writes and retirement can change it.",
+      "Non-archive growth excludes immediate completed and temporary snapshot archives only.",
+      "This collector cannot stop disk growth or prevent a capture failure."
+    ],
+    "net_disk_growth_bytes_per_second": 889697.518,
+    "next_archive_budget_bytes": 137438953472,
+    "non_archive_growth_bytes_per_second": 853176.313,
+    "read_only_inputs": true,
+    "recovery_headroom_bytes": -32722231296,
+    "recovery_minimum_free_bytes": 536870912000,
+    "runtime_health": {
+      "age_ms": 2954,
+      "configured": true,
+      "healthy": true,
+      "state": "HEALTHY"
+    },
+    "sample_interval_seconds": 30,
+    "schema": "blockzilla-native-capacity-v1",
+    "service_operations": [],
+    "snapshot_archive_allocated_bytes": 124442079232,
+    "snapshot_capture_reserve_at_risk": false,
+    "snapshot_headroom_bytes": 74651951104,
+    "snapshot_headroom_low": true,
+    "snapshot_helper_sha256": "fb46e8260000313c22d413e57bc6f443f0702727ef6590f975e3e41db47d9f23",
+    "source": {
+      "agave_revision": "87167f3906bdf5111e99ead64d8f4098b7874e33",
+      "genesis_hash": "5eykt4UsFv8P8NJdTREpY1vzqKqZKvdpKuc147dw2N9d",
+      "node_identity": "J7qpvCEWhdBgPdYRV3s3btWPrRVXa2qnAzgvxWTvtbrQ",
+      "session_id": "000000000000000018df884b2474cf8e-20b258"
+    },
+    "stale_after_seconds": 90,
+    "state": "RUNNING",
+    "total_disk_bytes": 7450013548544,
+    "updated_unix_ms": 1792314380957
+  },
+  "storage_jobs": {
+    "schema": "blockzilla-storage-jobs-status-v1",
+    "updated_unix_ms": 1792314380080,
+    "active_source": {
+      "genesis_hash": "5eykt4UsFv8P8NJdTREpY1vzqKqZKvdpKuc147dw2N9d",
+      "node_identity": "J7qpvCEWhdBgPdYRV3s3btWPrRVXa2qnAzgvxWTvtbrQ",
+      "agave_revision": "87167f3906bdf5111e99ead64d8f4098b7874e33",
+      "session_id": "000000000000000018df884b2474cf8e-20b258"
+    },
+    "registry_sha256": "0836d5da479c399eb99a5b5aad2c61b3e096378054449060de33b6d32b696442",
+    "state": "HEALTHY",
+    "issues": [],
+    "jobs": [
+      {
+        "unit": "hivezilla-native-cold-storage-20261012-live.service",
+        "source": {
+          "node_identity": "J7qpvCEWhdBgPdYRV3s3btWPrRVXa2qnAzgvxWTvtbrQ",
+          "genesis_hash": "5eykt4UsFv8P8NJdTREpY1vzqKqZKvdpKuc147dw2N9d",
+          "agave_revision": "87167f3906bdf5111e99ead64d8f4098b7874e33",
+          "session_id": "000000000000000018df884b2474cf8e-20b258"
+        },
+        "state": "RUNNING",
+        "issues": [],
+        "max_archived_banks": null,
+        "retryable": false,
+        "active_state": "active",
+        "invocation_id": "a32902d542b24702936d0e522110a167",
+        "frozen": false,
+        "archived_banks": 25159,
+        "retired_banks": 25159,
+        "remaining_banks": null,
+        "status_age_ms": 730,
+        "storage_progress": "TRANSFERRING",
+        "last_archive_progress_unix_ms": 1792314362473
+      },
+      {
+        "unit": "hivezilla-native-cold-storage-20261016-source-18de229d.service",
+        "source": {
+          "node_identity": "J7qpvCEWhdBgPdYRV3s3btWPrRVXa2qnAzgvxWTvtbrQ",
+          "genesis_hash": "5eykt4UsFv8P8NJdTREpY1vzqKqZKvdpKuc147dw2N9d",
+          "agave_revision": "d688dd0e3a576b048a848e5faf2e8d277f8feb6e",
+          "session_id": "000000000000000018de229d3fc8a9d9-275b05"
+        },
+        "state": "COMPLETE",
+        "issues": [],
+        "max_archived_banks": 785546,
+        "retryable": false,
+        "active_state": "inactive",
+        "invocation_id": "6a90e6a6a71e4342bc283a59b7b690b1",
+        "frozen": false,
+        "archived_banks": 785546,
+        "retired_banks": 785546,
+        "remaining_banks": 0
+      }
+    ]
+  },
+  "sender": {
+    "schema": "blockzilla-foundation-heartbeat-sender-v1",
+    "state": "SENT",
+    "sampled_unix_ms": 1792314396307,
+    "errors": [
+      "snapshot_capacity_headroom_low"
+    ],
+    "send_error": null,
+    "raw_capture": {
+      "required": false,
+      "state": "FAILED",
+      "recorder_state": "active",
+      "capture_id": "d90d7aea9cda2212fc9d0a1c275fff88",
+      "producer_pid": 2142808,
+      "durable_next_sequence": 701158357,
+      "packets": 701158357,
+      "journal_bytes": 919340095977,
+      "updated_unix_ms": 1792286156412,
+      "source_verified": true,
+      "faults": [
+        "raw_capture_failed"
+      ]
+    },
+    "capacity": {
+      "free_disk_bytes": 641587634176,
+      "capture_reserve_bytes": 429496729600,
+      "recovery_minimum_free_bytes": 536870912000,
+      "next_archive_budget_bytes": 137438953472,
+      "updated_unix_ms": 1792314380957,
+      "snapshot_headroom_bytes": 74651951104,
+      "recovery_headroom_bytes": -32722231296,
+      "snapshot_capture_reserve_at_risk": false,
+      "snapshot_headroom_low": true
+    },
+    "storage_jobs": {
+      "state": "HEALTHY",
+      "updated_unix_ms": 1792314380080,
+      "registry_sha256": "0836d5da479c399eb99a5b5aad2c61b3e096378054449060de33b6d32b696442",
+      "issues": [],
+      "jobs": [
+        {
+          "unit": "hivezilla-native-cold-storage-20261012-live.service",
+          "source": {
+            "node_identity": "J7qpvCEWhdBgPdYRV3s3btWPrRVXa2qnAzgvxWTvtbrQ",
+            "genesis_hash": "5eykt4UsFv8P8NJdTREpY1vzqKqZKvdpKuc147dw2N9d",
+            "agave_revision": "87167f3906bdf5111e99ead64d8f4098b7874e33",
+            "session_id": "000000000000000018df884b2474cf8e-20b258"
+          },
+          "max_archived_banks": null,
+          "state": "RUNNING",
+          "issues": [],
+          "archived_banks": 25159,
+          "retired_banks": 25159,
+          "remaining_banks": null
+        },
+        {
+          "unit": "hivezilla-native-cold-storage-20261016-source-18de229d.service",
+          "source": {
+            "node_identity": "J7qpvCEWhdBgPdYRV3s3btWPrRVXa2qnAzgvxWTvtbrQ",
+            "genesis_hash": "5eykt4UsFv8P8NJdTREpY1vzqKqZKvdpKuc147dw2N9d",
+            "agave_revision": "d688dd0e3a576b048a848e5faf2e8d277f8feb6e",
+            "session_id": "000000000000000018de229d3fc8a9d9-275b05"
+          },
+          "max_archived_banks": 785546,
+          "state": "COMPLETE",
+          "issues": [],
+          "archived_banks": 785546,
+          "retired_banks": 785546,
+          "remaining_banks": 0
+        }
+      ]
+    }
+  },
+  "priority": {
+    "state": "BACKGROUND_PAUSED",
+    "updated_unix_ms": 1792314405230,
+    "capacity": {
+      "installed": true,
+      "valid": true,
+      "recovery_headroom_bytes": -32722231296
+    },
+    "capacity_paused": true,
+    "disk_consumers_paused": true,
+    "native_reclaimers_paused": false,
+    "background_roles": {
+      "hivezilla-foundation-car-backfill-20261012.service": "disk_consumer",
+      "hivezilla-native-cold-storage-20261012-old.service": "native_reclaimer",
+      "hivezilla-native-cold-storage-20261016-source-18ddd9a6.service": "native_reclaimer",
+      "hivezilla-native-cold-storage-20261016-source-18de229d.service": "native_reclaimer"
+    },
+    "source": "000000000000000018df884b2474cf8e-20b258",
+    "slot_lag": 0,
+    "event_lag": 136,
+    "capture_sequence": 120599027,
+    "capture_rooted_slot": 458378941,
+    "healthy": true,
+    "capture_progress_observed": true,
+    "capture_progress_healthy": true,
+    "capture_sequence_age_seconds": 0.0,
+    "capture_root_age_seconds": 0.0,
+    "capture_progress_timeout_seconds": 60
+  },
+  "schema": "blockzilla-capacity-recurrence-final-v1",
+  "sampled_unix_ms": 1792314406295,
+  "source": {
+    "genesis_hash": "5eykt4UsFv8P8NJdTREpY1vzqKqZKvdpKuc147dw2N9d",
+    "node_identity": "J7qpvCEWhdBgPdYRV3s3btWPrRVXa2qnAzgvxWTvtbrQ",
+    "agave_revision": "87167f3906bdf5111e99ead64d8f4098b7874e33",
+    "session_id": "000000000000000018df884b2474cf8e-20b258"
+  },
+  "free_disk_bytes": 640141398016,
+  "protected_pids": {
+    "hivezilla-validator": "2142808",
+    "hivezilla-direct-worker": "916425",
+    "hivezilla-bank-v2-producer": "917148",
+    "hivezilla-stream-origin": "917180",
+    "hivezilla-stream-relay": "917317",
+    "hivezilla-bank-v2-r2-publisher": "917318",
+    "hivezilla-shred-hook-recorder": "2142799"
+  },
+  "protected_pids_unchanged": true,
+  "origin_pid": "1834760",
+  "extra_retirement_started": false,
+  "proposed_source_archived_banks": 257162
+}

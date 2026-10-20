@@ -1,0 +1,49 @@
+{
+  "schema": "blockzilla-evening-alert-history-summary-v1",
+  "sampled_unix_ms": 1792349080121,
+  "history_sha256": "a5ba21a62c0ddeb3c983ef9a50e9e2c51485384447133ec51f2a2f7101747df9",
+  "returned_alerts": 100,
+  "truncated": false,
+  "events_since_morning_check": [
+    {
+      "id": "e1507f2a-57e3-4656-8932-9ae1051d3d17",
+      "kind": "recovery",
+      "issues": [],
+      "createdMs": 1792346908362,
+      "status": "delivered",
+      "attempts": 1,
+      "paris_time": "2026-10-18T20:08:28.362000+02:00"
+    },
+    {
+      "id": "004792f6-c4af-40b6-960c-7bb62e6cdacf",
+      "kind": "failure",
+      "issues": [
+        "publisher_status_stale"
+      ],
+      "createdMs": 1792346818432,
+      "status": "delivered",
+      "attempts": 1,
+      "paris_time": "2026-10-18T20:06:58.432000+02:00"
+    },
+    {
+      "id": "f5014c43-a74c-4386-8f38-039df5799704",
+      "kind": "recovery",
+      "issues": [],
+      "createdMs": 1792341116404,
+      "status": "delivered",
+      "attempts": 1,
+      "paris_time": "2026-10-18T18:31:56.404000+02:00"
+    },
+    {
+      "id": "f948eff8-a7f1-4657-ba4a-9331b3de7cd0",
+      "kind": "failure",
+      "issues": [
+        "telemetry:storage_jobs_degraded"
+      ],
+      "createdMs": 1792341008535,
+      "status": "delivered",
+      "attempts": 1,
+      "paris_time": "2026-10-18T18:30:08.535000+02:00"
+    }
+  ]
+}

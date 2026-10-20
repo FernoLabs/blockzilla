@@ -1,0 +1,11 @@
+{
+  "schema": "blockzilla-monitor-observability-read-v1",
+  "http_status": 403,
+  "error_codes": [
+    10000
+  ],
+  "method": "Cloudflare Workers Observability temporary query with dry=true",
+  "scope": "Monitor alert_delivery records since morning check",
+  "result": "Existing OAuth login lacks the required telemetry permission. No stored Worker state or alert delivery was changed.",
+  "fallback": "Add bounded existing-admin-auth GET/history over the retained alert outbox, with SELECT only."
+}

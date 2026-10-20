@@ -1,0 +1,56 @@
+{
+  "schema": "blockzilla-history-deployment-readonly-proof-v1",
+  "state": "PASSED",
+  "started_unix_ms": 1792348154403,
+  "completed_unix_ms": 1792348156242,
+  "previous_version": "670ba00d-a5c3-4608-a553-c305656f143f",
+  "current_version": "c19ed9e6-86df-4c98-a15d-2936e5daf6db",
+  "deployed_bundle_sha256": "a376cfd61cfd66c1d0d80d34d69f90d04b80b8f7f1beb01dec02a38523109fc9",
+  "deployed_bundle_bytes": 44949,
+  "durable_started_ms": 1791846078202,
+  "started_ms_preserved": true,
+  "boot_id": "5caa7ddd-4731-4b83-8233-6b3c6a2e203d",
+  "source_session": "000000000000000018df884b2474cf8e-20b258",
+  "boot_and_source_preserved": true,
+  "monitor_clear": true,
+  "current_issues": [],
+  "active_incident": [],
+  "sample_errors": [],
+  "pending_alerts": 0,
+  "history_unauthorized_http_status": 401,
+  "history_authorized_http_status": 200,
+  "history_count": 100,
+  "history_truncated": false,
+  "strict_history_dto": true,
+  "unauthorized_body_sha256": "d089c8a9fc28e4e50223eb38c9409e362521be9380a37341304fbac7a4cd9e5f",
+  "records": {
+    "deployment": {
+      "file": "MONITOR-DEPLOYMENT-AFTER.json",
+      "bytes": 545,
+      "sha256": "e18b463bbf99dccbb8010176f9261b4d02d558dedfcbc222b1085f7878dcf63b"
+    },
+    "status": {
+      "file": "MONITOR-DEPLOY-AFTER.json",
+      "bytes": 2426,
+      "sha256": "bd0fd9c82edbcd1274b62af25040276c5486df3f0bfc4dab8a9104ce752f7aaf"
+    },
+    "history": {
+      "file": "HISTORY-DEPLOY-AFTER.json",
+      "bytes": 49159,
+      "sha256": "a5ba21a62c0ddeb3c983ef9a50e9e2c51485384447133ec51f2a2f7101747df9"
+    }
+  },
+  "preserved_evidence_sha256": {
+    "ALERT-HISTORY.json": "a5ba21a62c0ddeb3c983ef9a50e9e2c51485384447133ec51f2a2f7101747df9",
+    "MONITOR-DEPLOY-BEFORE.json": "8e22f8523770d569f6c598a6e5589da4580bccf9e403d7ebcbfccebc25294622",
+    "MONITOR-DEPLOYMENT-BEFORE.json": "9e9dff161daba02711320cf84feda86d765212e1248696fe518a138f3c44bcc1",
+    "worker-before/index.js": "d1c0833666833261bdf2728199d8bfa88244df1013f91b44ffe5ff49068d1565"
+  },
+  "methods_used": [
+    "GET"
+  ],
+  "deployments": [],
+  "service_actions": [],
+  "manual_messages": [],
+  "configuration_changes": []
+}

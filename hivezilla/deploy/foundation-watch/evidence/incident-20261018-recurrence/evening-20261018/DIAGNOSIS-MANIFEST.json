@@ -1,0 +1,62 @@
+{
+  "files": {
+    "ALLOCATION-COMPARISON.json": {
+      "bytes": 4841,
+      "sha256": "fbf04870db4c0e61a9f9076ebd54d11d5f0d51aabbc46829da550fd7fe1fcd15"
+    },
+    "ALLOCATIONS-SNAPSHOTS.json": {
+      "bytes": 18825,
+      "sha256": "13e627ee53285a2a6dafeb5b902814cfaa00cc0bfbf20ec11d3f5058ceed7aaf"
+    },
+    "FINDINGS.json": {
+      "bytes": 7094,
+      "sha256": "58236fc60886c33e7499a117455cd9768621607c3d118bc25bea91fc26638fd5"
+    },
+    "FLAT-ALLOCATIONS.json": {
+      "bytes": 3074060,
+      "sha256": "e1410e7d76d6be407f1f8bc2975495b5b225eff265a152b9df3dba7f4a8c1767"
+    },
+    "HOST-SAMPLE-1.json": {
+      "bytes": 89303,
+      "sha256": "49bfa5b8092074ff8f026a490a296ec598ac9056f9956aebb1feabc5f472d8b9"
+    },
+    "HOST-SAMPLE-2.json": {
+      "bytes": 7475,
+      "sha256": "7c2c6104fea18bd04a67ec3569e686523ef2cceb930ed0995a4c6da9d283baf3"
+    },
+    "JOURNAL-HISTORY-BOUNDS.json": {
+      "bytes": 387,
+      "sha256": "e171e0e162a4eec0cf9c3c093dcaac8e84ec158a148104f6ef3767c294a5b81f"
+    },
+    "LATEST-STATUS.json": {
+      "bytes": 6154,
+      "sha256": "0bf1f69f3e4ec63dda5636649beaaee61b02f6af64f08515807cb4d63497cd1f"
+    },
+    "PUBLISHER-PROVENANCE-FINAL.json": {
+      "bytes": 1829,
+      "sha256": "78496614233007b8fbb9a5c63a627105be5e357a5c986d4b99c7d5b12b8332c8"
+    },
+    "PUBLISHER-PROVENANCE.json": {
+      "bytes": 6577,
+      "sha256": "e86b5b682ccaae1ad809db7a0fd06e103aaa58bafcb10ffab22f17f5e414b411"
+    },
+    "PUBLISHER-RETRY-180636.json": {
+      "bytes": 463,
+      "sha256": "9588ab80dcd8a88b8ff76b3a716b11a5e39c7b15e2f0aacf6503c4a4922810e5"
+    },
+    "PUBLISHER-RETRY-TYPE.json": {
+      "bytes": 490,
+      "sha256": "1188cac9e782e1a3cea24c019c0078b07f782b42a546d331a26c5255101b8e71"
+    },
+    "PUBLISHERS-1800-1812.json": {
+      "bytes": 13700,
+      "sha256": "3611df15f118e4d43c191682e1b2c8b05934423eb1a49df7892b04ccce5e2196"
+    },
+    "RPC-ERROR-JOURNAL.json": {
+      "bytes": 281,
+      "sha256": "afad0a81776e6d18b3c19009487d59ea9438671d36c21a5f58c37a36d97b4168"
+    }
+  },
+  "read_only_host_work": true,
+  "schema": "blockzilla-evening-diagnosis-manifest-v1"
+}

@@ -1,0 +1,185 @@
+{
+  "schema": "blockzilla-authorized-storage-cleanup-v1",
+  "state": "PASS",
+  "date": "2026-10-16",
+  "host": {
+    "name": "Megaloadon / Foundation",
+    "ssh": "ubuntu@213.239.141.61"
+  },
+  "authorization": "Owner requested removal of unused benchmark files/results, native test captures, old shreds from compacted epochs, reports/test evidence, older test epoch runs and old system logs. The owner requested bounded log retention.",
+  "capacity": {
+    "before_utc": "2026-10-16T09:22:00.165166+00:00",
+    "before_free_bytes": 560429871104,
+    "after_unix": 1792145672.1662054,
+    "after_free_bytes": 1474244988928,
+    "observed_increase_bytes": 913815117824,
+    "note": "This is the net change in free capacity while the live node continued to write and retire files. It is not an exact sum of deleted file sizes."
+  },
+  "completed_groups": [
+    {
+      "kind": "old benchmarks and closed test exports/reports",
+      "roots_removed": 25,
+      "benchmark_roots": 11,
+      "report_roots": 14,
+      "observed_free_increase_bytes": 559191515136
+    },
+    {
+      "kind": "closed native test captures, shred fixtures and finite epoch test runs",
+      "roots_removed": 10,
+      "observed_free_increase_bytes": 200171520,
+      "note": "Retained compact custody hardlinks held most closed capture bytes; these are not counted as physically freed."
+    },
+    {
+      "kind": "duplicate compact performance test outputs",
+      "roots_removed": 2,
+      "observed_free_increase_bytes": 1570615296
+    },
+    {
+      "kind": "old raw shreds for compacted epoch1049",
+      "files_removed": 3422,
+      "allocated_bytes_removed": 229605318656,
+      "observed_free_increase_bytes": 228267098112,
+      "allowed_list_sha256": "24717e5d798b7453f7a991a7829a799d2fd536c4969105bb189feac3b1d7122e",
+      "proof": "Existing full native/CAR coverage and PoH receipts, plus current compact DB:431667 blocks,slots453168000..453599999. All selected shred payload slots fall in this epoch.",
+      "verification_limit": "Structural frame checks and pinned shred shape parsing were used to classify input. Source frame hashes/signatures were not recomputed. Saved coverage and PoH receipts retain their original scope."
+    },
+    {
+      "kind": "expired old system log history",
+      "raw_syslog_bytes_expired": 140876992438,
+      "old_gzip_allocated_bytes_removed": 3571089408,
+      "observed_free_increase_bytes": 146993885184,
+      "retained_tail_bytes_per_large_raw_log": 67108864
+    }
+  ],
+  "retained_data": [
+    "Live validator accounts, ledger, snapshots, capture, compact output and custody.",
+    "Recovery RPC block files under reports: these contain needed recovery input.",
+    "Main epoch1047 replay run: full archive verification and full epoch coverage were not established.",
+    "All224unknown-shape WALs and the mixed epoch boundary WAL in the old shred source; independent post-cleanup checks found0missing/0changed kept WALs.",
+    "Unretired failed capture data, current selected raw shred session, installed releases and the benchmark source referenced by an installed manifest.",
+    "Current epoch1000 comparison binary/source/plans and small cleanup source/metadata backups."
+  ],
+  "log_retention": {
+    "syslog": {
+      "rotation_threshold_bytes": 1073741824,
+      "size_check": "hourly",
+      "rotation": "daily or maxsize",
+      "archives": 4,
+      "compression": "immediate",
+      "note": "The hourly size check is a rotation threshold, not a hard filesystem quota."
+    },
+    "journald": {
+      "system_max_use_bytes": 2147483648,
+      "runtime_max_use_bytes": 536870912,
+      "max_retention_days": 7,
+      "max_file_days": 1
+    },
+    "receipt": "/home/ubuntu/benchmarks/car-grpc-20261016-r1/log-retention-r2.json"
+  },
+  "post_cleanup_health": {
+    "source": "000000000000000018deede1d641da13-275b05",
+    "capture_state": "CAPTURING",
+    "worker_state": "RUNNING",
+    "capture_sequence": 135858971,
+    "capture_rooted_slot": 457600123,
+    "last_compact_slot": 457600152,
+    "slot_lag": 0,
+    "event_lag": 150,
+    "worker_age_ms": 62,
+    "healthy": true
+  },
+  "validator": {
+    "pid": 2579205,
+    "restart_performed": false,
+    "reserve_bytes": 429496729600,
+    "services": {
+      "hivezilla-validator.service": "active",
+      "rsyslog.service": "active",
+      "systemd-journald.service": "active",
+      "blockzilla-syslog-logrotate.timer": "active"
+    }
+  },
+  "full_epoch1000_dump": {
+    "state": "BLOCKED_SOURCE_HTTP429",
+    "persistent_storage_ready": true,
+    "admission_minimum_free_bytes": 1103806595072,
+    "output_exists": false,
+    "last_source_check": {
+      "time_unix": 1792145606.4494328,
+      "requested_protocol": "HTTP2",
+      "curl_exit": 0,
+      "http_code": 429,
+      "http_version": "2",
+      "time_total": 1.364299,
+      "bytes": 124,
+      "sha256": "88d7119834ff811597f3e962731dd2e3899cab3c0cb56f56420048d18311053c",
+      "stderr": "",
+      "body_preview": "{\n  \"code\": \"too_many_requests\",\n  \"message\": \"Your account has made too many requests; try again later.\",\n  \"status\": 429\n}"
+    },
+    "sample": "Actual first64epoch1000blocks matched for both readers, including the epoch999 parent seed. This does not prove complete epoch output or full epoch performance."
+  },
+  "remote_record_root": "/home/ubuntu/benchmarks/car-grpc-20261016-r1",
+  "local_record_root": "/Users/augustin/Developement/ferno/blockzilla-v1/benchmark-results/car-grpc-20261016/cleanup-evidence",
+  "local_main_metadata_backup": {
+    "bytes": 86247263,
+    "sha256": "d9532203203c4df467f005c6f79bfeb92ffa695d0d0db8172830707a63a979ff",
+    "verified": true
+  },
+  "receipt_sha256": {
+    "cleanup-final-health-r1.json": "c0fe49b926e4bad758a47ad13d429957d69aef26588de34102c0a0ff07709c7b",
+    "old-log-expiration-r1.json": "914a9278f1bbe99e6d49c3680ed50b2bbc0c8c69db3791f5ec567a31c5f12203",
+    "RESULT.json": "f10620f706c7c6ee3c3aba043834af6b42b42f321dbd6f4fd3a5c81c6cbc62fa",
+    "log-retention-r2.json": "4e837a6443b21a54ce31e816567c84caa04611747a611d93557c0869d0922e22",
+    "SEEDED-64-PARITY.json": "eddcb09c096af63e268a4d5dda59f9447e5bd98dc87c87e97914ceabe8009d61",
+    "performance-cleanup-r1/deleted-000.json": "751939469d9a329cb11303181fc70a15b4c7c37225016e4fe8524a6d52bf043f",
+    "performance-cleanup-r1/deleted-001.json": "417e9d6ede4e3f8b29aeb836773461b0761bef0aa81e8bc0f9b5d1f43c44edd8",
+    "performance-cleanup-r1/PLAN.json": "58376232d74cd00decb64f0dd8746c0e40895ce6cd7c513e7f695cce5250dac5",
+    "performance-cleanup-r1/RESULT.json": "5fa9b299a7b4b11002a18c66b50e4149b8336354415cab02148ac67ed8153739",
+    "performance-cleanup-r1/BACKUP.json": "14c2602577f8d3afa322759a433097e0e39a896a443200f9853c2943426728be",
+    "cleanup-applied-r1/deleted-020.json": "8b453d4895448ccac9ca4941c9489048e0690df07163e83662e644ce5b8c86f8",
+    "cleanup-applied-r1/deleted-000.json": "519012602314bbfb88c6eb3313d14555104a12f0103d24e33cd88b918b5e6168",
+    "cleanup-applied-r1/deleted-016.json": "e98d6ae9195f77d9d61cea38c8ba0e5328833f10a7cc984f39327cd3a8d1482c",
+    "cleanup-applied-r1/deleted-017.json": "d8534b92ce5d5bece6c880a389e02a422673089cec9578edb7c1a0339b816e95",
+    "cleanup-applied-r1/deleted-001.json": "9eac0beef62a29440f43b11563579843c6633866b1ff1e79073d77d40526d303",
+    "cleanup-applied-r1/PLAN.json": "8c3540c74db3b6868954c900b0edf697a3fb7250d7ffad1607d0615e3e8b80a2",
+    "cleanup-applied-r1/RESULT.json": "ced85e144b607ed30dc986be029a8c4854ac9370f94b9cc689e0cbe4fade9b1e",
+    "cleanup-applied-r1/deleted-021.json": "9ee1167ced0cd1bb6ee0ba98fb11cc8741647630ee41b745495bc416b1a14026",
+    "cleanup-applied-r1/BACKUP.json": "0b435686558efee5b768019f988d5848e15fe9b8c8da8ea8de064108885cc01d",
+    "cleanup-applied-r1/deleted-006.json": "f704db45a15e376619805c94f967638d0f4d27fc77eb286f96ef9a08afebeb6b",
+    "cleanup-applied-r1/deleted-010.json": "493e561fc8a5cd845488134079327983f50cfb7150a5abc73f06f2cc0089ab87",
+    "cleanup-applied-r1/deleted-011.json": "864690e457ff6abafd6221d7a4b7c472b8b393f1e347510009d236bd7adbd8cc",
+    "cleanup-applied-r1/deleted-007.json": "380891e654b0bc24b075e7a31efdb46dc23c64a8ac2efc5d72a0064b09e448b3",
+    "cleanup-applied-r1/deleted-012.json": "25d306a66df4b4957d7bce2e833bb19c216b5ac8bcc9f2a6fa8571bfe466d9d0",
+    "cleanup-applied-r1/deleted-004.json": "e8834c39418faf8c0f83a78d1dab4c7ccef6c6e1d506035f51d109fbfd7f88df",
+    "cleanup-applied-r1/deleted-008.json": "d31f952a6bc28ae545f2b08a2b442d7287d00affb4294f32fdb5da9dfd1b0e83",
+    "cleanup-applied-r1/deleted-024.json": "f0c958fc6b3a98474f31a0485009da7bb98efc5bc9886418799edc33433d436b",
+    "cleanup-applied-r1/deleted-009.json": "2956eca4697dc35ef4ece54dad1e318fb31a89a7b5840480aaac0e12cec51eb1",
+    "cleanup-applied-r1/deleted-005.json": "278157f37abed709b431e6abd13bf6d3952a762c106aa95d54c25475e12b6a4c",
+    "cleanup-applied-r1/deleted-013.json": "a38fa62316fc720a59f416cb718d3392d757cfd36c33403bcbeeb38c53ae3625",
+    "cleanup-applied-r1/deleted-018.json": "cbe153d187f6db9a19d7aa98fe8480046612f0476079f046bf5e8345b2014d98",
+    "cleanup-applied-r1/deleted-022.json": "c05c550c0a4017a2b1614d530452d4962bb839432ed979274fd8c9c2300738f4",
+    "cleanup-applied-r1/deleted-014.json": "7a5661e850420474eb5498d9e0351d323aee1a71a03cfbb4729f548eb7c36861",
+    "cleanup-applied-r1/deleted-002.json": "4d7d9ca3b40a9e171bd8c033dccbf6aeab3134d875751a74917d527701901592",
+    "cleanup-applied-r1/deleted-003.json": "6990766af4121c6f93de96e063ff87db4c29b34cb198af2bc88885435fa2e424",
+    "cleanup-applied-r1/deleted-015.json": "fbfc5cea0128d851997d5130da6102f4293dc9463cf7cc298c6b76ba4f77ad58",
+    "cleanup-applied-r1/deleted-023.json": "8b8f5faaf43f407899e2cb9c87400b498f83d81d597acfd01ca61855cb355557",
+    "cleanup-applied-r1/deleted-019.json": "f1154bc61cb56db3c649e15fe2714b5dcbe3ddfe18d35ccef37a8df1136d5f4b",
+    "native-test-cleanup-r1/deleted-09.json": "8836d9701fdff46cf4280e8c6762890a93310077acf7fa456da46f260ee35ac1",
+    "native-test-cleanup-r1/deleted-05.json": "423871ac1ada88b7e702c0123e42dc0757848d6b642f2783b877f5eca68b0552",
+    "native-test-cleanup-r1/PLAN.json": "b7b5b12befd1c7cd0ca466dec7aeca2e43a3d92204c7c7c8620ee70515aec7cb",
+    "native-test-cleanup-r1/deleted-04.json": "9b00318eefad7b7f8bee4dba3d0a4b06644ebcd5ed2f3203daee81117dfcc4c0",
+    "native-test-cleanup-r1/RESULT.json": "6a16049455f2b1f6ecc6770fd88fc48f866ec12165f7829544014f5b55a20efd",
+    "native-test-cleanup-r1/BACKUP.json": "ba8a7e2563ee5e034cd62ad2c655345bbc6e91c08b392d25641b50c6a73a68f8",
+    "native-test-cleanup-r1/deleted-08.json": "36e5dff2de6230a56e96ae62d09396876e4df8d0f42d1b69b87ca35c6d8dfc7a",
+    "native-test-cleanup-r1/deleted-03.json": "73d5da563fa8c592b1b6ef9de433be5b4fdb75a80af68e96ee1b304ce267c45c",
+    "native-test-cleanup-r1/deleted-02.json": "7f7e40d3ca785bcf6a28579b5b285925f4b3e3ead95fbcd8fef76f341299df24",
+    "native-test-cleanup-r1/deleted-01.json": "9c22067d966ca814dd887aee4291a1d270763a1b0ff53a9e839420713e48a975",
+    "native-test-cleanup-r1/deleted-00.json": "bbfca4e1a011dadc32742950dc8f9ed76588892631cb477f90052bc8c6e06122",
+    "native-test-cleanup-r1/deleted-07.json": "3cf0db6bece7c168df3bd3110fd24cce0289e56d6bcb1d76123ede8a04511b51",
+    "native-test-cleanup-r1/deleted-06.json": "4c2004017815c53c31923fc10040abbed94135cfa947241e121bb969319ea1b3",
+    "shred-cleanup-r1/PLAN.json": "a89990b242583732838147edca67bd0cddd84db96d639ce60ee72c9bb8e786d6",
+    "shred-cleanup-r1/RESULT.json": "e2266080e28b01a050478d7444c7f3a9624b8336c0a04cd6d0cadc363c97eecc",
+    "shred-cleanup-r1/ALLOWLIST.json": "24717e5d798b7453f7a991a7829a799d2fd536c4969105bb189feac3b1d7122e",
+    "shred-cleanup-r1/SOURCE-METADATA.json": "46da8a4d6d8e591965a75e72a9fa1ac999a291307cb9d9b99aea0e10715720f6"
+  }
+}

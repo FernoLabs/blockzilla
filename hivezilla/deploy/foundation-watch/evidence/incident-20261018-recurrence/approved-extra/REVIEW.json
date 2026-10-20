@@ -1,0 +1,20 @@
+{
+  "state": "PASSED",
+  "plan_sha256": "de5dde9c63f48ef17bcfedc8301764614608d7a6881d9c22a5934ec3f067ee3b",
+  "installer_sha256": "40f77e3b2c2b9b8af4367809540f2e2e196041f590e0419699ca8340b2377cf6",
+  "installer_independent_review": true,
+  "protocol_activation_independent_review": true,
+  "protocol_focused_tests_local": 40,
+  "protocol_focused_tests_host": 40,
+  "cap_readback_focused_tests": 3,
+  "scope": {
+    "source": "000000000000000018ddd9a6bb6fc50e-282459",
+    "additional": 51606,
+    "absolute_cap": 308768,
+    "previous_cap": 785546,
+    "proof_gates_changed": false
+  },
+  "final_cloud_proof_independent_review": true,
+  "final_cloud_proof_sha256": "d4fcf1d98da782e9b019c723c620e0be8ffd7e8a2026958cf72311abd96d069b",
+  "final_cloud_proof_scope": "Independent full readback of the final committed bundle, in addition to the pinned helper full readback for every bundle."
+}

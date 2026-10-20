@@ -1,0 +1,169 @@
+{
+  "state": "PASSED",
+  "old_source": {
+    "genesis_hash": "5eykt4UsFv8P8NJdTREpY1vzqKqZKvdpKuc147dw2N9d",
+    "node_identity": "J7qpvCEWhdBgPdYRV3s3btWPrRVXa2qnAzgvxWTvtbrQ",
+    "agave_revision": "d688dd0e3a576b048a848e5faf2e8d277f8feb6e",
+    "session_id": "000000000000000018deede1d641da13-275b05"
+  },
+  "old_validator_pid": 2579205,
+  "started_unix_ms": 1792181179641,
+  "steps": [
+    {
+      "step": "stop_live_cold_storage",
+      "completed_unix_ms": 1792181179663,
+      "stdout": ""
+    },
+    {
+      "step": "close_old_native_capture",
+      "completed_unix_ms": 1792181179683,
+      "stdout": "Successfully unloaded plugin: hivezilla-direct-agave-v1"
+    },
+    {
+      "step": "stop_old_worker",
+      "completed_unix_ms": 1792181202605
+    },
+    {
+      "step": "stop_old_validator",
+      "completed_unix_ms": 1792181218239
+    },
+    {
+      "step": "start_matching_raw_recorder",
+      "completed_unix_ms": 1792181218604
+    },
+    {
+      "step": "start_new_validator",
+      "completed_unix_ms": 1792181218619
+    }
+  ],
+  "old_closed": {
+    "durable_sequence": 516962261,
+    "state": "CLOSED"
+  },
+  "old_final_processed": {
+    "canonical": false,
+    "event_sequence": 462109,
+    "last_compact_slot": 457764446,
+    "profile": "native-processed-compact-v1",
+    "publication_ready": false,
+    "retirement_supported": true,
+    "source_sequence": 516962261,
+    "state": "DRAINED",
+    "updated_unix_ms": 1792181180023
+  },
+  "new_start_requested_unix_ms": 1792181218620,
+  "maintenance_alert": {
+    "event_id": "27d95815-b969-4518-9ced-9d23172bde1f",
+    "reported_at_utc": "2026-10-16T20:07:41.481Z",
+    "issue": "public_stream_unreachable",
+    "cause": "planned validator restart and explicit native source change"
+  },
+  "new_source": {
+    "genesis_hash": "5eykt4UsFv8P8NJdTREpY1vzqKqZKvdpKuc147dw2N9d",
+    "node_identity": "J7qpvCEWhdBgPdYRV3s3btWPrRVXa2qnAzgvxWTvtbrQ",
+    "agave_revision": "87167f3906bdf5111e99ead64d8f4098b7874e33",
+    "session_id": "000000000000000018df1be3bad56d9c-20b258"
+  },
+  "new_validator_pid": 2142808,
+  "feed_switch_unix_ms": 1792182011311,
+  "handoff_resume_reason": "protected unit backup read corrected; source and spools retained",
+  "native_gap": {
+    "old_last_complete_processed_slot": 457764446,
+    "new_first_complete_processed_slot": 457767450,
+    "first_slot_number": 457764447,
+    "last_slot_number": 457767449,
+    "slot_numbers": 3003,
+    "recovered": false,
+    "meaning": "slot numbers between native sessions; not a count of lost produced or finalized blocks"
+  },
+  "old_publisher_final": {
+    "checkpoint": {
+      "schema": "blockzilla-native-publisher-checkpoint-v1",
+      "source": "/home/ubuntu/live/hivezilla-validator-20260930/compact/direct-agave-processed-live/000000000000000018deede1d641da13-275b05",
+      "namespace": "57f6beef58f71b68ac430120437e79363e65aba88ccb6536e805e1351d10f135",
+      "prefix": "native-stream/processed/direct-agave-live-v1/000000000000000018deede1d641da13-275b05",
+      "session": "000000000000000018deede1d641da13-275b05",
+      "publisher_id": "5c1a1c73ebf3b8e3b82a7b5c4f5f7837db5821d5371fe50bf99ae2ff9e67cf49",
+      "start_slot": 1,
+      "sequence": 462109,
+      "last_first_slot": 462109,
+      "cursor": "000000000000000018deede1d641da13-275b05:p462109:cf77f2e0918648afc4bf50b806bf8a613adfde3e2c080fbf58bdf293ab7c4440",
+      "blocks": 231078,
+      "bytes": 112660745445
+    },
+    "pending_intent_exists": false
+  },
+  "raw_capture": {
+    "session": "d90d7aea9cda2212fc9d0a1c275fff88",
+    "metadata": {
+      "capture_format": "hivezilla-shred-hook-ipc-v1",
+      "capture_id": "d90d7aea9cda2212fc9d0a1c275fff88",
+      "custody_authority": false,
+      "genesis_hash": "5eykt4UsFv8P8NJdTREpY1vzqKqZKvdpKuc147dw2N9d",
+      "global_order": "producer queue acceptance order; order across receive sockets is not physical network arrival order",
+      "max_packet_bytes": 1232,
+      "max_root_bytes": 1288490188800,
+      "producer_executable": "/home/ubuntu/live/hivezilla-validator-20260930/releases/agave-4.3.2-20261016-87167f3906bdf511/agave-validator",
+      "producer_pid": 2142808,
+      "raw_bytes_preserved": true,
+      "registered_hivesync_stream": false,
+      "reserve_free_bytes": 536870912000,
+      "schema": "hivezilla-shred-hook-session-v1",
+      "segment_bytes": 67108864,
+      "source_boundary": "UDP receiver before fetch queue eviction, filtering, signature checks, deduplication, or resigning; accepted repair observations after nonce validation",
+      "timestamp_boundary": "adapter observation time per received batch, not NIC arrival time",
+      "upstream_socket_loss_measured": false,
+      "validator_identity": "J7qpvCEWhdBgPdYRV3s3btWPrRVXa2qnAzgvxWTvtbrQ"
+    },
+    "status": {
+      "schema": "hivezilla-shred-hook-status-v1",
+      "state": "ACTIVE",
+      "reason": "receiving",
+      "updated_unix_ms": 1792182286907,
+      "durable_next_sequence": 9083845,
+      "durable_prefix_hash": "a4070753454182f33c79fa20cc592b9046e9f6c173e3e0c4a1797e0bcb072110",
+      "journal_bytes": 11884361692,
+      "counts": {
+        "packets": 9083845,
+        "payload_bytes": 11012292684,
+        "turbine_received": 5844726,
+        "repair_received": 1620705,
+        "repair_accepted": 1618414,
+        "data_shreds": 6159189,
+        "coding_shreds": 2923160,
+        "other_datagrams": 1496,
+        "first_header_slot": 457764631,
+        "max_header_slot": 457769548
+      },
+      "custody_authority": false,
+      "canonical_coverage_verified": false
+    },
+    "executable_matched": true,
+    "final_status": {
+      "schema": "hivezilla-shred-hook-status-v1",
+      "state": "ACTIVE",
+      "reason": "receiving",
+      "updated_unix_ms": 1792182751418,
+      "durable_next_sequence": 12807312,
+      "durable_prefix_hash": "05aaaf95383ab924b3dcefa96ebde0207e2797497d67693ade8d78c99ae507ca",
+      "journal_bytes": 16766754460,
+      "counts": {
+        "packets": 12807312,
+        "payload_bytes": 15537224556,
+        "turbine_received": 9539544,
+        "repair_received": 1635364,
+        "repair_accepted": 1632404,
+        "data_shreds": 8034201,
+        "coding_shreds": 4770956,
+        "other_datagrams": 2155,
+        "first_header_slot": 457764631,
+        "max_header_slot": 457771686
+      },
+      "custody_authority": false,
+      "canonical_coverage_verified": false
+    }
+  },
+  "completed_unix_ms": 1792182751439,
+  "final_live_check": "/home/ubuntu/live/hivezilla-validator-20260930/reports/agave-upgrade-4.3.2-20261016/LIVE-3.json",
+  "monitor_recovered": true
+}

@@ -1,0 +1,79 @@
+{
+  "authority": {
+    "finite_caps": [
+      785546,
+      308768
+    ],
+    "live_registry_changes_only": [
+      "helper",
+      "helper_sha256",
+      "expected_command[1]",
+      "expected_command_sha256"
+    ],
+    "old_registry_sha256": "a52115479c26ccff6367b8439cd58dbb2354bb7b61d25691e797a96611655f6f",
+    "source_pin_sha256": "ddfe097a2915a946c0917adcc135a2c7d997b1517d578044bfea80aadd7ea315",
+    "trusted_external_arguments": [
+      "installation_sha256",
+      "build_sha256",
+      "manifest_sha256",
+      "cold_sha256",
+      "live_pid",
+      "guardian_pid"
+    ]
+  },
+  "created_unix_ms": 1792477110564,
+  "files": {
+    "cloud-validator.py": {
+      "bytes": 18951,
+      "sha256": "d4fcf1d98da782e9b019c723c620e0be8ffd7e8a2026958cf72311abd96d069b"
+    },
+    "proof-support.py": {
+      "bytes": 33438,
+      "sha256": "30851c6644304d86daebc050da0ab4e63b30f37e8de698b7d5ea25cb68ef3f35"
+    },
+    "test_verify.py": {
+      "bytes": 19123,
+      "sha256": "f006c560a05529b45b35944ac2fc4993f6b3a6e3360cc8bd6d18c56bb5323bd8"
+    },
+    "verify.py": {
+      "bytes": 29853,
+      "sha256": "3ac2eb2cece213e593cc55d05300079b54b26672bc0a55ea32a96da0431b67dd"
+    }
+  },
+  "limits": {
+    "capture_reserve_bytes": 429496729600,
+    "child_stderr_saved": false,
+    "child_stdout_max_bytes": 65536,
+    "cloud_archive_max_bytes": 536870912,
+    "cloud_child_total_deadline_seconds": 200,
+    "cloud_payload_extraction": false,
+    "disk_margin_bytes": 1073741824,
+    "global_key_scans": 2,
+    "key_scan_deadline_seconds_each": 15,
+    "key_scan_output_rows_max": 129,
+    "newest_rows_read_max": 257,
+    "record_bytes_before_python_max": 65536,
+    "schema_or_index_mutations": false,
+    "selected_banks_max": 128,
+    "temporary_request_max_bytes": 8388608
+  },
+  "old_evidence_modified": false,
+  "production_data_mutations": [],
+  "runtime_review": {
+    "cold_sha256": "f757f2be29f01378448cbe5bb5b529db2625e6654c065f0f17ebd8ba3cbb6d41",
+    "focused_tests_reviewed_and_independently_passed": 64,
+    "guardian_unchanged": true,
+    "state": "PASSED",
+    "test_cold_sha256": "3a5fe9b96e7b3503c4d8c2d1a4efb8009f79889f4d92dbaa07420bc215e41cee"
+  },
+  "schema": "blockzilla-storage-circuit-postverify-package-v1",
+  "service_actions": [],
+  "state": "FROZEN_FOR_INDEPENDENT_REVIEW",
+  "tests": {
+    "command": "PYTHONDONTWRITEBYTECODE=1 python3 test_verify.py",
+    "count": 13,
+    "failed": 0,
+    "passed": 13,
+    "scope": "local synthetic fixtures; no host or cloud calls"
+  }
+}

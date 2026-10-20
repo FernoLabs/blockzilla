@@ -1,0 +1,46 @@
+{
+  "schema": "blockzilla-history-deployment-evidence-v1",
+  "state": "PASSED",
+  "current_version": "c19ed9e6-86df-4c98-a15d-2936e5daf6db",
+  "previous_version": "670ba00d-a5c3-4608-a553-c305656f143f",
+  "methods_used": [
+    "GET"
+  ],
+  "service_actions": [],
+  "configuration_changes": [],
+  "manual_messages": [],
+  "files": {
+    "MONITOR-DEPLOY-AFTER.json": {
+      "sha256": "bd0fd9c82edbcd1274b62af25040276c5486df3f0bfc4dab8a9104ce752f7aaf",
+      "bytes": 2426
+    },
+    "MONITOR-DEPLOYMENT-AFTER.json": {
+      "sha256": "e18b463bbf99dccbb8010176f9261b4d02d558dedfcbc222b1085f7878dcf63b",
+      "bytes": 545
+    },
+    "HISTORY-DEPLOY-AFTER.json": {
+      "sha256": "a5ba21a62c0ddeb3c983ef9a50e9e2c51485384447133ec51f2a2f7101747df9",
+      "bytes": 49159
+    },
+    "HISTORY-DEPLOY-VALIDATION.json": {
+      "sha256": "293df992acf1f577b9322e9e9335e68d0b8c57a897120e90cd9dc63e97221b2f",
+      "bytes": 2136
+    },
+    "worker-after/MANIFEST.json": {
+      "sha256": "45ca1812a16b3bf3001f32da579f1d5e7153cb88676f25e2ecee89ed81999224",
+      "bytes": 352
+    },
+    "worker-after/index.js": {
+      "sha256": "a376cfd61cfd66c1d0d80d34d69f90d04b80b8f7f1beb01dec02a38523109fc9",
+      "bytes": 44949
+    },
+    "read-worker-after.py": {
+      "sha256": "db34e490e7bfa8639eecee43d0ba7e78bcc8b5814aaa5a88666c69fb9067800d",
+      "bytes": 1936
+    },
+    "validate-history-deployment.py": {
+      "sha256": "94826146aeb1f516162acb8f669c332e5f03731566503b1916fe8d0adbbf8f36",
+      "bytes": 10345
+    }
+  }
+}

@@ -1,0 +1,38 @@
+# /etc/systemd/system/hivezilla-native-cold-storage-20261012-live.service
+[Unit]
+After=network-online.target
+StartLimitIntervalSec=0
+[Service]
+User=ubuntu
+Group=ubuntu
+ExecStart="/usr/bin/python3" "/home/ubuntu/live/hivezilla-validator-20260930/releases/native-cloud-retention-20261012/cold_storage.py" "archive" "--output" "/home/ubuntu/live/hivezilla-validator-20260930/compact/direct-agave-processed-live/000000000000000018ddd9a6bb6fc50e-282459" "--bank-output" "/home/ubuntu/live/hivezilla-validator-20260930/compact/bank-v2-live/000000000000000018ddd9a6bb6fc50e-282459" "--capture" "/home/ubuntu/live/hivezilla-validator-20260930/captures/direct-agave-live/000000000000000018ddd9a6bb6fc50e-282459" "--publisher-state" "/home/ubuntu/live/hivezilla-validator-20260930/reports/native-processed-r2-bank-v2/000000000000000018ddd9a6bb6fc50e-282459" "--credentials-file" "/home/ubuntu/live/hivezilla-validator-20260930/config/native-cold-storage.env" "--v1-spool" "/home/ubuntu/live/hivezilla-validator-20260930/stream-relay-spool-bank-v2/000000000000000018ddd9a6bb6fc50e-282459" "--bank-origin-spool" "/home/ubuntu/live/hivezilla-validator-20260930/bank-v2-origin-spool/000000000000000018ddd9a6bb6fc50e-282459" "--keep-seconds" "7200" "--retire" "--follow"
+Restart=on-failure
+RestartSec=30
+Nice=19
+CPUQuota=200%
+MemoryMax=4G
+UMask=0077
+KillMode=control-group
+TimeoutStopSec=60
+StandardOutput=append:/home/ubuntu/live/hivezilla-validator-20260930/reports/bank-v2-recovery-20261012-tools/cold-live.log
+StandardError=append:/home/ubuntu/live/hivezilla-validator-20260930/reports/bank-v2-recovery-20261012-tools/cold-live.log
+[Install]
+WantedBy=multi-user.target
+
+# /etc/systemd/system/hivezilla-native-cold-storage-20261012-live.service.d/zzzzzzzzzz-recovery-20261011.conf
+[Service]
+ExecStart=
+ExecStart="/usr/bin/python3" "/home/ubuntu/live/hivezilla-validator-20260930/releases/storage-recovery-20261013-742b6735b4bbb606/cold_storage.py" "archive" "--output" "/home/ubuntu/live/hivezilla-validator-20260930/compact/direct-agave-processed-live/000000000000000018de229d3fc8a9d9-275b05" "--bank-output" "/home/ubuntu/live/hivezilla-validator-20260930/compact/bank-v2-live/000000000000000018de229d3fc8a9d9-275b05" "--capture" "/home/ubuntu/live/hivezilla-validator-20260930/captures/direct-agave-live/000000000000000018de229d3fc8a9d9-275b05" "--publisher-state" "/home/ubuntu/live/hivezilla-validator-20260930/reports/native-processed-r2-bank-v2/000000000000000018de229d3fc8a9d9-275b05" "--credentials-file" "/home/ubuntu/live/hivezilla-validator-20260930/config/native-cold-storage.env" "--v1-spool" "/home/ubuntu/live/hivezilla-validator-20260930/stream-relay-spool-bank-v2/000000000000000018de229d3fc8a9d9-275b05" "--bank-origin-spool" "/home/ubuntu/live/hivezilla-validator-20260930/bank-v2-origin-spool/000000000000000018de229d3fc8a9d9-275b05" "--keep-seconds" "7200" "--retire" "--follow"
+ReadWritePaths=
+ReadWritePaths="/home/ubuntu/live/hivezilla-validator-20260930/compact/direct-agave-processed-live/000000000000000018de229d3fc8a9d9-275b05" "/home/ubuntu/live/hivezilla-validator-20260930/compact/bank-v2-live/000000000000000018de229d3fc8a9d9-275b05/feed.sqlite-shm" "/home/ubuntu/live/hivezilla-validator-20260930/captures/direct-agave-live/000000000000000018de229d3fc8a9d9-275b05/events.sqlite-shm"
+
+# /etc/systemd/system/hivezilla-native-cold-storage-20261012-live.service.d/zzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzz-native-source.conf
+[Service]
+ExecStart=
+ExecStart="/usr/bin/python3" "/home/ubuntu/live/hivezilla-validator-20260930/releases/storage-recovery-20261020-f757f2be29f0-3a5fe9b9/cold_storage.py" "archive" "--output" "/home/ubuntu/live/hivezilla-validator-20260930/compact/direct-agave-processed-live/000000000000000018df884b2474cf8e-20b258" "--bank-output" "/home/ubuntu/live/hivezilla-validator-20260930/compact/bank-v2-live/000000000000000018df884b2474cf8e-20b258" "--capture" "/home/ubuntu/live/hivezilla-validator-20260930/captures/direct-agave-live/000000000000000018df884b2474cf8e-20b258" "--publisher-state" "/home/ubuntu/live/hivezilla-validator-20260930/reports/native-processed-r2-bank-v2/000000000000000018df884b2474cf8e-20b258" "--credentials-file" "/home/ubuntu/live/hivezilla-validator-20260930/config/native-cold-storage.env" "--v1-spool" "/home/ubuntu/live/hivezilla-validator-20260930/stream-relay-spool-bank-v2/000000000000000018df884b2474cf8e-20b258" "--bank-origin-spool" "/home/ubuntu/live/hivezilla-validator-20260930/bank-v2-origin-spool/000000000000000018df884b2474cf8e-20b258" "--keep-seconds" "7200" "--retire" "--follow"
+ReadWritePaths=
+ReadWritePaths="/home/ubuntu/live/hivezilla-validator-20260930/compact/direct-agave-processed-live/000000000000000018df884b2474cf8e-20b258" "/home/ubuntu/live/hivezilla-validator-20260930/compact/bank-v2-live/000000000000000018df884b2474cf8e-20b258/feed.sqlite-shm" "/home/ubuntu/live/hivezilla-validator-20260930/captures/direct-agave-live/000000000000000018df884b2474cf8e-20b258/events.sqlite-shm"
+[Unit]
+StartLimitIntervalSec=0
+[Service]
+Restart=no

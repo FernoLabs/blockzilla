@@ -1,0 +1,76 @@
+{
+  "schema": "blockzilla-bank-artifact-index-migration-v1",
+  "session": "000000000000000018de229d3fc8a9d9-275b05",
+  "started_unix_ms": 1792133064875,
+  "completed_unix_ms": 1792133127311,
+  "database": "/home/ubuntu/live/hivezilla-validator-20260930/compact/bank-v2-live/000000000000000018de229d3fc8a9d9-275b05/feed.sqlite",
+  "sql": "CREATE INDEX IF NOT EXISTS event_artifact ON feed_events(artifact,sequence)",
+  "existing_source_definition": "hivezilla/direct-agave/src/confirmed.rs:48",
+  "old_source_producer_lock": "WORKER.lock held exclusively throughout migration",
+  "active_source_changed": false,
+  "services_restarted": false,
+  "event_rows_modified": 0,
+  "event_counts_and_bounds_before": [
+    2869813,
+    1,
+    2869813
+  ],
+  "event_counts_and_bounds_after": [
+    2869813,
+    1,
+    2869813
+  ],
+  "first_16_event_rows_unchanged": true,
+  "sample_artifact": "/home/ubuntu/live/hivezilla-validator-20260930/compact/direct-agave-processed-live/000000000000000018de229d3fc8a9d9-275b05/epoch-1056/456502438-2094.compact",
+  "sample_max_sequence_before": 33,
+  "sample_max_sequence_after": 33,
+  "query_plan_before": [
+    [
+      3,
+      0,
+      0,
+      "SEARCH feed_events"
+    ]
+  ],
+  "query_plan_after": [
+    [
+      3,
+      0,
+      0,
+      "SEARCH feed_events USING COVERING INDEX event_artifact (artifact=?)"
+    ]
+  ],
+  "sample_query_seconds_before": 39.7215087399818,
+  "sample_query_seconds_after": 3.192806616425514e-05,
+  "gate_query_changed": false,
+  "storage_gates_changed": false,
+  "free_disk_bytes_after": 563537043456,
+  "limits": [
+    "The timings are one query sample; cache state was not controlled. A storage pilot must measure end-to-end throughput."
+  ],
+  "active_source_migration": {
+    "schema": "blockzilla-live-bank-artifact-index-migration-v1",
+    "session": "000000000000000018deede1d641da13-275b05",
+    "started_unix_ms": 1792133208463,
+    "completed_unix_ms": 1792133208498,
+    "sql": "CREATE INDEX IF NOT EXISTS event_artifact ON feed_events(artifact,sequence)",
+    "existing_source_definition": "hivezilla/direct-agave/src/confirmed.rs:48",
+    "event_rows_before": 27214,
+    "index_transaction_seconds": 0.028235235949978232,
+    "first_16_event_rows_unchanged": true,
+    "event_rows_modified": 0,
+    "producer_pid_unchanged": 2995833,
+    "services_restarted": false,
+    "write_admission_timeout_seconds": 0.5,
+    "statement_progress_deadline_seconds": 2,
+    "query_plan_after": [
+      [
+        3,
+        0,
+        0,
+        "SEARCH feed_events USING COVERING INDEX event_artifact (artifact=?)"
+      ]
+    ],
+    "storage_gates_changed": false
+  }
+}

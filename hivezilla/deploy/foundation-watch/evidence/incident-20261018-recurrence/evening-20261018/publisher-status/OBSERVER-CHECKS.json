@@ -1,0 +1,25 @@
+{
+  "state": "PASSED",
+  "scope": "isolated synthetic sample validation only; no main/host/network execution",
+  "checks": 18,
+  "cases": [
+    "valid_waiting",
+    "valid_inflight_old_checkpoint",
+    "stale_status",
+    "future_status",
+    "failed_status",
+    "wrong_phase",
+    "bool_phase_required",
+    "waiting_has_no_batch",
+    "inflight_requires_batch",
+    "old_checkpoint_cannot_be_ahead",
+    "equal_sequence_exact_cursor",
+    "source_identity_pinned",
+    "sequence_nonregressing",
+    "same_sequence_exact_bytes",
+    "counter_bool_rejected",
+    "counter_u64_bound",
+    "cursor_bound",
+    "durable_time_required"
+  ]
+}

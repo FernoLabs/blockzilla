@@ -1,0 +1,33 @@
+{
+  "activation_sha256": "ceeea38c212d8dbc0c83b62a0b26a20c56c6d0bf033e4404249af5b04ade49fb",
+  "activation_tests_sha256": "81ac7d8959363ecc897f9eaff5abcbda0c564d8d826f2ccb66ef908350126aeb",
+  "blockers": [],
+  "build_sha256": "a001df9c1496cf6722a26b4cbfbe6298a3eb95843fcd516c1aecd56d2ae9515f",
+  "findings": [
+    "Scoped batch workers join before return; only the coordinator writes status.",
+    "Final status report precedes durable local checkpoint commit; failure retains exact intent and old checkpoint.",
+    "Partial remote HEAD success remains recoverable through the existing intent and retry order.",
+    "Activation changes only the publisher executable and retains source, arguments, publisher identity, namespace and seven protected processes.",
+    "Activation requires checkpoint progress after a floor captured under the same verified new process; old-process progress is insufficient.",
+    "Approved patch, donor, all 963 source records, 34 dependency graph records, eight regression names and release hashes are pinned.",
+    "Rollback checks source, registry, protected processes and owned old/new unit bytes before restoration."
+  ],
+  "limits": [
+    "Status reporting adds no total batch deadline.",
+    "Existing 300-second cloud progress and 8192-event backlog gates remain unchanged.",
+    "An entered remote request can complete after a status error; cancellation prevents later stages where possible and all scoped workers join.",
+    "Activation cloud proof fully reads catalog HEAD and the last commit metadata; it does not read the payload frame."
+  ],
+  "publisher_patch_sha256": "92f2376d361a62b4e34f4671e93c1b5f70bcf1b1f95c9c8b653a3c70c94c708e",
+  "publisher_source_sha256": "b31fba2acf86a93dd1506cfdd0d6d0a1cea174d91fba461dc7689561943f75dd",
+  "reviewed_unix_ms": 1792348838895,
+  "schema": "blockzilla-publisher-status-independent-review-v1",
+  "scope": "read_only_code_and_activation_review_no_host_actions",
+  "state": "PASSED",
+  "validation": {
+    "expected_host_library_tests": 44,
+    "host_44_tests_passed_reported_by_parent": true,
+    "host_build_and_source_graph_verified_by_parent": true,
+    "independent_activation_fixtures_passed": 11
+  }
+}

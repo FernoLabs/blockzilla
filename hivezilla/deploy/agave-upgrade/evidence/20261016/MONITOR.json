@@ -1,0 +1,24 @@
+{
+  "state": "PASSED",
+  "checked_unix_ms": 1792182744181,
+  "sampled_unix_ms": 1792182642004,
+  "last_check_unix_ms": 1792182651135,
+  "current_issues": [],
+  "active_incident_issues": [],
+  "stream_issue": null,
+  "host_errors": [],
+  "rpc": {
+    "healthy": true,
+    "finalized_slot": 457771146
+  },
+  "compact": {
+    "state": "RUNNING",
+    "last_compact_slot": 457771175,
+    "event_sequence": 7421,
+    "source_sequence": 8666502,
+    "updated_unix_ms": 1792182641813
+  },
+  "pending_alerts": 0,
+  "delivery_error": null,
+  "maintenance_event_id": "27d95815-b969-4518-9ced-9d23172bde1f"
+}

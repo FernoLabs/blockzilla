@@ -1,0 +1,18 @@
+{
+  "files": {
+    "MANIFEST.json": "bb551de8abb825e5a5ee7555260613d4694cbc13fdc7766f603542d7606c92a8",
+    "cloud-validator.py": "d4fcf1d98da782e9b019c723c620e0be8ffd7e8a2026958cf72311abd96d069b",
+    "proof-support.py": "30851c6644304d86daebc050da0ab4e63b30f37e8de698b7d5ea25cb68ef3f35",
+    "test_verify.py": "f02f7a18f95c728e77f38255ec2db108d4e79c2b51cde70d87f230fc7be0d110",
+    "verify.py": "3ac2eb2cece213e593cc55d05300079b54b26672bc0a55ea32a96da0431b67dd"
+  },
+  "host_execution": false,
+  "production_changes": [],
+  "recorded_unix_ms": 1792477288428,
+  "review": "Exact source/helper/registry and canonical completion authority; finite row bytes and caps retained; strict initialized circuit validation without state changes; process PID and invocation binding; complete fully retired bundle after new-process baseline; exact global key scan, both custody receipts, full bounded wrapped GET and tar/member checks; final authority rechecks.",
+  "schema": "blockzilla-storage-recovery-postverify-review-v1",
+  "state": "PASSED",
+  "test_failures": 0,
+  "test_only_portability_update": "The fixture prefers the staged sibling BUILD release helper, checks exact f757 source hash, then uses the local repository fallback. Runtime verifier and proof modules are unchanged.",
+  "tests": 13
+}

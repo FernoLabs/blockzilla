@@ -1,0 +1,22 @@
+{
+  "state": "INSTALLED",
+  "old_helper": "/home/ubuntu/live/hivezilla-validator-20260930/releases/bank-v2-health-20261016-0c5a62ac594f8dd8/heartbeat.py",
+  "old_sha256": "bf141c1e2f76249b0001b9095b2165e564b5c9bbaed44fd295af21c93881e4c7",
+  "new_helper": "/home/ubuntu/live/hivezilla-validator-20260930/releases/agave-upgrade-watch-20261016-0469f7ebd1d62b3b/heartbeat.py",
+  "new_sha256": "0469f7ebd1d62b3bf8c1c74cc5045c7d213687c7e5860308d70b4f3c17d28cce",
+  "sibling_sha256": "fb7adbd6cb6d03fb33dc54974eca3f593d581e6586f5a70be672587fb5e5937f",
+  "unit_sha256": "bd1017a7b480e6bedb22c83a4a8f9d8e33698992e7503d4bf50032c581cfee18",
+  "dropin": "/etc/systemd/system/hivezilla-foundation-heartbeat.service.d/zzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzz-agave-4.3.2.conf",
+  "proposed": "/home/ubuntu/live/hivezilla-validator-20260930/reports/agave-upgrade-4.3.2-20261016/heartbeat-new.conf",
+  "prepared_unix_ms": 1792182481070,
+  "change": "allow periods in one flat release directory name; keep exact launcher, roots and binary names",
+  "installed_unix_ms": 1792182522208,
+  "sample_errors": [],
+  "sender_report": {
+    "schema": "blockzilla-foundation-heartbeat-sender-v1",
+    "state": "SENT",
+    "sampled_unix_ms": 1792182521841,
+    "errors": [],
+    "send_error": null
+  }
+}

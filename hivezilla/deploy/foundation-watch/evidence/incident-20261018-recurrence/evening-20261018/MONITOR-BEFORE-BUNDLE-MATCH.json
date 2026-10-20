@@ -1,0 +1,11 @@
+{
+  "schema": "blockzilla-monitor-before-bundle-match-v1",
+  "state": "EXACT_MATCH",
+  "recorded_unix_ms": 1792347435779,
+  "active_version": "670ba00d-a5c3-4608-a553-c305656f143f",
+  "active_bundle_sha256": "d1c0833666833261bdf2728199d8bfa88244df1013f91b44ffe5ff49068d1565",
+  "local_existing_dry_run_sha256": "d1c0833666833261bdf2728199d8bfa88244df1013f91b44ffe5ff49068d1565",
+  "bundle_bytes": 42151,
+  "config_sha256": "bd27287793a8d6a00c9538c49a3a3247597801b399f56d6b39536dbfd6545cff",
+  "scope": "Existing local bundle matches active Worker bytes before the history rebuild."
+}

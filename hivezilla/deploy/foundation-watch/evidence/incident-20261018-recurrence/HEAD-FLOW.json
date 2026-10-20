@@ -1,0 +1,381 @@
+{
+  "schema": "blockzilla-recurrence-head-flow-v1",
+  "state": "FAULT_OBSERVED",
+  "elapsed_seconds": 60.093,
+  "source": {
+    "genesis_hash": "5eykt4UsFv8P8NJdTREpY1vzqKqZKvdpKuc147dw2N9d",
+    "node_identity": "J7qpvCEWhdBgPdYRV3s3btWPrRVXa2qnAzgvxWTvtbrQ",
+    "agave_revision": "87167f3906bdf5111e99ead64d8f4098b7874e33",
+    "session_id": "000000000000000018df884b2474cf8e-20b258"
+  },
+  "samples": [
+    {
+      "sampled_unix_ms": 1792312948334,
+      "status": "live",
+      "source_lag_ms": 1061,
+      "confirmed_slot": 458372220
+    },
+    {
+      "sampled_unix_ms": 1792312949339,
+      "status": "live",
+      "source_lag_ms": 939,
+      "confirmed_slot": 458372225
+    },
+    {
+      "sampled_unix_ms": 1792312950340,
+      "status": "live",
+      "source_lag_ms": 727,
+      "confirmed_slot": 458372231
+    },
+    {
+      "sampled_unix_ms": 1792312951454,
+      "status": "live",
+      "source_lag_ms": 808,
+      "confirmed_slot": 458372235
+    },
+    {
+      "sampled_unix_ms": 1792312952455,
+      "status": "live",
+      "source_lag_ms": 794,
+      "confirmed_slot": 458372239
+    },
+    {
+      "sampled_unix_ms": 1792312953456,
+      "status": "live",
+      "source_lag_ms": 1390,
+      "confirmed_slot": 458372240
+    },
+    {
+      "sampled_unix_ms": 1792312954457,
+      "status": "live",
+      "source_lag_ms": 772,
+      "confirmed_slot": 458372244
+    },
+    {
+      "sampled_unix_ms": 1792312955458,
+      "status": "stale",
+      "source_lag_ms": 876,
+      "confirmed_slot": 458372248
+    },
+    {
+      "sampled_unix_ms": 1792312956458,
+      "status": "live",
+      "source_lag_ms": 1101,
+      "confirmed_slot": 458372252
+    },
+    {
+      "sampled_unix_ms": 1792312957459,
+      "status": "live",
+      "source_lag_ms": 1213,
+      "confirmed_slot": 458372257
+    },
+    {
+      "sampled_unix_ms": 1792312958611,
+      "status": "live",
+      "source_lag_ms": 1334,
+      "confirmed_slot": 458372261
+    },
+    {
+      "sampled_unix_ms": 1792312959612,
+      "status": "live",
+      "source_lag_ms": 1939,
+      "confirmed_slot": 458372263
+    },
+    {
+      "sampled_unix_ms": 1792312960613,
+      "status": "stale",
+      "source_lag_ms": 1267,
+      "confirmed_slot": 458372272
+    },
+    {
+      "sampled_unix_ms": 1792312961637,
+      "status": "live",
+      "source_lag_ms": 1362,
+      "confirmed_slot": 458372276
+    },
+    {
+      "sampled_unix_ms": 1792312962697,
+      "status": "live",
+      "source_lag_ms": 1454,
+      "confirmed_slot": 458372282
+    },
+    {
+      "sampled_unix_ms": 1792312963886,
+      "status": "live",
+      "source_lag_ms": 805,
+      "confirmed_slot": 458372291
+    },
+    {
+      "sampled_unix_ms": 1792312964908,
+      "status": "live",
+      "source_lag_ms": 887,
+      "confirmed_slot": 458372295
+    },
+    {
+      "sampled_unix_ms": 1792312965909,
+      "status": "live",
+      "source_lag_ms": 1057,
+      "confirmed_slot": 458372299
+    },
+    {
+      "sampled_unix_ms": 1792312966910,
+      "status": "live",
+      "source_lag_ms": 1528,
+      "confirmed_slot": 458372301
+    },
+    {
+      "sampled_unix_ms": 1792312967988,
+      "status": "live",
+      "source_lag_ms": 1044,
+      "confirmed_slot": 458372307
+    },
+    {
+      "sampled_unix_ms": 1792312968988,
+      "status": "live",
+      "source_lag_ms": 991,
+      "confirmed_slot": 458372312
+    },
+    {
+      "sampled_unix_ms": 1792312969989,
+      "status": "live",
+      "source_lag_ms": 739,
+      "confirmed_slot": 458372318
+    },
+    {
+      "sampled_unix_ms": 1792312970990,
+      "status": "stale",
+      "source_lag_ms": 729,
+      "confirmed_slot": 458372322
+    },
+    {
+      "sampled_unix_ms": 1792312971991,
+      "status": "live",
+      "source_lag_ms": 888,
+      "confirmed_slot": 458372326
+    },
+    {
+      "sampled_unix_ms": 1792312972992,
+      "status": "live",
+      "source_lag_ms": 912,
+      "confirmed_slot": 458372331
+    },
+    {
+      "sampled_unix_ms": 1792312973993,
+      "status": "live",
+      "source_lag_ms": 977,
+      "confirmed_slot": 458372334
+    },
+    {
+      "sampled_unix_ms": 1792312974994,
+      "status": "live",
+      "source_lag_ms": 900,
+      "confirmed_slot": 458372339
+    },
+    {
+      "sampled_unix_ms": 1792312976118,
+      "status": "stale",
+      "source_lag_ms": 984,
+      "confirmed_slot": 458372343
+    },
+    {
+      "sampled_unix_ms": 1792312977119,
+      "status": "live",
+      "source_lag_ms": 1136,
+      "confirmed_slot": 458372347
+    },
+    {
+      "sampled_unix_ms": 1792312978119,
+      "status": "live",
+      "source_lag_ms": 1055,
+      "confirmed_slot": 458372352
+    },
+    {
+      "sampled_unix_ms": 1792312979230,
+      "status": "live",
+      "source_lag_ms": 1229,
+      "confirmed_slot": 458372356
+    },
+    {
+      "sampled_unix_ms": 1792312980231,
+      "status": "live",
+      "source_lag_ms": 1216,
+      "confirmed_slot": 458372361
+    },
+    {
+      "sampled_unix_ms": 1792312981232,
+      "status": "live",
+      "source_lag_ms": 1586,
+      "confirmed_slot": 458372364
+    },
+    {
+      "sampled_unix_ms": 1792312982233,
+      "status": "live",
+      "source_lag_ms": 2106,
+      "confirmed_slot": 458372368
+    },
+    {
+      "sampled_unix_ms": 1792312983466,
+      "status": "live",
+      "source_lag_ms": 2084,
+      "confirmed_slot": 458372374
+    },
+    {
+      "sampled_unix_ms": 1792312984467,
+      "status": "live",
+      "source_lag_ms": 1838,
+      "confirmed_slot": 458372382
+    },
+    {
+      "sampled_unix_ms": 1792312985751,
+      "status": "live",
+      "source_lag_ms": 833,
+      "confirmed_slot": 458372392
+    },
+    {
+      "sampled_unix_ms": 1792312986902,
+      "status": "live",
+      "source_lag_ms": 554,
+      "confirmed_slot": 458372398
+    },
+    {
+      "sampled_unix_ms": 1792312987942,
+      "status": "live",
+      "source_lag_ms": 831,
+      "confirmed_slot": 458372402
+    },
+    {
+      "sampled_unix_ms": 1792312989074,
+      "status": "live",
+      "source_lag_ms": 794,
+      "confirmed_slot": 458372407
+    },
+    {
+      "sampled_unix_ms": 1792312990125,
+      "status": "live",
+      "source_lag_ms": 974,
+      "confirmed_slot": 458372412
+    },
+    {
+      "sampled_unix_ms": 1792312991244,
+      "status": "live",
+      "source_lag_ms": 762,
+      "confirmed_slot": 458372417
+    },
+    {
+      "sampled_unix_ms": 1792312992245,
+      "status": "live",
+      "source_lag_ms": 815,
+      "confirmed_slot": 458372422
+    },
+    {
+      "sampled_unix_ms": 1792312993327,
+      "status": "live",
+      "source_lag_ms": 915,
+      "confirmed_slot": 458372427
+    },
+    {
+      "sampled_unix_ms": 1792312994437,
+      "status": "live",
+      "source_lag_ms": 737,
+      "confirmed_slot": 458372433
+    },
+    {
+      "sampled_unix_ms": 1792312995587,
+      "status": "live",
+      "source_lag_ms": 784,
+      "confirmed_slot": 458372437
+    },
+    {
+      "sampled_unix_ms": 1792312996655,
+      "status": "live",
+      "source_lag_ms": 589,
+      "confirmed_slot": 458372443
+    },
+    {
+      "sampled_unix_ms": 1792312997688,
+      "status": "live",
+      "source_lag_ms": 720,
+      "confirmed_slot": 458372448
+    },
+    {
+      "sampled_unix_ms": 1792312998941,
+      "status": "live",
+      "source_lag_ms": 801,
+      "confirmed_slot": 458372452
+    },
+    {
+      "sampled_unix_ms": 1792312999942,
+      "status": "live",
+      "source_lag_ms": 742,
+      "confirmed_slot": 458372458
+    },
+    {
+      "sampled_unix_ms": 1792313001018,
+      "status": "live",
+      "source_lag_ms": 744,
+      "confirmed_slot": 458372463
+    },
+    {
+      "sampled_unix_ms": 1792313002033,
+      "status": "live",
+      "source_lag_ms": 828,
+      "confirmed_slot": 458372467
+    },
+    {
+      "sampled_unix_ms": 1792313003034,
+      "status": "live",
+      "source_lag_ms": 949,
+      "confirmed_slot": 458372472
+    },
+    {
+      "sampled_unix_ms": 1792313004178,
+      "status": "live",
+      "source_lag_ms": 1159,
+      "confirmed_slot": 458372477
+    },
+    {
+      "sampled_unix_ms": 1792313005312,
+      "status": "live",
+      "source_lag_ms": 840,
+      "confirmed_slot": 458372484
+    },
+    {
+      "sampled_unix_ms": 1792313006425,
+      "status": "live",
+      "source_lag_ms": 617,
+      "confirmed_slot": 458372489
+    },
+    {
+      "sampled_unix_ms": 1792313007426,
+      "status": "live",
+      "source_lag_ms": 797,
+      "confirmed_slot": 458372494
+    }
+  ],
+  "faults": [
+    {
+      "sampled_unix_ms": 1792312955458,
+      "status": "stale",
+      "source_lag_ms": 876,
+      "confirmed_slot": 458372248
+    },
+    {
+      "sampled_unix_ms": 1792312960613,
+      "status": "stale",
+      "source_lag_ms": 1267,
+      "confirmed_slot": 458372272
+    },
+    {
+      "sampled_unix_ms": 1792312970990,
+      "status": "stale",
+      "source_lag_ms": 729,
+      "confirmed_slot": 458372322
+    },
+    {
+      "sampled_unix_ms": 1792312976118,
+      "status": "stale",
+      "source_lag_ms": 984,
+      "confirmed_slot": 458372343
+    }
+  ]
+}

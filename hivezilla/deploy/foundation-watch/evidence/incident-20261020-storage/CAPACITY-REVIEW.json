@@ -1,0 +1,74 @@
+{
+  "capacity_target_estimates": {
+    "additional_bytes_from_sample_for_full_budget_overlap": 102639882240,
+    "additional_bytes_from_sample_for_observed_overlap": 89968746496,
+    "limits": "Estimates exclude additional non-snapshot growth and cannot guarantee future archive size.",
+    "observed_archive_bytes_used_for_estimate": 124767817728,
+    "prewrite_free_to_stay_above_current_warning_during_full_budget_overlap_bytes": 811748818944,
+    "prewrite_free_to_stay_above_current_warning_during_observed_overlap_bytes": 799077683200
+  },
+  "deleted_files": [],
+  "deletion_authority_inferred": false,
+  "evidence_references": [
+    "hivezilla/deploy/direct-agave/snapshot_budget.py:134",
+    "hivezilla/deploy/direct-agave/capacity_guard.py:149",
+    "hivezilla/deploy/direct-agave/test_capacity_guard.py:65",
+    "hivezilla/deploy/foundation-watch/evidence/incident-20261018-recurrence/LEDGER-SNAPSHOT-FINDINGS.json",
+    "ALERT-HISTORY.json"
+  ],
+  "finite_caps_unchanged": [
+    785546,
+    308768
+  ],
+  "history": {
+    "limits": "Alert history does not establish exact temporary allocation for each event.",
+    "scope": "five isolated snapshot_capacity_headroom_low incidents19to20OctoberParis",
+    "self_clear_seconds": [
+      242.743,
+      256.078,
+      301.373,
+      514.72,
+      420.902
+    ]
+  },
+  "policy_findings": [
+    "The write budget is max(configured128GiB,largest observed allocated completed,incremental or temporary archive), not the sum of archive sizes.",
+    "Capacity subtracts a full future archive budget from current statvfs free space, including during an active snapshot write.",
+    "This is the tested conservative full-next-write policy. It overstates bytes still needed to complete that same active archive.",
+    "A warning records reduced recovery margin for another full write. It does not prove capture stopped or current free space is below the400GiB capture reserve.",
+    "Agave retains the previous recovery archive until the new full archive succeeds and then purges old archives. Prospective purge bytes are not current free space."
+  ],
+  "production_changes": [],
+  "recommendations": [
+    "Keep reserve,recovery,startup and alert thresholds unchanged.",
+    "Measure complete full-snapshot cycles, minimum free space and prewrite baselines before claiming sustained capacity.",
+    "Add informational in-flight allocation and remaining-write estimates only after exact writer and archive attribution; do not credit unknown temporary files or expected purge.",
+    "Maintain enough steady free capacity for full overlap plus other growth under the current policy."
+  ],
+  "registry_sha256": "a52115479c26ccff6367b8439cd58dbb2354bb7b61d25691e797a96611655f6f",
+  "reviewed_unix_ms": 1792475968545,
+  "sample": {
+    "active_temporary_archive_count": 0,
+    "capture_reserve_bytes": 429496729600,
+    "free_disk_bytes": 709108936704,
+    "next_archive_budget_bytes": 137438953472,
+    "path": "HOST-INITIAL.json",
+    "recovery_headroom_bytes": 34799071232,
+    "recovery_minimum_free_bytes": 536870912000,
+    "sampled_unix_ms": 1792475641237,
+    "sha256": "0078435232d88358cb9382e8615443986e2946c73d6a10a0fc8222c66cc9a57b",
+    "snapshot_archive_allocated_bytes": 124767817728,
+    "warning_threshold_free_bytes": 674309865472
+  },
+  "schema": "blockzilla-capacity-independent-review-v1",
+  "service_actions": [],
+  "source": {
+    "agave_revision": "87167f3906bdf5111e99ead64d8f4098b7874e33",
+    "genesis_hash": "5eykt4UsFv8P8NJdTREpY1vzqKqZKvdpKuc147dw2N9d",
+    "node_identity": "J7qpvCEWhdBgPdYRV3s3btWPrRVXa2qnAzgvxWTvtbrQ",
+    "session_id": "000000000000000018df884b2474cf8e-20b258"
+  },
+  "source_pin_sha256": "ddfe097a2915a946c0917adcc135a2c7d997b1517d578044bfea80aadd7ea315",
+  "state": "READ_ONLY_FINDINGS",
+  "threshold_changes": []
+}

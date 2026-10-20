@@ -1,0 +1,411 @@
+{
+  "code_changes": [],
+  "configuration_changes": [],
+  "current_live_helper_sha256": "f757f2be29f01378448cbe5bb5b529db2625e6654c065f0f17ebd8ba3cbb6d41",
+  "current_services": {
+    "hivezilla-native-cold-storage-20261012-live.service": {
+      "ActiveState": "active",
+      "ExecMainCode": "0",
+      "ExecMainExitTimestamp": "",
+      "ExecMainStartTimestamp": "Tue 2026-10-20 06:21:51 UTC",
+      "ExecMainStatus": "0",
+      "InvocationID": "3060c2b06be74837b95b017068658f5e",
+      "MainPID": "4054548",
+      "NRestarts": "0",
+      "Restart": "no",
+      "Result": "success",
+      "SubState": "running"
+    },
+    "hivezilla-native-storage-jobs.service": {
+      "ActiveState": "active",
+      "ExecMainCode": "0",
+      "ExecMainExitTimestamp": "",
+      "ExecMainStartTimestamp": "Tue 2026-10-20 06:21:51 UTC",
+      "ExecMainStatus": "0",
+      "InvocationID": "4e62a965dc9a4351bcb0b4f4b2673650",
+      "MainPID": "4054568",
+      "NRestarts": "0",
+      "Restart": "on-failure",
+      "Result": "success",
+      "SubState": "running"
+    }
+  },
+  "data_deletions": [],
+  "findings": {
+    "alert_history_authority": "Exact retained times supplied by root; this read-only collector did not query, post or modify alerts.",
+    "current_read_only_sample": {
+      "guardian_issues": [],
+      "guardian_state": "HEALTHY",
+      "live_archived_banks": 772774,
+      "live_retired_banks": 772774,
+      "recovery_state": "NORMAL",
+      "sampled_utc": "2026-10-20T06:26:18.019665+00:00"
+    },
+    "deployment_transition": {
+      "deactivations_succeeded": true,
+      "guardian_pid": 4054568,
+      "guardian_start_utc": "2026-10-20T06:21:51.433Z",
+      "guardian_stop_utc": "2026-10-20T06:21:50.991Z",
+      "interpretation": "These are the successful root-owned installation stops/starts. They are separate from the two prepatch failures.",
+      "live_pid": 4054548,
+      "live_start_utc": "2026-10-20T06:21:51.406Z",
+      "live_stop_utc": "2026-10-20T06:21:51.003Z"
+    },
+    "episodes": [
+      {
+        "exception_type": "UNKNOWN_NOT_RETAINED",
+        "exit_status": 1,
+        "failed_invocation_id": "4f587ee8481c48ebb3a42c3f1214bcd6",
+        "new_invocation_id": "5e17cbe1caf84410a35cacfc9e0168e8",
+        "process_exit_unix_ms": 1792476042667,
+        "process_exit_utc": "2026-10-20T06:00:42.667Z",
+        "restart_detail": "Exit/start is exact in the journal. This earlier retry-ledger entry was superseded; no exact exception type is inferred from later headers.",
+        "restart_unix_ms": 1792476116946,
+        "restart_utc": "2026-10-20T06:01:56.946Z"
+      },
+      {
+        "automatic_retry_bound_to_exact_failure": true,
+        "exception_type": "BundleTransferTimeout",
+        "exit_status": 1,
+        "failed_invocation_id": "5e17cbe1caf84410a35cacfc9e0168e8",
+        "failure_record_utc": "2026-10-20T06:07:03.671+00:00",
+        "healthy_observed_utc": "2026-10-20T06:09:02.740+00:00",
+        "healthy_start_archived_banks": 767334,
+        "new_invocation_id": "0cb00588f5e24db19a6831a7113e82d6",
+        "next_retry_utc": "2026-10-20T06:08:31.253+00:00",
+        "process_exit_unix_ms": 1792476434386,
+        "process_exit_utc": "2026-10-20T06:07:14.386Z",
+        "reserved_retry_utc": "2026-10-20T06:08:32.061+00:00",
+        "restart_unix_ms": 1792476512447,
+        "restart_utc": "2026-10-20T06:08:32.447Z",
+        "retained_attempts_after_reset": 0,
+        "retry_budget_reset_utc": "2026-10-20T06:10:03.570+00:00"
+      }
+    ],
+    "latest_exact_prepatch_failure": {
+      "archived_banks": 767142,
+      "error_type": "BundleTransferTimeout",
+      "inner_cloud_operation_or_HTTP_cause": "Not retained on whole-transfer deadline expiry.",
+      "invocation_id": "5e17cbe1caf84410a35cacfc9e0168e8",
+      "oldest_pending_age_ms": 300367,
+      "pending_bundles": 2,
+      "retired_banks": 767142,
+      "unix_ms": 1792476423671,
+      "utc": "2026-10-20T06:07:03.671+00:00"
+    },
+    "parent_retained_alert_history": [
+      {
+        "failure_utc": "2026-10-20T06:02:24.975Z",
+        "issue": "storage_jobs_degraded",
+        "recovery_utc": "2026-10-20T06:04:10.169Z"
+      },
+      {
+        "failure_utc": "2026-10-20T06:08:40.849Z",
+        "issue": "cold_failed_or_not_running"
+      },
+      {
+        "failure_utc": "2026-10-20T06:09:10.883Z",
+        "issue": "storage_jobs_degraded",
+        "recovery_utc": "2026-10-20T06:10:25.900Z"
+      }
+    ],
+    "postpatch_alert_history_checked_by_this_collector": false
+  },
+  "host_utc": "2026-10-20T06:26:18.019665+00:00",
+  "interpretation_limits": [
+    "The current LAST-FAILURE is one exact retained failure, not proof of all earlier failure types.",
+    "Systemd exit/start times establish process lifecycle, but not the missing application exception type.",
+    "Successful deployment stops near 06:21 must remain separate from prepatch failures."
+  ],
+  "journal": {
+    "earliest_unix_ms": 1792475660459,
+    "event_counts": {
+      "deactivated_successfully": 2,
+      "main_process_exited": 2,
+      "message_omitted": 4,
+      "started": 4,
+      "stopped": 2,
+      "stopping": 2,
+      "sudo_session_closed": 173,
+      "sudo_session_opened": 173,
+      "sudo_systemctl_command": 173,
+      "unit_failed": 2
+    },
+    "events": [
+      {
+        "event": "main_process_exited",
+        "exit_code": "exited",
+        "exit_label": "FAILURE",
+        "exit_status": 1,
+        "invocation_id": "4f587ee8481c48ebb3a42c3f1214bcd6",
+        "priority": "5",
+        "unit": "hivezilla-native-cold-storage-20261012-live.service",
+        "unix_ms": 1792476042667,
+        "utc": "2026-10-20T06:00:42.667+00:00"
+      },
+      {
+        "event": "unit_failed",
+        "invocation_id": "4f587ee8481c48ebb3a42c3f1214bcd6",
+        "priority": "4",
+        "result": "exit-code",
+        "unit": "hivezilla-native-cold-storage-20261012-live.service",
+        "unix_ms": 1792476042667,
+        "utc": "2026-10-20T06:00:42.667+00:00"
+      },
+      {
+        "event": "started",
+        "invocation_id": "5e17cbe1caf84410a35cacfc9e0168e8",
+        "priority": "6",
+        "unit": "hivezilla-native-cold-storage-20261012-live.service",
+        "unix_ms": 1792476116946,
+        "utc": "2026-10-20T06:01:56.946+00:00"
+      },
+      {
+        "event": "main_process_exited",
+        "exit_code": "exited",
+        "exit_label": "FAILURE",
+        "exit_status": 1,
+        "invocation_id": "5e17cbe1caf84410a35cacfc9e0168e8",
+        "priority": "5",
+        "unit": "hivezilla-native-cold-storage-20261012-live.service",
+        "unix_ms": 1792476434386,
+        "utc": "2026-10-20T06:07:14.386+00:00"
+      },
+      {
+        "event": "unit_failed",
+        "invocation_id": "5e17cbe1caf84410a35cacfc9e0168e8",
+        "priority": "4",
+        "result": "exit-code",
+        "unit": "hivezilla-native-cold-storage-20261012-live.service",
+        "unix_ms": 1792476434387,
+        "utc": "2026-10-20T06:07:14.387+00:00"
+      },
+      {
+        "event": "started",
+        "invocation_id": "0cb00588f5e24db19a6831a7113e82d6",
+        "priority": "6",
+        "unit": "hivezilla-native-cold-storage-20261012-live.service",
+        "unix_ms": 1792476512447,
+        "utc": "2026-10-20T06:08:32.447+00:00"
+      },
+      {
+        "event": "stopping",
+        "invocation_id": "77ec2c964ec3463ebe886988bd09a9d5",
+        "priority": "6",
+        "unit": "hivezilla-native-storage-jobs.service",
+        "unix_ms": 1792477310991,
+        "utc": "2026-10-20T06:21:50.991+00:00"
+      },
+      {
+        "event": "deactivated_successfully",
+        "invocation_id": "77ec2c964ec3463ebe886988bd09a9d5",
+        "priority": "6",
+        "unit": "hivezilla-native-storage-jobs.service",
+        "unix_ms": 1792477310994,
+        "utc": "2026-10-20T06:21:50.994+00:00"
+      },
+      {
+        "event": "stopped",
+        "invocation_id": "77ec2c964ec3463ebe886988bd09a9d5",
+        "priority": "6",
+        "unit": "hivezilla-native-storage-jobs.service",
+        "unix_ms": 1792477310994,
+        "utc": "2026-10-20T06:21:50.994+00:00"
+      },
+      {
+        "event": "stopping",
+        "invocation_id": "0cb00588f5e24db19a6831a7113e82d6",
+        "priority": "6",
+        "unit": "hivezilla-native-cold-storage-20261012-live.service",
+        "unix_ms": 1792477311003,
+        "utc": "2026-10-20T06:21:51.003+00:00"
+      },
+      {
+        "event": "deactivated_successfully",
+        "invocation_id": "0cb00588f5e24db19a6831a7113e82d6",
+        "priority": "6",
+        "unit": "hivezilla-native-cold-storage-20261012-live.service",
+        "unix_ms": 1792477311016,
+        "utc": "2026-10-20T06:21:51.016+00:00"
+      },
+      {
+        "event": "stopped",
+        "invocation_id": "0cb00588f5e24db19a6831a7113e82d6",
+        "priority": "6",
+        "unit": "hivezilla-native-cold-storage-20261012-live.service",
+        "unix_ms": 1792477311016,
+        "utc": "2026-10-20T06:21:51.016+00:00"
+      },
+      {
+        "event": "started",
+        "invocation_id": "3060c2b06be74837b95b017068658f5e",
+        "priority": "6",
+        "unit": "hivezilla-native-cold-storage-20261012-live.service",
+        "unix_ms": 1792477311406,
+        "utc": "2026-10-20T06:21:51.406+00:00"
+      },
+      {
+        "event": "started",
+        "invocation_id": "4e62a965dc9a4351bcb0b4f4b2673650",
+        "priority": "6",
+        "unit": "hivezilla-native-storage-jobs.service",
+        "unix_ms": 1792477311433,
+        "utc": "2026-10-20T06:21:51.433+00:00"
+      }
+    ],
+    "latest_unix_ms": 1792477312093,
+    "max_bytes": 8388608,
+    "max_entries": 3000,
+    "read_bytes": 306888,
+    "read_entries": 537,
+    "truncated": false
+  },
+  "raw_exception_text_or_urls_saved": false,
+  "registry_sha256": "48f343929d1c5bce4832e4ab094f72e1f164691c8b089890b16a91c6ebae211b",
+  "reports": {
+    "current_guardian": {
+      "metadata": {
+        "bytes": 2198,
+        "mtime_unix_ms": 1792477555504,
+        "path": "/home/ubuntu/live/hivezilla-validator-20260930/reports/storage-jobs/STATUS.json",
+        "sha256": "0c87ad8c2b0370c97b187c6271b3d87f26b1e4d562a06fef1ad0dc61e8763fba"
+      },
+      "safe_fields": {
+        "archived_banks": null,
+        "eligible_wait_since_unix_ms": null,
+        "error_type": null,
+        "http_status": null,
+        "invocation_id": null,
+        "issues": [],
+        "last_archive_progress_unix_ms": null,
+        "last_batch_seconds": null,
+        "network_error_type": null,
+        "pending_bundles": null,
+        "recovery_state_persisted": null,
+        "retired_banks": null,
+        "schema": "blockzilla-storage-jobs-status-v1",
+        "state": "HEALTHY",
+        "storage_progress": null,
+        "updated_unix_ms": 1792477555108
+      }
+    },
+    "current_live": {
+      "metadata": {
+        "bytes": 1327,
+        "mtime_unix_ms": 1792477577281,
+        "path": "/home/ubuntu/live/hivezilla-validator-20260930/compact/direct-agave-processed-live/000000000000000018df884b2474cf8e-20b258/cold-storage/STATUS.json",
+        "sha256": "1f9e68f93162d434501dab22c134b47c9b1ff28e97e7d0a1fb7726a640547327"
+      },
+      "safe_fields": {
+        "archived_banks": 772774,
+        "eligible_wait_since_unix_ms": 1792477571967,
+        "error_type": null,
+        "http_status": null,
+        "invocation_id": null,
+        "last_archive_progress_unix_ms": 1792477572409,
+        "last_batch_seconds": 13.856529474025592,
+        "network_error_type": null,
+        "pending_bundles": 2,
+        "recovery": {
+          "burst_retries_used": 0,
+          "healthy_since_unix_ms": null,
+          "healthy_start_archived_banks": null,
+          "last_failure_unix_ms": null,
+          "next_attempt_unix_ms": null,
+          "outage_since_unix_ms": null,
+          "schema": "blockzilla-native-cold-recovery-v1",
+          "state": "NORMAL"
+        },
+        "recovery_state_persisted": null,
+        "retired_banks": 772774,
+        "schema": "blockzilla-native-cold-storage-status-v1",
+        "state": "RUNNING",
+        "storage_progress": "TRANSFERRING",
+        "updated_unix_ms": 1792477577281
+      }
+    },
+    "last_failure": {
+      "metadata": {
+        "bytes": 2735,
+        "mtime_unix_ms": 1792476423671,
+        "path": "/home/ubuntu/live/hivezilla-validator-20260930/compact/direct-agave-processed-live/000000000000000018df884b2474cf8e-20b258/cold-storage/LAST-FAILURE.json",
+        "sha256": "d70e7a100ff6cbc9dcfac3ac2e305ab30332ab1dbd8eb4f46724641c0373ab98"
+      },
+      "safe_fields": {
+        "archived_banks": 767142,
+        "eligible_wait_since_unix_ms": 1792476123304,
+        "error_type": "BundleTransferTimeout",
+        "http_status": null,
+        "invocation_id": "5e17cbe1caf84410a35cacfc9e0168e8",
+        "last_archive_progress_unix_ms": 1792476405511,
+        "last_batch_seconds": 141.14498613611795,
+        "network_error_type": null,
+        "pending_bundles": 2,
+        "recovery_state_persisted": null,
+        "retired_banks": 767142,
+        "schema": "blockzilla-native-cold-storage-status-v1",
+        "source": {
+          "agave_revision": "87167f3906bdf5111e99ead64d8f4098b7874e33",
+          "genesis_hash": "5eykt4UsFv8P8NJdTREpY1vzqKqZKvdpKuc147dw2N9d",
+          "node_identity": "J7qpvCEWhdBgPdYRV3s3btWPrRVXa2qnAzgvxWTvtbrQ",
+          "session_id": "000000000000000018df884b2474cf8e-20b258"
+        },
+        "state": "FAILED",
+        "storage_progress": "FAILED",
+        "updated_unix_ms": 1792476423671
+      }
+    }
+  },
+  "retained_prepatch_retry_binding": {
+    "configuration_changes": [],
+    "last_failure_error_type": "BundleTransferTimeout",
+    "last_failure_invocation_id": "5e17cbe1caf84410a35cacfc9e0168e8",
+    "last_failure_metadata": {
+      "bytes": 2735,
+      "mtime_unix_ms": 1792476423671,
+      "path": "/home/ubuntu/live/hivezilla-validator-20260930/compact/direct-agave-processed-live/000000000000000018df884b2474cf8e-20b258/cold-storage/LAST-FAILURE.json",
+      "sha256": "d70e7a100ff6cbc9dcfac3ac2e305ab30332ab1dbd8eb4f46724641c0373ab98"
+    },
+    "last_failure_updated_unix_ms": 1792476423671,
+    "old_live_helper_sha256": "8a95785f2df4e2f53b414322f0fc42a8d2edd93a02f04cfca6358bb312c19800",
+    "old_live_job_key": "cc891951ea87ffe818adb34738a6b6687accfe9888daf30e7e6755120108dbc6",
+    "old_live_retry": {
+      "attempted_invocation": "5e17cbe1caf84410a35cacfc9e0168e8",
+      "attempts": 0,
+      "failure_invocation": "5e17cbe1caf84410a35cacfc9e0168e8",
+      "healthy_since_unix_ms": 1792476542740,
+      "healthy_start_archived_banks": 767334,
+      "last_observed_archived_banks": 771174,
+      "last_reset_unix_ms": 1792476603570,
+      "last_retry_unix_ms": 1792476512061,
+      "next_retry_unix_ms": 1792476511253
+    },
+    "old_registry_metadata": {
+      "bytes": 7598,
+      "mtime_unix_ms": 1792477278742,
+      "path": "/home/ubuntu/live/hivezilla-validator-20260930/reports/native-recovery-20261018/recurrence/incident-20261020-storage/circuit/registry-before.json",
+      "sha256": "a52115479c26ccff6367b8439cd58dbb2354bb7b61d25691e797a96611655f6f"
+    },
+    "retry_ledger_metadata": {
+      "bytes": 1558,
+      "mtime_unix_ms": 1792477616005,
+      "path": "/home/ubuntu/live/hivezilla-validator-20260930/reports/storage-jobs/RETRIES.json",
+      "sha256": "ab971885f8b0ce2dcc23c737bcf26b6873e7a8401852099118ae28954aae0a9b"
+    },
+    "sampled_unix_ms": 1792477635816,
+    "schema": "blockzilla-prepatch-retained-retry-binding-v1",
+    "service_actions": []
+  },
+  "sampled_unix_ms": 1792477578019,
+  "schema": "blockzilla-storage-prepatch-recurrences-20261020-v1",
+  "service_actions": [],
+  "source": {
+    "agave_revision": "87167f3906bdf5111e99ead64d8f4098b7874e33",
+    "genesis_hash": "5eykt4UsFv8P8NJdTREpY1vzqKqZKvdpKuc147dw2N9d",
+    "node_identity": "J7qpvCEWhdBgPdYRV3s3btWPrRVXa2qnAzgvxWTvtbrQ",
+    "session_id": "000000000000000018df884b2474cf8e-20b258"
+  },
+  "source_pin_sha256": "ddfe097a2915a946c0917adcc135a2c7d997b1517d578044bfea80aadd7ea315",
+  "window_end_utc": "2026-10-20 06:22:00 UTC",
+  "window_start_utc": "2026-10-20 05:54:00 UTC"
+}

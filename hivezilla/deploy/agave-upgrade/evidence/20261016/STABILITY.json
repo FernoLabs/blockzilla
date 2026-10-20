@@ -1,0 +1,57 @@
+{
+  "state": "PASSED",
+  "pids_unchanged": true,
+  "all_counters_advanced": true,
+  "elapsed_ms": 273712,
+  "rpc": {
+    "finalized_slot": 457771198,
+    "genesis_hash": "5eykt4UsFv8P8NJdTREpY1vzqKqZKvdpKuc147dw2N9d",
+    "health": "ok",
+    "identity": "J7qpvCEWhdBgPdYRV3s3btWPrRVXa2qnAzgvxWTvtbrQ",
+    "version": "4.3.2"
+  },
+  "compact": {
+    "event_sequence": 7525,
+    "lag_slots": 0,
+    "last_compact_slot": 457771227,
+    "source_sequence": 8789268,
+    "state": "RUNNING",
+    "updated_unix_ms": 1792182653529
+  },
+  "private": {
+    "bank_id": 7212,
+    "block_height": 435807012,
+    "blockhash": "2dqYuCkxGLsfqfiygjcEfYNH7vhmTnSHc1dQv3wVtSPs",
+    "cursor": "000000000000000018df1be3bad56d9c-20b258:p11302:00cf3b458948033f110cc5d69f9449ce85f7097a41ed86c25a6e192019584b45",
+    "last_valid_block_height": 435807162,
+    "parent_blockhash": "2Cg4oygoBniE23skdxycQy9APErbKptuAsgqdkEC1YsQ",
+    "parent_slot": 457771226,
+    "payload_frame_sha256": "464a03ab0b95782bd1a1797666cd005ed5bdca9a19e700588d3ea0cce86015c4",
+    "payload_len": 619811,
+    "rpc_bank_match": true,
+    "slot": 457771227,
+    "source_lag_ms": 646,
+    "status": "live"
+  },
+  "public": {
+    "advancing": true,
+    "block_events": 5,
+    "elapsed_seconds": 0.747,
+    "slots": [
+      457771228,
+      457771229,
+      457771230,
+      457771231,
+      457771232
+    ]
+  },
+  "publisher": {
+    "blocks": 3627,
+    "bytes": 1956393009,
+    "cursor": "000000000000000018df1be3bad56d9c-20b258:p7223:92007da60ea7537d3c088e88f72374379dd7e509db566c8b35e67506bda33f3b",
+    "sequence": 7223,
+    "state": "RUNNING",
+    "updated_unix_ms": 1792182652807
+  },
+  "failed": {}
+}

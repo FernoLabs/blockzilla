@@ -1,0 +1,177 @@
+{
+  "schema": "blockzilla-foundation-history-patch-v1",
+  "state": "READY_FOR_REVIEW",
+  "created_utc": "2026-10-18T18:22:20.969943+00:00",
+  "deployment_performed": false,
+  "scope": {
+    "route": "GET /history",
+    "authorization": "Existing ADMIN_TOKEN",
+    "maximum_returned_alerts": 100,
+    "maximum_selected_rows": 101,
+    "retention": "Existing retained events: last100 delivered plus all pending or sending. This response is not complete lifetime history.",
+    "truncated": "True if the fixed query selects a101st retained row.",
+    "dto": [
+      "id",
+      "kind",
+      "issues",
+      "createdMs",
+      "status",
+      "attempts"
+    ],
+    "event_max_bytes": 16384,
+    "issues_max_count": 80,
+    "issue_max_characters": 120,
+    "corrupt_returned_record": "Fixed500 alert_history_unavailable; no partial response.",
+    "effects": "Read-only fixed SQL; no check, alarm, delivery, outbound call, schema or configuration change."
+  },
+  "source_before": {
+    "edgezilla/foundation-watch/src/index.ts": {
+      "sha256": "5dde869ae3db64a590e238d1b212e6d27350c06762592178ef3fbbb53c770bec",
+      "bytes": 23863,
+      "snapshot": "index.ts.before"
+    },
+    "edgezilla/foundation-watch/test/worker.test.mjs": {
+      "sha256": "f3ea38b7c4ee129714ce361823c6b73714e54c7bc3ddaf4e3972e722befada50",
+      "bytes": 25279,
+      "snapshot": "worker.test.mjs.before"
+    }
+  },
+  "source_after": {
+    "edgezilla/foundation-watch/src/index.ts": {
+      "sha256": "01bab8167f53b1015326b5c26607e7f7e1d4f5942b36784938239a2bcb276929",
+      "bytes": 27470,
+      "snapshot": "index.ts.after"
+    },
+    "edgezilla/foundation-watch/test/worker.test.mjs": {
+      "sha256": "f9cdb33f34cbaa25d81f30e7c93d2960c3f17b9512709e6f84dbd715b0745902",
+      "bytes": 36457,
+      "snapshot": "worker.test.mjs.after"
+    }
+  },
+  "patch": {
+    "path": "history.patch",
+    "sha256": "3fc42f61b89a7e94341b874d853800b9139de73281b1eefec86632d1bfd24923",
+    "bytes": 18552
+  },
+  "dry_run_bundle": {
+    "path": "index.js",
+    "sha256": "a376cfd61cfd66c1d0d80d34d69f90d04b80b8f7f1beb01dec02a38523109fc9",
+    "bytes": 44949
+  },
+  "unchanged_config": {
+    "path": "edgezilla/foundation-watch/wrangler.jsonc",
+    "sha256": "bd27287793a8d6a00c9538c49a3a3247597801b399f56d6b39536dbfd6545cff",
+    "bytes": 739,
+    "git_diff_exit_code": 0
+  },
+  "checks": {
+    "typescript_and_wrangler_dry_run": {
+      "command": [
+        "npm",
+        "run",
+        "check"
+      ],
+      "exit_code": 0,
+      "elapsed_seconds": 2.449,
+      "log": "check.log"
+    },
+    "full_suite": {
+      "command": [
+        "node",
+        "--experimental-strip-types",
+        "--test",
+        "test/model.test.ts",
+        "test/telegram.test.ts",
+        "test/worker.test.mjs"
+      ],
+      "exit_code": 0,
+      "elapsed_seconds": 6.815,
+      "log": "tests.log",
+      "tests": 49,
+      "passed": 49,
+      "failed": 0
+    },
+    "diff_check": {
+      "command": [
+        "git",
+        "diff",
+        "--check",
+        "--",
+        "edgezilla/foundation-watch/src/index.ts",
+        "edgezilla/foundation-watch/test/worker.test.mjs"
+      ],
+      "exit_code": 0,
+      "log": "diff-check.log"
+    },
+    "prior_attempts": [
+      {
+        "command": [
+          "npm",
+          "run",
+          "check"
+        ],
+        "exit_code": 0,
+        "elapsed_seconds": 2.002,
+        "log": "check-before-final-guard.log"
+      },
+      {
+        "command": [
+          "node",
+          "--experimental-strip-types",
+          "--test",
+          "test/model.test.ts",
+          "test/telegram.test.ts",
+          "test/worker.test.mjs"
+        ],
+        "exit_code": 1,
+        "elapsed_seconds": 0.85,
+        "log": "tests-sandbox-listen-blocked.log"
+      },
+      {
+        "command": [
+          "node",
+          "--experimental-strip-types",
+          "--test",
+          "test/model.test.ts",
+          "test/telegram.test.ts",
+          "test/worker.test.mjs"
+        ],
+        "exit_code": 1,
+        "elapsed_seconds": 7.883,
+        "log": "tests-fixture-parameter-limit.log",
+        "sandbox_note": "Local Miniflare requires a loopback listener; first sandbox-only run was blocked by EPERM."
+      }
+    ]
+  },
+  "references": [
+    "https://developers.cloudflare.com/durable-objects/api/sqlite-storage-api/",
+    "https://developers.cloudflare.com/workers/best-practices/workers-best-practices/",
+    "https://developers.cloudflare.com/workers/wrangler/commands/"
+  ],
+  "current_types_checked": {
+    "version": "5.20261018.1",
+    "repository_dependency_changed": false
+  },
+  "records": {
+    "BEFORE.json": {
+      "sha256": "5de5f0a825fe1af09c1b1e04bded7b7adf4f3f9d888f169534779fe66a84e51c",
+      "bytes": 394
+    },
+    "CHECK-RESULTS.json": {
+      "sha256": "5ab7baa2a56afdc972289898a5ddf5d7af7c25ddf2b06a96217a32d750291d24",
+      "bytes": 1254
+    },
+    "check.log": {
+      "sha256": "d0b2c5ba355b67a367dae75ed0e80796393ecd73e56eea1b454616fcbafc7149",
+      "bytes": 800
+    },
+    "tests.log": {
+      "sha256": "2557da0a5234a47d9cfeda23f5c9b7aa2eaa0baec13cf0c766c79cbf9007f9a0",
+      "bytes": 7802
+    },
+    "diff-check.log": {
+      "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+      "bytes": 0
+    }
+  }
+}

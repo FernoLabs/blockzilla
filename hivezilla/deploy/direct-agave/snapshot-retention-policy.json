@@ -1,0 +1,84 @@
+{
+  "schema": "blockzilla-agave-snapshot-retention-policy-v1",
+  "state": "INSTALLED_FOR_NEXT_VALIDATOR_START",
+  "host": "ubuntu@213.239.141.61",
+  "checked_at_utc": "2026-10-13T15:47:15.220Z",
+  "binary": "/home/ubuntu/live/hivezilla-validator-20260930/releases/bank-stream-v2-20261010/agave-validator",
+  "binary_help_version": "agave-validator 4.3.0 (src:167a39d2; feat:c9ad34d2, client:Agave)",
+  "source_revision": "d688dd0e3a576b048a848e5faf2e8d277f8feb6e",
+  "source_checkout": "/home/ubuntu/benchmarks/blockzilla-bank-v2-20261010/agave",
+  "verified_read_only_sources": [
+    "Pinned binary --help",
+    "runtime/src/snapshot_utils.rs:1603",
+    "core/src/snapshot_packager_service.rs:179"
+  ],
+  "current_default_retention": {
+    "completed_full_archives": 2,
+    "completed_incremental_archives_for_newest_full": 4,
+    "completed_incremental_archives_per_other_retained_full": 1
+  },
+  "purge_trigger": "Agave purges older completed archives after the next archive has completed. The next write needs its own headroom.",
+  "installation_integration": {
+    "installer": "hivezilla/deploy/bank-stream-v2/install.py",
+    "helper": "hivezilla/deploy/direct-agave/snapshot_budget.py",
+    "packaging_requirement": "Keep the bank-stream-v2 and direct-agave directories as siblings and package snapshot_budget.py. The installer copies the helper into the immutable bank-stream-v2 release, records its artifact hash, loads that copy, and rejects missing helpers, unsupported pinned binary flags or an insufficient current disk budget before any service stop.",
+    "templates": [
+      "hivezilla/deploy/direct-agave/hivezilla-validator.service",
+      "hivezilla/deploy/direct-agave/hivezilla-validator-shred-hook.conf"
+    ],
+    "effective_boundary": "The installed unit prepares 1/1 retention, the disk gate and guarded loader for the next validator start. Running PID 2579205 still uses the previous defaults. The patch did not restart it.",
+    "existing_deployment_installer": "hivezilla/deploy/bank-stream-v2/install_storage_patch.py"
+  },
+  "startup_disk_gate": {
+    "mode": "--check-start",
+    "recovery_minimum_free_bytes": 536870912000,
+    "default_next_archive_floor_bytes": 137438953472,
+    "default_empty_directory_required_free_bytes": 674309865472,
+    "rule": "Require current statvfs free space at least recovery minimum plus the larger of the configured next-archive floor and largest observed archive allocation.",
+    "failure_exit_code": 75,
+    "recorded_space_override_allowed": false,
+    "empty_directory_behavior": "An existing empty snapshot directory can pass only with the configured write floor and recovery reserve. This permits a future snapshot fetch; it does not certify that the download, unpacking or replay will fit.",
+    "missing_or_unreadable_directory_behavior": "Fail closed without a file write or service operation.",
+    "installer_helper_location": "ROOT/releases/bank-stream-v2-20261010/snapshot_budget.py",
+    "template_helper_location": "ROOT/releases/snapshot-budget-20261013/snapshot_budget.py",
+    "template_packaging_requirement": "Install the exact reviewed snapshot_budget.py in the dated snapshot-budget-20261013 release before installing either validator template. Both templates run it through ExecStartPre. The bank v2 installer uses and hashes its own immutable release copy.",
+    "runtime_behavior": "The helper performs read-only checks. Systemd blocks the validator start when ExecStartPre returns nonzero. The installer also checks current disk budget before any service stop.",
+    "existing_deployment_helper_location": "ROOT/releases/storage-recovery-20261013-742b6735b4bbb606/snapshot_budget.py"
+  },
+  "preservation_rule": "Keep the newest completed full archive, its newest matching completed incremental archive, all equal newest identities, active temporary files and unknown paths.",
+  "last_read_only_inventory": {
+    "free_bytes": 9704001536,
+    "latest_completed_full_slot": 456363384,
+    "latest_completed_full_allocated_bytes": 123791945728,
+    "latest_matching_incremental_slot": 456462499,
+    "latest_matching_incremental_allocated_bytes": 121916055552,
+    "active_temporary_name": "tmp-snapshot-archive-456463503.tar.zst",
+    "active_temporary_allocated_bytes": 115093868544,
+    "obsolete_completed_candidate_count": 5,
+    "candidate_release_allocated_bytes": 444666789888,
+    "projected_free_after_candidate_retirement_bytes": 454370791424,
+    "capture_reserve_bytes": 429496729600,
+    "recovery_minimum_free_bytes": 536870912000,
+    "projected_recovery_minimum_met": false
+  },
+  "deployment_limits": [
+    "The patch did not restart validator PID 2579205. The unit changes apply at its next start.",
+    "A validator restart requires a separate downstream source handoff. The helper supports adoption of an existing healthy capture and resumption of a saved switch.",
+    "No snapshot was removed manually. Agave startup cleanup recovered space after the earlier ENOSPC crash.",
+    "Retention counts bound archive count, not archive bytes. Snapshot writes, internal snapshot state, accounts and other consumers need separate free-space checks.",
+    "The startup gate reserves at least128 GiB for the next archive and raises it to the largest observed archive allocation. This does not guarantee archive, account, ledger or unpacking capacity.",
+    "The startup gate blocks a start under sampled disk pressure. It cannot stop later growth in a running validator.",
+    "The pre-crash inventory below is historical. A fresh installation check passed with1463121059840 bytes free, above its674309865472 byte threshold.",
+    "Archive names do not prove valid contents or complete native capture coverage."
+  ],
+  "deployment_checked_at_utc": "2026-10-13T16:43:25.892Z",
+  "installed_release": "ROOT/releases/storage-recovery-20261013-742b6735b4bbb606",
+  "running_validator_pid": 2579205,
+  "running_validator_uses_previous_retention": true,
+  "installed_next_start_args": [
+    "--maximum-full-snapshots-to-retain",
+    "1",
+    "--maximum-incremental-snapshots-to-retain",
+    "1"
+  ]
+}

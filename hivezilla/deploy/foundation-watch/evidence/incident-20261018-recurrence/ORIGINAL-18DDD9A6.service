@@ -1,0 +1,25 @@
+[Unit]
+Description=Finite verified native custody drain for failed source 13 October 2026
+After=network-online.target
+
+[Service]
+User=ubuntu
+Group=ubuntu
+UMask=0077
+WorkingDirectory=/home/ubuntu/live/hivezilla-validator-20260930
+ExecStart="/usr/bin/python3" "/home/ubuntu/live/hivezilla-validator-20260930/releases/storage-recovery-20261013-742b6735b4bbb606/cold_storage.py" "archive" "--output" "/home/ubuntu/live/hivezilla-validator-20260930/compact/direct-agave-processed-live/000000000000000018ddd9a6bb6fc50e-282459" "--bank-output" "/home/ubuntu/live/hivezilla-validator-20260930/compact/bank-v2-live/000000000000000018ddd9a6bb6fc50e-282459" "--capture" "/home/ubuntu/live/hivezilla-validator-20260930/captures/direct-agave-live/000000000000000018ddd9a6bb6fc50e-282459" "--publisher-state" "/home/ubuntu/live/hivezilla-validator-20260930/reports/native-processed-r2-bank-v2/000000000000000018ddd9a6bb6fc50e-282459" "--credentials-file" "/home/ubuntu/live/hivezilla-validator-20260930/config/native-cold-storage.env" "--v1-spool" "/home/ubuntu/live/hivezilla-validator-20260930/stream-relay-spool-bank-v2/000000000000000018ddd9a6bb6fc50e-282459" "--bank-origin-spool" "/home/ubuntu/live/hivezilla-validator-20260930/bank-v2-origin-spool/000000000000000018ddd9a6bb6fc50e-282459" "--keep-seconds" "7200" "--retire" "--follow" "--batch-banks" "64" "--parallel-bundles" "2" "--max-batches" "64"
+Restart=on-failure
+RestartSec=30
+CPUQuota=200%
+MemoryMax=4G
+Nice=19
+KillMode=control-group
+TimeoutStopSec=60
+NoNewPrivileges=true
+ProtectSystem=strict
+ProtectHome=read-only
+PrivateTmp=true
+ReadWritePaths="/home/ubuntu/live/hivezilla-validator-20260930/compact/direct-agave-processed-live/000000000000000018ddd9a6bb6fc50e-282459" "/home/ubuntu/live/hivezilla-validator-20260930/compact/bank-v2-live/000000000000000018ddd9a6bb6fc50e-282459/feed.sqlite-shm" "/home/ubuntu/live/hivezilla-validator-20260930/captures/direct-agave-live/000000000000000018ddd9a6bb6fc50e-282459/events.sqlite-shm"
+
+[Install]
+WantedBy=multi-user.target

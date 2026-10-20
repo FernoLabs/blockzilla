@@ -1,0 +1,15 @@
+{
+  "upstream_tag": "v4.3.2",
+  "upstream_revision": "a203300045b405f86c9c84308b2eae76af69ac3b",
+  "agave_revision": "87167f3906bdf5111e99ead64d8f4098b7874e33",
+  "patches": {
+    "bank-hook.patch": "07e5535174d08ef8a468aabcb7de9b41db7a1249070e905fa44785efe7e5d9f7",
+    "integration.patch": "f41f5cc077b0c9f29668e8eb00d8c1d44f9a30a13e2dfff9eea9e7023dd71e6f",
+    "hivezilla_shred_hook.rs": "6a1620d9d255c76f895068eaae29f376d4d72c0d1537dbcd6f30caeebbbe5cc8",
+    "lib.rs": "f7ca94ff30a017acf5a10d61af55ea30f1fb01cece7daaa0d8f7359a37c5845d"
+  },
+  "rust_toolchain": "[toolchain]\nchannel = \"1.97.1\"\n",
+  "provider_source": "copy of installed native-parent-proof-20261016 source",
+  "provider_manifest_sha256": "d5279e48e1073e62e6df3a58e7a9354bf8f72a71f134d0d91f853af632d5063b",
+  "provider_file_count": 963
+}

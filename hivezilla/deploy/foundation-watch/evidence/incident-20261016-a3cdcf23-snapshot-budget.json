@@ -1,0 +1,204 @@
+{
+  "schema": "blockzilla-native-snapshot-budget-v1",
+  "event": "a3cdcf23-2192-4f5d-881c-a362b67dfa2e",
+  "host": "ubuntu@213.239.141.61",
+  "root": "/home/ubuntu/live/hivezilla-validator-20260930",
+  "scope": {
+    "server_mutations": false,
+    "snapshot_deletion": false,
+    "service_operations": false,
+    "cloud_writes": false,
+    "deep_snapshot_scan": false,
+    "methods": [
+      "read /proc/2579205/cmdline",
+      "run pinned validator --help",
+      "read bounded validator journal",
+      "read pinned snapshot_controller.rs",
+      "RPC getSlot/getBlockHeight/getHighestSnapshotSlot",
+      "statvfs and immediate snapshot archive stat"
+    ]
+  },
+  "units": {
+    "GB": "1000000000 bytes",
+    "GiB": "1073741824 bytes",
+    "MB_per_second": "1000000 bytes per second"
+  },
+  "running_validator": {
+    "pid": 2579205,
+    "binary": "/home/ubuntu/live/hivezilla-validator-20260930/releases/bank-stream-v2-20261010/agave-validator",
+    "snapshot_arguments": [
+      [
+        "--snapshots",
+        "/home/ubuntu/live/hivezilla-validator-20260930/snapshots"
+      ]
+    ],
+    "explicit_interval_or_retention_override": false,
+    "full_interval_default": 100000,
+    "full_retention_default": 2,
+    "incremental_retention_default": 4,
+    "help_returncode": 0,
+    "help_excerpt": [
+      "--full-snapshot-interval-slots <NUMBER>",
+      "Number of slots between generating full snapshots. Only used when incremental snapshots are enabled. Must be greater than the incremental snapshot interval. Must be greater than zero. [default: 100000]",
+      "--maximum-full-snapshots-to-retain <NUMBER>",
+      "The maximum number of full snapshot archives to hold on to when purging older snapshots. [default: 2]",
+      "--maximum-incremental-snapshots-to-retain <NUMBER>",
+      "The maximum number of incremental snapshot archives to hold on to when purging older snapshots. [default: 4]"
+    ]
+  },
+  "source_trigger": {
+    "path": "/home/ubuntu/benchmarks/blockzilla-bank-v2-20261010/agave/runtime/src/snapshot_controller.rs",
+    "line": 97,
+    "expression": "bank.block_height() % snapshot_interval == 0",
+    "meaning": "The full trigger uses rooted bank block height. It does not use the last full snapshot slot plus 100000. The bank must also be newer than latest_abs_request_slot.",
+    "next_full_block_height": 435600000,
+    "slot_at_next_trigger_lower_bound_if_no_future_skipped_slots": 457564174
+  },
+  "samples": [
+    {
+      "at_utc": "2026-10-16T06:37:10.617000+00:00",
+      "available_bytes": 564534194176,
+      "finalized_slot": 457539720,
+      "finalized_block_height": 435575546
+    },
+    {
+      "at_utc": "2026-10-16T06:37:18.623000+00:00",
+      "available_bytes": 564197691392,
+      "finalized_slot": 457539755,
+      "finalized_block_height": 435575581,
+      "highest_full_snapshot_slot": 457464166,
+      "highest_incremental_snapshot_slot": 457539574
+    },
+    {
+      "at_utc": "2026-10-16T06:42:46.729589+00:00",
+      "available_bytes": 562487209984,
+      "finalized_slot": 457541271,
+      "finalized_block_height": 435577097,
+      "highest_full_snapshot_slot": 457464166,
+      "highest_incremental_snapshot_slot": 457541174
+    },
+    {
+      "at_utc": "2026-10-16T06:42:51.037192+00:00",
+      "available_bytes": 562341568512,
+      "finalized_slot": 457541292,
+      "finalized_block_height": 435577118,
+      "highest_full_snapshot_slot": 457464166,
+      "highest_incremental_snapshot_slot": 457541174
+    }
+  ],
+  "snapshot_archives_at_0642": [
+    {
+      "name": "snapshot-457364145-3ajdkg4fDAwiTMojkm6ye3Beeac4jW691hmXxz8DsfGQ.tar.zst",
+      "logical_bytes": 123947167459,
+      "allocated_bytes": 123954151424,
+      "mtime_ns": 1792095293010879263
+    },
+    {
+      "name": "snapshot-457464166-8fh3Dmextuv1wKJ3FBkGH16CBWbxCkHkghnEF54ZTFdB.tar.zst",
+      "logical_bytes": 123986510937,
+      "allocated_bytes": 123997741056,
+      "mtime_ns": 1792118041272943298
+    },
+    {
+      "name": "incremental-snapshot-457364145-457463966-3kkM2h6A3TZvNca7Ayyydegyz4t3F4TnpF4k97MnJSns.tar.zst",
+      "logical_bytes": 630252632,
+      "allocated_bytes": 630300672
+    },
+    {
+      "name": "incremental-snapshot-457464166-457540574-CNbwasuqJsFq23qiWPzAfXoku7JJ7BxbMMUa8hKQ8CtC.tar.zst",
+      "logical_bytes": 613353807,
+      "allocated_bytes": 613380096
+    },
+    {
+      "name": "incremental-snapshot-457464166-457540774-8Zk6fo89kZzKfnKYEqpFJKWRiH2cnMzMeUq7HHK9jpZE.tar.zst",
+      "logical_bytes": 613777504,
+      "allocated_bytes": 613797888
+    },
+    {
+      "name": "incremental-snapshot-457464166-457540974-Cm67ePTPpxbVHoAQm62ZWnPLwB6HGWMxwuup578Uyk6s.tar.zst",
+      "logical_bytes": 614115349,
+      "allocated_bytes": 614141952
+    },
+    {
+      "name": "incremental-snapshot-457464166-457541174-FvzsHTWWsy4xLavBmi9CM3TdzWvgjiSzVZutJmHKjVfy.tar.zst",
+      "logical_bytes": 615434363,
+      "allocated_bytes": 615452672
+    }
+  ],
+  "temporary_archive_present_at_0642": false,
+  "previous_full_write": {
+    "slot": 457464166,
+    "archive_generation_started_utc": "2026-10-16T02:05:21.657160+00:00",
+    "purge_started_utc": "2026-10-16T02:34:01.280230+00:00",
+    "elapsed_seconds": 1719.62307,
+    "journal_excerpt": [
+      "2026-10-16T02:05:20.982622965Z INFO solana_core::snapshot_packager_service handling snapshot package: SnapshotPackage { kind: Archive(Full), slot: 457464166, .. }",
+      "2026-10-16T02:05:21.657160285Z INFO agave_snapshots::archive Generating snapshot archive for slot 457464166, kind: Full",
+      "2026-10-16T02:34:01.280230031Z INFO solana_runtime::snapshot_utils Purging old full snapshot archives in /home/ubuntu/live/hivezilla-validator-20260930/snapshots, retaining up to 2 full snapshots",
+      "2026-10-16T02:34:02.431620122Z INFO solana_runtime::snapshot_utils Purging old incremental snapshot archives in /home/ubuntu/live/hivezilla-validator-20260930/snapshots, retaining up to 4 incremental snapshots"
+    ],
+    "conclusion": "The prior full write lasted about 28 minutes 40 seconds. The old full archives stayed present until the new archive finished."
+  },
+  "budget_at_last_sample": {
+    "available_bytes": 562341568512,
+    "capture_reserve_bytes": 429496729600,
+    "largest_observed_full_allocated_bytes": 123997741056,
+    "available_after_reserve_and_observed_full_bytes": 8847097856,
+    "configured_archive_write_floor_bytes": 137438953472,
+    "reserve_plus_archive_write_floor_bytes": 566935683072,
+    "reserve_plus_archive_write_floor_shortfall_bytes": 4594114560,
+    "startup_gate_bytes": 674309865472,
+    "startup_gate_shortfall_bytes": 111968296960,
+    "startup_gate_applies_to": "A future validator start. It is not a stop condition for this running validator."
+  },
+  "finite_estimate": {
+    "sample_elapsed_seconds": 332.414192,
+    "rooted_banks_advanced": 1537,
+    "rooted_banks_per_second": 4.623749638222425,
+    "remaining_rooted_banks_to_full": 22882,
+    "seconds_to_full_trigger": 4948.797359364998,
+    "estimated_full_trigger_utc": "2026-10-16T08:05:19.834551+00:00",
+    "estimated_archive_finish_utc_if_previous_duration_repeats": "2026-10-16T08:33:59.457621+00:00",
+    "observed_net_filesystem_loss_bytes_per_second_over_332_seconds": 5583765.448859055,
+    "pilot_reference": "incident-20261016-a3cdcf23-storage.json",
+    "pilot_retirement_bytes_per_second": 10412030.185335597,
+    "pilot_net_filesystem_loss_bytes_per_second": 10101359.639666248,
+    "inferred_other_net_consumption_bytes_per_second": 20513389.825001843,
+    "projected_space_loss_before_trigger_at_pilot_net_rate_bytes": 49989581910.77649,
+    "minimum_retirement_rate_to_reach_128GiB_archive_floor_by_trigger_bytes_per_second": 21441719.321320012,
+    "minimum_retirement_rate_to_reach_startup_gate_by_trigger_bytes_per_second": 43138744.8010171,
+    "minimum_total_retired_bytes_from_last_sample_to_archive_finish_for_400GiB_reserve_using_observed_full": 127944809928.57031,
+    "minimum_total_retired_bytes_from_last_sample_to_archive_finish_for_400GiB_reserve_using_128GiB_floor": 141386022344.5703
+  },
+  "finite_old_source_capacity_report": {
+    "reported_at_utc": "2026-10-16T06:28:31+00:00",
+    "source": "000000000000000018de229d3fc8a9d9-275b05",
+    "source_of_numbers": "Read-only eligibility report from the retention_recovery agent; eight banks passed full sample checks.",
+    "banks_passing_SQL_v2_replay_and_strict_native_ack": 229165,
+    "tail_banks_failing_v2_replay_retention": 7159,
+    "sample_size_banks": 256,
+    "mean_nonkeep_logical_bytes_per_bank": 2413778.72,
+    "all_eligible_logical_byte_estimate": 553153600368.8,
+    "approved_trial_bank_cap": 65536,
+    "approved_trial_logical_byte_estimate": 158189402193.92,
+    "newly_indexed_banks_as_of_064003": 1664,
+    "estimated_remaining_trial_logical_bytes_as_of_064003": 154172874403.84003,
+    "serial_v2_artifact_gate_seconds_per_bank": 0.20972,
+    "approximate_serial_gate_logical_bytes_per_second": 11509530.421514401,
+    "limits": [
+      "Logical bytes are not verified remaining filesystem allocation.",
+      "Every bank still needs the full age, source, hash, replay, and exact remote readback checks.",
+      "The 65536-bank trial cap is finite. The larger eligible set is not the current trial cap.",
+      "Four transfers do not remove the serial v2 artifact gate. Faster storage release needs a new measured pilot."
+    ]
+  },
+  "conclusion": "At the measured old rate, space loss before the next full snapshot exceeds the present archive margin. About 21.5 MB/s of sustained verified retirement would restore the conservative archive floor by the estimated trigger if other consumption stays at the pilot level. The trial has enough estimated logical bytes for one write cycle, but the remaining allocation and required sustained rate are not proved.",
+  "estimate_limits": [
+    "These are finite projections from measured rates, not a promise of future rate or trigger time.",
+    "Root speed, account storage, compact output, archive size, and network speed can change.",
+    "The prior 28-minute 40-second full write is an observed example, not an upper time bound.",
+    "The 128 GiB archive floor is a conservative configured budget, not a proven maximum next archive size.",
+    "A full archive must complete before automatic purge can release the old full archive.",
+    "This assessment did not delete snapshots, change retention, restart the validator, or change a storage job."
+  ]
+}

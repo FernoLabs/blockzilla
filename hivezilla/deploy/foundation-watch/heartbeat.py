@@ -7,6 +7,7 @@ machine-alive heartbeat with fixed error codes.
 """
 import argparse
 from contextlib import closing
+import hashlib
 import importlib.util
 import json
 import os
@@ -15,6 +16,7 @@ import re
 import shlex
 import shutil
 import sqlite3
+import stat
 import subprocess
 import tempfile
 import time
@@ -48,6 +50,10 @@ SERVICES = {
 }
 SOURCE_BOUND_SERVICES = {"worker", "producer", "publisher", "cold_storage"}
 ACTIVE_STATES = {"active", "inactive", "failed", "activating", "deactivating", "reloading"}
+SOURCE_KEYS = {"genesis_hash", "node_identity", "agave_revision", "session_id"}
+RAW_RECORDER = "hivezilla-shred-hook-recorder.service"
+RAW_OUTPUT = "captures/shred-hook-direct-20261002"
+RAW_POLICY_SCHEMA = "blockzilla-raw-capture-monitor-policy-v1"
 
 
 class SafeError(Exception):
@@ -77,6 +83,28 @@ def read_json(path, limit=MAX_JSON_BYTES):
     if not isinstance(value, dict):
         raise SafeError("invalid_object")
     return value
+
+
+def select_source(root):
+    """Read the explicit current pin; only an absent pin permits legacy input."""
+    pin = root / "config/native-active-source.json"
+    try:
+        mode = pin.lstat().st_mode
+    except FileNotFoundError:
+        source = read_json(root / "reports/bank-v2-recovery-20261012/RECOVERY.json")["source"]
+    else:
+        if not stat.S_ISREG(mode):
+            raise SafeError("source_invalid")
+        source = read_json(pin)
+        if set(source) != SOURCE_KEYS:
+            raise SafeError("source_invalid")
+        if any(not isinstance(source[key], str) or not re.fullmatch(r"[A-Za-z0-9]{1,128}", source[key])
+               for key in SOURCE_KEYS - {"session_id"}):
+            raise SafeError("source_invalid")
+    session = source["session_id"]
+    if not isinstance(session, str) or not SESSION_RE.fullmatch(session):
+        raise SafeError("source_invalid")
+    return source
 
 
 def read_capture(path):
@@ -151,7 +179,7 @@ def recognized_worker_launcher(command, root):
             return False
         for flag, binary in (("--engine", "hivezilla-direct-agave"), ("--blockzilla", "blockzilla")):
             parts = Path(options[flag]).relative_to(root / "releases").parts
-            if len(parts) != 2 or parts[1] != binary or not re.fullmatch(r"[a-z0-9][a-z0-9-]{0,95}", parts[0]):
+            if len(parts) != 2 or parts[1] != binary or not re.fullmatch(r"[a-z0-9][a-z0-9.-]{0,95}", parts[0]):
                 return False
         return True
     except (ValueError, IndexError, KeyError):
@@ -255,8 +283,297 @@ def stale(timestamp, now, limit_ms):
     return timestamp is None or timestamp > now + 30000 or now - timestamp > limit_ms
 
 
+def storage_progress(data, now):
+    """A fresh helper status must not hide an eligible transfer with no commit.
+
+    Older helpers have no progress fields. Keep their existing status contract;
+    upgraded helpers must supply the complete bounded progress record.
+    """
+    if data.get("state") == "FAILED":
+        if data.get("storage_progress", "FAILED") != "FAILED":
+            raise SafeError("invalid_storage_failure_progress")
+        return {"storage_progress": "FAILED"}, False
+    if "storage_progress" not in data:
+        return {}, False
+    phase = data["storage_progress"]
+    if phase not in {"WAITING", "TRANSFERRING", "ADVANCING", "STALLED"}:
+        raise SafeError("invalid_storage_progress")
+    seconds = integer(data["progress_stall_seconds"])
+    if not 300 <= seconds <= 3600:
+        raise SafeError("invalid_storage_progress_timeout")
+    values = {key: integer(data[key], nullable=True) for key in
+              ("eligible_wait_since_unix_ms", "last_archive_progress_unix_ms")}
+    if any(value is not None and value > now + 30000 for value in values.values()):
+        raise SafeError("invalid_storage_progress_time")
+    waiting = values["eligible_wait_since_unix_ms"]
+    committed = values["last_archive_progress_unix_ms"]
+    since = max(waiting, committed or 0) if waiting is not None else None
+    stalled = since is not None and now - since >= seconds * 1000
+    if phase == "STALLED" and not stalled:
+        raise SafeError("invalid_storage_stall_claim")
+    return {"storage_progress": phase, "progress_stall_seconds": seconds, **values}, stalled
+
+
+def regular_bytes(path, limit=65536):
+    if not stat.S_ISREG(path.lstat().st_mode):
+        raise SafeError("invalid_monitor_file")
+    with path.open("rb") as stream:
+        body = stream.read(limit + 1)
+    if len(body) > limit:
+        raise SafeError("monitor_file_too_large")
+    return body
+
+
+def regular_json(path, limit=65536):
+    value = json.loads(regular_bytes(path, limit))
+    if not isinstance(value, dict):
+        raise SafeError("invalid_monitor_object")
+    return value
+
+
+def directory(path):
+    if not stat.S_ISDIR(path.lstat().st_mode):
+        raise SafeError("invalid_monitor_directory")
+
+
+def raw_capture_status(root, source, now, service_reader):
+    """Raw recording is independent of native feed readiness unless required."""
+    required = False
+    policy = root / "config/raw-capture-monitor.json"
+    try:
+        policy.lstat()
+    except FileNotFoundError:
+        pass
+    else:
+        value = regular_json(policy)
+        if (set(value) != {"schema", "required"} or value["schema"] != RAW_POLICY_SCHEMA
+                or type(value["required"]) is not bool):
+            raise SafeError("raw_capture_policy_invalid")
+        required = value["required"]
+    result = {"required": required, "state": "NOT_CONFIGURED", "recorder_state": None,
+              "capture_id": None, "producer_pid": None, "durable_next_sequence": None,
+              "packets": None, "journal_bytes": None, "updated_unix_ms": None,
+              "source_verified": False, "faults": []}
+    output = root / RAW_OUTPUT
+    try:
+        output.lstat()
+    except FileNotFoundError:
+        if required:
+            result["faults"] = ["raw_capture_unavailable"]
+        return result
+    faults = set()
+    try:
+        directory(output)
+        active, _ = service_reader(RAW_RECORDER)
+        if active not in ACTIVE_STATES:
+            raise SafeError("raw_recorder_unavailable")
+        result["recorder_state"] = active
+        if active != "active":
+            faults.add("raw_recorder_inactive")
+        current = regular_json(output / "CURRENT.json")
+        capture_id = current.get("capture_id")
+        if not isinstance(capture_id, str) or not re.fullmatch(r"[0-9a-f]{32}", capture_id):
+            raise SafeError("raw_capture_source_mismatch")
+        capture = output / capture_id
+        if current.get("path") != str(capture):
+            raise SafeError("raw_capture_source_mismatch")
+        directory(capture)
+        meta, data = regular_json(capture / "SESSION.json"), regular_json(capture / "STATUS.json")
+        producer = integer(current.get("producer_pid"))
+        if (producer == 0 or meta.get("capture_id") != capture_id or meta.get("producer_pid") != producer
+                or source is None or set(source) != SOURCE_KEYS
+                or producer != int(source["session_id"].rsplit("-", 1)[1], 16)
+                or meta.get("genesis_hash") != source["genesis_hash"]
+                or meta.get("validator_identity") != source["node_identity"]):
+            raise SafeError("raw_capture_source_mismatch")
+        if data.get("schema") != "hivezilla-shred-hook-status-v1" or data.get("state") not in {"ACTIVE", "FAILED", "CLOSED"}:
+            raise SafeError("raw_capture_unavailable")
+        result.update(capture_id=capture_id, producer_pid=producer, source_verified=True,
+                      state=data["state"], durable_next_sequence=integer(data["durable_next_sequence"]),
+                      packets=integer(data["counts"]["packets"]), journal_bytes=integer(data["journal_bytes"]),
+                      updated_unix_ms=integer(data["updated_unix_ms"]))
+        if data["state"] == "FAILED":
+            faults.add("raw_capture_failed")
+        elif data["state"] != "ACTIVE":
+            faults.add("raw_capture_not_running")
+        elif stale(result["updated_unix_ms"], now, 120000):
+            faults.add("raw_capture_stale")
+    except Exception as error:
+        result["state"] = "UNAVAILABLE"
+        code = str(error) if isinstance(error, SafeError) else "raw_capture_unavailable"
+        faults.add(code if code.startswith("raw_") else "raw_capture_unavailable")
+    result["faults"] = sorted(faults)
+    return result
+
+
+def capacity_status(root, source, now):
+    """An installed report directory requires fresh, exact-source telemetry."""
+    report = root / "reports/native-capacity"
+    try:
+        report.lstat()
+    except FileNotFoundError:
+        return None
+    directory(report)
+    data = regular_json(report / "STATUS.json")
+    if data.get("state") == "FAILED":
+        raise SafeError("snapshot_capacity_failed")
+    if (data.get("schema") != "blockzilla-native-capacity-v1" or source is None
+            or set(source) != SOURCE_KEYS or data.get("source") != source):
+        raise SafeError("snapshot_capacity_source_mismatch")
+    if data.get("state") != "RUNNING":
+        raise SafeError("snapshot_capacity_invalid")
+    stamp = integer(data["updated_unix_ms"])
+    if stale(stamp, now, 90000):
+        raise SafeError("snapshot_capacity_stale")
+    values = {key: integer(data[key]) for key in ("free_disk_bytes", "capture_reserve_bytes",
+              "recovery_minimum_free_bytes", "next_archive_budget_bytes")}
+    if (values["capture_reserve_bytes"] != RESERVE_BYTES
+            or values["recovery_minimum_free_bytes"] < RESERVE_BYTES + 100 * 1024**3
+            or values["next_archive_budget_bytes"] < 128 * 1024**3):
+        raise SafeError("snapshot_capacity_invalid")
+    snapshot = values["free_disk_bytes"] - values["capture_reserve_bytes"] - values["next_archive_budget_bytes"]
+    recovery = values["free_disk_bytes"] - values["recovery_minimum_free_bytes"] - values["next_archive_budget_bytes"]
+    for key, expected in (("snapshot_headroom_bytes", snapshot), ("recovery_headroom_bytes", recovery)):
+        if type(data.get(key)) is not int or data[key] != expected or abs(expected) > MAX_SAFE_INTEGER:
+            raise SafeError("snapshot_capacity_invalid")
+    for key, expected in (("snapshot_capture_reserve_at_risk", snapshot < 0), ("snapshot_headroom_low", recovery < 0)):
+        if type(data.get(key)) is not bool or data[key] != expected:
+            raise SafeError("snapshot_capacity_invalid")
+    return {**values, "updated_unix_ms": stamp, "snapshot_headroom_bytes": snapshot,
+            "recovery_headroom_bytes": recovery, "snapshot_capture_reserve_at_risk": snapshot < 0,
+            "snapshot_headroom_low": recovery < 0}
+
+
+def storage_jobs_status(root, source, now):
+    """Watch only jobs in the explicit registry; never select or start a job."""
+    path = root / "config/storage-jobs.json"
+    try:
+        info = path.lstat()
+    except FileNotFoundError:
+        return None
+    body = regular_bytes(path, MAX_JSON_BYTES)
+    registry = json.loads(body)
+    if (info.st_mode & 0o022 or not isinstance(registry, dict)
+            or registry.get("schema") != "blockzilla-storage-jobs-registry-v1"
+            or registry.get("root") != str(root)
+            or not isinstance(registry.get("jobs"), list) or not 1 <= len(registry["jobs"]) <= 16):
+        raise SafeError("storage_jobs_unavailable")
+    approved = {}
+    for job in registry["jobs"]:
+        if not isinstance(job, dict):
+            raise SafeError("storage_jobs_unavailable")
+        unit, identity, cap = job.get("unit"), job.get("source"), job.get("max_archived_banks")
+        if (not isinstance(unit, str) or unit in approved
+                or not re.fullmatch(r"hivezilla-native-cold-storage-[0-9]{8}-(?:source-[0-9a-f]{8}|old|live)\.service", unit)
+                or not isinstance(identity, dict) or set(identity) != SOURCE_KEYS
+                or any(not isinstance(value, str) or not re.fullmatch(r"[A-Za-z0-9-]{1,128}", value)
+                       for value in identity.values())
+                or not SESSION_RE.fullmatch(identity["session_id"])
+                or not re.fullmatch(r"[0-9a-f]{40}", identity["agave_revision"])):
+            raise SafeError("storage_jobs_unavailable")
+        if cap is None:
+            if unit != "hivezilla-native-cold-storage-20261012-live.service" or identity != source:
+                raise SafeError("storage_jobs_unavailable")
+        elif type(cap) is not int or not 1 <= cap <= MAX_SAFE_INTEGER:
+            raise SafeError("storage_jobs_unavailable")
+        approved[unit] = (identity, cap)
+    report = root / "reports/storage-jobs"
+    directory(report)
+    data = regular_json(report / "STATUS.json", MAX_JSON_BYTES)
+    if (data.get("schema") != "blockzilla-storage-jobs-status-v1" or source is None
+            or set(source) != SOURCE_KEYS or data.get("active_source") != source
+            or data.get("registry_sha256") != hashlib.sha256(body).hexdigest()):
+        raise SafeError("storage_jobs_unavailable")
+    stamp = integer(data["updated_unix_ms"])
+    if stale(stamp, now, 90000):
+        raise SafeError("storage_jobs_stale")
+
+    def fixed_issues(value):
+        if (not isinstance(value, list) or len(value) > 40
+                or any(not isinstance(code, str) or not re.fullmatch(r"[a-z0-9_]{1,80}", code) for code in value)):
+            raise SafeError("storage_jobs_unavailable")
+        return sorted(set(value))
+
+    issues = fixed_issues(data.get("issues"))
+    if data.get("state") != ("DEGRADED" if issues else "HEALTHY") or not isinstance(data.get("jobs"), list):
+        raise SafeError("storage_jobs_unavailable")
+    jobs, seen, individual = [], set(), set()
+    if len(data["jobs"]) != len(approved):
+        raise SafeError("storage_jobs_unavailable")
+    for job in data["jobs"]:
+        if not isinstance(job, dict):
+            raise SafeError("storage_jobs_unavailable")
+        unit = job.get("unit")
+        if unit not in approved or unit in seen:
+            raise SafeError("storage_jobs_unavailable")
+        identity, cap = approved[unit]
+        if (job.get("source") != identity or job.get("max_archived_banks") != cap
+                or cap is not None and type(job.get("max_archived_banks")) is not int):
+            raise SafeError("storage_jobs_unavailable")
+        phase, faults = state(job.get("state")), fixed_issues(job.get("issues"))
+        if phase in {"FAILED", "STOPPED", "UNAVAILABLE"} and not faults:
+            raise SafeError("storage_jobs_unavailable")
+        values = {key: integer(job.get(key), nullable=True) for key in
+                  ("archived_banks", "retired_banks", "remaining_banks")}
+        jobs.append(dict(unit=unit, source=identity, max_archived_banks=cap,
+                         state=phase, issues=faults, **values))
+        seen.add(unit)
+        individual.update(faults)
+    if set(issues) != individual:
+        raise SafeError("storage_jobs_unavailable")
+    return dict(state=data["state"], updated_unix_ms=stamp, registry_sha256=data["registry_sha256"],
+                issues=issues, jobs=jobs)
+
+
+def read_bank_head(root, source, now):
+    """Check private v2 on the local relay. The key stays on this machine."""
+    key_path = root / 'config/stream-20261004/client-api.key'
+    if not stat.S_ISREG(key_path.lstat().st_mode):
+        raise SafeError('bank_v2_key_invalid')
+    with key_path.open('rb') as stream:
+        raw_key = stream.read(514)
+    key = raw_key.decode('ascii').strip()
+    if len(raw_key) > 513 or not re.fullmatch(r'[A-Za-z0-9_.~-]{32,512}', key):
+        raise SafeError('bank_v2_key_invalid')
+    request = urllib.request.Request('http://127.0.0.1:8871/v2/banks/head',
+        headers={'Authorization': 'Bearer ' + key, 'User-Agent': 'Blockzilla-Foundation-Watch/1.0'})
+    try:
+        with direct_opener().open(request, timeout=2) as response:
+            if response.status != 200:
+                raise SafeError('bank_v2_http_error')
+            raw = response.read(65537)
+    except urllib.error.HTTPError as error:
+        error.close()
+        raise SafeError('bank_v2_http_error') from None
+    if len(raw) > 65536:
+        raise SafeError('bank_v2_reply_too_large')
+    head = json.loads(raw)
+    if (head.get('schema') != 'blockzilla-confirmed-head-v1'
+            or head.get('profile') != 'native-bank-compact-v2'
+            or set(source) != SOURCE_KEYS or head.get('source') != source):
+        raise SafeError('bank_v2_source_mismatch')
+    phase = head.get('status')
+    if phase not in {'starting', 'live', 'stale', 'failed'}:
+        raise SafeError('bank_v2_reply_invalid')
+    observed = integer(head.get('source_observed_at_unix_ms'), nullable=True)
+    sampled = integer(head['sampled_at_unix_ms'])
+    lag = integer(head.get('source_lag_ms'), nullable=True)
+    if sampled > now + 30000 or (observed is not None and observed > sampled):
+        raise SafeError('bank_v2_clock_invalid')
+    confirmed = head.get('latest_confirmed')
+    slot = None
+    if confirmed is not None:
+        slot = integer(confirmed['bank']['slot'])
+        if integer(confirmed['observed_at_unix_ms']) != observed or lag != sampled - observed:
+            raise SafeError('bank_v2_reply_invalid')
+    elif phase == 'live' or observed is not None or lag is not None:
+        raise SafeError('bank_v2_reply_invalid')
+    return dict(status=phase, confirmed_slot=slot, source_observed_at_unix_ms=observed,
+                sampled_at_unix_ms=sampled, source_lag_ms=lag)
+
+
 def sample(root=ROOT, *, now_ms=None, proc_root=Path("/proc"), service_reader=read_service,
-           rpc_reader=read_rpc, disk_reader=shutil.disk_usage):
+           rpc_reader=read_rpc, disk_reader=shutil.disk_usage, bank_reader=read_bank_head):
     now = integer(now_ms if now_ms is not None else int(time.time() * 1000))
     result = {
         "schema": SCHEMA, "machine_id": "foundation", "sampled_unix_ms": now,
@@ -301,12 +618,10 @@ def sample(root=ROOT, *, now_ms=None, proc_root=Path("/proc"), service_reader=re
         errors.add("memory_unavailable")
 
     session = None
+    selected_source = None
     try:
-        recovery = read_json(root / "reports/bank-v2-recovery-20261012/RECOVERY.json")
-        value = recovery["source"]["session_id"]
-        if not isinstance(value, str) or not SESSION_RE.fullmatch(value):
-            raise SafeError("source_invalid")
-        session = value
+        selected_source = select_source(root)
+        session = selected_source["session_id"]
         result["capture"]["session"] = session
     except Exception:
         errors.add("source_invalid")
@@ -338,9 +653,14 @@ def sample(root=ROOT, *, now_ms=None, proc_root=Path("/proc"), service_reader=re
             if read_json(output / "FEED.json").get("session_id") != session:
                 errors.add("compact_source_mismatch")
             data = read_json(output / "STATUS.json")
-            result["compact"] = {"state": state(data["state"]),
-                                 **{key: integer(data[key], nullable=key == "last_compact_slot")
+            compact_state = state(data["state"])
+            terminal = compact_state == "FAILED"
+            result["compact"] = {"state": compact_state,
+                                 **{key: integer(data.get(key) if terminal else data[key],
+                                                 nullable=terminal or key == "last_compact_slot")
                                     for key in ("last_compact_slot", "event_sequence", "source_sequence", "updated_unix_ms")}}
+            if terminal:
+                errors.add("compact_failed")
             if stale(result["compact"]["updated_unix_ms"], now, 120000):
                 errors.add("compact_stale")
         except Exception:
@@ -360,13 +680,29 @@ def sample(root=ROOT, *, now_ms=None, proc_root=Path("/proc"), service_reader=re
             errors.add("publisher_unavailable")
         try:
             data = read_json(output / "cold-storage/STATUS.json")
-            result["cold_storage"] = {"state": state(data["state"]),
-                                      "retired_banks": integer(data["retired_banks"]),
+            phase = state(data["state"])
+            result["cold_storage"] = {"state": phase,
+                                      "retired_banks": integer(data.get("retired_banks"), nullable=phase == "FAILED"),
                                       "updated_unix_ms": integer(data["updated_unix_ms"])}
+            if phase == "FAILED":
+                errors.add("cold_storage_failed")
             if stale(result["cold_storage"]["updated_unix_ms"], now, 300000):
                 errors.add("cold_storage_stale")
+            progress, stalled = storage_progress(data, now)
+            result["cold_storage"].update(progress)
+            if stalled:
+                errors.add("cold_storage_no_archive_progress")
         except Exception:
             errors.add("cold_storage_unavailable")
+        try:
+            bank = bank_reader(root, selected_source, now)
+            result['bank_v2'] = bank
+            if bank['status'] != 'live':
+                errors.add('bank_v2_not_live')
+            if stale(bank['source_observed_at_unix_ms'], now, 5000):
+                errors.add('bank_v2_stale')
+        except Exception:
+            errors.add('bank_v2_unavailable')
 
     for unit, label in SERVICES.items():
         try:
@@ -395,6 +731,37 @@ def sample(root=ROOT, *, now_ms=None, proc_root=Path("/proc"), service_reader=re
     except Exception:
         result["rpc"] = {"healthy": None, "finalized_slot": None}
         errors.add("rpc_unavailable")
+    try:
+        raw = raw_capture_status(root, selected_source, now, service_reader)
+        result["raw_capture"] = raw
+        if raw["required"]:
+            errors.update(raw["faults"])
+    except Exception:
+        result["raw_capture"] = {"state": "UNAVAILABLE", "required": None}
+        errors.add("raw_capture_policy_invalid")
+    try:
+        capacity = capacity_status(root, selected_source, now)
+        if capacity is not None:
+            result["capacity"] = capacity
+            if capacity["snapshot_headroom_low"]:
+                errors.add("snapshot_capacity_headroom_low")
+            if capacity["snapshot_capture_reserve_at_risk"]:
+                errors.add("snapshot_capacity_reserve_at_risk")
+    except SafeError as error:
+        code = str(error)
+        errors.add(code if code.startswith("snapshot_capacity_") else "snapshot_capacity_unavailable")
+    except Exception:
+        errors.add("snapshot_capacity_unavailable")
+    try:
+        storage_jobs = storage_jobs_status(root, selected_source, now)
+        if storage_jobs is not None:
+            result["storage_jobs"] = storage_jobs
+            if storage_jobs["state"] == "DEGRADED":
+                errors.add("storage_jobs_degraded")
+    except SafeError as error:
+        errors.add("storage_jobs_stale" if str(error) == "storage_jobs_stale" else "storage_jobs_unavailable")
+    except Exception:
+        errors.add("storage_jobs_unavailable")
     result["errors"] = sorted(errors)
     # Archive status is optional. Its collection failure must not suppress a
     # machine heartbeat or change the independent live-pipeline checks.
@@ -484,6 +851,11 @@ def run_once(payload, report, url, token, *, sender=send):
     delivery = {"schema": "blockzilla-foundation-heartbeat-sender-v1", "state": "SENT",
                 "sampled_unix_ms": payload["sampled_unix_ms"], "errors": payload["errors"],
                 "send_error": None}
+    # These records come from sample's bounded, sanitized readers. Save only the
+    # selected diagnostics locally; never persist transport settings or replies.
+    for name in ("raw_capture", "capacity", "storage_jobs"):
+        if name in payload:
+            delivery[name] = payload[name]
     try:
         sender(payload, url, token)
     except SafeError as error:

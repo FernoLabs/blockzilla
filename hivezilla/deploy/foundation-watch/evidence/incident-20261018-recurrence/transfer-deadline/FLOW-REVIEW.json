@@ -1,0 +1,13 @@
+{
+  "schema": "blockzilla-transfer-deadline-flow-review-v1",
+  "state": "PASSED_NOT_RUN",
+  "recorded_unix_ms": 1792320915801,
+  "script_sha256": "3fd2d057d7ce6dde56664895bdb71b23b1a09d81fd9633fe1349c51193a7c424",
+  "independent_reviewer": "upgrade_review",
+  "target_seconds": 120,
+  "scope": "Read-only source, registry, installation, finite-cap, guardian, head, RPC, process and slot/archive advancement observation after the stronger cloud post-verifier.",
+  "secret_output": false,
+  "service_changes": [],
+  "data_mutations": [],
+  "limit": "Sequential bounded checks can make elapsed time longer than120seconds."
+}

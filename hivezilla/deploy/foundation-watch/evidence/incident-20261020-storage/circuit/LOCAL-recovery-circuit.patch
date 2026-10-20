@@ -1,0 +1,769 @@
+--- a/hivezilla/deploy/direct-agave/cold_storage.py
++++ b/hivezilla/deploy/direct-agave/cold_storage.py
+@@ -32,6 +32,10 @@
+ BUNDLE_TRANSFER_SECONDS = 300
+ TRANSFER_REPORT_LIMIT = 4096
+ TRANSFER_SCHEMA = "blockzilla-bundle-transfer-v1"
++RECOVERY_SCHEMA = "blockzilla-native-cold-recovery-v1"
++RECOVERY_MARKER_SCHEMA = "blockzilla-native-cold-recovery-initialized-v1"
++RECOVERY_DELAYS = (30, 60, 120)
++RECOVERY_PROBE_SECONDS = 900
+ SOURCE_KEYS = ("genesis_hash", "node_identity", "agave_revision", "session_id")
+ 
+ 
+@@ -128,6 +132,209 @@
+     return dict(error_type=kind if re.fullmatch(r"[A-Za-z_][A-Za-z0-9_]{0,63}", kind) else "BundleTransferError",
+                 http_status=status if type(status) is int and 100 <= status <= 599 else None,
+                 network_error_type="ProtocolError" if streaming_protocol_error(error) else None)
++
++
++def transient_evidence(fields):
++    return (fields["error_type"] in {"EndpointConnectionError", "ConnectionClosedError", "ConnectTimeoutError",
++                                    "ReadTimeoutError", "BundleTransferTimeout"}
++            and fields["http_status"] is None and fields["network_error_type"] is None
++            or fields["error_type"] == "ResponseStreamingError" and fields["network_error_type"] == "ProtocolError"
++            and fields["http_status"] is None
++            or fields["error_type"] == "ClientError" and fields["network_error_type"] is None
++            and fields["http_status"] in {408, 429, 500, 502, 503, 504})
++
++
++def transient_transfer(error):
++    return transient_evidence(failure_fields(error))
++
++
++class RecoveryStateError(RuntimeError):
++    pass
++
++
++class RecoveryBlocked(RuntimeError):
++    pass
++
++
++class RecoveryCircuit:
++    """One source-wide budget, owned by the archive thread and durable in meta3.
++
++    Meta4 is an initialization anchor. Losing either row cannot create a new
++    budget. A reservation stays spent when a process dies before child launch.
++    """
++    def __init__(self, db, source, namespace, maximum, now_ms=None):
++        self.db = db
++        self.persisted = True
++        now_ms = int(time.time() * 1000) if now_ms is None else now_ms
++        self.binding = dict(source=source, namespace=namespace, max_archived_banks=maximum)
++        rows = dict(db.execute("SELECT id,value FROM meta WHERE id IN (3,4)"))
++        marker = dict(schema=RECOVERY_MARKER_SCHEMA, binding=self.binding)
++        if not rows:
++            self.value = dict(schema=RECOVERY_SCHEMA, binding=self.binding, state="NORMAL", burst_retries_used=0,
++                outage_since_unix_ms=None, next_attempt_unix_ms=None, reservation=None, last_error=None,
++                last_failure_unix_ms=None, healthy_since_unix_ms=None, healthy_start_archived_banks=None)
++            db.execute("INSERT INTO meta(id,value) VALUES(4,?)", (json.dumps(marker, sort_keys=True),))
++            self.save()
++        else:
++            try:
++                if set(rows) != {3, 4} or len(rows[4]) > 16384 or strict_json(rows[4]) != marker or len(rows[3]) > 16384:
++                    raise ValueError()
++                self.value = strict_json(rows[3])
++                self.validate()
++            except (ValueError, TypeError, KeyError):
++                raise RecoveryStateError("invalid_recovery_state") from None
++        if self.value["state"] == "BLOCKED":
++            raise RecoveryBlocked("storage_recovery_blocked")
++        if self.value["reservation"] is not None:
++            self.value.update(reservation=None, healthy_since_unix_ms=None, healthy_start_archived_banks=None,
++                              state="OPEN" if self.value["burst_retries_used"] == 3 else "BACKOFF")
++            self.save()
++        elif self.value["state"] == "RECOVERING":
++            # A stopped process is not sixty seconds of observed healthy work.
++            self.value.update(healthy_since_unix_ms=now_ms, healthy_start_archived_banks=self.archived())
++            self.save()
++
++    def validate(self):
++        v = self.value
++        fields = {"schema", "binding", "state", "burst_retries_used", "outage_since_unix_ms",
++                  "next_attempt_unix_ms", "reservation", "last_error", "healthy_since_unix_ms",
++                  "healthy_start_archived_banks", "last_failure_unix_ms"}
++        if (not isinstance(v, dict) or set(v) != fields or v["schema"] != RECOVERY_SCHEMA
++                or v["binding"] != self.binding or v["state"] not in {"NORMAL", "BACKOFF", "OPEN", "RECOVERING", "BLOCKED"}
++                or type(v["burst_retries_used"]) is not int or not 0 <= v["burst_retries_used"] <= 3):
++            raise ValueError()
++        for key in ("outage_since_unix_ms", "next_attempt_unix_ms", "healthy_since_unix_ms", "healthy_start_archived_banks", "last_failure_unix_ms"):
++            if v[key] is not None and (type(v[key]) is not int or not 0 <= v[key] <= 2**63 - 1):
++                raise ValueError()
++        error = v["last_error"]
++        if error is not None and (not isinstance(error, dict) or set(error) != {"error_type", "http_status", "network_error_type"}
++                or not isinstance(error["error_type"], str) or not re.fullmatch(r"[A-Za-z_][A-Za-z0-9_]{0,63}", error["error_type"])
++                or error["http_status"] is not None and (type(error["http_status"]) is not int or not 100 <= error["http_status"] <= 599)
++                or error["network_error_type"] not in (None, "ProtocolError")
++                or error["network_error_type"] is not None and error["error_type"] != "ResponseStreamingError"):
++            raise ValueError()
++        reservation = v["reservation"]
++        if reservation is not None and (not isinstance(reservation, dict) or set(reservation) != {"kind", "reserved_unix_ms"}
++                or reservation["kind"] not in {"retry", "probe"} or type(reservation["reserved_unix_ms"]) is not int
++                or not 0 <= reservation["reserved_unix_ms"] <= 2**63 - 1):
++            raise ValueError()
++        if v["state"] == "NORMAL":
++            if v["burst_retries_used"] or any(v[k] is not None for k in fields - {"schema", "binding", "state", "burst_retries_used"}):
++                raise ValueError()
++        elif v["state"] == "BLOCKED":
++            if error is None or reservation is not None or v["healthy_since_unix_ms"] is not None or v["healthy_start_archived_banks"] is not None:
++                raise ValueError()
++        else:
++            if (error is None or not transient_evidence(error) or v["outage_since_unix_ms"] is None
++                    or v["last_failure_unix_ms"] is None or v["next_attempt_unix_ms"] is None
++                    or not v["outage_since_unix_ms"] <= v["last_failure_unix_ms"] <= v["next_attempt_unix_ms"]):
++                raise ValueError()
++            delay = RECOVERY_DELAYS[v["burst_retries_used"]] if v["burst_retries_used"] < 3 else RECOVERY_PROBE_SECONDS
++            if v["next_attempt_unix_ms"] < v["last_failure_unix_ms"] + delay * 1000:
++                raise ValueError()
++            if v["state"] == "OPEN" and v["burst_retries_used"] != 3:
++                raise ValueError()
++            if v["state"] == "RECOVERING" and (v["healthy_since_unix_ms"] is None
++                    or v["healthy_start_archived_banks"] is None or reservation is not None
++                    or v["burst_retries_used"] == 0 or v["healthy_since_unix_ms"] < v["last_failure_unix_ms"]):
++                raise ValueError()
++            if v["state"] in {"BACKOFF", "OPEN"} and (v["healthy_since_unix_ms"] is not None
++                    or v["healthy_start_archived_banks"] is not None):
++                raise ValueError()
++            if v["state"] == "BACKOFF" and v["burst_retries_used"] == 3 and reservation is None:
++                raise ValueError()
++            if reservation is not None:
++                used = v["burst_retries_used"]
++                if (reservation["reserved_unix_ms"] < v["outage_since_unix_ms"]
++                        or reservation["kind"] == "probe" and (used != 3 or v["state"] != "OPEN")
++                        or reservation["kind"] == "retry" and (not 1 <= used <= 3 or v["state"] != "BACKOFF")):
++                    raise ValueError()
++                delay = RECOVERY_DELAYS[used] if used < 3 else RECOVERY_PROBE_SECONDS
++                if v["next_attempt_unix_ms"] < reservation["reserved_unix_ms"] + delay * 1000:
++                    raise ValueError()
++
++    def save(self):
++        self.persisted = False
++        self.validate()
++        body = json.dumps(self.value, separators=(",", ":"), sort_keys=True)
++        if len(body) > 16384:
++            raise RecoveryStateError("recovery_state_too_large")
++        self.db.execute("INSERT OR REPLACE INTO meta(id,value) VALUES(3,?)", (body,))
++        self.db.commit()
++        self.persisted = True
++
++    def archived(self):
++        return self.db.execute("SELECT count(*) FROM archives").fetchone()[0]
++
++    def fresh_allowed(self):
++        return self.value["state"] in {"NORMAL", "RECOVERING"}
++
++    def due(self, now_ms):
++        return (self.value["state"] in {"BACKOFF", "OPEN", "RECOVERING"}
++                and self.value["reservation"] is None and now_ms >= self.value["next_attempt_unix_ms"])
++
++    def reserve(self, now_ms):
++        if not self.due(now_ms):
++            return None
++        v = self.value
++        if v["burst_retries_used"] < 3:
++            v["burst_retries_used"] += 1
++            kind = "retry"
++            delay = RECOVERY_DELAYS[v["burst_retries_used"]] if v["burst_retries_used"] < 3 else RECOVERY_PROBE_SECONDS
++            v["state"] = "BACKOFF"
++        else:
++            kind, delay, v["state"] = "probe", RECOVERY_PROBE_SECONDS, "OPEN"
++        v.update(reservation=dict(kind=kind, reserved_unix_ms=now_ms), next_attempt_unix_ms=now_ms + delay * 1000,
++                 healthy_since_unix_ms=None, healthy_start_archived_banks=None)
++        self.save()  # No child starts before this reservation commits.
++        return kind
++
++    def failed(self, error, submitted_ms, kind, now_ms):
++        v = self.value
++        if not transient_transfer(error):
++            self.block(error)
++            raise error
++        outage = v["outage_since_unix_ms"]
++        if kind is not None:
++            v["reservation"] = None
++        used = v["burst_retries_used"]
++        delay = RECOVERY_DELAYS[used] if used < 3 else RECOVERY_PROBE_SECONDS
++        active_retry = v["reservation"] is not None and v["reservation"]["kind"] == "retry"
++        v.update(state="BACKOFF" if used < 3 or active_retry else "OPEN", last_error=failure_fields(error),
++                 last_failure_unix_ms=now_ms,
++                 outage_since_unix_ms=min(outage if outage is not None else submitted_ms, submitted_ms),
++                 next_attempt_unix_ms=max(v["next_attempt_unix_ms"] or 0, now_ms + delay * 1000),
++                 healthy_since_unix_ms=None, healthy_start_archived_banks=None)
++        self.save()
++
++    def succeeded(self, kind, now_ms):
++        if kind is not None:
++            self.value.update(state="RECOVERING", reservation=None, healthy_since_unix_ms=now_ms,
++                              healthy_start_archived_banks=self.archived())
++            self.save()
++
++    def tick(self, now_ms, failed_pending):
++        v = self.value
++        if (v["state"] == "RECOVERING" and not failed_pending and v["reservation"] is None
++                and now_ms - v["healthy_since_unix_ms"] >= 60000
++                and self.archived() > v["healthy_start_archived_banks"]):
++            v.update(state="NORMAL", burst_retries_used=0, outage_since_unix_ms=None,
++                     next_attempt_unix_ms=None, reservation=None, last_error=None,
++                     last_failure_unix_ms=None, healthy_since_unix_ms=None, healthy_start_archived_banks=None)
++            self.save()
++
++    def block(self, error):
++        if self.value["state"] == "BLOCKED" and self.persisted:
++            return
++        self.db.rollback()  # Never commit a partial archive transaction with the latch.
++        if self.value["state"] != "BLOCKED":
++            self.value.update(state="BLOCKED", reservation=None, last_error=failure_fields(error),
++                              healthy_since_unix_ms=None, healthy_start_archived_banks=None)
++        self.save()
++
++    def status(self):
++        return {key: self.value[key] for key in ("schema", "state", "burst_retries_used", "outage_since_unix_ms",
++            "next_attempt_unix_ms", "reservation", "last_error", "last_failure_unix_ms", "healthy_since_unix_ms", "healthy_start_archived_banks")}
+ 
+ 
+ def strict_json(raw):
+@@ -518,37 +725,77 @@
+     The client is created before threads start, per the Boto3 client guidance:
+     https://docs.aws.amazon.com/boto3/latest/guide/clients.html
+     """
+-    def __init__(self, root, db, remote, state, retire_files, limit):
++    def __init__(self, root, db, remote, state, retire_files, limit, recovery=None, clock=None):
+         self.root, self.db, self.remote, self.state = root, db, remote, state
+         self.retire_files, self.limit = retire_files, limit
+         self.pool = ThreadPoolExecutor(max_workers=limit)
+         self.pending = {}
++        self.recovery = recovery
++        self.clock = clock or (lambda: int(time.time() * 1000))
++
++    def can_submit(self):
++        if len(self.pending) >= self.limit:
++            return False
++        return (self.recovery is None or self.recovery.fresh_allowed()
++                or not self.pending and self.recovery.due(self.clock()))
+ 
+     def pending_banks(self):
+         return {(r['slot'], r['bank']) for data in self.pending.values() for r in data['records']}
+ 
+     def submit(self, records):
++        if not self.can_submit():
++            return False
++        kind = None
++        if self.recovery is not None and not self.recovery.fresh_allowed():
++            kind = self.recovery.reserve(self.clock())
++            if kind is None:
++                return False
+         used = {data['number'] for data in self.pending.values()}
+         number = next(n for n in range(self.limit) if n not in used)
+         path = self.state / f'bundle-{number}.tar'
+         future = self.pool.submit(upload_bundle, self.root, self.remote, records, path)
+-        self.pending[future] = dict(number=number, path=path, records=records, started=time.monotonic())
+-        self.pending[future]['submitted_unix_ms'] = int(time.time() * 1000)
++        self.pending[future] = dict(number=number, path=path, records=records, started=time.monotonic(),
++            submitted_unix_ms=self.clock(), retry_wait=False, attempt_kind=kind)
++        return True
+ 
+     def collect(self, block=False):
+         if block and self.pending:
+-            wait(self.pending, timeout=1, return_when=FIRST_COMPLETED)
++            active = [future for future, data in self.pending.items() if not data['retry_wait']]
++            if active:
++                wait(active, timeout=1, return_when=FIRST_COMPLETED)
++            else:
++                time.sleep(1)  # Backoff must not block STATUS writes or spin the CPU.
+         committed = []
+         for future in list(self.pending):
+-            if not future.done():
++            data = self.pending[future]
++            if data['retry_wait'] or not future.done():
+                 continue
+-            data = self.pending[future]
+-            sha, key = future.result()  # A failed verification has no SQLite or deletion side effects.
+-            freed = commit_bundle(self.root, self.db, self.remote, data['records'], data['path'],
+-                                  sha, key, self.retire_files)
++            try:
++                sha, key = future.result()  # Failure has no SQLite or deletion side effects.
++                freed = commit_bundle(self.root, self.db, self.remote, data['records'], data['path'],
++                                      sha, key, self.retire_files)
++                if self.recovery is not None:
++                    self.recovery.succeeded(data['attempt_kind'], self.clock())
++            except Exception as error:
++                if self.recovery is None:
++                    raise
++                self.recovery.failed(error, data['submitted_unix_ms'], data['attempt_kind'], self.clock())
++                data.update(retry_wait=True, attempt_kind=None)
++                continue
+             committed.append(dict(banks=len(data['records']), freed=freed,
+                                   seconds=time.monotonic() - data['started']))
+             del self.pending[future]
++        if self.recovery is not None:
++            for future, data in list(self.pending.items()):
++                if data['retry_wait'] and self.recovery.due(self.clock()):
++                    kind = self.recovery.reserve(self.clock())
++                    if kind is not None:
++                        replacement = self.pool.submit(upload_bundle, self.root, self.remote, data['records'], data['path'])
++                        del self.pending[future]
++                        data.update(retry_wait=False, attempt_kind=kind)
++                        self.pending[replacement] = data
++                    break
++            self.recovery.tick(self.clock(), any(data['retry_wait'] for data in self.pending.values()))
+         return committed
+ 
+     def close(self):
+@@ -558,8 +805,12 @@
+ def progress_status(transfers, last_progress_ms, now_ms):
+     pending = list(transfers.pending.values())
+     eligible_since = min((d['submitted_unix_ms'] for d in pending), default=None)
++    recovery = getattr(transfers, 'recovery', None)
++    outage = recovery.value['outage_since_unix_ms'] if recovery is not None else None
++    if outage is not None:
++        eligible_since = min(eligible_since, outage) if eligible_since is not None else outage
+     oldest_slot = min((r['slot'] for d in pending for r in d['records']), default=None)
+-    if pending:
++    if pending or outage is not None:
+         last_activity = max(eligible_since, last_progress_ms or eligible_since)
+         progress = ('STALLED' if now_ms - last_activity >= STORAGE_STALL_SECONDS * 1000
+                     else 'TRANSFERRING')
+@@ -626,6 +877,10 @@
+                     failure_traceback=trace, updated_unix_ms=int(time.time() * 1000))
+     previous["http_status"] = evidence["http_status"]
+     previous["network_error_type"] = evidence["network_error_type"]
++    if context.get("recovery") is not None:
++        previous["recovery"] = context["recovery"].status()
++        previous["recovery_state_persisted"] = (getattr(context["recovery"], "persisted", False)
++                                                and not context.get("recovery_latch_write_failed", False))
+     if "source" in context:
+         previous["source"] = context["source"]
+     invocation = os.environ.get("INVOCATION_ID", "")
+@@ -762,6 +1017,12 @@
+         try:
+             return archive_open(a, resources, context)
+         except Exception as error:
++            try:
++                if context.get("recovery") is not None:
++                    context["recovery"].block(error)
++            except Exception:
++                context["recovery_latch_write_failed"] = True
++                print("cold_storage_recovery_latch_write_failed", file=sys.stderr, flush=True)
+             record_archive_failure(context, error)
+             raise RuntimeError("cold_storage_archive_failed; inspect LAST-FAILURE.json") from None
+ 
+@@ -783,6 +1044,9 @@
+     remote = R2(a.credentials_file)
+     db = database(state, source, remote.namespace)
+     resources.callback(db.close)
++    recovery = RecoveryCircuit(db, source, remote.namespace, getattr(a, "max_archived_banks", None))
++    if failure_context is not None:
++        failure_context["recovery"] = recovery
+     feed = sqlite3.connect("file:" + str(root / "feed.sqlite") + "?mode=ro", uri=True, timeout=30)
+     resources.callback(feed.close)
+     feed.execute("ATTACH DATABASE ? AS cold", ("file:" + str(state / "archive.sqlite") + "?mode=ro",))
+@@ -797,7 +1061,7 @@
+     last_skips = dict(frame_replay=0, pending=0, archived=0, retention=0, bank_replay=0, writer_ack=0)
+     saved_progress = db.execute("SELECT value FROM meta WHERE id=2").fetchone()
+     last_progress = int(saved_progress[0]) if saved_progress else None
+-    transfers = Transfers(root, db, remote, state, a.retire, a.parallel_bundles)
++    transfers = Transfers(root, db, remote, state, a.retire, a.parallel_bundles, recovery=recovery)
+     resources.callback(transfers.close)
+     submitted_once = False
+     batch_seconds, last_batch_banks = None, 0
+@@ -826,7 +1090,7 @@
+         after = min(after, replay_base(a.v1_spool / "CHECKPOINT.json", source))
+         bank_base = replay_base(a.bank_origin_spool / "CHECKPOINT.json", source, bank=True)
+         bounded_done = bool(a.max_batches and batches + len(transfers.pending) >= a.max_batches)
+-        can_submit = (len(transfers.pending) < a.parallel_bundles and not bounded_done and allowance != 0
++        can_submit = (transfers.can_submit() and not bounded_done and allowance != 0
+                       and (a.follow or not submitted_once))
+         if can_submit and scan_through is None:
+             # Freeze each sweep's end. A growing live tail must not prevent a
+@@ -912,14 +1176,16 @@
+             if absolute_done and not transfers.pending:
+                 status["stop_reason"] = "max_archived_banks"
+         status.update(progress_status(transfers, last_progress, status['updated_unix_ms']))
++        status['recovery'] = recovery.status()
+         atomic(state / "STATUS.json", status)
+-        if not transfers.pending and (absolute_done or (a.max_batches and batches >= a.max_batches) or not a.follow):
++        if not transfers.pending and (absolute_done or recovery.fresh_allowed()
++                and ((a.max_batches and batches >= a.max_batches) or not a.follow)):
+             print(json.dumps(status))
+             return
+         if not records and not transfers.pending:
+             # Continue a finite sweep without a 15-second wait per blocked page.
+             # Yield between pages; wait normally after the entire sweep ends.
+-            time.sleep(15 if sweep_completed else SCAN_PAGE_PAUSE_SECONDS)
++            time.sleep(1 if not recovery.fresh_allowed() else 15 if sweep_completed else SCAN_PAGE_PAUSE_SECONDS)
+ 
+ 
+ if __name__ == "__main__":
+--- a/hivezilla/deploy/direct-agave/test_cold_storage.py
++++ b/hivezilla/deploy/direct-agave/test_cold_storage.py
+@@ -458,9 +458,10 @@
+     def test_absolute_archive_cap_reserves_banks_in_parallel_pending_groups(self):
+         class DeferredTransfers:
+             largest_pending = 0
+-            def __init__(self, root, db, remote, state, retire_files, limit):
++            def __init__(self, root, db, remote, state, retire_files, limit, recovery=None):
+                 self.root, self.db, self.remote, self.state = root, db, remote, state
+-                self.retire_files, self.pending = retire_files, {}
++                self.retire_files, self.pending, self.limit = retire_files, {}, limit
++            def can_submit(self): return len(self.pending) < self.limit
+             def pending_banks(self):
+                 return {(r['slot'], r['bank']) for data in self.pending.values() for r in data['records']}
+             def submit(self, records):
+@@ -685,10 +686,11 @@
+         # Exercise the real archive loop, SQL gates, verified bundle commit and
+         # retirement. Only network and thread scheduling are synchronous here.
+         class ImmediateTransfers:
+-            def __init__(self, root, db, remote, state, retire_files, limit):
++            def __init__(self, root, db, remote, state, retire_files, limit, recovery=None):
+                 self.root, self.db, self.remote, self.state = root, db, remote, state
+                 self.retire_files = retire_files
+                 self.pending = {}
++            def can_submit(self): return not self.pending
+             def pending_banks(self):
+                 return {(r['slot'], r['bank']) for d in self.pending.values() for r in d['records']}
+             def submit(self, records):
+@@ -1029,6 +1031,345 @@
+             self.assertEqual(db.execute('SELECT * FROM archives').fetchall(), [(1, 2, 'large original record', 1)])
+             db.close()
+ 
++    def test_recovery_outage_reservations_and_probe_cadence_survive_restarts(self):
++        with tempfile.TemporaryDirectory() as d:
++            root = Path(d); db = m.database(root, {'session_id': 'session'}, 'namespace')
++            circuit = m.RecoveryCircuit(db, {'session_id': 'session'}, 'namespace', 9, now_ms=1000)
++            circuit.failed(m.BundleTransferTimeout(), 0, None, 1000)
++            deadline = 31000
++            for used, next_delay in [(1, 60), (2, 120), (3, 900)]:
++                self.assertFalse(circuit.due(deadline - 1))
++                self.assertEqual(circuit.reserve(deadline), 'retry')
++                # A new connection sees the spent reservation before any child exists.
++                with closing(sqlite3.connect(root / 'archive.sqlite')) as reader:
++                    saved = json.loads(reader.execute('SELECT value FROM meta WHERE id=3').fetchone()[0])
++                self.assertEqual(saved['burst_retries_used'], used)
++                self.assertEqual(saved['reservation']['kind'], 'retry')
++                expected = deadline + next_delay * 1000
++                db.close(); db = m.database(root, {'session_id': 'session'}, 'namespace')
++                circuit = m.RecoveryCircuit(db, {'session_id': 'session'}, 'namespace', 9, now_ms=deadline + 1)
++                self.assertEqual(circuit.value['burst_retries_used'], used)
++                self.assertEqual(circuit.value['next_attempt_unix_ms'], expected)
++                self.assertEqual(circuit.value['outage_since_unix_ms'], 0)
++                deadline = expected
++            self.assertEqual(circuit.value['state'], 'OPEN')
++            self.assertFalse(circuit.due(deadline - 1))
++            self.assertEqual(circuit.reserve(deadline), 'probe')
++            db.close(); db = m.database(root, {'session_id': 'session'}, 'namespace')
++            circuit = m.RecoveryCircuit(db, {'session_id': 'session'}, 'namespace', 9, now_ms=deadline + 1)
++            self.assertFalse(circuit.due(deadline + 899999))
++            self.assertEqual(circuit.reserve(deadline + 900000), 'probe')
++            circuit.failed(m.BundleTransferTimeout(), deadline, 'probe', deadline + 900001)
++            self.assertGreaterEqual(circuit.value['next_attempt_unix_ms'], deadline + 1800001)
++            empty = SimpleNamespace(pending={}, recovery=circuit)
++            status = m.progress_status(empty, None, deadline + 900001)
++            self.assertEqual(status['storage_progress'], 'STALLED')
++            self.assertEqual(status['eligible_wait_since_unix_ms'], 0)
++            db.close()
++
++    def test_recovery_reset_needs_sixty_fresh_seconds_and_later_durable_progress(self):
++        with tempfile.TemporaryDirectory() as d:
++            root = Path(d); source = {'session_id': 'session'}; db = m.database(root, source, 'namespace')
++            circuit = m.RecoveryCircuit(db, source, 'namespace', None, now_ms=1000)
++            circuit.failed(m.BundleTransferTimeout(), 0, None, 1000)
++            circuit.reserve(31000); circuit.succeeded('retry', 32000)
++            circuit.tick(92000, False)
++            self.assertEqual(circuit.value['burst_retries_used'], 1)
++            db.execute("INSERT INTO archives(slot,bank,record,retired) VALUES(1,2,'{}',1)"); db.commit()
++            circuit.tick(91999, False)
++            self.assertEqual(circuit.value['state'], 'RECOVERING')
++            circuit.tick(92000, True)
++            self.assertEqual(circuit.value['state'], 'RECOVERING')
++            # Restart cannot count stopped time as observed healthy time.
++            circuit = m.RecoveryCircuit(db, source, 'namespace', None, now_ms=92000)
++            circuit.tick(152000, False)
++            self.assertEqual(circuit.value['burst_retries_used'], 1)
++            db.execute("INSERT INTO archives(slot,bank,record,retired) VALUES(3,4,'{}',1)"); db.commit()
++            circuit.tick(152000, False)
++            self.assertEqual(circuit.value['state'], 'NORMAL')
++            self.assertIsNone(circuit.value['outage_since_unix_ms'])
++            self.assertEqual(circuit.value['burst_retries_used'], 0)
++            db.close()
++
++    def test_recovery_rejects_missing_corrupt_foreign_and_permanent_retry_state(self):
++        mutations = [
++            lambda db, v: db.execute('DELETE FROM meta WHERE id=3'),
++            lambda db, v: db.execute('DELETE FROM meta WHERE id=4'),
++            lambda db, v: db.execute("UPDATE meta SET value='broken' WHERE id=3"),
++            lambda db, v: v.update(last_error=dict(error_type='ClientError', http_status=403, network_error_type=None)),
++            lambda db, v: v.update(last_error=dict(error_type='NoCredentialsError', http_status=None, network_error_type=None)),
++            lambda db, v: v.update(last_error=dict(error_type='ReadTimeoutError', http_status=403, network_error_type=None)),
++            lambda db, v: v.update(next_attempt_unix_ms=1001),
++            lambda db, v: v.update(state='OPEN'),
++            lambda db, v: v.update(reservation=dict(kind='probe', reserved_unix_ms=1000)),
++            lambda db, v: v['binding'].update(max_archived_banks=10),
++            lambda db, v: db.execute("UPDATE meta SET value=replace(value,'\"schema\":','\"schema\":\"bad\",\"schema\":') WHERE id=4"),
++        ]
++        for mutate in mutations:
++            with self.subTest(mutation=mutations.index(mutate)), tempfile.TemporaryDirectory() as d:
++                db = m.database(Path(d), {'session_id': 'session'}, 'namespace')
++                circuit = m.RecoveryCircuit(db, {'session_id': 'session'}, 'namespace', 9, now_ms=1000)
++                circuit.failed(m.BundleTransferTimeout(), 0, None, 1000)
++                value = json.loads(db.execute('SELECT value FROM meta WHERE id=3').fetchone()[0])
++                before = json.dumps(value, sort_keys=True)
++                mutate(db, value)
++                if json.dumps(value, sort_keys=True) != before:
++                    db.execute('UPDATE meta SET value=? WHERE id=3', (json.dumps(value),))
++                db.commit()
++                with self.assertRaises(m.RecoveryStateError):
++                    m.RecoveryCircuit(db, {'session_id': 'session'}, 'namespace', 9, now_ms=2000)
++                db.close()
++
++    def test_recovery_permanent_fault_is_durably_blocked_across_restart(self):
++        for kind, http in [('ClientError', 403), ('NoCredentialsError', None), ('RuntimeError', None),
++                           ('IncompleteReadError', None), ('ResponseStreamingError', None)]:
++            with self.subTest(kind=kind), tempfile.TemporaryDirectory() as d:
++                root = Path(d); db = m.database(root, {'session_id': 'session'}, 'namespace')
++                circuit = m.RecoveryCircuit(db, {'session_id': 'session'}, 'namespace', None, now_ms=1000)
++                circuit.failed(m.BundleTransferTimeout(), 0, None, 1000)
++                error = m.BundleTransferError(dict(error_type=kind, http_status=http, network_error_type=None))
++                with self.assertRaises(m.BundleTransferError): circuit.failed(error, 0, None, 2000)
++                self.assertEqual(circuit.value['state'], 'BLOCKED')
++                db.close(); db = m.database(root, {'session_id': 'session'}, 'namespace')
++                with self.assertRaises(m.RecoveryBlocked):
++                    m.RecoveryCircuit(db, {'session_id': 'session'}, 'namespace', None, now_ms=3000)
++                db.close()
++
++    def test_recovery_parallel_failures_share_budget_keep_caps_and_commit_only_proofs(self):
++        with tempfile.TemporaryDirectory() as d:
++            root = Path(d).resolve(); source, items, _ = self.archive_fixture(root, count=2)
++            remote = self.isolated_remote(root); state = root / 'cold-storage'; db = m.database(state, source, remote.namespace)
++            now = [1000]; circuit = m.RecoveryCircuit(db, source, remote.namespace, 2, now_ms=now[0])
++            transfers = m.Transfers(root, db, remote, state, True, 2, circuit, lambda: now[0])
++            calls = {}; lock = threading.Lock()
++            def result(command, request):
++                with lock:
++                    calls[request['path']] = calls.get(request['path'], 0) + 1
++                    attempt = calls[request['path']]
++                if attempt == 1: raise m.BundleTransferTimeout()
++                with closing(sqlite3.connect(state / 'archive.sqlite')) as reader:
++                    ledger = json.loads(reader.execute('SELECT value FROM meta WHERE id=3').fetchone()[0])
++                self.assertIsNotNone(ledger['reservation'])
++                return 0, {k: v for k, v in request.items() if k != 'path'}
++            def finished():
++                for future, data in list(transfers.pending.items()):
++                    if not data['retry_wait']:
++                        try: future.result(timeout=3)
++                        except m.BundleTransferTimeout: pass
++            try:
++                with patch.object(m, 'transfer_process', side_effect=result):
++                    transfers.submit([items[0][0]]); transfers.submit([items[1][0]])
++                    finished(); self.assertEqual(transfers.collect(), [])
++                    self.assertEqual(len(transfers.pending), 2)
++                    self.assertFalse(transfers.can_submit())
++                    self.assertEqual(m.archive_allowance(0, transfers.pending_banks(), 2), 0)
++                    self.assertTrue(all(data['submitted_unix_ms'] == 1000 for data in transfers.pending.values()))
++                    self.assertTrue(all(path.exists() for _, *paths in items for path in paths))
++                    now[0] = 31000; transfers.collect(); finished(); transfers.collect()
++                    self.assertEqual(circuit.value['burst_retries_used'], 1)
++                    self.assertEqual(circuit.value['state'], 'RECOVERING')
++                    self.assertEqual(m.archive_allowance(1, transfers.pending_banks(), 2), 0)
++                    now[0] = 91000; transfers.collect(); finished(); transfers.collect()
++                self.assertEqual(circuit.value['burst_retries_used'], 2)
++                self.assertEqual(db.execute('SELECT count(*),sum(retired) FROM archives').fetchone(), (2, 2))
++                self.assertEqual(transfers.pending_banks(), set())
++            finally: transfers.close(); db.close()
++
++    def test_recovery_successful_old_sibling_does_not_reset_outage(self):
++        with tempfile.TemporaryDirectory() as d:
++            root = Path(d).resolve(); source, items, _ = self.archive_fixture(root, count=2)
++            remote = self.isolated_remote(root); state = root / 'cold-storage'; db = m.database(state, source, remote.namespace)
++            circuit = m.RecoveryCircuit(db, source, remote.namespace, 2, now_ms=1000)
++            transfers = m.Transfers(root, db, remote, state, True, 2, circuit, lambda: 1000)
++            def result(command, request):
++                if request['path'].endswith('bundle-0.tar'): raise m.BundleTransferTimeout()
++                return 0, {k: v for k, v in request.items() if k != 'path'}
++            try:
++                with patch.object(m, 'transfer_process', side_effect=result):
++                    transfers.submit([items[0][0]]); transfers.submit([items[1][0]])
++                    for future in transfers.pending:
++                        try: future.result(timeout=3)
++                        except m.BundleTransferTimeout: pass
++                    self.assertEqual(len(transfers.collect()), 1)
++                circuit.tick(100000, True)
++                self.assertEqual(circuit.value['state'], 'BACKOFF')
++                self.assertIsNone(circuit.value['healthy_since_unix_ms'])
++                self.assertEqual(circuit.value['outage_since_unix_ms'], 1000)
++                self.assertEqual(db.execute('SELECT count(*),sum(retired) FROM archives').fetchone(), (1, 1))
++            finally: transfers.close(); db.close()
++
++    def test_recovery_restart_allows_only_one_due_probe_group_then_real_progress(self):
++        with tempfile.TemporaryDirectory() as d:
++            root = Path(d).resolve(); source, items, _ = self.archive_fixture(root, count=2)
++            remote = self.isolated_remote(root); state = root / 'cold-storage'; db = m.database(state, source, remote.namespace)
++            now = [1000]; circuit = m.RecoveryCircuit(db, source, remote.namespace, 2, now_ms=now[0])
++            circuit.failed(m.BundleTransferTimeout(), 0, None, now[0])
++            for _ in range(3):
++                now[0] = circuit.value['next_attempt_unix_ms']; kind = circuit.reserve(now[0])
++                circuit.failed(m.BundleTransferTimeout(), 0, kind, now[0])
++            circuit = m.RecoveryCircuit(db, source, remote.namespace, 2, now_ms=now[0])
++            transfers = m.Transfers(root, db, remote, state, True, 2, circuit, lambda: now[0])
++            def result(command, request): return 0, {k: v for k, v in request.items() if k != 'path'}
++            try:
++                self.assertFalse(transfers.can_submit())
++                now[0] = circuit.value['next_attempt_unix_ms']
++                with patch.object(m, 'transfer_process', side_effect=result):
++                    self.assertTrue(transfers.submit([items[0][0]]))
++                    self.assertFalse(transfers.submit([items[1][0]]))
++                    self.assertEqual(circuit.value['reservation']['kind'], 'probe')
++                    next(iter(transfers.pending)).result(timeout=3); transfers.collect()
++                self.assertEqual(circuit.value['state'], 'RECOVERING')
++                self.assertEqual(circuit.value['burst_retries_used'], 3)
++                self.assertTrue(transfers.can_submit())
++                self.assertEqual(db.execute('SELECT count(*),sum(retired) FROM archives').fetchone(), (1, 1))
++                self.assertEqual(m.archive_allowance(1, transfers.pending_banks(), 2), 1)
++            finally: transfers.close(); db.close()
++
++    def test_recovery_lost_put_reply_then_412_requires_full_readback_before_retirement(self):
++        boto, _ = self.r2_errors()
++        with tempfile.TemporaryDirectory() as d:
++            root = Path(d).resolve(); source, record, data, evidence = self.fixture(root)
++            remote = self.isolated_remote(root); remote.bucket = 'bucket'; state = root / 'cold-storage'
++            db = m.database(state, source, remote.namespace); now = [1000]
++            circuit = m.RecoveryCircuit(db, source, remote.namespace, 1, now_ms=now[0])
++            transfers = m.Transfers(root, db, remote, state, True, 2, circuit, lambda: now[0])
++            stored, bodies = [], []
++            def put(**kwargs):
++                if not stored:
++                    stored.append(kwargs['Body'].read()); raise boto.ReadTimeoutError('DO_NOT_PRINT')
++                error = boto.ClientError('DO_NOT_PRINT'); error.response = {'ResponseMetadata': {'HTTPStatusCode': 412}}
++                raise error
++            def get(**kwargs):
++                body = io.BytesIO(stored[0]); bodies.append(body); return {'Body': body}
++            remote.client = SimpleNamespace(put_object=Mock(side_effect=put), get_object=Mock(side_effect=get))
++            def child(command, request):
++                try: remote._put_verified_in_process(request['key'], Path(request['path']), request['sha256'])
++                except Exception as error: return 1, dict(schema=m.TRANSFER_SCHEMA, state='FAILED', **m.failure_fields(error))
++                return 0, {k: v for k, v in request.items() if k != 'path'}
++            try:
++                with patch.object(m, 'transfer_process', side_effect=child):
++                    transfers.submit([record])
++                    for future in transfers.pending:
++                        with self.assertRaises(m.BundleTransferError): future.result(timeout=3)
++                    transfers.collect()
++                    self.assertTrue(data.exists() and evidence.exists())
++                    self.assertEqual(db.execute('SELECT count(*) FROM archives').fetchone()[0], 0)
++                    self.assertEqual(remote.client.get_object.call_count, 0)
++                    now[0] = 31000; transfers.collect()
++                    for future, entry in transfers.pending.items():
++                        if not entry['retry_wait']: future.result(timeout=3)
++                    transfers.collect()
++                self.assertEqual(remote.client.put_object.call_count, 2)
++                self.assertEqual(remote.client.get_object.call_count, 1)
++                self.assertTrue(bodies[0].closed)
++                self.assertEqual(db.execute('SELECT count(*),sum(retired) FROM archives').fetchone(), (1, 1))
++                self.assertFalse(data.exists() or evidence.exists())
++            finally: transfers.close(); db.close()
++
++    def test_recovery_crash_after_verified_index_resumes_partial_retirement_without_upload(self):
++        class Crash(BaseException): pass
++        with tempfile.TemporaryDirectory() as d:
++            root = Path(d).resolve(); source, items, options = self.archive_fixture(root, count=1)
++            record, data, evidence = items[0]; remote = Remote(); state = root / 'cold-storage'
++            remote.put_verified = Mock(wraps=remote.put_verified)
++            db = m.database(state, source, remote.namespace)
++            circuit = m.RecoveryCircuit(db, source, remote.namespace, 1, now_ms=1000)
++            transfers = m.Transfers(root, db, remote, state, True, 2, circuit, lambda: 1000)
++            unlink = Path.unlink
++            def crash(path, *args, **kwargs):
++                result = unlink(path, *args, **kwargs)
++                if path == data: raise Crash()
++                return result
++            try:
++                transfers.submit([record]); next(iter(transfers.pending)).result(timeout=3)
++                with patch.object(Path, 'unlink', crash), self.assertRaises(Crash): transfers.collect()
++                self.assertEqual(db.execute('SELECT count(*),sum(retired) FROM archives').fetchone(), (1, 0))
++                self.assertFalse(data.exists()); self.assertTrue(evidence.exists())
++                self.assertEqual(circuit.value['state'], 'NORMAL')
++            finally: transfers.close(); db.close()
++            options.max_archived_banks = 1
++            with patch.object(m, 'R2', return_value=remote), patch('builtins.print'): m.archive(options)
++            with closing(m.database(state, source, remote.namespace)) as db:
++                self.assertEqual(db.execute('SELECT count(*),sum(retired) FROM archives').fetchone(), (1, 1))
++            self.assertEqual(remote.put_verified.call_count, 1)
++            self.assertFalse(data.exists() or evidence.exists())
++
++    def test_recovery_nonfollow_restart_keeps_outage_and_waits_for_due_probe(self):
++        class StopAfterWait(BaseException): pass
++        with tempfile.TemporaryDirectory() as d:
++            root = Path(d).resolve(); source, items, options = self.archive_fixture(root, count=1)
++            state = root / 'cold-storage'; remote = Remote(); remote.put_verified = Mock(wraps=remote.put_verified)
++            db = m.database(state, source, remote.namespace)
++            circuit = m.RecoveryCircuit(db, source, remote.namespace, None, now_ms=100000)
++            circuit.failed(m.BundleTransferTimeout(), 0, None, 100000); db.close()
++            options.follow = False
++            with patch.object(m, 'R2', return_value=remote), patch.object(m.time, 'time', return_value=100), \
++                 patch.object(m.time, 'sleep', side_effect=StopAfterWait) as sleep, \
++                 self.assertRaises(StopAfterWait): m.archive(options)
++            sleep.assert_called_once_with(1)
++            status = json.loads((state / 'STATUS.json').read_text())
++            self.assertEqual(status['state'], 'RUNNING')
++            self.assertEqual(status['recovery']['state'], 'BACKOFF')
++            self.assertEqual(status['eligible_wait_since_unix_ms'], 0)
++            self.assertEqual(status['recovery']['burst_retries_used'], 0)
++            remote.put_verified.assert_not_called()
++            self.assertTrue(all(path.exists() for _, *paths in items for path in paths))
++
++    def test_recovery_source_gate_fault_outside_transfer_durably_blocks(self):
++        with tempfile.TemporaryDirectory() as d:
++            root = Path(d).resolve(); source, _, options = self.archive_fixture(root, count=1)
++            path = options.publisher_state / 'CHECKPOINT.json'
++            value = json.loads(path.read_text()); value['session'] = 'wrong'; path.write_text(json.dumps(value))
++            with patch.object(m, 'R2', return_value=Remote()), patch('builtins.print'), self.assertRaises(RuntimeError):
++                m.archive(options)
++            with closing(sqlite3.connect(root / 'cold-storage/archive.sqlite')) as db:
++                value = json.loads(db.execute('SELECT value FROM meta WHERE id=3').fetchone()[0])
++            self.assertEqual(value['state'], 'BLOCKED')
++            with patch.object(m, 'R2', return_value=Remote()), patch('builtins.print'), self.assertRaises(RuntimeError):
++                m.archive(options)
++            failure = json.loads((root / 'cold-storage/LAST-FAILURE.json').read_text())
++            self.assertEqual(failure['error_type'], 'RecoveryBlocked')
++
++    def test_recovery_latch_write_fault_still_reports_safe_failed_evidence(self):
++        with tempfile.TemporaryDirectory() as d:
++            state = Path(d)
++            recovery = SimpleNamespace(block=Mock(side_effect=sqlite3.OperationalError('DO_NOT_PRINT')),
++                                       status=lambda: {'state': 'BLOCKED'})
++            def fail(options, resources, context):
++                context.update(state=state, source={'session_id': 'session'}, recovery=recovery)
++                raise RuntimeError('DO_NOT_PRINT signed URL')
++            with patch.object(m, 'archive_open', side_effect=fail), patch('builtins.print') as output, self.assertRaises(RuntimeError):
++                m.archive(None)
++            saved = json.loads((state / 'LAST-FAILURE.json').read_text())
++            self.assertEqual(saved['state'], 'FAILED')
++            self.assertFalse(saved['recovery_state_persisted'])
++            self.assertNotIn('DO_NOT_PRINT', json.dumps(saved))
++            self.assertNotIn('DO_NOT_PRINT', str(output.call_args_list))
++
++    def test_recovery_failed_latch_write_is_not_claimed_durable_and_can_be_retried(self):
++        with tempfile.TemporaryDirectory() as d:
++            db = m.database(Path(d), {'session_id': 'session'}, 'namespace')
++            circuit = m.RecoveryCircuit(db, {'session_id': 'session'}, 'namespace', None, now_ms=1000)
++            class OnceFailingDB:
++                failed = False
++                def execute(self, sql, *args):
++                    if sql.startswith('INSERT OR REPLACE INTO meta') and not self.failed:
++                        self.failed = True; raise sqlite3.OperationalError('DO_NOT_PRINT')
++                    return db.execute(sql, *args)
++                def commit(self): return db.commit()
++                def rollback(self): return db.rollback()
++            circuit.db = OnceFailingDB()
++            with self.assertRaises(sqlite3.OperationalError): circuit.block(RuntimeError('DO_NOT_PRINT'))
++            self.assertFalse(circuit.persisted)
++            self.assertEqual(json.loads(db.execute('SELECT value FROM meta WHERE id=3').fetchone()[0])['state'], 'NORMAL')
++            circuit.block(OSError('secondary error'))
++            self.assertTrue(circuit.persisted)
++            value = json.loads(db.execute('SELECT value FROM meta WHERE id=3').fetchone()[0])
++            self.assertEqual(value['state'], 'BLOCKED')
++            self.assertEqual(value['last_error']['error_type'], 'RuntimeError')
++            self.assertNotIn('DO_NOT_PRINT', json.dumps(value))
++            db.close()
++
+     def test_symlink_and_traversal_paths_reject(self):
+         with tempfile.TemporaryDirectory() as d:
+             root = Path(d)

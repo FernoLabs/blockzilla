@@ -1,0 +1,74 @@
+{
+  "schema": "blockzilla-live-cold-transfer-followup-v1",
+  "scope": "read_only_process_counters_after_automatic_resumption",
+  "pid": 1966513,
+  "observed_pause": {
+    "source": "parent_observations",
+    "archived_banks": 44103,
+    "last_archive_progress_unix_ms": 1792318465635,
+    "first_resumed_archive_progress_unix_ms": 1792318686192,
+    "approximate_pause_ms": 220557,
+    "first_resumed_archived_banks": 44231,
+    "failed_report_observed": false
+  },
+  "samples": [
+    {
+      "sampled_unix_ms": 1792318775716,
+      "status_state": "RUNNING",
+      "archived_banks": 45127,
+      "retired_banks": 45127,
+      "pending_bundles": 2,
+      "status_updated_unix_ms": 1792318775405,
+      "pending_bundle_bytes": [
+        140902400,
+        144506880
+      ],
+      "sockets_established": 2
+    },
+    {
+      "sampled_unix_ms": 1792318784552,
+      "status_state": "RUNNING",
+      "archived_banks": 45255,
+      "retired_banks": 45255,
+      "pending_bundles": 2,
+      "status_updated_unix_ms": 1792318784372,
+      "pending_bundle_bytes": [
+        156405760,
+        169697280
+      ],
+      "sockets_established": 2
+    }
+  ],
+  "sample_elapsed_ms": 8836,
+  "status_archived_delta": 128,
+  "process_io_delta": {
+    "rchar": 2131442649,
+    "wchar": 566406079,
+    "read_bytes": 269975552,
+    "write_bytes": 332816384
+  },
+  "socket_deltas": {
+    "bytes_sent": 252538644,
+    "bytes_received": 188717694,
+    "bytes_acked": 252245036
+  },
+  "sdk_config": {
+    "connect_timeout_seconds": 10,
+    "read_timeout_seconds": 60,
+    "sdk_max_retries": 3,
+    "sdk_initial_plus_retries_max": 4,
+    "whole_get_readback_attempts": 3,
+    "whole_get_backoff_seconds": [
+      1,
+      2
+    ],
+    "managed_upload_used": false,
+    "total_transfer_deadline": null,
+    "storage_stall_alert_seconds": 900
+  },
+  "conclusion": "Active network and archive progress resumed without a process restart. No evidence establishes the earlier request cause; the sample began after resumption. The read timeout is an inactivity limit, so an active slow transfer can exceed 60 seconds.",
+  "service_actions": [],
+  "retirement_or_proof_checks_changed": false,
+  "credentials_read": false,
+  "secret_output": false
+}

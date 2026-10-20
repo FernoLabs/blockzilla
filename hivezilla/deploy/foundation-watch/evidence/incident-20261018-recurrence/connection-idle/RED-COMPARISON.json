@@ -1,0 +1,36 @@
+{
+  "command": {
+    "argv": [
+      "ionice",
+      "-c3",
+      "nice",
+      "-n",
+      "19",
+      "/home/ubuntu/.rustup/toolchains/1.98.0-x86_64-unknown-linux-gnu/bin/cargo",
+      "test",
+      "--lib",
+      "--locked",
+      "--offline",
+      "-j",
+      "4",
+      "server::tests::active_sse_survives_multiple_connection_idle_intervals",
+      "--",
+      "--exact"
+    ],
+    "completed_unix_ms": 1792317991420,
+    "cwd": "/home/ubuntu/benchmarks/bank-connection-idle-20261018-2f3cbe5e/red-fixture/provider/hivezilla/stream-relay",
+    "log": "/home/ubuntu/live/hivezilla-validator-20260930/reports/native-recovery-20261018/recurrence/connection-idle/red-comparison.log",
+    "log_sha256": "a411aa8ef9171045f7a0426c412539006fd4f9d38e2cc2ae6cba4e6cffb0edbe",
+    "phase": "RED_COMPARISON",
+    "returncode": 101,
+    "started_unix_ms": 1792317981395
+  },
+  "fixture": "/home/ubuntu/benchmarks/bank-connection-idle-20261018-2f3cbe5e/red-fixture/provider",
+  "fixture_server_sha256": "ef5d62153e0c53d932443b3e11d2a272cf892934dc5f7795dbe0064d0148a7cb",
+  "full_idle_only_tests_passed": 36,
+  "log_sha256": "a411aa8ef9171045f7a0426c412539006fd4f9d38e2cc2ae6cba4e6cffb0edbe",
+  "production_server_sha256": "ce54960f27b284e001d4fe744f4e876fb2ea0756baaf88c5594dbfa424d818ee",
+  "scope": "Separate fixture only. Reintroduces a total connection lifetime equal to the injected idle interval. The frozen production source is unchanged.",
+  "state": "EXPECTED_FAILURE_CONFIRMED",
+  "test": "server::tests::active_sse_survives_multiple_connection_idle_intervals"
+}

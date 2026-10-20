@@ -1,0 +1,81 @@
+{
+  "cloud_proof_sha256": "3568ffe1ae71ea9228f82e80d5c6b66c5c74616c9a5f23698a33e948c7aaf8e5",
+  "final_status_sha256": "0b6ce276039c9b7c623c07f0e6c8b56ef3a472560f27aa125ad5366ed2536ba9",
+  "live_before": {
+    "archived_banks": 60649,
+    "last_archive_progress_unix_ms": 1792321411244,
+    "max_archive_rowid": 60649,
+    "metadata": {
+      "namespace": "1a93d01e2c293e1f61c246747319a92fea69ab27060f050b986304c4c4715bcf",
+      "source": {
+        "agave_revision": "87167f3906bdf5111e99ead64d8f4098b7874e33",
+        "genesis_hash": "5eykt4UsFv8P8NJdTREpY1vzqKqZKvdpKuc147dw2N9d",
+        "node_identity": "J7qpvCEWhdBgPdYRV3s3btWPrRVXa2qnAzgvxWTvtbrQ",
+        "session_id": "000000000000000018df884b2474cf8e-20b258"
+      }
+    },
+    "retired_banks": 60649
+  },
+  "old_live_invocation": "d4d14be1cb074724b841bb428ec41b01",
+  "old_live_row": {
+    "allow_restart": true,
+    "expected_command": [
+      "/usr/bin/python3",
+      "/home/ubuntu/live/hivezilla-validator-20260930/releases/protocol-retry-20261018-ccc4e4475ec568d1/cold_storage.py",
+      "archive",
+      "--output",
+      "/home/ubuntu/live/hivezilla-validator-20260930/compact/direct-agave-processed-live/000000000000000018df884b2474cf8e-20b258",
+      "--bank-output",
+      "/home/ubuntu/live/hivezilla-validator-20260930/compact/bank-v2-live/000000000000000018df884b2474cf8e-20b258",
+      "--capture",
+      "/home/ubuntu/live/hivezilla-validator-20260930/captures/direct-agave-live/000000000000000018df884b2474cf8e-20b258",
+      "--publisher-state",
+      "/home/ubuntu/live/hivezilla-validator-20260930/reports/native-processed-r2-bank-v2/000000000000000018df884b2474cf8e-20b258",
+      "--credentials-file",
+      "/home/ubuntu/live/hivezilla-validator-20260930/config/native-cold-storage.env",
+      "--v1-spool",
+      "/home/ubuntu/live/hivezilla-validator-20260930/stream-relay-spool-bank-v2/000000000000000018df884b2474cf8e-20b258",
+      "--bank-origin-spool",
+      "/home/ubuntu/live/hivezilla-validator-20260930/bank-v2-origin-spool/000000000000000018df884b2474cf8e-20b258",
+      "--keep-seconds",
+      "7200",
+      "--retire",
+      "--follow"
+    ],
+    "expected_command_sha256": "c2a85e6d5be9c9f0d6494413a6686bdc156c2f1a05f5ba335959b603fe5ae7b9",
+    "helper": "/home/ubuntu/live/hivezilla-validator-20260930/releases/protocol-retry-20261018-ccc4e4475ec568d1/cold_storage.py",
+    "helper_sha256": "837b89f1c2dcfac6fb34415f783d88274ae0fd8d9200c53d5a70333cfbc57b63",
+    "max_archived_banks": null,
+    "max_retries": 3,
+    "namespace": "1a93d01e2c293e1f61c246747319a92fea69ab27060f050b986304c4c4715bcf",
+    "output": "/home/ubuntu/live/hivezilla-validator-20260930/compact/direct-agave-processed-live/000000000000000018df884b2474cf8e-20b258",
+    "retry_delay_seconds": 60,
+    "source": {
+      "agave_revision": "87167f3906bdf5111e99ead64d8f4098b7874e33",
+      "genesis_hash": "5eykt4UsFv8P8NJdTREpY1vzqKqZKvdpKuc147dw2N9d",
+      "node_identity": "J7qpvCEWhdBgPdYRV3s3btWPrRVXa2qnAzgvxWTvtbrQ",
+      "session_id": "000000000000000018df884b2474cf8e-20b258"
+    },
+    "unit": "hivezilla-native-cold-storage-20261012-live.service"
+  },
+  "protected_pids": {
+    "hivezilla-bank-v2-origin": 2134416,
+    "hivezilla-bank-v2-producer": 917148,
+    "hivezilla-bank-v2-r2-publisher": 917318,
+    "hivezilla-direct-worker": 916425,
+    "hivezilla-shred-hook-recorder": 2142799,
+    "hivezilla-stream-origin": 2135639,
+    "hivezilla-stream-relay": 2136117,
+    "hivezilla-validator": 2142808
+  },
+  "registry_before_sha256": "c813c9e2accfb857eba1bf331f60af616ddfc8084b7aa2bce276ebf1fdb0c4c3",
+  "sampled_unix_ms": 1792321413314,
+  "schema": "blockzilla-transfer-deadline-before-v1",
+  "source": {
+    "agave_revision": "87167f3906bdf5111e99ead64d8f4098b7874e33",
+    "genesis_hash": "5eykt4UsFv8P8NJdTREpY1vzqKqZKvdpKuc147dw2N9d",
+    "node_identity": "J7qpvCEWhdBgPdYRV3s3btWPrRVXa2qnAzgvxWTvtbrQ",
+    "session_id": "000000000000000018df884b2474cf8e-20b258"
+  },
+  "source_pin_sha256": "ddfe097a2915a946c0917adcc135a2c7d997b1517d578044bfea80aadd7ea315"
+}

@@ -1,0 +1,18 @@
+{
+  "schema": "blockzilla-monitor-deployment-after-v1",
+  "deployment": {
+    "id": "b98b678e-59f2-4c9b-a8dd-cb97f198110b",
+    "created_on": "2026-10-18T18:23:46.680306Z",
+    "source": "wrangler",
+    "strategy": "percentage",
+    "versions": [
+      {
+        "version_id": "c19ed9e6-86df-4c98-a15d-2936e5daf6db",
+        "percentage": 100
+      }
+    ]
+  },
+  "previous_version": "670ba00d-a5c3-4608-a553-c305656f143f",
+  "deployment_count_returned": 9,
+  "authorization": "existing Wrangler OAuth; no credentials or recipient data saved"
+}

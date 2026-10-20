@@ -1,0 +1,38 @@
+{
+  "schema": "blockzilla-bundle-transfer-deadline-patch-v1",
+  "files": {
+    "cold_storage.py": {
+      "before_sha256": "837b89f1c2dcfac6fb34415f783d88274ae0fd8d9200c53d5a70333cfbc57b63",
+      "after_sha256": "8a95785f2df4e2f53b414322f0fc42a8d2edd93a02f04cfca6358bb312c19800",
+      "bytes": 48305
+    },
+    "test_cold_storage.py": {
+      "before_sha256": "f6ca12d56954b7d7dd11233520c554c1c92536fdcc047ac81ff93269e1f5875d",
+      "after_sha256": "2e2d5f16bcb5a67b6e10e28c8d32a3926b294cb3b2fbcca44075422d897934b6",
+      "bytes": 66992
+    },
+    "storage_jobs.py": {
+      "before_sha256": "9c586efd91790488dedaa282e88f16625c3a187791c6316c62e269bf2a12b376",
+      "after_sha256": "567c15e41b3f21665a765fbfaa5b2c70d9a565d1280463da959d946472a3c87c",
+      "bytes": 22150
+    },
+    "test_storage_jobs.py": {
+      "before_sha256": "85fc4351dcb2561fb477a88f02ff99b8061b74e0d50b75f7fc3a7eb8df41092f",
+      "after_sha256": "6eef654a016d1f18be588f28bafd287d69b8aa95d8e9d02695df7cab858d7827",
+      "bytes": 19170
+    }
+  },
+  "patch_sha256": "498831996a2dc34c3eccc73df94b901219d81e3707038790b77c3531ae24731e",
+  "total_child_transfer_deadline_seconds": 300,
+  "stdout_max_bytes": 4096,
+  "stderr_capture_bytes": 0,
+  "tests": {
+    "command": "python3 -m unittest test_cold_storage test_storage_jobs",
+    "count": 51,
+    "passed": 51,
+    "failed": 0,
+    "syntax": "passed",
+    "diff_check": "passed"
+  },
+  "scope": "Only cold_storage.py/test_cold_storage.py/storage_jobs.py/test_storage_jobs.py; no deployment; finite approved cleanup keeps exact7f helper. Tar packing stays outside the transfer deadline."
+}

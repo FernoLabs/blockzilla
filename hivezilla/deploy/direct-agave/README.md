@@ -4,10 +4,770 @@ Host: `ubuntu@213.239.141.61`.
 
 Root: `/home/ubuntu/live/hivezilla-validator-20260930`.
 
-The validator runs Agave 4.3.0 with the native Hivezilla Geyser plugin. It uses
+The validator runs Agave 4.3.2 with the native Hivezilla Geyser plugin. It uses
 the existing identity and `--no-voting`. The compact worker reads the durable
-local journal. It does not use gRPC. The receive hook records raw shreds in a
-separate directory.
+local journal. It does not use gRPC. The raw receive-hook capture is currently
+FAILED while the recorder service remains active. Recovery requires a later
+validator restart.
+
+## Storage transfer recovery, 20 October 2026
+
+At 05:52:24 UTC (07:52:24 Europe/Paris), event
+`bbdb2969-0b9e-4ae6-99a3-cd8d9087a47f` reported
+`cloud_storage_not_running`, `telemetry:cold_storage_failed` and
+`telemetry:storage_jobs_degraded`. At the first read, the latest saved failure was
+`BundleTransferTimeout` at 05:50:44 UTC. The 300-second child deadline worked,
+but the failed transfer ended the live storage process. The supervisor
+restarted it, and verified archive and retirement progress resumed. Its retry
+budget was not exhausted. Earlier process exits were also recorded at 05:31
+and 05:40 UTC; their exact failure types were not independently retained.
+Read [the findings](../foundation-watch/evidence/incident-20261020-storage/FINDINGS.json)
+and [the retained history](../foundation-watch/evidence/incident-20261020-storage/ALERT-HISTORY-SUMMARY.json).
+
+Two more process exits occurred before activation. The 06:00:42 UTC exit
+has no retained exception type. The latest saved timeout was at 06:07:03 UTC;
+the process exited at 06:07:14 and restarted at 06:08:32. These events use the
+old helper. Read [the prepatch recurrence record](../foundation-watch/evidence/incident-20261020-storage/PREPATCH-RECURRENCES.json).
+
+The child did not retain PUT or GET phase timing. These records do not show
+which operation used the deadline or establish the underlying cloud fault.
+The sampled capacity was OK, with positive snapshot and recovery headroom.
+This failure was not a disk-reserve failure.
+
+The active release is
+`ROOT/releases/storage-recovery-20261020-f757f2be29f0-3a5fe9b9`.
+Live storage uses PID 4054548, and
+its supervisor uses PID 4054568. The source and all eight protected process
+IDs stayed unchanged. Read [the installation](../foundation-watch/evidence/incident-20261020-storage/circuit/INSTALLATION.json).
+
+The repair keeps known temporary transfer faults inside the live
+process. One durable recovery circuit covers the source, cloud namespace and
+absolute bank cap across both transfer slots and process restarts. It reserves
+three retries before use, with 30-, 60- and 120-second waits. After these
+retries, the circuit opens and permits at most one recovery probe per 900
+seconds. Fresh submissions pause during each wait. Pending banks keep their
+cap reservation. An existing successful transfer can still commit after full
+proof. A successful retry permits normal work, but the burst budget resets
+only after 60 observed fault-free seconds and new durable progress after the
+healthy baseline.
+
+Permanent authentication, source, local-file, size, hash and proof faults
+persist `BLOCKED` and stop the job. Restart does not clear this state. The
+SQLite state and initialization marker reject missing, corrupt or foreign
+state. The original outage time survives a restart, so waiting cannot reset
+the existing 900-second progress-stall check. Status updates do not count as
+durable progress. The guardian and monitor thresholds remain unchanged.
+
+Each child retains the existing 300-second total deadline for the digest,
+conditional PUT, SDK retries, complete GET verification and child exit. Tar
+packing remains outside this deadline. Index commit and local retirement
+still require exact full readback proof. No source, namespace, finite helper
+or deletion allowance changes are part of this repair. The completed finite
+jobs remain capped at 785546 and 308768 banks.
+
+All 64 storage and supervisor tests passed on Foundation. They cover outage
+and restart limits, reservation before launch, probe timing, permanent fault
+retention, parallel cap reservations, lost PUT replies, full readback and
+partial retirement recovery. The real SDK smoke check also passed without
+network access. Read [the build](../foundation-watch/evidence/incident-20261020-storage/circuit/BUILD.json)
+and [the SDK check](../foundation-watch/evidence/incident-20261020-storage/circuit/SDK-SMOKE.json).
+
+The [independent cloud proof](../foundation-watch/evidence/incident-20261020-storage/circuit/POSTVERIFY.json)
+passed for a complete new bundle: 140861440 bytes, 64 banks, 1024 files and
+128 custody notes. Both finite jobs stayed COMPLETE at their exact caps.
+All [nine live check groups](../foundation-watch/evidence/incident-20261020-storage/circuit/VERIFY-LIVE.json)
+passed. The repair made no validator or stream service restart.
+
+The [121-second observation](../foundation-watch/evidence/incident-20261020-storage/circuit/FLOW-120S.json)
+passed with 13 samples and zero faults. Archived and retired counts advanced
+from 772134 to 773094. RPC stayed healthy, and source lag stayed at or below
+1748 ms. The recovery state stayed NORMAL. The
+[final monitor](../foundation-watch/evidence/incident-20261020-storage/MONITOR-END.json)
+had no current issues, active incidents, sample errors or pending alerts.
+The [retained history](../foundation-watch/evidence/incident-20261020-storage/ALERT-HISTORY-END.json)
+contained no event after activation. These short checks do not prove capacity
+through a complete snapshot cycle or recovery from a future cloud outage.
+
+Disk capacity remains a separate limit. The conservative capacity checks
+keep the 400 GiB capture reserve and 500 GiB recovery minimum, plus the full
+next-archive budget. Expected snapshot purge space is not current free space.
+A durable byte bound for retained native metadata remains designed and
+unimplemented. This repair adds no metadata deletion authority and does not
+establish sustained capacity. Read [the capacity review](../foundation-watch/evidence/incident-20261020-storage/CAPACITY-REVIEW.json)
+and [its addendum](../foundation-watch/evidence/incident-20261020-storage/CAPACITY-REVIEW-ADDENDUM.json).
+The raw capture remains FAILED while its recorder service is active; its
+recovery still requires a later validator restart.
+
+## Evening publisher alerts, 18 October 2026
+
+The retained alert history shows two later incidents, in Europe/Paris time.
+At 18:30:08, the storage supervisor reported a degraded job after a transfer
+deadline. Its bounded automatic retry recovered; the recovery alert was at
+18:31:56. At 20:06:58, the only issue was `publisher_status_stale`; recovery
+was at 20:08:28. The publisher logged an HTTP 500 commit GET retry at 20:06:36.
+It kept the same process. The exact old batch timing was not retained.
+Read [the diagnosis](../foundation-watch/evidence/incident-20261018-recurrence/evening-20261018/DIAGNOSIS-BEFORE.json).
+
+The active publisher now uses
+`ROOT/releases/publisher-status-20261018-92f2376d-7fb9e39d7506`, binary SHA-256
+`7fb9e39d75062546cb407586596ca2f5303caaf8dd25725e768025f8266b816a`.
+Its status updates every five seconds during remote work, including catalog
+HEAD readback. It reports `phase=upload_commit` and `in_flight=true` with the
+last durable checkpoint. Status updates do not advance that checkpoint.
+The existing 300-second cloud progress and 8192-event backlog checks remain.
+This repair adds no total batch deadline. Slow completed batches now have a
+small numeric journal record.
+
+All 44 Rust tests and 11 Linux install fixtures passed. Only the v2 cloud
+publisher restarted, from PID 917318 to 4167494. Validator PID 2142808, the
+other six protected processes, source, registry and finite cleanup caps stayed
+unchanged. The new process advanced from its own checkpoint baseline, and
+separate full GETs checked the remote HEAD and last commit. Read
+[the installation](../foundation-watch/evidence/incident-20261018-recurrence/evening-20261018/publisher-status/INSTALLATION.json),
+[the build](../foundation-watch/evidence/incident-20261018-recurrence/evening-20261018/publisher-status/BUILD.json)
+and [the final live check](../foundation-watch/evidence/incident-20261018-recurrence/evening-20261018/LIVE-FINAL.json).
+All nine live check groups passed, with 873 ms confirmed source lag. These
+checks do not establish recovery of the failed raw capture.
+
+The [120-second publisher observation](../foundation-watch/evidence/incident-20261018-recurrence/evening-20261018/publisher-status/FLOW-120S.json)
+passed with 121 samples, 1106 new durable events and at most 4995 ms status age.
+It included 120 samples during an active upload. The
+[final monitor](../foundation-watch/evidence/incident-20261018-recurrence/evening-20261018/MONITOR-FINAL.json)
+had no current issues, active incidents, sample errors or pending alerts.
+No new alert record appeared during this repair.
+
+## Later capacity alerts, 18 October 2026
+
+The 18 October installation used
+`ROOT/releases/transfer-deadline-20261018-498831996a2dc34c`. Each transfer child
+has a 300-second total deadline for the local digest, conditional PUT, SDK
+retries and full GET verification. Tar packing stays outside this deadline.
+On timeout, the parent kills the child and waits for it to exit. Archive commit
+and local retirement still require exact full readback proof. All 51 storage and
+supervisor tests passed on Foundation. Existing local and supervisor retry
+limits and backoff remain unchanged.
+
+Only live storage and its supervisor restarted, to PIDs 2353823 and 2353836.
+The source, all eight protected process IDs and the finite bank caps stayed
+unchanged. Read [the 18 October deadline installation](../foundation-watch/evidence/incident-20261018-recurrence/transfer-deadline/INSTALLATION.json).
+
+The [cloud proof after installation](../foundation-watch/evidence/incident-20261018-recurrence/transfer-deadline/POSTVERIFY.json)
+and [final live check](../foundation-watch/evidence/incident-20261018-recurrence/transfer-deadline/LIVE-FINAL.json)
+**PASSED**. Independent full GET checked a new 64-bank bundle: 145121280 bytes,
+1024 files and 128 custody notes. Live storage advanced from 60649 to 60969
+archived and retired banks. All nine live check groups passed, with 743 ms
+source lag.
+
+The [final flow check](../foundation-watch/evidence/incident-20261018-recurrence/transfer-deadline/FLOW-120S.json)
+**PASSED** over 121.211 seconds with 13 samples and zero faults. Its live count
+advanced from 60777 to 60969 archived and retired banks. Final free space was
+789595852800 bytes. The source, registry, eight protected process IDs and two
+new storage process IDs stayed unchanged during these checks.
+
+The [final external monitor](../foundation-watch/evidence/incident-20261018-recurrence/transfer-deadline/MONITOR-FINAL.json)
+was armed and had no current issues, incidents, errors or pending alerts. Read
+[the final consolidated receipt](../foundation-watch/evidence/incident-20261018-recurrence/RECEIPT-FINAL.json).
+
+The active transport release is now
+`ROOT/releases/bank-connection-idle-20261018-2f3cbe5e-73506f06cdc6`; its binary
+SHA-256 is `73506f06cdc646437a1a635ec9186ce6b3dd01146ae5474d8828a1f9f66c1d7d`.
+The v2 origin is PID 2134416, the v1 origin is PID 2135639, and the relay is
+PID 2136117. The five protected native process IDs stayed unchanged, including
+validator PID 2142808. That transport activation kept the source, storage
+helpers and bank limits unchanged.
+Read [the active installation](../foundation-watch/evidence/incident-20261018-recurrence/connection-idle/INSTALLATION.json),
+[the build receipt](../foundation-watch/evidence/incident-20261018-recurrence/connection-idle/BUILD.json)
+and [the release manifest](../foundation-watch/evidence/incident-20261018-recurrence/connection-idle/MANIFEST.json).
+
+A later 600.024-second check found two isolated stale heads in 601 samples,
+302 seconds apart. The common HTTP server closed active TLS and plain SSE
+connections at a total age of 300 seconds. A direct origin status was live
+184 ms before a relay fault. Worker and producer status ages stayed below
+813 ms and 471 ms; the samples around that fault stayed below 256 ms and 75 ms.
+Read [the diagnosis](../foundation-watch/evidence/incident-20261018-recurrence/DIAGNOSIS.json),
+[the stress check](../foundation-watch/evidence/incident-20261018-recurrence/HEAD-STRESS-FLOW.json)
+and [the direct-origin check](../foundation-watch/evidence/incident-20261018-recurrence/HEAD-STRESS-ORIGIN-STATUS.json).
+
+The server now has a 300-second I/O idle limit. Only a positive byte read or
+write extends the deadline. The five-second TLS and header limits, connection
+and request caps, authentication and five-second head health lifetime remain.
+All 36 transport library tests passed on Foundation. The active SSE regression
+failed with the old total timer in a separate source copy and passed with the
+new idle timer. The prior one-second status interval remains. Read
+[the timer comparison](../foundation-watch/evidence/incident-20261018-recurrence/connection-idle/RED-COMPARISON.json).
+The [630-second same-connection check](../foundation-watch/evidence/incident-20261018-recurrence/connection-idle/SAME-CONNECTION-630S.json)
+**PASSED** over 630.508 seconds: 613 private head samples, zero faults and at
+most 2084 ms source lag. Each of the three SSE connections stayed open for more
+than 630 seconds, with one open call, no reconnect, and events after the 300-
+and 600-second boundaries. The external monitor had cleared before the transport
+restarts.
+
+The first private v2 head repair addressed a separate timing defect. Its health
+lifetime was five seconds, and the origin sent status every five seconds. Delivery delay could
+expire health while confirmed blocks remained fresh. A 60-second observation
+found four stale heads in 57 samples; confirmed source lag stayed below 2106 ms.
+The regression failed with the old interval and passed with the new interval.
+
+That repair changed the v2 origin to send status every second. Its five-second
+health lifetime, confirmed observation age, source checks and all head checks remain unchanged.
+Repeated health alone still cannot make old confirmed data live. All 33
+transport library tests passed locally and on Foundation. The isolated host
+build used a source graph equivalent to the deployed production code, with the
+same dependency lock and no unrelated working changes.
+
+At that first repair, only `hivezilla-bank-v2-origin.service` restarted, from
+PID 917181 to 1834760.
+Its release at that check was
+`ROOT/releases/bank-head-health-20261018-c319ba5d-e769871d5197`; the binary SHA-256
+is `e769871d519750a187814a82e1a1f3e48cfc9bde0948410674a70dca7c97d1b7`.
+The existing spool and source remain. After the old health lifetime expired,
+the confirmed sequence advanced and the private frame hash and RPC bank matched.
+Validator PID 2142808, relay PID 917317 and the other protected capture/feed
+process IDs stayed unchanged. No bank limit changed. Read
+[the timing diagnosis](../foundation-watch/evidence/incident-20261018-recurrence/head-health/TIMING-DIAGNOSIS.json)
+and [the build receipt](../foundation-watch/evidence/incident-20261018-recurrence/SSE-BUILD-READY.json).
+
+The post-change observation passed: 112 private-head samples over 120.043
+seconds, no freshness faults, confirmed slot advancement and at most 1891 ms
+source lag. The final full live check passed for RPC, capture, compaction,
+private payload hash and RPC bank, public SSE and cloud publication. Live
+storage reached 25159 archived/retired banks. Free space was 640141398016 bytes.
+The external monitor retained only the valid early capacity warning. Read
+[the recurrence receipt](../foundation-watch/evidence/incident-20261018-recurrence/RECEIPT.json).
+
+The next full snapshot started at 08:15:34 UTC and completed at 08:25:11 UTC.
+Its archive used about 124.19 GB. Agave removed the previous full and incremental
+archives after the new archive succeeded. Native capture and both feeds stayed
+healthy. Free space recovered from about 525 GB during overlap to about 644 GB.
+The early warning remains valid below the 674309865472-byte recovery threshold.
+Do not lower the reserve or describe this warning as a feed outage.
+
+Live cloud storage then failed with a streamed `ReadTimeoutError` at 08:27:38
+UTC. It had archived and retired 15815 banks. The supervisor made its first
+bounded retry at 08:29:45 UTC; verified storage progress resumed without a
+validator or feed restart.
+
+The first readback retry repair used
+`ROOT/releases/readback-retry-20261018-e5db5eeaf39a4f88/cold_storage.py`, SHA-256
+`5a320696a79da06a8f8e5ddd550e9d53da808b37119407c8708a44bd4c64c923`.
+It allows three complete GET attempts only for selected typed network faults.
+Each attempt starts at byte zero with a new counter and hash, and closes its
+stream before retry. It reads through the wrapped body so content-length
+validation remains active. Size, hash, credential and other permanent failures
+do not receive these local retries. Full verified readback still precedes index
+commit and local retirement. All 29 storage tests passed on Foundation; all 38
+focused storage/supervisor tests passed locally. The live source, all eight
+protected process IDs and existing bank limits stayed unchanged.
+
+At 09:17 UTC, live storage failed with `ResponseStreamingError` after 28871
+archived/retired banks. The previous strict supervisor blocked this unknown
+wrapper. The 09:33 UTC installation used live-storage and supervisor release
+`ROOT/releases/protocol-retry-20261018-ccc4e4475ec568d1`. Its `cold_storage.py`
+SHA-256 is `837b89f1c2dcfac6fb34415f783d88274ae0fd8d9200c53d5a70333cfbc57b63`;
+its `storage_jobs.py` SHA-256 is
+`9c586efd91790488dedaa282e88f16625c3a187791c6316c62e269bf2a12b376`.
+
+The helper recognises the typed protocol-error wrapper and permits up to three
+complete GET attempts, each with a new counter and hash. Generic wrappers,
+content-length faults and permanent size/hash failures remain blocked. A fixed
+`ProtocolError` classification lets the supervisor apply its separate limit
+of three retries. All 40 storage/supervisor tests passed locally and on
+Foundation. A smoke check used the real SDK wrapper and confirmed that generic
+and length faults stay blocked. Read
+[the protocol installation receipt](../foundation-watch/evidence/incident-20261018-recurrence/approved-extra/PROTOCOL-INSTALLATION.json)
+and [the SDK check](../foundation-watch/evidence/incident-20261018-recurrence/approved-extra/SDK-SMOKE.json).
+Live storage PID was 1966513 at that installation. Validator PID 2142808
+and the protected capture/feed process IDs stayed unchanged.
+
+The owner [approved 51606 additional banks](../foundation-watch/evidence/incident-20261018-recurrence/approved-extra/APPROVAL.json)
+from source `000000000000000018ddd9a6bb6fc50e-282459`. This finite job is now
+**COMPLETE** at exactly 308768 archived and retired banks. The separate old job
+is complete at 785546. Both units are inactive. Each returned success and has
+zero pending bundles; both absolute caps remain unchanged. The extra job used its exact
+approved `7f0d6719` helper, source and command throughout.
+
+The [independent cloud proof of the final bundle](../foundation-watch/evidence/incident-20261018-recurrence/approved-extra/CLOUD-PROOF-FINAL.json)
+reopened the durable index read-only and checked all 200171520 bytes of the last
+64-bank bundle, including 1024 member files and 128 custody notes. The
+[cleanup flow observation](../foundation-watch/evidence/incident-20261018-recurrence/approved-extra/FLOW-POST-TRANSPORT.json)
+completed after 3018.909 seconds with 301 samples, zero faults and at most
+2530 ms source lag. The [cleanup final live check](../foundation-watch/evidence/incident-20261018-recurrence/approved-extra/LIVE-FINAL.json)
+also passed.
+
+The [completed status](../foundation-watch/evidence/incident-20261018-recurrence/approved-extra/FINAL-STATUS.json)
+measured 788295614464 free bytes and a net increase of 151371489280 bytes from
+its baseline. This net change is not attributable only to the cleanup; other
+disk activity continued. Preflight free space was 635038658560 bytes. At that
+preflight, the early warning was valid below the 674309865472-byte recovery
+threshold.
+
+Snapshot and ledger cleanup both work. The sampled RPC transaction/address
+metadata use about 330.78 GB, but their measured size fell during the longer
+comparison. The short allocation samples do not prove a sustained ledger leak
+or explain all of the baseline space change. Read
+[the snapshot and ledger findings](../foundation-watch/evidence/incident-20261018-recurrence/LEDGER-SNAPSHOT-FINDINGS.json).
+The fixed local storage design below is still not deployed. The separate
+[implementation checklist](../foundation-watch/evidence/incident-20261018-recurrence/approved-extra/METADATA-NEXT-STEPS.json)
+covers the missing retirement-proof reader, catalog verification, SQL expiry,
+reader leases and the full disk budget. No metadata migration has started.
+
+## Continuous disk protection, 18 October 2026
+
+The owner approved the prepared storage release and requested a long-term
+solution. The approved old-source job started at 05:37 UTC. Its absolute total
+limit remains 785546 banks, including all earlier runs and pending transfers.
+The 29440-bank remaining allowance was not increased. Unused upgrade compiler
+targets released 22186106880 allocated file bytes. Installed binaries, source,
+build reports, shared Cargo caches and captured data remain.
+
+The approved job completed at 785546 archived and locally retired banks. All
+29440 additional banks stayed within the approved limit. The database count and
+source/namespace matched, and the completed unit was inactive. The 702.522-second
+flow observation passed with 71 samples and no faults. The final private frame
+hash and RPC bank check passed; public SSE and cloud publication advanced.
+Free space was 679283412992 bytes at the final evidence sample. The external
+monitor had no current faults, active incident faults or pending alerts. These
+are finite checks. Read [the final protection receipt](../foundation-watch/evidence/incident-20261018/PROTECTION-RECEIPT.json).
+
+The active protection release is
+`ROOT/releases/storage-protection-20261018-94c2aaca04758c49`. Its
+`MANIFEST.json` pins all helper and test bytes. All **132 tests passed on
+Foundation** before activation. The validator and seven protected capture/feed
+service PIDs stayed unchanged. A controlled live-storage restart passed; the
+supervisor read the current database and remained healthy. Its writable mounts
+cover the two cold-storage directories, so SQLite sidecar replacement does not
+leave a mount bound to an old sidecar. Database connections remain read-only
+with `query_only` enabled.
+
+`hivezilla-native-capacity.service` samples disk and immediate snapshot archive
+allocation every 30 seconds. It calculates headroom above the 400 GiB native
+capture reserve, with at least 128 GiB for the next archive. It warns below
+500 GiB plus that archive budget, currently **628 GiB**, before the 400 GiB
+reserve is at risk. Recent
+growth estimates require at least three samples over 60 seconds. They are
+estimates, not future capacity guarantees. The collector reports under
+`ROOT/reports/native-capacity`.
+
+The priority guard pauses only CAR disk-consuming work when the installed
+capacity report is stale, invalid or below that early limit. Resumption needs
+32 GiB of extra margin. Native storage jobs can keep releasing verified copies
+when live capture, conversion and publication are healthy. Existing live lag
+and capture-progress rules still pause background work when necessary.
+The validator, capture worker, producer, publishers and current live storage
+job are outside the disk-consumer control list.
+
+`hivezilla-native-storage-jobs.service` checks only the two jobs registered in
+`ROOT/config/storage-jobs.json`: the current live storage job and the approved
+old-source job. It binds each job to its exact source, command, helper hash,
+cloud namespace and archive limit. It retries only known network faults and
+selected retryable HTTP errors. A matching current systemd invocation and
+failure record are required. Three consecutive retry attempts are allowed,
+with durable backoff state. Reset requires 60 healthy seconds and a durable
+archive-count increase. Hash, source, readback, permission and unknown failures
+remain blocked. The old job resumes at boot with the same cap. Registry edits
+and source handoff remain explicit.
+
+The sender now checks both new reports. A fresh RUNNING timestamp cannot hide
+a failed registered job. Raw capture has separate diagnostics and an explicit
+optional policy in `ROOT/config/raw-capture-monitor.json`; it remains failed
+and requires a validator restart to resume. Its optional status does not claim
+that packets are recorded. The external watcher code did not change.
+The final sender-only release is
+`ROOT/releases/storage-watch-20261018-beafd5034d4b6346`. Its local sender report
+retains the sanitized diagnostic details that the external watcher does not
+store. All 53 sender/archive tests passed on Foundation.
+
+Use `ROOT/config/native-recovery-helper.json` to select the current recovery
+helper. Its path is
+`ROOT/releases/capacity-recovery-20261018-94d35122f4f4af22/recover_session.py`.
+With the collector installed, both new recovery and saved resume require a
+fresh exact-source capacity report and current free space for the recovery
+minimum plus the next snapshot. Stale or invalid capacity data blocks before
+service actions. All 40 focused recovery tests passed on Foundation. The old
+500 GiB-only recovery releases below are historical.
+
+These controls do **not** give total local disk use a fixed bound. Retired banks
+still keep about 36 KiB of marker files and directories per bank in the sample.
+The measured catalogs add about 14.6 KB per rooted bank. At the sampled daily
+bank range, metadata alone can grow by about **10–21 GB per day**. Closed-source
+replay tails, unresolved forks, incomplete capture evidence and raw shreds also
+need separate retention contracts. None received new deletion authority.
+
+The lasting storage design is a bounded local hot window backed by verified
+cloud catalogs. A 64-bank, in-memory lossless packing trial reduced exact marker
+and archive-row data to about 2637 bytes per bank, before indexes and manifests.
+It did not move or delete server metadata. The next migration must first add a
+shared exact-byte metadata resolver to all Rust and Python readers, then seal
+source-bound cloud shards and bound processed/v2 SQLite history separately.
+Keep local metadata until cloud readback, a durable catalog commit and reader
+compatibility tests pass. The proposed shard/cache limits and acceptance tests
+are in [the metadata plan](../foundation-watch/evidence/incident-20261018/METADATA-PLAN.json).
+That migration is designed; it is not deployed or proved to give a stable disk
+footprint. Do not describe the current payload cleanup as a complete disk bound.
+The complete host budget must also cover validator accounts, ledger, snapshot
+overlap, packing space and a measured cloud-outage buffer. Check both two hot
+windows and a full snapshot write/purge cycle before accepting a fixed bound.
+More disk space supplies time; it does not stop continued growth.
+
+## Disk reserve recovery, 18 October 2026
+
+The validator stayed healthy on Agave 4.3.2 with PID **2142808**. Raw shred
+capture stopped at its 500 GiB reserve at 01:15:56 UTC. Native capture stopped
+at its separate 400 GiB reserve at 02:29:30 UTC. The failed native source is
+`000000000000000018df1be3bad56d9c-20b258`. Its failure record, durable journal,
+compact files and cloud checkpoint remain. A full snapshot completed at
+02:32:48 UTC. Temporary snapshot overlap is consistent with the time of the
+space loss; the retained records do not prove all disk use at failure time.
+
+After free space exceeded the 500 GiB capture recovery gate, the recovery
+helper reloaded the plugin and selected source
+`000000000000000018df884b2474cf8e-20b258`. It did not restart the validator.
+The old cloud publisher completed its remaining 14 events through checkpoint
+1000493. Reports are under `ROOT/reports/native-recovery-20261018`.
+
+Three live checks passed. Capture, compact output and cloud publication advanced.
+Rooted compact lag was zero. Each private frame passed its hash check and its
+bank matched local confirmed RPC. Public SSE slots advanced. At 05:26:15 UTC,
+the external monitor had no current faults or active incident faults. The
+native capture gap remains; it has not been rebuilt.
+
+Raw capture `d90d7aea9cda2212fc9d0a1c275fff88` remains **FAILED**. Its recorder
+service is active, but the validator's raw hook stops permanently after a
+transport failure. Plugin reload cannot reset that hook. Raw recording needs
+a later validator restart with sufficient storage. The live native feeds do
+not depend on that recorder. A running recorder service alone does not prove
+that packets are recorded.
+
+The recovery helper now saves the exact source, root, old failure evidence,
+runtime hashes and planned spool paths. An interrupted same-revision switch
+can resume from its saved capture without another plugin reload. Existing
+spool paths require the exact saved plan. Older reports without this evidence
+remain rejected. All 61 bank-stream deployment tests passed.
+The tested helper is installed at
+`ROOT/releases/incident-resume-20261018-d25366e623ecead4/recover_session.py`.
+Its SHA-256 is
+`d25366e623ecead4f7b5e38d64a86e62b0235841f499c89a5ffdce7c15b1c3f7`.
+
+The old source storage job for `000000000000000018de229d3fc8a9d9-275b05`
+stopped on 16 October. Its report still said RUNNING. The exact earlier
+exception is absent from the retained logs. The new helper writes FAILED while
+it holds the archive lock. It saves durable counters and a bounded stack trace
+without exception values. A failed lock contender cannot change the owner's
+status. An absolute `--max-archived-banks` limit includes earlier commits and
+all pending transfers, so retries cannot reset the allowance.
+
+The new helper is installed and tested at
+`ROOT/releases/cold-storage-cap-20261018-2deb8d9ea7f5cd1c/cold_storage.py`.
+Its SHA-256 is
+`2deb8d9ea7f5cd1c52a1b6e4f8e6ed8c988f952b74ca7959570cfc122d19e9f9`.
+All 22 storage tests passed locally and on Foundation. The prepared old-source
+job has an absolute total limit of 785546 banks. With 756106 already stored,
+at most **29440 additional banks** can qualify. The sampled eligible data
+suggests about 96 GB, but this is not a measured release total. All source,
+replay, two-hour retention, native acknowledgement and full cloud readback
+checks remain active.
+
+Automatic approval review first rejected the service change and local file
+retirement because it required direct user approval. The owner then approved
+the plan. The job started with the same limit; see the continuous protection
+record above.
+The [prepared plan](../foundation-watch/evidence/incident-20261018/STORAGE-PLAN.json)
+is saved under `ROOT/reports/native-recovery-20261018/storage-cap-plan`.
+The live and capped old storage services now use the reviewed protection release.
+
+Local [incident evidence](../foundation-watch/evidence/incident-20261018/RECOVERY-EVIDENCE.json)
+and [the second live check](../foundation-watch/evidence/incident-20261018/LIVE-2.json)
+record these finite checks. Sustained storage capacity still needs observation.
+
+## Agave 4.3.2 upgrade, 16 October 2026
+
+The owner requested the upgrade announced by Anza. The official release is
+[Agave v4.3.2](https://github.com/anza-xyz/agave/releases/tag/v4.3.2), at upstream
+revision `a203300045b405f86c9c84308b2eae76af69ac3b`. The installed host keeps the
+native bank and raw shred hooks. Its patched revision is
+`87167f3906bdf5111e99ead64d8f4098b7874e33`. The release directory is
+`ROOT/releases/agave-4.3.2-20261016-87167f3906bdf511`.
+
+The host, plugin and native worker use Rust 1.97.1. The compact builder uses
+Rust 1.98.0. All four artifacts were built and tested on Foundation. The plugin
+uses the exact patched 4.3.2 interface and transaction status crates. The native
+Bank load test, frozen and confirmed tuple checks, real compact writer tests,
+and host build passed. The stored bank patch now includes the RPC notifier trait
+method that the previous patch file omitted. All 57 deployment tests and all
+41 heartbeat and archive tests passed.
+
+The old capture closed cleanly. The worker processed its full durable source
+through sequence 516962261. Its final cloud checkpoint is 462109, with no pending
+upload intent and no remaining events. The old source files, reports and cloud
+checkpoint remain. The new validator PID is **2142808**. The identity and genesis
+hash are the same, and `--no-voting` remains active. The running command now uses
+the one-full and one-incremental snapshot limits. The startup disk check passed
+with 1,443,541,491,712 bytes free against a 674,309,865,472-byte requirement.
+
+The loader checked local health, public finalized progress and the live writer
+before it accepted capture `000000000000000018df1be3bad56d9c-20b258`. The source
+switch changed the worker and compact builder together. It kept the existing
+parent proof repair, transport programs, storage rules and service limits.
+A protected unit backup read stopped the first switch attempt. The fixed helper
+read that file through sudo and resumed the saved switch. It did not reload the
+plugin or reset the new spools.
+
+The old last complete processed slot is 457764446. The new first complete slot
+is 457767450. The interval 457764447–457767449 contains **3,003 slot numbers**.
+This is the native capture gap from the planned restart. It is not a count of
+lost produced or finalized blocks. The gap has not been rebuilt. Clients that
+pin the old source must reconcile before they accept the new source. The new
+source file is saved with the upgrade evidence and under
+`ROOT/reports/agave-upgrade-4.3.2-20261016/handoff/expected-source.json`.
+
+The first complete live check passed at 20:26 UTC. All nine checked services
+were running. RPC reported 4.3.2 and healthy state. Rooted compact lag was zero.
+The private head was live with 445 ms source age. Its 483,380-byte frame matched
+the head's exact frame hash. The head's bank hash, parent and height matched the
+local confirmed RPC block.
+The public SSE slots advanced. The new cloud checkpoint had stored 2,026 blocks
+and 1,097,219,621 bytes. The raw shred recorder also accepted the new executable
+and recorded packets. Packet recording does not prove complete shred coverage.
+
+The sender's release-name check rejected the periods in `4.3.2`. Its separate
+repair permits periods in one flat release directory and keeps the exact
+launcher, roots and binary-name checks. Only the heartbeat sender restarted for
+that repair. Its release is
+`ROOT/releases/agave-upgrade-watch-20261016-0469f7ebd1d62b3b`. A real sample and
+service send had no errors. The planned restart raised Megaloadon event
+`27d95815-b969-4518-9ced-9d23172bde1f`. At 20:30 UTC, the external monitor had
+no current issues, no active incident issues, no host errors and no pending
+alerts. The restart alert had cleared.
+
+The final live check passed 273.7 seconds after the first passed check. All
+nine validator and feed service PIDs stayed the same. Capture, compact output
+and cloud counters advanced. Rooted compact lag was zero, and the private head
+was live with 646 ms source age. Its 619,811-byte frame matched the head's hash;
+the head's bank also matched local confirmed RPC. Cloud publication had stored
+3,627 blocks and 1,956,393,009 bytes. These are finite live checks.
+
+Reports are under `ROOT/reports/agave-upgrade-4.3.2-20261016`. The local
+[final receipt](../agave-upgrade/evidence/20261016/RECEIPT.json) links the source,
+artifacts, live checks and monitor result. The source and build files remain in
+`/home/ubuntu/benchmarks/agave-upgrade-4.3.2-20261016`. The old source's storage
+command is saved in the handoff report for a separate drain. Automatic source
+handoff after a later validator restart remains open.
+
+## Installed continuous storage scan repair, 16 October 2026
+
+The live cold storage scan could pass a bank while its age, replay boundary or
+writer acknowledgement blocked retirement. New banks kept the scan busy, so it
+did not return to the older banks. The repaired scan uses a fixed catalog ceiling
+for each sweep, then starts a new sweep. All retention, publication, replay,
+source hash, acknowledgement and full cloud readback gates remain in force.
+
+The installed helper is
+`ROOT/releases/cold-storage-flow-20261016-6369a7ed78291021/cold_storage.py`, with
+SHA-256 `d25f1c82945ee58c727e8f8d948ff936d0fbd9982573d9bde015c2a9890fa9fd`.
+The source override selects this release for the next service start. Only cold
+storage and the heartbeat sender were restarted. The validator and all eight
+protected live service PIDs stayed unchanged.
+
+The 903.6-second flow check passed with 61 samples and no faults. It archived
+and retired 6,208 banks after full cloud readback and released 14,801,940,480
+bytes. Capture, compact output and cloud publication advanced throughout the
+check. Rooted compact lag stayed within the 32-slot check limit. This proves
+finite progress; sustained capacity and uninterrupted future coverage still
+need observation.
+
+The sender now checks the private v2 head on loopback with the existing on-host
+key. It validates the source, live state and source age. At 11:25:58 UTC, the
+private head was live with 1,656 ms source lag and no sender faults. The key stays
+on Foundation. Eligible transfers with no durable archive commit for 900 seconds
+produce `cold_storage_no_archive_progress`; a fresh process timestamp alone does
+not clear that fault. The sender release is
+`ROOT/releases/bank-v2-health-20261016-0c5a62ac594f8dd8`.
+
+All 56 cold storage, sender and archive status tests passed locally and on
+Foundation. Read [the repair and flow receipt](../foundation-watch/evidence/pipeline-flow-repair-20261016.json).
+The existing native gaps remain. The watcher alerts on faults; it does not
+perform a source handoff after a validator restart. The dated old-source finite
+drain also stopped before its original bank cap and needs a bounded resume.
+
+## Installed native parent proof patch, 16 October 2026
+
+Megaloadon event `a3cdcf23-2192-4f5d-881c-a362b67dfa2e` reported a stopped
+pipeline. The compact worker failed at 02:00:52 UTC with
+`contradictory native bank queue tuple`. Capture then reached its disk reserve
+and stopped at 02:06:24 UTC. The validator and RPC remained healthy.
+
+For bank 958752 at slot 457459658, the native confirmed observation had the
+correct parent blockhash. A later frozen observation had the same bank, blockhash,
+parent slot, height and expiry, but a zero parent blockhash. In the pinned Agave
+hook, `bank.parent()` can be absent after squash detaches the parent. An earlier
+native block footer retained the exact nonzero parent blockhash. The captured
+records and their source digests are saved in
+[the conflict fixture](../foundation-watch/evidence/incident-20261016-a3cdcf23-native-conflict.json).
+
+The worker now resolves only a zero parent blockhash from an exact native
+observation or a bounded, digest-checked native block footer for the same bank.
+It checks both stored observation types. Conflicting nonzero hashes, bank
+identity, parent slot, height or expiry still stop discovery. The original
+source rows remain unchanged. The discovery transaction records the original
+observation and its proof in `bank_parent_resolutions`; it preserves native
+confirmation, timestamps and source positions. This does not infer confirmation
+or expiry from time or processed state.
+
+The installed worker is
+`ROOT/releases/native-parent-proof-20261016-7c6f488fe28b757a/hivezilla-direct-agave`.
+Its SHA-256 is
+`7c6f488fe28b757abfaa57e71b6fa3357ad95f8f6a250e571f4f0d82509b2818`.
+It was built offline on Foundation with Rust 1.98.0 and the pinned native
+revision. All 23 native unit tests and both real-builder tests passed. The build
+used an isolated copy of the installed source; unrelated local chain changes
+were excluded. No validator or plugin binary changed.
+
+The checked source handoff retained validator PID 2579205 and selected capture
+`000000000000000018deede1d641da13-275b05`. The old source's final 24 publisher
+events reached checkpoint 1913216, with no pending intent and a remote head check
+by the publisher. At 06:49:57 UTC, Megaloadon had no current or active incident
+issues, all six required services were active, RPC was healthy, rooted compact
+lag was zero, and public block slots advanced. The cloud queue held 166 events.
+These are finite recovery checks. The private v2 HTTP payload check was not run
+on 16 October; public SSE does not prove that separate contract.
+
+The old last complete processed compact slot is 457459657. The new first slot
+is 457533344. The intervening interval is 457459658–457533343, or 73,686 slot
+numbers. It is not a count of lost produced or finalized blocks. The source
+files remain subject to the existing verified storage policy; the native gap
+has not been rebuilt.
+
+The owner's 12 October approval enabled continuing native cloud storage and
+local retirement after exact cloud byte checks. The two saved old-source jobs
+were resumed with the same two-hour minimum, publication, replay and native
+acknowledgement gates. Both use 64 banks per batch, a two-core quota and a
+4 GiB memory limit. The 13 October source job uses two parallel bundles and has a
+64-batch limit per process run and restarts on failure. The 16 October source
+job started with two bundles and a 1,024-batch limit. The first storage pilot
+released 10.41 MB/s, but filesystem free space fell. It was changed to four
+bundles. At restart, 1,472 new banks were already indexed, so the remaining
+limit was reduced to 1,001 batches to preserve the original 65,536-bank cap.
+It has no automatic restart. `--follow`
+can wait when no bank qualifies; these limits do not promise drain completion.
+No snapshot was removed manually.
+
+Four transfers alone did not supply enough capacity. The old v2 metadata
+database lacked `event_artifact(artifact,sequence)`, which the current
+`confirmed.rs` already defines. The storage gate's exact artifact lookup was
+scanning event history for each bank. The missing index was added to the closed
+source under its exclusive producer `WORKER.lock`. All 2,869,813 event rows,
+their sequence bounds and the sampled event contents were retained. The gate
+query now uses the covering index. The same missing index was added to the
+small active database in a 28 ms SQLite transaction, with producer PID 2995833
+unchanged. No gate query, retention rule or event data changed. See
+[the schema repair receipt](../foundation-watch/evidence/incident-20261016-a3cdcf23-bank-artifact-index.json)
+and [the separate storage pilots](../foundation-watch/evidence/incident-20261016-a3cdcf23-storage-tuning.json).
+The 199-second pilot after the index repair released 7.18 GB at 35.99 MB/s.
+Filesystem free space rose by 3.99 GB to 567.37 GB. Live services remained
+active, with rooted compact lag zero. This is a finite capacity check.
+
+The priority guard in `ROOT/releases/native-priority-20261016-e148f16ca59d95de`
+now includes both dated old-source units. It uses the existing capture health,
+progress and lag rules. The current live storage unit remains outside this
+background freeze list. All 11 priority tests passed. The live source still
+keeps at least two hours locally. The running validator still uses its previous
+snapshot retention limits; the installed one-full/one-incremental policy and
+628 GiB minimum startup gate apply to the next start. Sustained storage capacity
+and restored-file cache retirement remain open. The finite snapshot budget
+estimated the next full trigger near 08:05 UTC at native block height 435600000.
+The prior full write took 28 minutes 40 seconds before archive cleanup. Its
+space must be available before cleanup. Read
+[the dated budget](../foundation-watch/evidence/incident-20261016-a3cdcf23-snapshot-budget.json)
+for the measured inputs and limits; it is not a guaranteed snapshot time.
+
+Read [the repair receipt](../foundation-watch/evidence/incident-20261016-a3cdcf23.json),
+[flow checks](../foundation-watch/evidence/incident-20261016-a3cdcf23-flow.json),
+[storage checks](../foundation-watch/evidence/incident-20261016-a3cdcf23-storage.json)
+and `ROOT/reports/native-parent-proof-20261016` for the measured result.
+
+## Installed storage and recovery patch, 13 October 2026
+
+The 15:18 UTC incident stopped native capture at the 400 GiB reserve. The
+validator later failed at 15:52:48 UTC with `No space left on device` in account,
+ledger and snapshot writes. Systemd restarted it before this patch was installed.
+Agave's startup cleanup supplied free space. No snapshot was removed manually.
+A 260-bank sample found no restored non-marker files in already retired banks;
+restored-file growth was not proved to be the incident cause. See the
+[first incident](../foundation-watch/evidence/incident-20261013-839ef9ea.json) and
+[patch and recovery receipt](../foundation-watch/evidence/incident-20261013-4cddb9a9.json).
+
+The operating scripts are installed in
+`ROOT/releases/storage-recovery-20261013-742b6735b4bbb606`. The final source
+handoff helper is in `ROOT/releases/source-handoff-20261013-679547f433f4`.
+The handoff retained the restarted validator PID 2579205 and adopted its healthy
+capture, `000000000000000018de229d3fc8a9d9-275b05`. The old failed source and its
+files remain. Reports are in `ROOT/reports/bank-v2-recovery-20261013-4cddb9a9-r2`.
+
+At the 16:42:43 UTC heartbeat, all six required services were active and RPC
+was healthy. The public SSE feed returned advancing slots. A 542,418-byte v2
+payload matched its frame hash. Compaction still had a 3,167-slot backlog, down
+from 3,609 over five minutes; the cloud queue fell from 4,851 to 4,111 events.
+The v2 head was still stale. The watcher still reported `compaction_behind`.
+These checks prove flow and progress, not full recovery or stable disk capacity.
+
+The installed unit sets a limit of one full archive and one matching incremental
+archive for the next validator start. The running process still uses its previous
+limits. The installer checks the exact host's help before it changes
+the command. [snapshot_budget.py](snapshot_budget.py) only reads files and creates
+a plan. It protects the newest full archive, its newest matching incremental,
+active temporary files and unknown paths. Archive names do not prove valid
+contents. The plan includes space for the next archive. Agave removes old archives
+after a new archive completes, so the new limits do not supply that write space.
+The startup check requires at least 500 GiB plus a next-archive budget. That
+budget is at least 128 GiB and increases to the largest observed archive
+allocation. The check cannot stop later growth in a running validator.
+The policy and pinned source checks are in
+[snapshot-retention-policy.json](snapshot-retention-policy.json).
+
+Cloud restore now checks disk space before download and during each write. It
+keeps a 400 GiB reserve and a 1 GiB margin, with space for the temporary bundle
+and requested file. A shared lock prevents concurrent restores in sibling source
+sessions from passing admission together. A restore writes only the requested
+file and checks the bundle and saved receipt. It removes its own partial files
+after failure. It does not remove files that a reader can still use. Restored
+files still need a separate cache retirement policy.
+
+The recovery helper now changes all six live storage source paths with the feed
+services. It publishes `ROOT/config/native-active-source.json` only after the
+running commands match the new source. Updated heartbeat and priority readers
+prefer this pin; only an absent pin permits the dated recovery-record fallback.
+An invalid pin remains a visible failure. Historical recovery records remain.
+The updated readers were installed before this source handoff.
+
+The old publisher tail has a separate finite drain. Its wrapper counts remaining
+events again after each restart, so a partial cloud commit reduces the next
+limit. This handoff committed all 30 remaining events. The saved checkpoint and
+remote head both equal 634171, with no pending upload intent. The old cold-storage
+command is saved for a separate background resume;
+the helper does not start another old storage job. The two-hour live retention,
+full cloud byte checks and failed-source evidence remain required. Recovery still
+requires at least 500 GiB free and a separate public flow check. Source handoff
+checks the effective command order before it stops feed services. A saved switch
+can resume after a partial service change without loading another capture.
+
+The old last complete processed compact slot is 456452820. The new first
+complete slot is 456502438. Their intervening interval is 456452821–456502437,
+49,617 slots. This is not a count of lost produced blocks or proof of canonical
+coverage. The native gap remains unrecovered.
+
+For an existing deployment, stage the eight script files named by
+[install_storage_patch.py](../bank-stream-v2/install_storage_patch.py) in one
+directory. Run that installer as `ubuntu` with `--source-dir`, `--root`, and
+`--prepare-only` first. Review its report before the apply run. It installs
+guards and future validator settings, and restarts the sender and priority guard.
+The source handoff is separate. Do not use the full native binary installer for
+this script update. A failed source switch remains resumable with
+`recover_session.py --root ROOT --report SAVED_REPORT --resume-switch`.
+
+Validation: 152 deployment tests passed. The patch has a clean application
+check against the saved repository base. No native gap was rebuilt. Old-source
+cold storage still needs a separate resume, and restored files still need a
+bounded cache policy with reader protection.
 
 ## Operating status, 12 October 2026
 

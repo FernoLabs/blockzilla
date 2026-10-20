@@ -1,0 +1,86 @@
+{
+  "schema": "blockzilla-foundation-heartbeat-v1",
+  "machine_id": "foundation",
+  "sampled_unix_ms": 1792182521290,
+  "monotonic_ms": 1473667210,
+  "boot_id": "5caa7ddd-4731-4b83-8233-6b3c6a2e203d",
+  "free_disk_bytes": 1535944327168,
+  "capture_reserve_bytes": 429496729600,
+  "mem_available_bytes": 1009349906432,
+  "capture": {
+    "session": "000000000000000018df1be3bad56d9c-20b258",
+    "state": "CAPTURING",
+    "durable_sequence": 7341730,
+    "latest_rooted_slot": 457770584,
+    "updated_unix_ms": null
+  },
+  "compact": {
+    "state": "RUNNING",
+    "last_compact_slot": 457770613,
+    "event_sequence": 6297,
+    "source_sequence": 7337451,
+    "updated_unix_ms": 1792182521296
+  },
+  "publisher": {
+    "state": "RUNNING",
+    "sequence": 5561,
+    "updated_unix_ms": 1792182511566
+  },
+  "cold_storage": {
+    "state": "RUNNING",
+    "retired_banks": 0,
+    "updated_unix_ms": 1792182514787,
+    "storage_progress": "WAITING",
+    "progress_stall_seconds": 900,
+    "eligible_wait_since_unix_ms": null,
+    "last_archive_progress_unix_ms": null
+  },
+  "services": {
+    "hivezilla-validator.service": "active",
+    "hivezilla-direct-worker.service": "active",
+    "hivezilla-bank-v2-producer.service": "active",
+    "hivezilla-bank-v2-r2-publisher.service": "active",
+    "hivezilla-native-cold-storage-20261012-live.service": "active",
+    "hivezilla-live-priority-20261012.service": "active"
+  },
+  "rpc": {
+    "healthy": true,
+    "finalized_slot": 457770583
+  },
+  "errors": [],
+  "bank_v2": {
+    "status": "live",
+    "confirmed_slot": 457770612,
+    "source_observed_at_unix_ms": 1792182520627,
+    "sampled_at_unix_ms": 1792182521315,
+    "source_lag_ms": 688
+  },
+  "archive": {
+    "state": "COMPLETE",
+    "epoch": 1054,
+    "updated_unix_ms": 1792182521290,
+    "stage_updated_unix_ms": 1791888439162,
+    "progress_updated_unix_ms": null,
+    "progress_percent": null,
+    "bytes_per_second": null,
+    "eta_seconds": null,
+    "eta_scope": null,
+    "paused": false,
+    "epoch_eta_min_seconds": null,
+    "epoch_eta_max_seconds": null,
+    "queue_eta_min_seconds": null,
+    "queue_eta_max_seconds": null,
+    "last_completed_epoch": 1054,
+    "last_compact_bytes": 122250037731,
+    "completed_epochs": [
+      1048,
+      1049,
+      1050,
+      1051,
+      1052,
+      1053,
+      1054
+    ],
+    "upload_queue_epochs": []
+  }
+}

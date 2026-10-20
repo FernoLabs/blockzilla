@@ -1,0 +1,194 @@
+{
+  "schema": "blockzilla-ledger-snapshot-findings-v1",
+  "state": "READ_ONLY_FINDINGS",
+  "date_utc": "2026-10-18",
+  "host": "ubuntu@213.239.141.61",
+  "root": "/home/ubuntu/live/hivezilla-validator-20260930",
+  "source_session": "000000000000000018df884b2474cf8e-20b258",
+  "agave_revision": "87167f3906bdf5111e99ead64d8f4098b7874e33",
+  "validator_pid": 2142808,
+  "production_mutations_by_this_review": [],
+  "conclusions": [
+    "The full snapshot completed. Agave then removed the old full and old incremental archives without operator action.",
+    "The short ledger allocation increase was part of a RocksDB allocation and deletion cycle. These samples do not prove a sustained ledger leak.",
+    "Automatic ledger cleanup is active near the configured 100 million total shreds. This is a shred-count target, not a total disk-byte cap.",
+    "Transaction and address-index SST files use most ledger space, but their combined size fell by 9897052940 bytes from 07:00 to 08:33 UTC.",
+    "The measured ledger history does not explain the full free-space fall from the 06:17 protection receipt. Complete allocation history for the other data classes was not available in this review.",
+    "The latest sender sample in this review has only snapshot_capacity_headroom_low. The live storage timeout cleared after one supervisor retry.",
+    "No retirement cap was changed. Approval for additional old-bank retirement was pending."
+  ],
+  "snapshot": {
+    "unit": "hivezilla-validator.service",
+    "full_slot": 458364738,
+    "handling_started_utc": "2026-10-18T08:15:34.214662723Z",
+    "bank_serialized_utc": "2026-10-18T08:15:34.863758311Z",
+    "archive_time_us": 574444071,
+    "old_full_purge_started_utc": "2026-10-18T08:25:08.754229948Z",
+    "old_incremental_purge_started_utc": "2026-10-18T08:25:11.128328235Z",
+    "package_completed_utc": "2026-10-18T08:25:11.152495863Z",
+    "maximum_full_snapshots_to_retain": 1,
+    "maximum_incremental_snapshots_to_retain": 1,
+    "full_interval_block_heights": 100000,
+    "incremental_interval_block_heights": 200,
+    "next_full_trigger_block_height": 436500000,
+    "archive_overlap_sample": {
+      "sampled_unix_ms": 1792311873880,
+      "sampled_utc": "2026-10-18T08:24:33.880Z",
+      "free_disk_bytes": 524742918144,
+      "capture_reserve_bytes": 429496729600,
+      "margin_above_capture_reserve_bytes": 95246188544,
+      "old_full_allocated_bytes": 124201738240,
+      "old_incremental_allocated_bytes": 614363136,
+      "temporary_full_allocated_bytes": 117539885056
+    },
+    "completed_archive_inventory": {
+      "sampled_unix_ms": 1792311954496,
+      "sampled_utc": "2026-10-18T08:25:54.496Z",
+      "free_disk_bytes": 645859225600,
+      "active_temporary_archives": 0,
+      "full_name": "snapshot-458364738-6PPuABwZi7ozAo3VyMi2BAe6Uh8mgkeYUS5cvRgAAk36.tar.zst",
+      "full_logical_bytes": 124183901242,
+      "full_allocated_bytes": 124190986240,
+      "incremental_name": "incremental-snapshot-458364738-458367538-GFcEVaR547AHRjD8zQiGiqABfFrRaQPqVux4K5RKCsKw.tar.zst",
+      "incremental_allocated_bytes": 160403456,
+      "old_archives_present": false
+    },
+    "capacity_interpretation": {
+      "next_archive_budget_bytes": 137438953472,
+      "warning_free_threshold_bytes": 674309865472,
+      "critical_free_threshold_bytes": 566935683072,
+      "note": "The report subtracts a full future archive budget from current free space, including during an active archive write. CRITICAL is an early reserve warning; it does not mean free space is already below 400 GiB. The 10-minute growth estimate can still include the completed write and purge."
+    }
+  },
+  "allocated_directory_samples": {
+    "method": "ionice -c3 nice -n19 du -s -x --block-size=1 ROOT/accounts ROOT/ledger",
+    "errors": [],
+    "scan_seconds_each": "approximately 0.65",
+    "samples": [
+      {
+        "sample_start_unix_ms": 1792312134090,
+        "sample_end_unix_ms": 1792312134730,
+        "sample_start_utc": "2026-10-18T08:28:54.090Z",
+        "accounts_allocated_bytes": 522355904512,
+        "ledger_allocated_bytes": 460033118208,
+        "free_disk_bytes": 643828224000
+      },
+      {
+        "sample_start_unix_ms": 1792312209952,
+        "sample_end_unix_ms": 1792312210597,
+        "sample_start_utc": "2026-10-18T08:30:09.952Z",
+        "accounts_allocated_bytes": 522376929280,
+        "ledger_allocated_bytes": 460876238848,
+        "free_disk_bytes": 642634215424
+      },
+      {
+        "sample_start_unix_ms": 1792312308602,
+        "sample_end_unix_ms": 1792312309252,
+        "sample_start_utc": "2026-10-18T08:31:48.602Z",
+        "accounts_allocated_bytes": 522393747456,
+        "ledger_allocated_bytes": 460789497856,
+        "free_disk_bytes": 643062280192
+      }
+    ],
+    "first_to_last": {
+      "elapsed_seconds": 174.512,
+      "accounts_change_bytes": 37842944,
+      "ledger_change_bytes": 756379648,
+      "free_disk_change_bytes": -765943808,
+      "other_net_allocated_change_bytes": -28278784,
+      "limitation": "The scans are short observations while writers and retirement run. They are not a long-term growth rate or a byte bound."
+    },
+    "second_to_third_ledger_change_bytes": -86740992,
+    "rocksdb_file_deletion_observed_utc": [
+      "2026-10-18T08:31:20Z",
+      "2026-10-18T08:31:43Z"
+    ]
+  },
+  "rocksdb_sst_bytes": {
+    "metric": "blockstore_rocksdb_cfs,cf_name=NAME total_sst_files_size",
+    "samples": [
+      {
+        "sample_utc": "2026-10-18T07:00:13Z",
+        "data_shred": 75643284415,
+        "code_shred": 48868255959,
+        "transaction_status": 153359114685,
+        "address_signatures": 187315884318
+      },
+      {
+        "sample_utc": "2026-10-18T08:00:14Z",
+        "data_shred": 75690063331,
+        "code_shred": 48797095960,
+        "transaction_status": 150276083728,
+        "address_signatures": 185290650165
+      },
+      {
+        "sample_utc": "2026-10-18T08:33:05Z",
+        "data_shred": 75593206781,
+        "code_shred": 48994607213,
+        "transaction_status": 146765393047,
+        "address_signatures": 184012553016
+      }
+    ],
+    "transaction_and_address_change_bytes": -9897052940,
+    "background_errors_at_latest_sample": 0,
+    "limitation": "These are RocksDB SST properties, not a full filesystem allocation inventory. No matching rows were returned for the bounded 06:00 and 06:17 queries."
+  },
+  "ledger_cleanup": {
+    "configured_argument": "--limit-blockstore-size 100000000",
+    "strategy_observed": "total data and coding shred count",
+    "poll_interval_seconds": 10,
+    "automatic_check_root_advance_condition": ">512 slots",
+    "latest_count_log_utc": "2026-10-18T08:31:43.913346333Z",
+    "total_shreds": 100624482,
+    "data_shreds": 61769489,
+    "coding_shreds": 38854993,
+    "lowest_slot_before_cleanup": 458274390,
+    "highest_slot_before_cleanup": 458369239,
+    "latest_root": 458369207,
+    "expired_through_slot": 458274979,
+    "successful_purge_utc": "2026-10-18T08:31:43.920357472Z",
+    "purge_milliseconds": 6,
+    "rpc_sample_unix_ms": 1792312308602,
+    "rpc_current_slot": 458369231,
+    "rpc_minimum_ledger_slot": 458274980,
+    "rpc_first_available_block": 458274981,
+    "retained_slot_span": 94250,
+    "byte_cap_limit": "The source excludes block and transaction metadata from its fixed-footprint estimate. Their expiry and compaction continue, but the shred-count target is not an exact bound on all ledger bytes."
+  },
+  "monitor_observation": {
+    "live_storage_failure_type": "ReadTimeoutError",
+    "failure_unix_ms": 1792312058762,
+    "scheduled_retry_unix_ms": 1792312185307,
+    "retry_attempts_started": 1,
+    "healthy_observed_unix_ms": 1792312246215,
+    "retired_banks_at_healthy_observation": 16071,
+    "sender_sampled_unix_ms": 1792312246137,
+    "sender_errors": ["snapshot_capacity_headroom_low"],
+    "raw_capture": "FAILED and optional; it was not a required sender fault."
+  },
+  "sources": {
+    "pinned_source_root_on_host": "/home/ubuntu/benchmarks/agave-upgrade-4.3.2-20261016/agave",
+    "snapshot_trigger": "runtime/src/snapshot_controller.rs:95-103; bank.block_height() modulo configured interval",
+    "snapshot_defaults": "snapshots/src/snapshot_config.rs:9-16",
+    "snapshot_archive_and_purge_order": "core/src/snapshot_packager_service.rs:155-185; archive_snapshot_package then purge_old_snapshot_archives",
+    "snapshot_purge_implementation": "runtime/src/snapshot_utils.rs:1603; purge_old_snapshot_archives",
+    "ledger_cleanup": "ledger/src/blockstore/cleanup_service.rs:29-69,128-252,279-302; maybe_generate_automatic_cleanup_request and cleanup_ledger",
+    "ledger_size_argument": "validator/src/cli.rs:825-833",
+    "ledger_size_metric": "ledger/src/blockstore_metrics.rs:274-286; BlockstoreRocksDbColumnFamilyMetrics::report_metrics",
+    "ledger_property_read": "ledger/src/blockstore_db.rs:487-494; submit_rocksdb_cf_metrics",
+    "journal_identifiers": [
+      "solana_core::snapshot_packager_service handling snapshot package",
+      "snapshot_packager_service archive_time_us purge_old_archives_time_us",
+      "solana_runtime::snapshot_utils Purging old full snapshot archives",
+      "solana_ledger::blockstore::cleanup_service Blockstore has",
+      "solana_ledger::blockstore::cleanup_service Cleaned up Blockstore data older than slot",
+      "blockstore_rocksdb_cfs total_sst_files_size"
+    ],
+    "rocksdb_log_on_host": "ROOT/ledger/rocksdb/LOG; successful table_file_deletion records",
+    "reports_on_host": [
+      "ROOT/reports/native-capacity/STATUS.json",
+      "ROOT/reports/storage-jobs/STATUS.json",
+      "ROOT/reports/foundation-watch/STATUS.json"
+    ]
+  }
+}

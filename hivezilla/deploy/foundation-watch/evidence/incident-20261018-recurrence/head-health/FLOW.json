@@ -1,0 +1,686 @@
+{
+  "schema": "blockzilla-bank-head-cadence-flow-v1",
+  "state": "PASSED",
+  "elapsed_seconds": 120.043,
+  "source": {
+    "genesis_hash": "5eykt4UsFv8P8NJdTREpY1vzqKqZKvdpKuc147dw2N9d",
+    "node_identity": "J7qpvCEWhdBgPdYRV3s3btWPrRVXa2qnAzgvxWTvtbrQ",
+    "agave_revision": "87167f3906bdf5111e99ead64d8f4098b7874e33",
+    "session_id": "000000000000000018df884b2474cf8e-20b258"
+  },
+  "samples": [
+    {
+      "sampled_unix_ms": 1792314231868,
+      "status": "live",
+      "source_lag_ms": 810,
+      "confirmed_slot": 458378164
+    },
+    {
+      "sampled_unix_ms": 1792314232878,
+      "status": "live",
+      "source_lag_ms": 669,
+      "confirmed_slot": 458378169
+    },
+    {
+      "sampled_unix_ms": 1792314233889,
+      "status": "live",
+      "source_lag_ms": 522,
+      "confirmed_slot": 458378175
+    },
+    {
+      "sampled_unix_ms": 1792314234983,
+      "status": "live",
+      "source_lag_ms": 551,
+      "confirmed_slot": 458378179
+    },
+    {
+      "sampled_unix_ms": 1792314236013,
+      "status": "live",
+      "source_lag_ms": 706,
+      "confirmed_slot": 458378182
+    },
+    {
+      "sampled_unix_ms": 1792314237014,
+      "status": "live",
+      "source_lag_ms": 820,
+      "confirmed_slot": 458378185
+    },
+    {
+      "sampled_unix_ms": 1792314238015,
+      "status": "live",
+      "source_lag_ms": 742,
+      "confirmed_slot": 458378190
+    },
+    {
+      "sampled_unix_ms": 1792314239172,
+      "status": "live",
+      "source_lag_ms": 541,
+      "confirmed_slot": 458378195
+    },
+    {
+      "sampled_unix_ms": 1792314240181,
+      "status": "live",
+      "source_lag_ms": 654,
+      "confirmed_slot": 458378200
+    },
+    {
+      "sampled_unix_ms": 1792314241317,
+      "status": "live",
+      "source_lag_ms": 631,
+      "confirmed_slot": 458378205
+    },
+    {
+      "sampled_unix_ms": 1792314242318,
+      "status": "live",
+      "source_lag_ms": 765,
+      "confirmed_slot": 458378210
+    },
+    {
+      "sampled_unix_ms": 1792314243473,
+      "status": "live",
+      "source_lag_ms": 608,
+      "confirmed_slot": 458378215
+    },
+    {
+      "sampled_unix_ms": 1792314244513,
+      "status": "live",
+      "source_lag_ms": 603,
+      "confirmed_slot": 458378220
+    },
+    {
+      "sampled_unix_ms": 1792314245559,
+      "status": "live",
+      "source_lag_ms": 631,
+      "confirmed_slot": 458378225
+    },
+    {
+      "sampled_unix_ms": 1792314246641,
+      "status": "live",
+      "source_lag_ms": 640,
+      "confirmed_slot": 458378230
+    },
+    {
+      "sampled_unix_ms": 1792314247642,
+      "status": "live",
+      "source_lag_ms": 734,
+      "confirmed_slot": 458378235
+    },
+    {
+      "sampled_unix_ms": 1792314248761,
+      "status": "live",
+      "source_lag_ms": 913,
+      "confirmed_slot": 458378239
+    },
+    {
+      "sampled_unix_ms": 1792314249762,
+      "status": "live",
+      "source_lag_ms": 701,
+      "confirmed_slot": 458378245
+    },
+    {
+      "sampled_unix_ms": 1792314250770,
+      "status": "live",
+      "source_lag_ms": 918,
+      "confirmed_slot": 458378249
+    },
+    {
+      "sampled_unix_ms": 1792314251824,
+      "status": "live",
+      "source_lag_ms": 607,
+      "confirmed_slot": 458378256
+    },
+    {
+      "sampled_unix_ms": 1792314252898,
+      "status": "live",
+      "source_lag_ms": 633,
+      "confirmed_slot": 458378261
+    },
+    {
+      "sampled_unix_ms": 1792314254076,
+      "status": "live",
+      "source_lag_ms": 694,
+      "confirmed_slot": 458378266
+    },
+    {
+      "sampled_unix_ms": 1792314255165,
+      "status": "live",
+      "source_lag_ms": 578,
+      "confirmed_slot": 458378271
+    },
+    {
+      "sampled_unix_ms": 1792314256166,
+      "status": "live",
+      "source_lag_ms": 809,
+      "confirmed_slot": 458378275
+    },
+    {
+      "sampled_unix_ms": 1792314257221,
+      "status": "live",
+      "source_lag_ms": 645,
+      "confirmed_slot": 458378280
+    },
+    {
+      "sampled_unix_ms": 1792314258273,
+      "status": "live",
+      "source_lag_ms": 722,
+      "confirmed_slot": 458378285
+    },
+    {
+      "sampled_unix_ms": 1792314259372,
+      "status": "live",
+      "source_lag_ms": 737,
+      "confirmed_slot": 458378290
+    },
+    {
+      "sampled_unix_ms": 1792314260509,
+      "status": "live",
+      "source_lag_ms": 688,
+      "confirmed_slot": 458378295
+    },
+    {
+      "sampled_unix_ms": 1792314261510,
+      "status": "live",
+      "source_lag_ms": 938,
+      "confirmed_slot": 458378299
+    },
+    {
+      "sampled_unix_ms": 1792314262649,
+      "status": "live",
+      "source_lag_ms": 554,
+      "confirmed_slot": 458378305
+    },
+    {
+      "sampled_unix_ms": 1792314263694,
+      "status": "live",
+      "source_lag_ms": 614,
+      "confirmed_slot": 458378310
+    },
+    {
+      "sampled_unix_ms": 1792314264833,
+      "status": "live",
+      "source_lag_ms": 820,
+      "confirmed_slot": 458378314
+    },
+    {
+      "sampled_unix_ms": 1792314266000,
+      "status": "live",
+      "source_lag_ms": 811,
+      "confirmed_slot": 458378320
+    },
+    {
+      "sampled_unix_ms": 1792314267315,
+      "status": "live",
+      "source_lag_ms": 586,
+      "confirmed_slot": 458378326
+    },
+    {
+      "sampled_unix_ms": 1792314268321,
+      "status": "live",
+      "source_lag_ms": 638,
+      "confirmed_slot": 458378331
+    },
+    {
+      "sampled_unix_ms": 1792314269496,
+      "status": "live",
+      "source_lag_ms": 524,
+      "confirmed_slot": 458378337
+    },
+    {
+      "sampled_unix_ms": 1792314270554,
+      "status": "live",
+      "source_lag_ms": 649,
+      "confirmed_slot": 458378341
+    },
+    {
+      "sampled_unix_ms": 1792314271555,
+      "status": "live",
+      "source_lag_ms": 526,
+      "confirmed_slot": 458378347
+    },
+    {
+      "sampled_unix_ms": 1792314272556,
+      "status": "live",
+      "source_lag_ms": 715,
+      "confirmed_slot": 458378351
+    },
+    {
+      "sampled_unix_ms": 1792314273564,
+      "status": "live",
+      "source_lag_ms": 667,
+      "confirmed_slot": 458378356
+    },
+    {
+      "sampled_unix_ms": 1792314274565,
+      "status": "live",
+      "source_lag_ms": 862,
+      "confirmed_slot": 458378360
+    },
+    {
+      "sampled_unix_ms": 1792314275651,
+      "status": "live",
+      "source_lag_ms": 615,
+      "confirmed_slot": 458378367
+    },
+    {
+      "sampled_unix_ms": 1792314276734,
+      "status": "live",
+      "source_lag_ms": 806,
+      "confirmed_slot": 458378372
+    },
+    {
+      "sampled_unix_ms": 1792314278049,
+      "status": "live",
+      "source_lag_ms": 793,
+      "confirmed_slot": 458378377
+    },
+    {
+      "sampled_unix_ms": 1792314279059,
+      "status": "live",
+      "source_lag_ms": 791,
+      "confirmed_slot": 458378382
+    },
+    {
+      "sampled_unix_ms": 1792314280260,
+      "status": "live",
+      "source_lag_ms": 724,
+      "confirmed_slot": 458378387
+    },
+    {
+      "sampled_unix_ms": 1792314281336,
+      "status": "live",
+      "source_lag_ms": 754,
+      "confirmed_slot": 458378391
+    },
+    {
+      "sampled_unix_ms": 1792314282386,
+      "status": "live",
+      "source_lag_ms": 1141,
+      "confirmed_slot": 458378394
+    },
+    {
+      "sampled_unix_ms": 1792314283387,
+      "status": "live",
+      "source_lag_ms": 1224,
+      "confirmed_slot": 458378399
+    },
+    {
+      "sampled_unix_ms": 1792314284553,
+      "status": "live",
+      "source_lag_ms": 1570,
+      "confirmed_slot": 458378403
+    },
+    {
+      "sampled_unix_ms": 1792314285758,
+      "status": "live",
+      "source_lag_ms": 1645,
+      "confirmed_slot": 458378407
+    },
+    {
+      "sampled_unix_ms": 1792314286759,
+      "status": "live",
+      "source_lag_ms": 1720,
+      "confirmed_slot": 458378411
+    },
+    {
+      "sampled_unix_ms": 1792314287994,
+      "status": "live",
+      "source_lag_ms": 1891,
+      "confirmed_slot": 458378416
+    },
+    {
+      "sampled_unix_ms": 1792314289045,
+      "status": "live",
+      "source_lag_ms": 847,
+      "confirmed_slot": 458378425
+    },
+    {
+      "sampled_unix_ms": 1792314290141,
+      "status": "live",
+      "source_lag_ms": 930,
+      "confirmed_slot": 458378429
+    },
+    {
+      "sampled_unix_ms": 1792314291142,
+      "status": "live",
+      "source_lag_ms": 904,
+      "confirmed_slot": 458378434
+    },
+    {
+      "sampled_unix_ms": 1792314292143,
+      "status": "live",
+      "source_lag_ms": 982,
+      "confirmed_slot": 458378439
+    },
+    {
+      "sampled_unix_ms": 1792314293341,
+      "status": "live",
+      "source_lag_ms": 1165,
+      "confirmed_slot": 458378443
+    },
+    {
+      "sampled_unix_ms": 1792314294342,
+      "status": "live",
+      "source_lag_ms": 825,
+      "confirmed_slot": 458378449
+    },
+    {
+      "sampled_unix_ms": 1792314295343,
+      "status": "live",
+      "source_lag_ms": 881,
+      "confirmed_slot": 458378455
+    },
+    {
+      "sampled_unix_ms": 1792314296415,
+      "status": "live",
+      "source_lag_ms": 573,
+      "confirmed_slot": 458378461
+    },
+    {
+      "sampled_unix_ms": 1792314297434,
+      "status": "live",
+      "source_lag_ms": 859,
+      "confirmed_slot": 458378464
+    },
+    {
+      "sampled_unix_ms": 1792314298435,
+      "status": "live",
+      "source_lag_ms": 558,
+      "confirmed_slot": 458378471
+    },
+    {
+      "sampled_unix_ms": 1792314299552,
+      "status": "live",
+      "source_lag_ms": 981,
+      "confirmed_slot": 458378475
+    },
+    {
+      "sampled_unix_ms": 1792314300808,
+      "status": "live",
+      "source_lag_ms": 561,
+      "confirmed_slot": 458378482
+    },
+    {
+      "sampled_unix_ms": 1792314301924,
+      "status": "live",
+      "source_lag_ms": 914,
+      "confirmed_slot": 458378485
+    },
+    {
+      "sampled_unix_ms": 1792314303005,
+      "status": "live",
+      "source_lag_ms": 1393,
+      "confirmed_slot": 458378489
+    },
+    {
+      "sampled_unix_ms": 1792314304281,
+      "status": "live",
+      "source_lag_ms": 1080,
+      "confirmed_slot": 458378495
+    },
+    {
+      "sampled_unix_ms": 1792314305298,
+      "status": "live",
+      "source_lag_ms": 1262,
+      "confirmed_slot": 458378499
+    },
+    {
+      "sampled_unix_ms": 1792314306299,
+      "status": "live",
+      "source_lag_ms": 705,
+      "confirmed_slot": 458378506
+    },
+    {
+      "sampled_unix_ms": 1792314307373,
+      "status": "live",
+      "source_lag_ms": 689,
+      "confirmed_slot": 458378511
+    },
+    {
+      "sampled_unix_ms": 1792314308484,
+      "status": "live",
+      "source_lag_ms": 671,
+      "confirmed_slot": 458378516
+    },
+    {
+      "sampled_unix_ms": 1792314309509,
+      "status": "live",
+      "source_lag_ms": 834,
+      "confirmed_slot": 458378520
+    },
+    {
+      "sampled_unix_ms": 1792314310510,
+      "status": "live",
+      "source_lag_ms": 765,
+      "confirmed_slot": 458378525
+    },
+    {
+      "sampled_unix_ms": 1792314311510,
+      "status": "live",
+      "source_lag_ms": 540,
+      "confirmed_slot": 458378531
+    },
+    {
+      "sampled_unix_ms": 1792314312525,
+      "status": "live",
+      "source_lag_ms": 580,
+      "confirmed_slot": 458378536
+    },
+    {
+      "sampled_unix_ms": 1792314313588,
+      "status": "live",
+      "source_lag_ms": 867,
+      "confirmed_slot": 458378539
+    },
+    {
+      "sampled_unix_ms": 1792314314589,
+      "status": "live",
+      "source_lag_ms": 647,
+      "confirmed_slot": 458378544
+    },
+    {
+      "sampled_unix_ms": 1792314315691,
+      "status": "live",
+      "source_lag_ms": 839,
+      "confirmed_slot": 458378548
+    },
+    {
+      "sampled_unix_ms": 1792314316705,
+      "status": "live",
+      "source_lag_ms": 562,
+      "confirmed_slot": 458378555
+    },
+    {
+      "sampled_unix_ms": 1792314317860,
+      "status": "live",
+      "source_lag_ms": 762,
+      "confirmed_slot": 458378559
+    },
+    {
+      "sampled_unix_ms": 1792314318979,
+      "status": "live",
+      "source_lag_ms": 967,
+      "confirmed_slot": 458378563
+    },
+    {
+      "sampled_unix_ms": 1792314320018,
+      "status": "live",
+      "source_lag_ms": 686,
+      "confirmed_slot": 458378569
+    },
+    {
+      "sampled_unix_ms": 1792314321019,
+      "status": "live",
+      "source_lag_ms": 1043,
+      "confirmed_slot": 458378573
+    },
+    {
+      "sampled_unix_ms": 1792314322223,
+      "status": "live",
+      "source_lag_ms": 838,
+      "confirmed_slot": 458378579
+    },
+    {
+      "sampled_unix_ms": 1792314323320,
+      "status": "live",
+      "source_lag_ms": 873,
+      "confirmed_slot": 458378584
+    },
+    {
+      "sampled_unix_ms": 1792314324481,
+      "status": "live",
+      "source_lag_ms": 927,
+      "confirmed_slot": 458378588
+    },
+    {
+      "sampled_unix_ms": 1792314325482,
+      "status": "live",
+      "source_lag_ms": 815,
+      "confirmed_slot": 458378595
+    },
+    {
+      "sampled_unix_ms": 1792314326598,
+      "status": "live",
+      "source_lag_ms": 896,
+      "confirmed_slot": 458378600
+    },
+    {
+      "sampled_unix_ms": 1792314327804,
+      "status": "live",
+      "source_lag_ms": 628,
+      "confirmed_slot": 458378606
+    },
+    {
+      "sampled_unix_ms": 1792314328869,
+      "status": "live",
+      "source_lag_ms": 900,
+      "confirmed_slot": 458378610
+    },
+    {
+      "sampled_unix_ms": 1792314329954,
+      "status": "live",
+      "source_lag_ms": 934,
+      "confirmed_slot": 458378615
+    },
+    {
+      "sampled_unix_ms": 1792314331022,
+      "status": "live",
+      "source_lag_ms": 836,
+      "confirmed_slot": 458378620
+    },
+    {
+      "sampled_unix_ms": 1792314332034,
+      "status": "live",
+      "source_lag_ms": 881,
+      "confirmed_slot": 458378624
+    },
+    {
+      "sampled_unix_ms": 1792314333064,
+      "status": "live",
+      "source_lag_ms": 913,
+      "confirmed_slot": 458378630
+    },
+    {
+      "sampled_unix_ms": 1792314334256,
+      "status": "live",
+      "source_lag_ms": 891,
+      "confirmed_slot": 458378635
+    },
+    {
+      "sampled_unix_ms": 1792314335256,
+      "status": "live",
+      "source_lag_ms": 666,
+      "confirmed_slot": 458378641
+    },
+    {
+      "sampled_unix_ms": 1792314336361,
+      "status": "live",
+      "source_lag_ms": 587,
+      "confirmed_slot": 458378646
+    },
+    {
+      "sampled_unix_ms": 1792314337362,
+      "status": "live",
+      "source_lag_ms": 932,
+      "confirmed_slot": 458378649
+    },
+    {
+      "sampled_unix_ms": 1792314338363,
+      "status": "live",
+      "source_lag_ms": 876,
+      "confirmed_slot": 458378654
+    },
+    {
+      "sampled_unix_ms": 1792314339364,
+      "status": "live",
+      "source_lag_ms": 583,
+      "confirmed_slot": 458378659
+    },
+    {
+      "sampled_unix_ms": 1792314340365,
+      "status": "live",
+      "source_lag_ms": 783,
+      "confirmed_slot": 458378663
+    },
+    {
+      "sampled_unix_ms": 1792314341574,
+      "status": "live",
+      "source_lag_ms": 692,
+      "confirmed_slot": 458378668
+    },
+    {
+      "sampled_unix_ms": 1792314342575,
+      "status": "live",
+      "source_lag_ms": 840,
+      "confirmed_slot": 458378672
+    },
+    {
+      "sampled_unix_ms": 1792314343584,
+      "status": "live",
+      "source_lag_ms": 889,
+      "confirmed_slot": 458378677
+    },
+    {
+      "sampled_unix_ms": 1792314344655,
+      "status": "live",
+      "source_lag_ms": 860,
+      "confirmed_slot": 458378682
+    },
+    {
+      "sampled_unix_ms": 1792314345756,
+      "status": "live",
+      "source_lag_ms": 682,
+      "confirmed_slot": 458378688
+    },
+    {
+      "sampled_unix_ms": 1792314346816,
+      "status": "live",
+      "source_lag_ms": 995,
+      "confirmed_slot": 458378691
+    },
+    {
+      "sampled_unix_ms": 1792314347846,
+      "status": "live",
+      "source_lag_ms": 889,
+      "confirmed_slot": 458378696
+    },
+    {
+      "sampled_unix_ms": 1792314348847,
+      "status": "live",
+      "source_lag_ms": 628,
+      "confirmed_slot": 458378702
+    },
+    {
+      "sampled_unix_ms": 1792314349908,
+      "status": "live",
+      "source_lag_ms": 601,
+      "confirmed_slot": 458378707
+    },
+    {
+      "sampled_unix_ms": 1792314350909,
+      "status": "live",
+      "source_lag_ms": 579,
+      "confirmed_slot": 458378712
+    }
+  ],
+  "faults": []
+}

@@ -1,0 +1,291 @@
+--- a/hivezilla/stream-relay/src/server.rs
++++ b/hivezilla/stream-relay/src/server.rs
+@@ -21,8 +21,21 @@
+ };
+ use serde::Deserialize;
+ use serde_json::json;
+-use std::{net::SocketAddr, path::PathBuf, sync::Arc, time::Duration};
+-use tokio::{net::TcpListener, sync::Semaphore};
++use std::{
++    future::Future,
++    io,
++    net::SocketAddr,
++    path::PathBuf,
++    pin::Pin,
++    sync::Arc,
++    task::{Context as TaskContext, Poll},
++    time::Duration,
++};
++use tokio::{
++    io::{AsyncRead, AsyncWrite, ReadBuf},
++    net::TcpListener,
++    sync::Semaphore,
++};
+ 
+ #[derive(Clone)]
+ pub struct Api {
+@@ -456,6 +469,112 @@
+     config.alpn_protocols = vec![b"h2".to_vec(), b"http/1.1".to_vec()];
+     config.max_early_data_size = 0;
+     Ok(Some(Arc::new(config)))
++}
++
++/// Bound silent or blocked connections without limiting an active stream's age.
++struct IdleIo<I> {
++    io: I,
++    timeout: Duration,
++    deadline: Pin<Box<tokio::time::Sleep>>,
++}
++impl<I> IdleIo<I> {
++    fn new(io: I, timeout: Duration) -> Self {
++        Self {
++            io,
++            timeout,
++            deadline: Box::pin(tokio::time::sleep(timeout)),
++        }
++    }
++    fn check_idle(&mut self, cx: &mut TaskContext<'_>) -> io::Result<()> {
++        if self.deadline.as_mut().poll(cx).is_ready() {
++            Err(io::Error::new(
++                io::ErrorKind::TimedOut,
++                "connection_idle_timeout",
++            ))
++        } else {
++            Ok(())
++        }
++    }
++    fn progress(&mut self) {
++        self.deadline
++            .as_mut()
++            .reset(tokio::time::Instant::now() + self.timeout);
++    }
++}
++impl<I: AsyncRead + Unpin> AsyncRead for IdleIo<I> {
++    fn poll_read(
++        self: Pin<&mut Self>,
++        cx: &mut TaskContext<'_>,
++        buf: &mut ReadBuf<'_>,
++    ) -> Poll<io::Result<()>> {
++        let this = self.get_mut();
++        this.check_idle(cx)?;
++        let before = buf.filled().len();
++        let result = Pin::new(&mut this.io).poll_read(cx, buf);
++        if matches!(result, Poll::Ready(Ok(()))) && buf.filled().len() > before {
++            this.progress();
++        }
++        result
++    }
++}
++impl<I: AsyncWrite + Unpin> AsyncWrite for IdleIo<I> {
++    fn poll_write(
++        self: Pin<&mut Self>,
++        cx: &mut TaskContext<'_>,
++        buf: &[u8],
++    ) -> Poll<io::Result<usize>> {
++        let this = self.get_mut();
++        this.check_idle(cx)?;
++        let result = Pin::new(&mut this.io).poll_write(cx, buf);
++        if matches!(result, Poll::Ready(Ok(n)) if n > 0) {
++            this.progress();
++        }
++        result
++    }
++    fn poll_write_vectored(
++        self: Pin<&mut Self>,
++        cx: &mut TaskContext<'_>,
++        bufs: &[io::IoSlice<'_>],
++    ) -> Poll<io::Result<usize>> {
++        let this = self.get_mut();
++        this.check_idle(cx)?;
++        let result = Pin::new(&mut this.io).poll_write_vectored(cx, bufs);
++        if matches!(result, Poll::Ready(Ok(n)) if n > 0) {
++            this.progress();
++        }
++        result
++    }
++    fn is_write_vectored(&self) -> bool {
++        self.io.is_write_vectored()
++    }
++    fn poll_flush(self: Pin<&mut Self>, cx: &mut TaskContext<'_>) -> Poll<io::Result<()>> {
++        let this = self.get_mut();
++        this.check_idle(cx)?;
++        Pin::new(&mut this.io).poll_flush(cx)
++    }
++    fn poll_shutdown(self: Pin<&mut Self>, cx: &mut TaskContext<'_>) -> Poll<io::Result<()>> {
++        let this = self.get_mut();
++        this.check_idle(cx)?;
++        Pin::new(&mut this.io).poll_shutdown(cx)
++    }
++}
++async fn http_connection<I>(io: I, app: Router, idle: Duration)
++where
++    I: AsyncRead + AsyncWrite + Unpin + Send + 'static,
++{
++    let mut b = Builder::new(TokioExecutor::new());
++    b.http1()
++        .timer(TokioTimer::new())
++        .header_read_timeout(Duration::from_secs(5))
++        .max_buf_size(64 * 1024);
++    b.http2()
++        .timer(TokioTimer::new())
++        .max_concurrent_streams(32)
++        .max_send_buf_size(64 * 1024);
++    let service = TowerToHyperService::new(app);
++    let _ = b
++        .serve_connection(TokioIo::new(IdleIo::new(io, idle)), service)
++        .await;
+ }
+ pub async fn serve(bind: SocketAddr, api: Api, tls: Tls, origin: bool) -> Result<()> {
+     let _ = rustls::crypto::ring::default_provider().install_default();
+@@ -481,16 +600,6 @@
+         let tls = tls.clone();
+         tokio::spawn(async move {
+             let _permit = permit;
+-            let mut b = Builder::new(TokioExecutor::new());
+-            b.http1()
+-                .timer(TokioTimer::new())
+-                .header_read_timeout(Duration::from_secs(5))
+-                .max_buf_size(64 * 1024);
+-            b.http2()
+-                .timer(TokioTimer::new())
+-                .max_concurrent_streams(32)
+-                .max_send_buf_size(64 * 1024);
+-            let service = TowerToHyperService::new(app);
+             if let Some(config) = tls {
+                 if let Ok(Ok(s)) = tokio::time::timeout(
+                     Duration::from_secs(5),
+@@ -498,18 +607,10 @@
+                 )
+                 .await
+                 {
+-                    let _ = tokio::time::timeout(
+-                        Duration::from_secs(300),
+-                        b.serve_connection(TokioIo::new(s), service),
+-                    )
+-                    .await;
++                    http_connection(s, app, Duration::from_secs(300)).await;
+                 }
+             } else {
+-                let _ = tokio::time::timeout(
+-                    Duration::from_secs(300),
+-                    b.serve_connection(TokioIo::new(socket), service),
+-                )
+-                .await;
++                http_connection(socket, app, Duration::from_secs(300)).await;
+             }
+         });
+     }
+@@ -584,6 +685,113 @@
+             axum::serve(l, router(a)).await.unwrap();
+         });
+         (url, task)
++    }
++    #[tokio::test]
++    async fn active_sse_survives_multiple_connection_idle_intervals() {
++        use futures_util::StreamExt;
++        let api = test_api();
++        let store = api.store.clone();
++        store
++            .admit(crate::frame::processed_fixture(1, 100, 1, "block"))
++            .unwrap();
++        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
++        let address = listener.local_addr().unwrap();
++        let idle = Duration::from_secs(1);
++        let server = tokio::spawn(async move {
++            let (socket, _) = listener.accept().await.unwrap();
++            http_connection(socket, router(api), idle).await;
++        });
++        let response = reqwest::Client::new()
++            .get(format!(
++                "http://{address}/v1/events?after={}",
++                crate::frame::processed_anchor("session1", 0)
++            ))
++            .bearer_auth("abc+/?#%=")
++            .send()
++            .await
++            .unwrap();
++        assert_eq!(response.status(), StatusCode::OK);
++        assert!(
++            response.headers()[header::CONTENT_TYPE]
++                .to_str()
++                .unwrap()
++                .starts_with("text/event-stream")
++        );
++        let mut body = response.bytes_stream();
++        let mut text = String::new();
++        let started = tokio::time::Instant::now();
++        for sequence in 1..=19 {
++            if sequence > 1 {
++                tokio::time::sleep(Duration::from_millis(120)).await;
++                store
++                    .admit(crate::frame::processed_fixture(
++                        sequence,
++                        100 + sequence,
++                        sequence,
++                        "block",
++                    ))
++                    .unwrap();
++            }
++            let target = format!("id: {}", store.latest());
++            tokio::time::timeout(idle, async {
++                while !text.contains(&target) {
++                    let bytes = body
++                        .next()
++                        .await
++                        .expect("SSE closed")
++                        .expect("SSE read failed");
++                    text.push_str(std::str::from_utf8(&bytes).unwrap());
++                }
++            })
++            .await
++            .unwrap();
++        }
++        assert!(started.elapsed() > 2 * idle);
++        assert!(!server.is_finished());
++        drop(body);
++        tokio::time::timeout(Duration::from_secs(2), server)
++            .await
++            .unwrap()
++            .unwrap();
++    }
++    #[tokio::test]
++    async fn silent_http_connection_expires_and_releases_its_task() {
++        use tokio::io::AsyncReadExt;
++        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
++        let address = listener.local_addr().unwrap();
++        let server = tokio::spawn(async move {
++            let (socket, _) = listener.accept().await.unwrap();
++            http_connection(socket, router(test_api()), Duration::from_millis(100)).await;
++        });
++        let mut socket = tokio::net::TcpStream::connect(address).await.unwrap();
++        let mut byte = [0];
++        assert_eq!(
++            tokio::time::timeout(Duration::from_secs(2), socket.read(&mut byte))
++                .await
++                .unwrap()
++                .unwrap(),
++            0
++        );
++        server.await.unwrap();
++    }
++    #[tokio::test]
++    async fn zero_progress_reads_and_blocked_writes_do_not_renew_idle_time() {
++        use tokio::io::{AsyncReadExt, AsyncWriteExt};
++        let (server, _peer) = tokio::io::duplex(1);
++        let mut read = IdleIo::new(server, Duration::from_millis(100));
++        let mut byte = [0];
++        let error = tokio::time::timeout(Duration::from_secs(2), read.read_exact(&mut byte))
++            .await
++            .unwrap()
++            .unwrap_err();
++        assert_eq!(error.kind(), io::ErrorKind::TimedOut);
++        let (server, _peer) = tokio::io::duplex(1);
++        let mut write = IdleIo::new(server, Duration::from_millis(100));
++        let error = tokio::time::timeout(Duration::from_secs(2), write.write_all(&[1, 2]))
++            .await
++            .unwrap()
++            .unwrap_err();
++        assert_eq!(error.kind(), io::ErrorKind::TimedOut);
+     }
+     fn keyed(base: &str, path: &str) -> reqwest::Url {
+         let mut u = reqwest::Url::parse(&format!("{base}{path}")).unwrap();

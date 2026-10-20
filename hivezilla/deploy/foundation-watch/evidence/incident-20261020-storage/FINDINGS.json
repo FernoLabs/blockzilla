@@ -1,0 +1,228 @@
+{
+  "capacity": {
+    "active_temporary_archive_count_at_0555": 1,
+    "free_disk_bytes": 707464716288,
+    "overlap_observation": "No temporary archive at 05:54:30. One small temporary archive at 05:55\u201305:57. Current full archive stayed at 124367106048 allocated bytes. The monitored capacity remained OK and signed headrooms were positive.",
+    "recovery_headroom_bytes": 33154850816,
+    "snapshot_archive_allocated_bytes": 125046484992,
+    "snapshot_headroom_bytes": 140529033216,
+    "snapshots_at_final_sample": [
+      {
+        "allocated_bytes": 403439616,
+        "bytes": 403420312,
+        "mtime_unix_ms": 1792475778912,
+        "name": "incremental-snapshot-459064884-459121897-GcAudpU67DsLAicyY2kn8v3fveuEPTSStQFsqWBSpikF.tar.zst"
+      },
+      {
+        "allocated_bytes": 124367106048,
+        "bytes": 124361333903,
+        "mtime_unix_ms": 1792463895938,
+        "name": "snapshot-459064884-7GkrGnsvTBbfHAEdiwsEkU6A3HRvj7531EKdc7LSeoNV.tar.zst"
+      },
+      {
+        "allocated_bytes": 278933504,
+        "bytes": 278921216,
+        "mtime_unix_ms": 1792475821807,
+        "name": "tmp-snapshot-archive-459122097.tar.zst"
+      }
+    ],
+    "state": "OK"
+  },
+  "conclusion": "The live job did retry. It is running and made durable archive and retirement progress after the latest restart. The latest failure is the active 300-second whole-transfer deadline, not a disk reserve failure or exhausted supervisor retry budget.",
+  "configuration_changes": [],
+  "credential_values_or_raw_exception_text_saved": false,
+  "deleted_files": [],
+  "evidence": [
+    "HOST-SAMPLE-1.json",
+    "HOST-DETAILS-2.json",
+    "FAILURE-POLICY.json"
+  ],
+  "failure": {
+    "archived_banks": 764390,
+    "error_type": "BundleTransferTimeout",
+    "failure_unix_ms": 1792475444339,
+    "failure_utc": "2026-10-20T05:50:44.339+00:00",
+    "helper_hash_matches": true,
+    "helper_sha256": "8a95785f2df4e2f53b414322f0fc42a8d2edd93a02f04cfca6358bb312c19800",
+    "http_status": null,
+    "invocation_id": "a0fd3350ebff4bd791a2062f5c1a5462",
+    "last_failure_sha256": "c7c6d36b1d7c3a63a3b44f1ca5da7845527a85044b23ca821769fc1da3760968",
+    "network_error_type": null,
+    "pending_bundles": 2,
+    "retired_banks": 764390,
+    "stack_terminal_function": "transfer_process",
+    "stack_terminal_line": 164,
+    "unknown": "The child stores no PUT/GET phase or underlying cloud failure on total deadline expiry. These records do not establish which remote operation used the time.",
+    "whole_transfer_seconds": 300
+  },
+  "finite_jobs": [
+    {
+      "absolute_cap": 785546,
+      "archived_banks": 785546,
+      "retired_banks": 785546,
+      "state": "COMPLETE",
+      "unit": "hivezilla-native-cold-storage-20261016-source-18de229d.service"
+    },
+    {
+      "absolute_cap": 308768,
+      "archived_banks": 308768,
+      "retired_banks": 308768,
+      "state": "COMPLETE",
+      "unit": "hivezilla-native-cold-storage-20261016-source-18ddd9a6.service"
+    }
+  ],
+  "history_limits": {
+    "all_history_log_timeout_headers": 7,
+    "bounded_storage_journal_truncated": false,
+    "earlier_two_exit_error_types_independently_retained": false,
+    "latest_failure_type_is_exact": true,
+    "log_entries_have_per_event_timestamps": false,
+    "storage_exits_since0520": 3,
+    "storage_starts_since0520": 3
+  },
+  "latest_retry": {
+    "attempted_invocation": "a0fd3350ebff4bd791a2062f5c1a5462",
+    "attempts": 0,
+    "failure_invocation": "a0fd3350ebff4bd791a2062f5c1a5462",
+    "healthy_since_unix_ms": 1792475599646,
+    "healthy_start_archived_banks": 764582,
+    "last_observed_archived_banks": 764966,
+    "last_reset_unix_ms": 1792475660454,
+    "last_retry_unix_ms": 1792475568952,
+    "next_retry_unix_ms": 1792475568153
+  },
+  "observed_at_utc": "2026-10-20T05:55:56.287137+00:00",
+  "pids": {
+    "hivezilla-bank-v2-origin": 2134416,
+    "hivezilla-bank-v2-producer": 917148,
+    "hivezilla-bank-v2-r2-publisher": 4167494,
+    "hivezilla-direct-worker": 916425,
+    "hivezilla-foundation-heartbeat": 0,
+    "hivezilla-live-priority-20261012": 1042917,
+    "hivezilla-native-capacity": 1039031,
+    "hivezilla-native-cold-storage-20261012-live": 3948875,
+    "hivezilla-native-cold-storage-20261016-source-18ddd9a6": 0,
+    "hivezilla-native-cold-storage-20261016-source-18de229d": 0,
+    "hivezilla-native-storage-jobs": 2353836,
+    "hivezilla-shred-hook-recorder": 2142799,
+    "hivezilla-stream-origin": 2135639,
+    "hivezilla-stream-relay": 2136117,
+    "hivezilla-validator": 2142808
+  },
+  "progress": [
+    {
+      "archived_banks": 765030,
+      "retired_banks": 765030,
+      "sampled_unix_ms": 1792475670711
+    },
+    {
+      "archived_banks": 765606,
+      "retired_banks": 765606,
+      "sampled_unix_ms": 1792475756287
+    }
+  ],
+  "recorded_unix_ms": 1792475909026,
+  "registry_sha256": "a52115479c26ccff6367b8439cd58dbb2354bb7b61d25691e797a96611655f6f",
+  "retry_result": {
+    "attempts_now": 0,
+    "automatic_reset_policy": "Reset after at least 60 healthy seconds and durable archive count increase. This is a consecutive failure budget, not a lifetime retry count.",
+    "budget_exhausted": false,
+    "guardian_error_event_count": 0,
+    "guardian_journal_event_counts": {
+      "sudo_session_closed": 222,
+      "sudo_session_opened": 222,
+      "sudo_systemctl_command": 222
+    },
+    "live_pid": 3948875,
+    "supervisor_issues": [],
+    "supervisor_pid": 2353836,
+    "supervisor_state": "HEALTHY"
+  },
+  "schema": "blockzilla-storage-incident-findings-20261020-v1",
+  "service_actions": [],
+  "source": {
+    "agave_revision": "87167f3906bdf5111e99ead64d8f4098b7874e33",
+    "genesis_hash": "5eykt4UsFv8P8NJdTREpY1vzqKqZKvdpKuc147dw2N9d",
+    "node_identity": "J7qpvCEWhdBgPdYRV3s3btWPrRVXa2qnAzgvxWTvtbrQ",
+    "session_id": "000000000000000018df884b2474cf8e-20b258"
+  },
+  "source_pin_sha256": "ddfe097a2915a946c0917adcc135a2c7d997b1517d578044bfea80aadd7ea315",
+  "state": "READ_ONLY_DIAGNOSIS_COMPLETE",
+  "systemd_timeline": [
+    {
+      "event": "main_process_exited",
+      "exit_code": "exited",
+      "exit_label": "FAILURE",
+      "exit_status": 1,
+      "priority": "5",
+      "unit": "hivezilla-native-cold-storage-20261012-live.service",
+      "unix_ms": 1792474262398,
+      "utc": "2026-10-20T05:31:02.398+00:00"
+    },
+    {
+      "event": "unit_failed",
+      "priority": "4",
+      "result": "exit-code",
+      "unit": "hivezilla-native-cold-storage-20261012-live.service",
+      "unix_ms": 1792474262398,
+      "utc": "2026-10-20T05:31:02.398+00:00"
+    },
+    {
+      "event": "started",
+      "priority": "6",
+      "unit": "hivezilla-native-cold-storage-20261012-live.service",
+      "unix_ms": 1792474352450,
+      "utc": "2026-10-20T05:32:32.450+00:00"
+    },
+    {
+      "event": "main_process_exited",
+      "exit_code": "exited",
+      "exit_label": "FAILURE",
+      "exit_status": 1,
+      "priority": "5",
+      "unit": "hivezilla-native-cold-storage-20261012-live.service",
+      "unix_ms": 1792474824442,
+      "utc": "2026-10-20T05:40:24.442+00:00"
+    },
+    {
+      "event": "unit_failed",
+      "priority": "4",
+      "result": "exit-code",
+      "unit": "hivezilla-native-cold-storage-20261012-live.service",
+      "unix_ms": 1792474824443,
+      "utc": "2026-10-20T05:40:24.443+00:00"
+    },
+    {
+      "event": "started",
+      "priority": "6",
+      "unit": "hivezilla-native-cold-storage-20261012-live.service",
+      "unix_ms": 1792474900046,
+      "utc": "2026-10-20T05:41:40.046+00:00"
+    },
+    {
+      "event": "main_process_exited",
+      "exit_code": "exited",
+      "exit_label": "FAILURE",
+      "exit_status": 1,
+      "priority": "5",
+      "unit": "hivezilla-native-cold-storage-20261012-live.service",
+      "unix_ms": 1792475478169,
+      "utc": "2026-10-20T05:51:18.169+00:00"
+    },
+    {
+      "event": "unit_failed",
+      "priority": "4",
+      "result": "exit-code",
+      "unit": "hivezilla-native-cold-storage-20261012-live.service",
+      "unix_ms": 1792475478170,
+      "utc": "2026-10-20T05:51:18.170+00:00"
+    },
+    {
+      "event": "started",
+      "priority": "6",
+      "unit": "hivezilla-native-cold-storage-20261012-live.service",
+      "unix_ms": 1792475569346,
+      "utc": "2026-10-20T05:52:49.346+00:00"
+    }
+  ]
+}

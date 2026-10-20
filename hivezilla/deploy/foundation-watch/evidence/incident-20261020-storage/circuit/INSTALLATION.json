@@ -1,0 +1,387 @@
+{
+  "activation_started_unix_ms": 1792477311395,
+  "bank_caps_changed": false,
+  "before_sha256": "7410c55f3bf21d276b1e3bd91f3dbfa79684c74f777aef3a26e679b04d3bf078",
+  "build_sha256": "ee1b8ae9ffcaf8b1eaf91f0a6ef487bf35560c2bdefa2d7ca7b1b328777c1d8e",
+  "cold_sha256": "f757f2be29f01378448cbe5bb5b529db2625e6654c065f0f17ebd8ba3cbb6d41",
+  "completed_unix_ms": 1792477325957,
+  "configured_unix_ms": 1792477311394,
+  "finite_rows_byte_identical": true,
+  "guardian_command": [
+    "/usr/bin/python3",
+    "-B",
+    "/home/ubuntu/live/hivezilla-validator-20260930/releases/transfer-deadline-20261018-498831996a2dc34c/storage_jobs.py",
+    "--registry",
+    "/home/ubuntu/live/hivezilla-validator-20260930/config/storage-jobs.json",
+    "--report-dir",
+    "/home/ubuntu/live/hivezilla-validator-20260930/reports/storage-jobs",
+    "--supervise",
+    "--follow",
+    "--interval-seconds",
+    "30"
+  ],
+  "guardian_invocation_id": "4e62a965dc9a4351bcb0b4f4b2673650",
+  "guardian_pid": 4054568,
+  "guardian_sha256": "567c15e41b3f21665a765fbfaa5b2c70d9a565d1280463da959d946472a3c87c",
+  "live_before": {
+    "archived_banks": 771174,
+    "last_archive_progress_unix_ms": 1792477299330,
+    "max_archive_rowid": 771174,
+    "metadata": {
+      "namespace": "1a93d01e2c293e1f61c246747319a92fea69ab27060f050b986304c4c4715bcf",
+      "source": {
+        "agave_revision": "87167f3906bdf5111e99ead64d8f4098b7874e33",
+        "genesis_hash": "5eykt4UsFv8P8NJdTREpY1vzqKqZKvdpKuc147dw2N9d",
+        "node_identity": "J7qpvCEWhdBgPdYRV3s3btWPrRVXa2qnAzgvxWTvtbrQ",
+        "session_id": "000000000000000018df884b2474cf8e-20b258"
+      }
+    },
+    "retired_banks": 771174
+  },
+  "live_command": [
+    "/usr/bin/python3",
+    "/home/ubuntu/live/hivezilla-validator-20260930/releases/storage-recovery-20261020-f757f2be29f0-3a5fe9b9/cold_storage.py",
+    "archive",
+    "--output",
+    "/home/ubuntu/live/hivezilla-validator-20260930/compact/direct-agave-processed-live/000000000000000018df884b2474cf8e-20b258",
+    "--bank-output",
+    "/home/ubuntu/live/hivezilla-validator-20260930/compact/bank-v2-live/000000000000000018df884b2474cf8e-20b258",
+    "--capture",
+    "/home/ubuntu/live/hivezilla-validator-20260930/captures/direct-agave-live/000000000000000018df884b2474cf8e-20b258",
+    "--publisher-state",
+    "/home/ubuntu/live/hivezilla-validator-20260930/reports/native-processed-r2-bank-v2/000000000000000018df884b2474cf8e-20b258",
+    "--credentials-file",
+    "/home/ubuntu/live/hivezilla-validator-20260930/config/native-cold-storage.env",
+    "--v1-spool",
+    "/home/ubuntu/live/hivezilla-validator-20260930/stream-relay-spool-bank-v2/000000000000000018df884b2474cf8e-20b258",
+    "--bank-origin-spool",
+    "/home/ubuntu/live/hivezilla-validator-20260930/bank-v2-origin-spool/000000000000000018df884b2474cf8e-20b258",
+    "--keep-seconds",
+    "7200",
+    "--retire",
+    "--follow"
+  ],
+  "live_invocation_id": "3060c2b06be74837b95b017068658f5e",
+  "live_pid": 4054548,
+  "live_status": {
+    "archived_banks": 771238,
+    "batch_bank_limit": 64,
+    "eligible_wait_since_unix_ms": 1792477313908,
+    "freed_bytes_this_run": 148140032,
+    "full_remote_readback_required": true,
+    "keep_seconds": 7200,
+    "last_archive_progress_unix_ms": 1792477325059,
+    "last_batch_banks": 64,
+    "last_batch_seconds": 12.566442906856537,
+    "last_candidate_eligible_unix_ms": 1792477325643,
+    "last_candidate_seen_unix_ms": 1792477325324,
+    "last_scan_skip_counts": {
+      "archived": 0,
+      "bank_replay": 0,
+      "frame_replay": 0,
+      "pending": 0,
+      "retention": 0,
+      "writer_ack": 0
+    },
+    "oldest_eligible_pending_slot": 459088680,
+    "parallel_bundle_limit": 2,
+    "pending_bundles": 2,
+    "progress_stall_seconds": 900,
+    "recovery": {
+      "burst_retries_used": 0,
+      "healthy_since_unix_ms": null,
+      "healthy_start_archived_banks": null,
+      "last_error": null,
+      "last_failure_unix_ms": null,
+      "next_attempt_unix_ms": null,
+      "outage_since_unix_ms": null,
+      "reservation": null,
+      "schema": "blockzilla-native-cold-recovery-v1",
+      "state": "NORMAL"
+    },
+    "retired_banks": 771238,
+    "scan_after_bank": 1324199,
+    "scan_after_slot": 459088807,
+    "scan_pages_this_run": 3,
+    "scan_rows_this_run": 192,
+    "scan_sweeps_completed": 0,
+    "scan_sweeps_started": 1,
+    "scan_through_slot": 459128940,
+    "schema": "blockzilla-native-cold-storage-status-v1",
+    "state": "RUNNING",
+    "storage_progress": "TRANSFERRING",
+    "updated_unix_ms": 1792477325658
+  },
+  "manifest_sha256": "d560fc240d7d7a925917427d9d475c7761c047d0399e3bc9ba84948c1aac975c",
+  "new_live_row": {
+    "allow_restart": true,
+    "expected_command": [
+      "/usr/bin/python3",
+      "/home/ubuntu/live/hivezilla-validator-20260930/releases/storage-recovery-20261020-f757f2be29f0-3a5fe9b9/cold_storage.py",
+      "archive",
+      "--output",
+      "/home/ubuntu/live/hivezilla-validator-20260930/compact/direct-agave-processed-live/000000000000000018df884b2474cf8e-20b258",
+      "--bank-output",
+      "/home/ubuntu/live/hivezilla-validator-20260930/compact/bank-v2-live/000000000000000018df884b2474cf8e-20b258",
+      "--capture",
+      "/home/ubuntu/live/hivezilla-validator-20260930/captures/direct-agave-live/000000000000000018df884b2474cf8e-20b258",
+      "--publisher-state",
+      "/home/ubuntu/live/hivezilla-validator-20260930/reports/native-processed-r2-bank-v2/000000000000000018df884b2474cf8e-20b258",
+      "--credentials-file",
+      "/home/ubuntu/live/hivezilla-validator-20260930/config/native-cold-storage.env",
+      "--v1-spool",
+      "/home/ubuntu/live/hivezilla-validator-20260930/stream-relay-spool-bank-v2/000000000000000018df884b2474cf8e-20b258",
+      "--bank-origin-spool",
+      "/home/ubuntu/live/hivezilla-validator-20260930/bank-v2-origin-spool/000000000000000018df884b2474cf8e-20b258",
+      "--keep-seconds",
+      "7200",
+      "--retire",
+      "--follow"
+    ],
+    "expected_command_sha256": "bbdd68a638be8b2756c80c1b935be733a0f85491d85485549f47d743c937c103",
+    "helper": "/home/ubuntu/live/hivezilla-validator-20260930/releases/storage-recovery-20261020-f757f2be29f0-3a5fe9b9/cold_storage.py",
+    "helper_sha256": "f757f2be29f01378448cbe5bb5b529db2625e6654c065f0f17ebd8ba3cbb6d41",
+    "max_archived_banks": null,
+    "max_retries": 3,
+    "namespace": "1a93d01e2c293e1f61c246747319a92fea69ab27060f050b986304c4c4715bcf",
+    "output": "/home/ubuntu/live/hivezilla-validator-20260930/compact/direct-agave-processed-live/000000000000000018df884b2474cf8e-20b258",
+    "retry_delay_seconds": 60,
+    "source": {
+      "agave_revision": "87167f3906bdf5111e99ead64d8f4098b7874e33",
+      "genesis_hash": "5eykt4UsFv8P8NJdTREpY1vzqKqZKvdpKuc147dw2N9d",
+      "node_identity": "J7qpvCEWhdBgPdYRV3s3btWPrRVXa2qnAzgvxWTvtbrQ",
+      "session_id": "000000000000000018df884b2474cf8e-20b258"
+    },
+    "unit": "hivezilla-native-cold-storage-20261012-live.service"
+  },
+  "observed_guardian_command": [
+    "/usr/bin/python3",
+    "-B",
+    "/home/ubuntu/live/hivezilla-validator-20260930/releases/transfer-deadline-20261018-498831996a2dc34c/storage_jobs.py",
+    "--registry",
+    "/home/ubuntu/live/hivezilla-validator-20260930/config/storage-jobs.json",
+    "--report-dir",
+    "/home/ubuntu/live/hivezilla-validator-20260930/reports/storage-jobs",
+    "--supervise",
+    "--follow",
+    "--interval-seconds",
+    "30"
+  ],
+  "observed_live_command": [
+    "/usr/bin/python3",
+    "/home/ubuntu/live/hivezilla-validator-20260930/releases/storage-recovery-20261020-f757f2be29f0-3a5fe9b9/cold_storage.py",
+    "archive",
+    "--output",
+    "/home/ubuntu/live/hivezilla-validator-20260930/compact/direct-agave-processed-live/000000000000000018df884b2474cf8e-20b258",
+    "--bank-output",
+    "/home/ubuntu/live/hivezilla-validator-20260930/compact/bank-v2-live/000000000000000018df884b2474cf8e-20b258",
+    "--capture",
+    "/home/ubuntu/live/hivezilla-validator-20260930/captures/direct-agave-live/000000000000000018df884b2474cf8e-20b258",
+    "--publisher-state",
+    "/home/ubuntu/live/hivezilla-validator-20260930/reports/native-processed-r2-bank-v2/000000000000000018df884b2474cf8e-20b258",
+    "--credentials-file",
+    "/home/ubuntu/live/hivezilla-validator-20260930/config/native-cold-storage.env",
+    "--v1-spool",
+    "/home/ubuntu/live/hivezilla-validator-20260930/stream-relay-spool-bank-v2/000000000000000018df884b2474cf8e-20b258",
+    "--bank-origin-spool",
+    "/home/ubuntu/live/hivezilla-validator-20260930/bank-v2-origin-spool/000000000000000018df884b2474cf8e-20b258",
+    "--keep-seconds",
+    "7200",
+    "--retire",
+    "--follow"
+  ],
+  "old_live_row": {
+    "allow_restart": true,
+    "expected_command": [
+      "/usr/bin/python3",
+      "/home/ubuntu/live/hivezilla-validator-20260930/releases/transfer-deadline-20261018-498831996a2dc34c/cold_storage.py",
+      "archive",
+      "--output",
+      "/home/ubuntu/live/hivezilla-validator-20260930/compact/direct-agave-processed-live/000000000000000018df884b2474cf8e-20b258",
+      "--bank-output",
+      "/home/ubuntu/live/hivezilla-validator-20260930/compact/bank-v2-live/000000000000000018df884b2474cf8e-20b258",
+      "--capture",
+      "/home/ubuntu/live/hivezilla-validator-20260930/captures/direct-agave-live/000000000000000018df884b2474cf8e-20b258",
+      "--publisher-state",
+      "/home/ubuntu/live/hivezilla-validator-20260930/reports/native-processed-r2-bank-v2/000000000000000018df884b2474cf8e-20b258",
+      "--credentials-file",
+      "/home/ubuntu/live/hivezilla-validator-20260930/config/native-cold-storage.env",
+      "--v1-spool",
+      "/home/ubuntu/live/hivezilla-validator-20260930/stream-relay-spool-bank-v2/000000000000000018df884b2474cf8e-20b258",
+      "--bank-origin-spool",
+      "/home/ubuntu/live/hivezilla-validator-20260930/bank-v2-origin-spool/000000000000000018df884b2474cf8e-20b258",
+      "--keep-seconds",
+      "7200",
+      "--retire",
+      "--follow"
+    ],
+    "expected_command_sha256": "7ded09749fa742d20fd563b69be182134d9d54234ffbcf60d0b673321d4f81cb",
+    "helper": "/home/ubuntu/live/hivezilla-validator-20260930/releases/transfer-deadline-20261018-498831996a2dc34c/cold_storage.py",
+    "helper_sha256": "8a95785f2df4e2f53b414322f0fc42a8d2edd93a02f04cfca6358bb312c19800",
+    "max_archived_banks": null,
+    "max_retries": 3,
+    "namespace": "1a93d01e2c293e1f61c246747319a92fea69ab27060f050b986304c4c4715bcf",
+    "output": "/home/ubuntu/live/hivezilla-validator-20260930/compact/direct-agave-processed-live/000000000000000018df884b2474cf8e-20b258",
+    "retry_delay_seconds": 60,
+    "source": {
+      "agave_revision": "87167f3906bdf5111e99ead64d8f4098b7874e33",
+      "genesis_hash": "5eykt4UsFv8P8NJdTREpY1vzqKqZKvdpKuc147dw2N9d",
+      "node_identity": "J7qpvCEWhdBgPdYRV3s3btWPrRVXa2qnAzgvxWTvtbrQ",
+      "session_id": "000000000000000018df884b2474cf8e-20b258"
+    },
+    "unit": "hivezilla-native-cold-storage-20261012-live.service"
+  },
+  "phase": "PENDING_INDEPENDENT_PROOF",
+  "plan_sha256": "07fe964df0303fa396387eef771342de1ed5a8e500dced7338862efc1b3b2da2",
+  "post_progress": {
+    "archived_banks": 771238,
+    "last_archive_progress_unix_ms": 1792477325059,
+    "max_archive_rowid": 771238,
+    "metadata": {
+      "namespace": "1a93d01e2c293e1f61c246747319a92fea69ab27060f050b986304c4c4715bcf",
+      "source": {
+        "agave_revision": "87167f3906bdf5111e99ead64d8f4098b7874e33",
+        "genesis_hash": "5eykt4UsFv8P8NJdTREpY1vzqKqZKvdpKuc147dw2N9d",
+        "node_identity": "J7qpvCEWhdBgPdYRV3s3btWPrRVXa2qnAzgvxWTvtbrQ",
+        "session_id": "000000000000000018df884b2474cf8e-20b258"
+      }
+    },
+    "retired_banks": 771238
+  },
+  "post_restart_baseline": {
+    "archived_banks": 771174,
+    "last_archive_progress_unix_ms": 1792477299330,
+    "max_archive_rowid": 771174,
+    "metadata": {
+      "namespace": "1a93d01e2c293e1f61c246747319a92fea69ab27060f050b986304c4c4715bcf",
+      "source": {
+        "agave_revision": "87167f3906bdf5111e99ead64d8f4098b7874e33",
+        "genesis_hash": "5eykt4UsFv8P8NJdTREpY1vzqKqZKvdpKuc147dw2N9d",
+        "node_identity": "J7qpvCEWhdBgPdYRV3s3btWPrRVXa2qnAzgvxWTvtbrQ",
+        "session_id": "000000000000000018df884b2474cf8e-20b258"
+      }
+    },
+    "retired_banks": 771174
+  },
+  "post_restart_baseline_unix_ms": 1792477311720,
+  "post_transition_cloud_proof": "PENDING_INDEPENDENT_CHECK",
+  "protected_pids": {
+    "hivezilla-bank-v2-origin": 2134416,
+    "hivezilla-bank-v2-producer": 917148,
+    "hivezilla-bank-v2-r2-publisher": 4167494,
+    "hivezilla-direct-worker": 916425,
+    "hivezilla-shred-hook-recorder": 2142799,
+    "hivezilla-stream-origin": 2135639,
+    "hivezilla-stream-relay": 2136117,
+    "hivezilla-validator": 2142808
+  },
+  "protected_pids_unchanged": true,
+  "recovery_ledger_preserved": true,
+  "registry_after_sha256": "48f343929d1c5bce4832e4ab094f72e1f164691c8b089890b16a91c6ebae211b",
+  "registry_before_sha256": "a52115479c26ccff6367b8439cd58dbb2354bb7b61d25691e797a96611655f6f",
+  "release": "/home/ubuntu/live/hivezilla-validator-20260930/releases/storage-recovery-20261020-f757f2be29f0-3a5fe9b9",
+  "schema": "blockzilla-storage-recovery-install-v1",
+  "service_actions": [
+    [
+      "stop",
+      "hivezilla-native-storage-jobs.service"
+    ],
+    [
+      "stop",
+      "hivezilla-native-cold-storage-20261012-live.service"
+    ],
+    [
+      "start",
+      "hivezilla-native-cold-storage-20261012-live.service"
+    ],
+    [
+      "start",
+      "hivezilla-native-storage-jobs.service"
+    ]
+  ],
+  "source": {
+    "agave_revision": "87167f3906bdf5111e99ead64d8f4098b7874e33",
+    "genesis_hash": "5eykt4UsFv8P8NJdTREpY1vzqKqZKvdpKuc147dw2N9d",
+    "node_identity": "J7qpvCEWhdBgPdYRV3s3btWPrRVXa2qnAzgvxWTvtbrQ",
+    "session_id": "000000000000000018df884b2474cf8e-20b258"
+  },
+  "source_changed": false,
+  "started_unix_ms": 1792477310938,
+  "state": "ACTIVE_PENDING_CLOUD_PROOF",
+  "storage_jobs": {
+    "active_source": {
+      "agave_revision": "87167f3906bdf5111e99ead64d8f4098b7874e33",
+      "genesis_hash": "5eykt4UsFv8P8NJdTREpY1vzqKqZKvdpKuc147dw2N9d",
+      "node_identity": "J7qpvCEWhdBgPdYRV3s3btWPrRVXa2qnAzgvxWTvtbrQ",
+      "session_id": "000000000000000018df884b2474cf8e-20b258"
+    },
+    "issues": [],
+    "jobs": [
+      {
+        "active_state": "active",
+        "archived_banks": 771174,
+        "frozen": false,
+        "invocation_id": "3060c2b06be74837b95b017068658f5e",
+        "issues": [],
+        "last_archive_progress_unix_ms": 1792477299330,
+        "max_archived_banks": null,
+        "remaining_banks": null,
+        "retired_banks": 771174,
+        "retryable": false,
+        "source": {
+          "agave_revision": "87167f3906bdf5111e99ead64d8f4098b7874e33",
+          "genesis_hash": "5eykt4UsFv8P8NJdTREpY1vzqKqZKvdpKuc147dw2N9d",
+          "node_identity": "J7qpvCEWhdBgPdYRV3s3btWPrRVXa2qnAzgvxWTvtbrQ",
+          "session_id": "000000000000000018df884b2474cf8e-20b258"
+        },
+        "state": "RUNNING",
+        "status_age_ms": 1156,
+        "storage_progress": "TRANSFERRING",
+        "unit": "hivezilla-native-cold-storage-20261012-live.service"
+      },
+      {
+        "active_state": "inactive",
+        "archived_banks": 785546,
+        "frozen": false,
+        "invocation_id": "6a90e6a6a71e4342bc283a59b7b690b1",
+        "issues": [],
+        "max_archived_banks": 785546,
+        "remaining_banks": 0,
+        "retired_banks": 785546,
+        "retryable": false,
+        "source": {
+          "agave_revision": "d688dd0e3a576b048a848e5faf2e8d277f8feb6e",
+          "genesis_hash": "5eykt4UsFv8P8NJdTREpY1vzqKqZKvdpKuc147dw2N9d",
+          "node_identity": "J7qpvCEWhdBgPdYRV3s3btWPrRVXa2qnAzgvxWTvtbrQ",
+          "session_id": "000000000000000018de229d3fc8a9d9-275b05"
+        },
+        "state": "COMPLETE",
+        "unit": "hivezilla-native-cold-storage-20261016-source-18de229d.service"
+      },
+      {
+        "active_state": "inactive",
+        "archived_banks": 308768,
+        "frozen": false,
+        "invocation_id": "",
+        "issues": [],
+        "max_archived_banks": 308768,
+        "remaining_banks": 0,
+        "retired_banks": 308768,
+        "retryable": false,
+        "source": {
+          "agave_revision": "d688dd0e3a576b048a848e5faf2e8d277f8feb6e",
+          "genesis_hash": "5eykt4UsFv8P8NJdTREpY1vzqKqZKvdpKuc147dw2N9d",
+          "node_identity": "J7qpvCEWhdBgPdYRV3s3btWPrRVXa2qnAzgvxWTvtbrQ",
+          "session_id": "000000000000000018ddd9a6bb6fc50e-282459"
+        },
+        "state": "COMPLETE",
+        "unit": "hivezilla-native-cold-storage-20261016-source-18ddd9a6.service"
+      }
+    ],
+    "registry_sha256": "48f343929d1c5bce4832e4ab094f72e1f164691c8b089890b16a91c6ebae211b",
+    "schema": "blockzilla-storage-jobs-status-v1",
+    "state": "HEALTHY",
+    "updated_unix_ms": 1792477311592
+  },
+  "validator_restarted": false
+}

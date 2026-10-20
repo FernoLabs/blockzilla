@@ -1,0 +1,70 @@
+{
+  "schema": "blockzilla-bank-head-timing-diagnosis-v1",
+  "source": {
+    "genesis_hash": "5eykt4UsFv8P8NJdTREpY1vzqKqZKvdpKuc147dw2N9d",
+    "node_identity": "J7qpvCEWhdBgPdYRV3s3btWPrRVXa2qnAzgvxWTvtbrQ",
+    "agave_revision": "87167f3906bdf5111e99ead64d8f4098b7874e33",
+    "session_id": "000000000000000018df884b2474cf8e-20b258"
+  },
+  "observed": {
+    "samples": 57,
+    "non_live_samples": 4,
+    "maximum_confirmed_source_lag_ms": 2106,
+    "faults": [
+      {
+        "sampled_unix_ms": 1792312955458,
+        "status": "stale",
+        "source_lag_ms": 876,
+        "confirmed_slot": 458372248
+      },
+      {
+        "sampled_unix_ms": 1792312960613,
+        "status": "stale",
+        "source_lag_ms": 1267,
+        "confirmed_slot": 458372272
+      },
+      {
+        "sampled_unix_ms": 1792312970990,
+        "status": "stale",
+        "source_lag_ms": 729,
+        "confirmed_slot": 458372322
+      },
+      {
+        "sampled_unix_ms": 1792312976118,
+        "status": "stale",
+        "source_lag_ms": 984,
+        "confirmed_slot": 458372343
+      }
+    ]
+  },
+  "cause": {
+    "status_interval_ms": 5000,
+    "head_health_expiry_ms": 5000,
+    "health_clock_is_separate_from_confirmed_observation_clock": true,
+    "production_sources": [
+      "hivezilla/stream-relay/src/bank_server.rs",
+      "hivezilla/stream-relay/src/bank_store.rs"
+    ]
+  },
+  "repair": {
+    "status_interval_ms": 1000,
+    "head_health_expiry_ms": 5000,
+    "head_checks_unchanged": true,
+    "source_and_event_contract_unchanged": true,
+    "regression_old_cadence": "FAILED_AS_EXPECTED",
+    "regression_new_cadence": "PASSED",
+    "local_transport_library_tests": 33,
+    "host_transport_library_tests": 33,
+    "counts_overlap": true
+  },
+  "source_review": {
+    "clean_reference_commit": "c03e07f772aba1c8fb7265465574e65e6320141a",
+    "host_provider_manifest_sha256": "d5279e48e1073e62e6df3a58e7a9354bf8f72a71f134d0d91f853af632d5063b",
+    "production_graph_equivalent_after_formatting_normalization": true,
+    "dependency_manifests_and_transport_lock_byte_equal": true,
+    "unrelated_dirty_chain_and_tests_not_included": true,
+    "comparison": "head-health/SOURCE-COMPARISON.json"
+  },
+  "old_runtime_binary_sha256": "1bfc4577e5090d2a073a7114a0dd086f6397f4205e0909fcd20cc701d79846ae",
+  "extra_retirement_started": false
+}

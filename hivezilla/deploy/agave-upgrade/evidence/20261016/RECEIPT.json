@@ -1,0 +1,175 @@
+{
+  "schema": "blockzilla-agave-upgrade-receipt-v1",
+  "state": "PASSED",
+  "completed_unix_ms": 1792182751439,
+  "upstream_tag": "v4.3.2",
+  "upstream_revision": "a203300045b405f86c9c84308b2eae76af69ac3b",
+  "agave_revision": "87167f3906bdf5111e99ead64d8f4098b7874e33",
+  "validator_version": "agave-validator 4.3.2 (src:87167f39; feat:c9ad34d2, client:Agave)",
+  "old_source": {
+    "genesis_hash": "5eykt4UsFv8P8NJdTREpY1vzqKqZKvdpKuc147dw2N9d",
+    "node_identity": "J7qpvCEWhdBgPdYRV3s3btWPrRVXa2qnAzgvxWTvtbrQ",
+    "agave_revision": "d688dd0e3a576b048a848e5faf2e8d277f8feb6e",
+    "session_id": "000000000000000018deede1d641da13-275b05"
+  },
+  "source": {
+    "agave_revision": "87167f3906bdf5111e99ead64d8f4098b7874e33",
+    "genesis_hash": "5eykt4UsFv8P8NJdTREpY1vzqKqZKvdpKuc147dw2N9d",
+    "node_identity": "J7qpvCEWhdBgPdYRV3s3btWPrRVXa2qnAzgvxWTvtbrQ",
+    "session_id": "000000000000000018df1be3bad56d9c-20b258"
+  },
+  "validator_pid": 2142808,
+  "no_voting": true,
+  "snapshot_retention": {
+    "full": 1,
+    "incremental": 1
+  },
+  "artifacts": {
+    "agave-validator": {
+      "path": "/home/ubuntu/live/hivezilla-validator-20260930/releases/agave-4.3.2-20261016-87167f3906bdf511/agave-validator",
+      "sha256": "d8371d630a8ca6dc4c7d38aea35c9ebac2308fa36fb63b4d8a30702dbb94a15b"
+    },
+    "libhivezilla_direct_agave.so": {
+      "path": "/home/ubuntu/live/hivezilla-validator-20260930/releases/agave-4.3.2-20261016-87167f3906bdf511/libhivezilla_direct_agave.so",
+      "sha256": "56dc96e0bdff0b1be906687c0460d995025f4e761c12d49003236a823e66f337"
+    },
+    "hivezilla-direct-agave": {
+      "path": "/home/ubuntu/live/hivezilla-validator-20260930/releases/agave-4.3.2-20261016-87167f3906bdf511/hivezilla-direct-agave",
+      "sha256": "79b459267cbbfaea9de9db4495b5ec5eb957b089658c57bbf5dca632d972da5c"
+    },
+    "blockzilla": {
+      "path": "/home/ubuntu/live/hivezilla-validator-20260930/releases/agave-4.3.2-20261016-87167f3906bdf511/blockzilla",
+      "sha256": "14c2622f8a0e073916a17613fb299cddfcc3f1204b0793f6b57d18593d431bbe"
+    }
+  },
+  "native_build_commands_passed": 9,
+  "deployment_python_tests_passed": 57,
+  "heartbeat_archive_tests_passed": 41,
+  "live_checks": "LIVE-2.json and LIVE-3.json",
+  "stability": {
+    "state": "PASSED",
+    "pids_unchanged": true,
+    "all_counters_advanced": true,
+    "elapsed_ms": 273712,
+    "rpc": {
+      "finalized_slot": 457771198,
+      "genesis_hash": "5eykt4UsFv8P8NJdTREpY1vzqKqZKvdpKuc147dw2N9d",
+      "health": "ok",
+      "identity": "J7qpvCEWhdBgPdYRV3s3btWPrRVXa2qnAzgvxWTvtbrQ",
+      "version": "4.3.2"
+    },
+    "compact": {
+      "event_sequence": 7525,
+      "lag_slots": 0,
+      "last_compact_slot": 457771227,
+      "source_sequence": 8789268,
+      "state": "RUNNING",
+      "updated_unix_ms": 1792182653529
+    },
+    "private": {
+      "bank_id": 7212,
+      "block_height": 435807012,
+      "blockhash": "2dqYuCkxGLsfqfiygjcEfYNH7vhmTnSHc1dQv3wVtSPs",
+      "cursor": "000000000000000018df1be3bad56d9c-20b258:p11302:00cf3b458948033f110cc5d69f9449ce85f7097a41ed86c25a6e192019584b45",
+      "last_valid_block_height": 435807162,
+      "parent_blockhash": "2Cg4oygoBniE23skdxycQy9APErbKptuAsgqdkEC1YsQ",
+      "parent_slot": 457771226,
+      "payload_frame_sha256": "464a03ab0b95782bd1a1797666cd005ed5bdca9a19e700588d3ea0cce86015c4",
+      "payload_len": 619811,
+      "rpc_bank_match": true,
+      "slot": 457771227,
+      "source_lag_ms": 646,
+      "status": "live"
+    },
+    "public": {
+      "advancing": true,
+      "block_events": 5,
+      "elapsed_seconds": 0.747,
+      "slots": [
+        457771228,
+        457771229,
+        457771230,
+        457771231,
+        457771232
+      ]
+    },
+    "publisher": {
+      "blocks": 3627,
+      "bytes": 1956393009,
+      "cursor": "000000000000000018df1be3bad56d9c-20b258:p7223:92007da60ea7537d3c088e88f72374379dd7e509db566c8b35e67506bda33f3b",
+      "sequence": 7223,
+      "state": "RUNNING",
+      "updated_unix_ms": 1792182652807
+    },
+    "failed": {}
+  },
+  "monitor": {
+    "state": "PASSED",
+    "checked_unix_ms": 1792182744181,
+    "sampled_unix_ms": 1792182642004,
+    "last_check_unix_ms": 1792182651135,
+    "current_issues": [],
+    "active_incident_issues": [],
+    "stream_issue": null,
+    "host_errors": [],
+    "rpc": {
+      "healthy": true,
+      "finalized_slot": 457771146
+    },
+    "compact": {
+      "state": "RUNNING",
+      "last_compact_slot": 457771175,
+      "event_sequence": 7421,
+      "source_sequence": 8666502,
+      "updated_unix_ms": 1792182641813
+    },
+    "pending_alerts": 0,
+    "delivery_error": null,
+    "maintenance_event_id": "27d95815-b969-4518-9ced-9d23172bde1f"
+  },
+  "native_gap": {
+    "old_last_complete_processed_slot": 457764446,
+    "new_first_complete_processed_slot": 457767450,
+    "first_slot_number": 457764447,
+    "last_slot_number": 457767449,
+    "slot_numbers": 3003,
+    "recovered": false,
+    "meaning": "slot numbers between native sessions; not a count of lost produced or finalized blocks"
+  },
+  "old_source_fully_drained": true,
+  "old_publisher_tail_events": 0,
+  "old_publisher_pending_intent": false,
+  "old_source_files_preserved": true,
+  "source_pin_file": "/home/ubuntu/live/hivezilla-validator-20260930/reports/agave-upgrade-4.3.2-20261016/handoff/expected-source.json",
+  "raw_hook_executable_matched": true,
+  "raw_hook_packets_advanced": true,
+  "heartbeat_repair": {
+    "state": "INSTALLED",
+    "old_helper": "/home/ubuntu/live/hivezilla-validator-20260930/releases/bank-v2-health-20261016-0c5a62ac594f8dd8/heartbeat.py",
+    "old_sha256": "bf141c1e2f76249b0001b9095b2165e564b5c9bbaed44fd295af21c93881e4c7",
+    "new_helper": "/home/ubuntu/live/hivezilla-validator-20260930/releases/agave-upgrade-watch-20261016-0469f7ebd1d62b3b/heartbeat.py",
+    "new_sha256": "0469f7ebd1d62b3bf8c1c74cc5045c7d213687c7e5860308d70b4f3c17d28cce",
+    "sibling_sha256": "fb7adbd6cb6d03fb33dc54974eca3f593d581e6586f5a70be672587fb5e5937f",
+    "unit_sha256": "bd1017a7b480e6bedb22c83a4a8f9d8e33698992e7503d4bf50032c581cfee18",
+    "dropin": "/etc/systemd/system/hivezilla-foundation-heartbeat.service.d/zzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzz-agave-4.3.2.conf",
+    "proposed": "/home/ubuntu/live/hivezilla-validator-20260930/reports/agave-upgrade-4.3.2-20261016/heartbeat-new.conf",
+    "prepared_unix_ms": 1792182481070,
+    "change": "allow periods in one flat release directory name; keep exact launcher, roots and binary names",
+    "installed_unix_ms": 1792182522208,
+    "sample_errors": [],
+    "sender_report": {
+      "schema": "blockzilla-foundation-heartbeat-sender-v1",
+      "state": "SENT",
+      "sampled_unix_ms": 1792182521841,
+      "errors": [],
+      "send_error": null
+    }
+  },
+  "free_disk_bytes": 1527595577344,
+  "limits": [
+    "native restart gap has not been rebuilt",
+    "pinned consumers must reconcile before changing source",
+    "old-source cold storage command saved for a separate drain",
+    "later validator restarts still need an explicit source handoff"
+  ]
+}

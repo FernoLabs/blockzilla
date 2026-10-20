@@ -1,0 +1,539 @@
+--- a/hivezilla/deploy/direct-agave/cold_storage.py
++++ b/hivezilla/deploy/direct-agave/cold_storage.py
+@@ -7,14 +7,18 @@
+ import json
+ import os
+ from pathlib import Path, PurePosixPath
++import re
++import selectors
+ import shlex
+ import shutil
+ import sqlite3
+ import stat
++import subprocess
+ import sys
+ import tarfile
+ import tempfile
+ import time
++import threading
+ import traceback
+ from concurrent.futures import FIRST_COMPLETED, ThreadPoolExecutor, wait
+ from contextlib import ExitStack, closing
+@@ -25,6 +29,9 @@
+ RESTORE_MARGIN = 1024**3
+ STORAGE_STALL_SECONDS = 900
+ SCAN_PAGE_PAUSE_SECONDS = 0.1
++BUNDLE_TRANSFER_SECONDS = 300
++TRANSFER_REPORT_LIMIT = 4096
++TRANSFER_SCHEMA = "blockzilla-bundle-transfer-v1"
+ SOURCE_KEYS = ("genesis_hash", "node_identity", "agave_revision", "session_id")
+ 
+ 
+@@ -101,10 +108,120 @@
+             and isinstance(details.get("error"), ProtocolError))
+ 
+ 
++class BundleTransferTimeout(RuntimeError):
++    pass
++
++
++class BundleTransferError(RuntimeError):
++    def __init__(self, evidence=None):
++        super().__init__("bundle_transfer_failed")
++        self.evidence = evidence
++
++
++def failure_fields(error):
++    if isinstance(error, BundleTransferError) and error.evidence is not None:
++        return error.evidence.copy()
++    response = getattr(error, "response", None)
++    metadata = response.get("ResponseMetadata") if isinstance(response, dict) else None
++    status = metadata.get("HTTPStatusCode") if isinstance(metadata, dict) else None
++    kind = type(error).__name__
++    return dict(error_type=kind if re.fullmatch(r"[A-Za-z_][A-Za-z0-9_]{0,63}", kind) else "BundleTransferError",
++                http_status=status if type(status) is int and 100 <= status <= 599 else None,
++                network_error_type="ProtocolError" if streaming_protocol_error(error) else None)
++
++
++def strict_json(raw):
++    def pairs(items):
++        result = {}
++        for key, value in items:
++            if key in result:
++                raise ValueError("duplicate_transfer_field")
++            result[key] = value
++        return result
++    return json.loads(raw, object_pairs_hook=pairs)
++
++
++def transfer_process(command, request, timeout=BUNDLE_TRANSFER_SECONDS):
++    """Bound all child work and output; kill and reap before returning failure."""
++    deadline = time.monotonic() + timeout
++    raw = json.dumps(request, separators=(",", ":")).encode()
++    if len(raw) > TRANSFER_REPORT_LIMIT:
++        raise BundleTransferError()
++    reader, writer = os.pipe()  # EOF makes the child exit if this parent dies.
++    process = None
++    try:
++        with tempfile.TemporaryFile() as input_file:
++            input_file.write(raw); input_file.seek(0)
++            process = subprocess.Popen([*command, "--parent-watch-fd", str(reader)],
++                stdin=input_file, stdout=subprocess.PIPE, stderr=subprocess.DEVNULL, pass_fds=(reader,))
++        os.close(reader); reader = None
++        output = bytearray()
++        with selectors.DefaultSelector() as poll:
++            poll.register(process.stdout, selectors.EVENT_READ)
++            while poll.get_map():
++                remaining = deadline - time.monotonic()
++                if remaining <= 0:
++                    raise BundleTransferTimeout("bundle_transfer_deadline")
++                for key, _ in poll.select(remaining):
++                    body = os.read(key.fd, TRANSFER_REPORT_LIMIT + 1 - len(output))
++                    if not body:
++                        poll.unregister(key.fileobj)
++                    else:
++                        output.extend(body)
++                        if len(output) > TRANSFER_REPORT_LIMIT:
++                            raise BundleTransferError()
++        remaining = deadline - time.monotonic()
++        if remaining <= 0:
++            raise BundleTransferTimeout("bundle_transfer_deadline")
++        try:
++            code = process.wait(timeout=remaining)
++        except subprocess.TimeoutExpired:
++            raise BundleTransferTimeout("bundle_transfer_deadline") from None
++        try:
++            value = strict_json(output)
++        except (ValueError, UnicodeError):
++            raise BundleTransferError() from None
++        return code, value
++    finally:
++        if process is not None:
++            if process.poll() is None:
++                process.kill()
++            process.wait()
++            process.stdout.close()
++        if reader is not None:
++            os.close(reader)
++        os.close(writer)
++
++
++def bundle_stamp(path):
++    info = path.lstat()
++    if not path.is_absolute() or not stat.S_ISREG(info.st_mode) or not 0 < info.st_size <= MAX_BUNDLE:
++        raise BundleTransferError()
++    return [info.st_dev, info.st_ino, info.st_size, info.st_mtime_ns, info.st_ctime_ns]
++
++
++def validate_transfer_result(code, value, expected):
++    if code == 0 and isinstance(value, dict) and value == expected and type(value.get("bytes")) is int:
++        return
++    if (code == 1 and isinstance(value, dict)
++            and set(value) == {"schema", "state", "error_type", "http_status", "network_error_type"}
++            and value["schema"] == TRANSFER_SCHEMA and value["state"] == "FAILED"
++            and isinstance(value["error_type"], str)
++            and re.fullmatch(r"[A-Za-z_][A-Za-z0-9_]{0,63}", value["error_type"])
++            and (value["http_status"] is None or type(value["http_status"]) is int and 100 <= value["http_status"] <= 599)
++            and value["network_error_type"] in (None, "ProtocolError")
++            and (value["network_error_type"] is None or value["error_type"] == "ResponseStreamingError")):
++        raise BundleTransferError({key: value[key] for key in ("error_type", "http_status", "network_error_type")})
++    raise BundleTransferError()
++
++
+ class R2:
+     def __init__(self, credentials):
+         import boto3
+         from botocore.config import Config
++        self.credentials_file = credentials.resolve(strict=True)
++        self.helper = Path(__file__).resolve(strict=True)
++        self.helper_sha256 = digest(self.helper)
+         values = {}
+         for line in credentials.read_text().splitlines():
+             line = line.strip()
+@@ -130,6 +247,21 @@
+                           request_checksum_calculation="when_required", response_checksum_validation="when_required"))
+ 
+     def put_verified(self, key, path, sha):
++        path = path.resolve(strict=True)
++        stamp = bundle_stamp(path)
++        if digest(self.helper) != self.helper_sha256:
++            raise BundleTransferError()
++        expected = dict(schema=TRANSFER_SCHEMA, state="VERIFIED", namespace=self.namespace,
++                        key=key, sha256=sha, bytes=stamp[2], nonce=os.urandom(16).hex(),
++                        helper_sha256=self.helper_sha256)
++        request = dict(expected, path=str(path))
++        code, value = transfer_process([sys.executable, str(self.helper), "_transfer",
++                                       "--credentials-file", str(self.credentials_file)], request)
++        validate_transfer_result(code, value, expected)
++        if bundle_stamp(path) != stamp:
++            raise BundleTransferError()
++
++    def _put_verified_in_process(self, key, path, sha):
+         from botocore.exceptions import ClientError, ConnectionClosedError, ReadTimeoutError, ResponseStreamingError
+         from urllib3.exceptions import ReadTimeoutError as URLLib3ReadTimeoutError
+         try:
+@@ -176,6 +308,54 @@
+             os.fsync(f.fileno())
+         if digest(destination) != sha:
+             raise RuntimeError("remote_bundle_readback_mismatch")
++
++
++def transfer_child(credentials, watch_fd):
++    # This process has no database, source-retirement or restore authority.
++    # The pipe is held open only by its parent; SIGTERM/SIGKILL also closes it.
++    if not stat.S_ISFIFO(os.fstat(watch_fd).st_mode):
++        raise BundleTransferError()
++    def parent_watch():
++        try:
++            os.read(watch_fd, 1)
++        finally:
++            os._exit(70)
++    threading.Thread(target=parent_watch, daemon=True).start()
++    try:
++        raw = sys.stdin.buffer.read(TRANSFER_REPORT_LIMIT + 1)
++        request = strict_json(raw)
++        fields = {"schema", "state", "namespace", "key", "sha256", "bytes", "nonce", "helper_sha256", "path"}
++        if (len(raw) > TRANSFER_REPORT_LIMIT or not isinstance(request, dict) or set(request) != fields
++                or request["schema"] != TRANSFER_SCHEMA or request["state"] != "VERIFIED"
++                or any(not isinstance(request[name], str) or not re.fullmatch(r"[0-9a-f]{64}", request[name])
++                       for name in ("namespace", "sha256", "helper_sha256"))
++                or not isinstance(request["nonce"], str) or not re.fullmatch(r"[0-9a-f]{32}", request["nonce"])
++                or not isinstance(request["key"], str) or len(request["key"]) > 1024
++                or not request["key"].startswith("native-custody/processed-v1/")
++                or not request["key"].endswith("/" + request["sha256"] + ".tar")
++                or type(request["bytes"]) is not int or not 0 < request["bytes"] <= MAX_BUNDLE
++                or not isinstance(request["path"], str)):
++            raise BundleTransferError()
++        path = Path(request["path"])
++        stamp = bundle_stamp(path)
++        if (path.resolve(strict=True) != path or stamp[2] != request["bytes"]
++                or digest(Path(__file__).resolve(strict=True)) != request["helper_sha256"]
++                or digest(path) != request["sha256"]):
++            raise BundleTransferError()
++        remote = R2(credentials)
++        if remote.namespace != request["namespace"]:
++            raise BundleTransferError()
++        remote._put_verified_in_process(request["key"], path, request["sha256"])
++        if bundle_stamp(path) != stamp:
++            raise BundleTransferError()
++        result = {key: value for key, value in request.items() if key != "path"}
++        code = 0
++    except Exception as error:
++        result = dict(schema=TRANSFER_SCHEMA, state="FAILED", **failure_fields(error))
++        code = 1
++    # Only this small fixed-shape record crosses the process boundary.
++    print(json.dumps(result, separators=(",", ":")), flush=True)
++    return code
+ 
+ 
+ def database(state, source, namespace):
+@@ -414,6 +594,8 @@
+ 
+ def record_archive_failure(context, error):
+     kind, trace = safe_failure_trace(error)
++    evidence = failure_fields(error)
++    kind = evidence["error_type"]
+     print(trace, file=sys.stderr, flush=True)
+     # A second invocation that fails to acquire LOCK must not mark a healthy
+     # owner FAILED. This context is set only after exclusive lock acquisition.
+@@ -442,11 +624,8 @@
+     previous.update(schema="blockzilla-native-cold-storage-status-v1", state="FAILED",
+                     storage_progress="FAILED", error="archive_operation_failed", error_type=kind,
+                     failure_traceback=trace, updated_unix_ms=int(time.time() * 1000))
+-    response = getattr(error, "response", None)
+-    metadata = response.get("ResponseMetadata") if isinstance(response, dict) else None
+-    http_status = metadata.get("HTTPStatusCode") if isinstance(metadata, dict) else None
+-    previous["http_status"] = http_status if type(http_status) is int and 100 <= http_status <= 599 else None
+-    previous["network_error_type"] = "ProtocolError" if streaming_protocol_error(error) else None
++    previous["http_status"] = evidence["http_status"]
++    previous["network_error_type"] = evidence["network_error_type"]
+     if "source" in context:
+         previous["source"] = context["source"]
+     invocation = os.environ.get("INVOCATION_ID", "")
+@@ -744,6 +923,13 @@
+ 
+ 
+ if __name__ == "__main__":
++    if len(sys.argv) > 1 and sys.argv[1] == "_transfer":
++        child = argparse.ArgumentParser()
++        child.add_argument("--credentials-file", type=Path, required=True)
++        child.add_argument("--parent-watch-fd", type=int, required=True)
++        options = child.parse_args(sys.argv[2:])
++        os.umask(0o077)
++        raise SystemExit(transfer_child(options.credentials_file, options.parent_watch_fd))
+     p = argparse.ArgumentParser(description=__doc__)
+     modes = p.add_subparsers(dest="mode", required=True)
+     put = modes.add_parser("archive")
+--- a/hivezilla/deploy/direct-agave/test_cold_storage.py
++++ b/hivezilla/deploy/direct-agave/test_cold_storage.py
+@@ -4,9 +4,11 @@
+ from pathlib import Path
+ import tempfile
+ import sqlite3
++import subprocess
+ import sys
+ import tarfile
+ import threading
++import time
+ from concurrent.futures import ThreadPoolExecutor
+ from contextlib import closing
+ from types import SimpleNamespace
+@@ -68,7 +70,213 @@
+         remote.bucket, remote.namespace = 'bucket', 'namespace'
+         remote.client = SimpleNamespace(put_object=Mock(),
+             get_object=Mock(side_effect=[{'Body': body} for body in bodies]))
++        # These fake SDK tests exercise the exact implementation used inside
++        # the isolated child. Process-boundary tests below cover the parent.
++        remote.put_verified = remote._put_verified_in_process
+         return remote
++
++    @staticmethod
++    def isolated_remote(root):
++        remote = m.R2.__new__(m.R2)
++        remote.namespace = 'b' * 64
++        remote.helper = Path(m.__file__).resolve()
++        remote.helper_sha256 = m.digest(remote.helper)
++        remote.credentials_file = root / 'credentials.env'
++        return remote
++
++    def test_transfer_process_total_deadline_kills_and_reaps_slow_active_child(self):
++        with tempfile.TemporaryDirectory() as d:
++            pidfile = Path(d) / 'pid'
++            script = ('import os,pathlib,signal,time; pathlib.Path(' + repr(str(pidfile)) + ').write_text(str(os.getpid())); '
++                      'signal.signal(signal.SIGTERM,signal.SIG_IGN); '
++                      '\nwhile True:\n print(" ",flush=True); time.sleep(.01)')
++            processes = []
++            original = m.subprocess.Popen
++            def launch(*args, **kwargs):
++                process = original(*args, **kwargs); processes.append(process); return process
++            started = time.monotonic()
++            with patch.object(m.subprocess, 'Popen', side_effect=launch):
++                with self.assertRaises(m.BundleTransferTimeout):
++                    m.transfer_process([sys.executable, '-c', script], {}, timeout=.3)
++            self.assertLess(time.monotonic() - started, 3)
++            self.assertTrue(pidfile.exists())
++            self.assertEqual(len(processes), 1)
++            self.assertIsNotNone(processes[0].returncode)
++            self.assertTrue(processes[0].stdout.closed)
++            with self.assertRaises(ProcessLookupError): m.os.kill(int(pidfile.read_text()), 0)
++            with self.assertRaises(ChildProcessError): m.os.waitpid(processes[0].pid, m.os.WNOHANG)
++
++    def test_transfer_process_bounds_output_and_discards_secret_stderr(self):
++        script = 'import os,time; os.write(2,b"DO_NOT_PRINT"*100000); os.write(1,b"DO_NOT_PRINT"*100000); time.sleep(60)'
++        with self.assertRaises(m.BundleTransferError) as error, patch('builtins.print') as output:
++            m.transfer_process([sys.executable, '-c', script], {}, timeout=2)
++        self.assertNotIn('DO_NOT_PRINT', str(error.exception))
++        self.assertNotIn('DO_NOT_PRINT', str(vars(error.exception)))
++        output.assert_not_called()
++
++    def test_transfer_process_strict_json_rejects_duplicate_and_trailing_proofs(self):
++        for raw in ('{"state":"VERIFIED","state":"FAILED"}', '{}\n{}', 'DO_NOT_PRINT'):
++            with self.subTest(raw=raw), self.assertRaises(m.BundleTransferError):
++                m.transfer_process([sys.executable, '-c', 'print(' + repr(raw) + ')'], {}, timeout=2)
++
++    def test_parent_requires_exact_proof_and_unchanged_bundle_and_helper(self):
++        with tempfile.TemporaryDirectory() as d:
++            root = Path(d).resolve(); path = root / 'bundle.tar'; path.write_bytes(b'verified bytes')
++            remote = self.isolated_remote(root); sha = m.digest(path); key = 'native-custody/processed-v1/session/' + sha + '.tar'
++            def result(command, request):
++                self.assertEqual(command, [sys.executable, str(remote.helper), '_transfer', '--credentials-file', str(remote.credentials_file)])
++                self.assertEqual(request['path'], str(path))
++                self.assertEqual(request['namespace'], remote.namespace)
++                self.assertEqual(request['sha256'], sha)
++                return 0, {k: v for k, v in request.items() if k != 'path'}
++            with patch.object(m, 'transfer_process', side_effect=result): remote.put_verified(key, path, sha)
++            for field in ('namespace', 'key', 'sha256', 'bytes', 'nonce', 'helper_sha256', 'state', 'extra', 'missing', 'bool', 'nonzero', 'changed'):
++                with self.subTest(field=field):
++                    def bad(command, request):
++                        code, value = result(command, request)
++                        if field == 'extra': value['unexpected'] = True
++                        elif field == 'missing': value.pop('namespace')
++                        elif field == 'bool': value['bytes'] = True
++                        elif field == 'nonzero': code = 1
++                        elif field == 'changed': path.write_bytes(b'changed same size')
++                        else: value[field] = 'wrong'
++                        return code, value
++                    with patch.object(m, 'transfer_process', side_effect=bad), self.assertRaises(m.BundleTransferError):
++                        remote.put_verified(key, path, sha)
++                    path.write_bytes(b'verified bytes')
++            remote.helper_sha256 = '0' * 64
++            with patch.object(m, 'transfer_process') as invoke, self.assertRaises(m.BundleTransferError): remote.put_verified(key, path, sha)
++            invoke.assert_not_called()
++
++    def test_timeout_keeps_index_and_custody_then_a_proven_retry_commits_once(self):
++        with tempfile.TemporaryDirectory() as d:
++            root = Path(d).resolve(); source, record, data, evidence = self.fixture(root)
++            remote = self.isolated_remote(root); state = root / 'cold-storage'; db = m.database(state, source, remote.namespace)
++            run = m.transfer_process
++            def timeout(command, request):
++                return run([sys.executable, '-c', 'import time; time.sleep(60)'], request, timeout=.1)
++            with patch.object(m, 'transfer_process', side_effect=timeout), self.assertRaises(m.BundleTransferTimeout):
++                m.archive_group(root, db, remote, [record], state, True)
++            self.assertEqual(db.execute('SELECT count(*) FROM archives').fetchone()[0], 0)
++            self.assertIsNone(db.execute('SELECT value FROM meta WHERE id=2').fetchone())
++            self.assertTrue(data.exists() and evidence.exists() and (state / 'bundle.tar').exists())
++            self.assertFalse((data.parent / 'REMOTE-CUSTODY.json').exists())
++            def success(command, request):
++                script = 'import json,sys; r=json.load(sys.stdin); r.pop("path"); print(json.dumps(r))'
++                return run([sys.executable, '-c', script], request, timeout=2)
++            with patch.object(m, 'transfer_process', side_effect=success):
++                m.archive_group(root, db, remote, [record], state, True)
++            self.assertEqual(db.execute('SELECT count(*),sum(retired) FROM archives').fetchone(), (1, 1))
++            self.assertFalse(data.exists() or evidence.exists()); db.close()
++
++    def test_failed_or_mismatched_child_proofs_never_commit_or_retire(self):
++        for failure in ('namespace', 'sha256', 'bytes', 'nonzero', 'credentials', 'hash', 'incomplete'):
++            with self.subTest(failure=failure), tempfile.TemporaryDirectory() as d:
++                root = Path(d).resolve(); source, record, data, evidence = self.fixture(root)
++                remote = self.isolated_remote(root); state = root / 'cold-storage'; db = m.database(state, source, remote.namespace)
++                def result(command, request):
++                    value = {k: v for k, v in request.items() if k != 'path'}
++                    if failure in ('credentials', 'hash', 'incomplete'):
++                        kind = {'credentials': 'NoCredentialsError', 'hash': 'RuntimeError', 'incomplete': 'IncompleteReadError'}[failure]
++                        return 1, dict(schema=m.TRANSFER_SCHEMA, state='FAILED', error_type=kind,
++                                       http_status=None, network_error_type=None)
++                    if failure == 'nonzero': return 1, value
++                    value[failure] = 'wrong'
++                    return 0, value
++                with patch.object(m, 'transfer_process', side_effect=result), self.assertRaises(m.BundleTransferError):
++                    m.archive_group(root, db, remote, [record], state, True)
++                self.assertEqual(db.execute('SELECT count(*) FROM archives').fetchone()[0], 0)
++                self.assertIsNone(db.execute('SELECT value FROM meta WHERE id=2').fetchone())
++                self.assertTrue(data.exists() and evidence.exists() and (state / 'bundle.tar').exists())
++                self.assertFalse((data.parent / 'REMOTE-CUSTODY.json').exists()); db.close()
++
++    def test_parallel_transfer_failure_keeps_only_proven_success_and_pending_cap_reservation(self):
++        with tempfile.TemporaryDirectory() as d:
++            root = Path(d).resolve(); source, items, options = self.archive_fixture(root, count=2)
++            remote = self.isolated_remote(root); state = root / 'cold-storage'; db = m.database(state, source, remote.namespace)
++            transfers = m.Transfers(root, db, remote, state, True, 2)
++            def result(command, request):
++                if request['path'].endswith('bundle-1.tar'):
++                    raise m.BundleTransferTimeout('bundle_transfer_deadline')
++                return 0, {k: v for k, v in request.items() if k != 'path'}
++            try:
++                with patch.object(m, 'transfer_process', side_effect=result):
++                    transfers.submit([items[0][0]]); transfers.submit([items[1][0]])
++                    for future in transfers.pending:
++                        try: future.result(timeout=3)
++                        except m.BundleTransferTimeout: pass
++                    with self.assertRaises(m.BundleTransferTimeout): transfers.collect()
++                self.assertEqual(db.execute('SELECT slot,retired FROM archives').fetchall(), [(10, 1)])
++                self.assertFalse(items[0][1].exists())
++                self.assertTrue(items[1][1].exists() and items[1][2].exists())
++                self.assertEqual(transfers.pending_banks(), {(11, 21)})
++                self.assertEqual(m.archive_allowance(1, transfers.pending_banks(), 2), 0)
++            finally: transfers.close(); db.close()
++
++    def test_child_checks_namespace_before_network_and_emits_only_safe_failure_fields(self):
++        with tempfile.TemporaryDirectory() as d:
++            root = Path(d).resolve(); path = root / 'bundle.tar'; path.write_bytes(b'verified bytes'); sha = m.digest(path)
++            request = dict(schema=m.TRANSFER_SCHEMA, state='VERIFIED', namespace='b' * 64,
++                key='native-custody/processed-v1/session/' + sha + '.tar', sha256=sha, bytes=path.stat().st_size,
++                nonce='c' * 32, helper_sha256=m.digest(Path(m.__file__).resolve()), path=str(path))
++            remote = SimpleNamespace(namespace='wrong', _put_verified_in_process=Mock())
++            reader, writer = m.os.pipe()
++            try:
++                for namespace in ('wrong', 'b' * 64):
++                    remote.namespace = namespace
++                    with patch.object(m.threading, 'Thread'), patch.object(m, 'R2', return_value=remote), \
++                         patch.object(m.sys, 'stdin', SimpleNamespace(buffer=io.BytesIO(json.dumps(request).encode()))), \
++                         patch.object(m.sys, 'stdout', io.StringIO()) as output:
++                        code = m.transfer_child(root / 'DO_NOT_PRINT.env', reader)
++                        result = json.loads(output.getvalue())
++                    if namespace == 'wrong':
++                        self.assertEqual(code, 1); remote._put_verified_in_process.assert_not_called()
++                        self.assertEqual(set(result), {'schema', 'state', 'error_type', 'http_status', 'network_error_type'})
++                        self.assertNotIn('DO_NOT_PRINT', json.dumps(result))
++                    else:
++                        self.assertEqual(code, 0)
++                        self.assertEqual(result, {k: v for k, v in request.items() if k != 'path'})
++                        remote._put_verified_in_process.assert_called_once_with(request['key'], path, sha)
++            finally: m.os.close(reader); m.os.close(writer)
++
++    def test_child_exits_when_parent_liveness_pipe_closes(self):
++        script = ('import importlib.util,sys,time,types; from pathlib import Path; '
++                  's=importlib.util.spec_from_file_location("cold",sys.argv[1]); m=importlib.util.module_from_spec(s); s.loader.exec_module(m); '
++                  'm.sys.stdin=types.SimpleNamespace(buffer=types.SimpleNamespace(read=lambda n:time.sleep(60))); '
++                  'm.transfer_child(Path("/unused"),int(sys.argv[2]))')
++        reader, writer = m.os.pipe()
++        process = subprocess.Popen([sys.executable, '-c', script, m.__file__, str(reader)], pass_fds=(reader,),
++                                   stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
++        m.os.close(reader)
++        try:
++            time.sleep(.15); self.assertIsNone(process.poll()); m.os.close(writer); writer = None
++            self.assertEqual(process.wait(timeout=3), 70)
++        finally:
++            if process.poll() is None: process.kill()
++            process.wait()
++            if writer is not None: m.os.close(writer)
++
++    def test_child_failure_classification_is_redacted_and_preserved_in_durable_status(self):
++        cases = [('ReadTimeoutError', None, None), ('ResponseStreamingError', None, 'ProtocolError'),
++                 ('ClientError', 503, None), ('ClientError', 403, None), ('NoCredentialsError', None, None),
++                 ('RuntimeError', None, None), ('IncompleteReadError', None, None)]
++        with tempfile.TemporaryDirectory() as d:
++            state = Path(d)
++            for kind, http, network in cases:
++                failure = dict(schema=m.TRANSFER_SCHEMA, state='FAILED', error_type=kind,
++                               http_status=http, network_error_type=network)
++                with self.assertRaises(m.BundleTransferError) as error: m.validate_transfer_result(1, failure, {})
++                with patch.object(m.sys, 'stderr', io.StringIO()): m.record_archive_failure(dict(state=state), error.exception)
++                saved = json.loads((state / 'LAST-FAILURE.json').read_text())
++                self.assertEqual((saved['error_type'], saved['http_status'], saved['network_error_type']), (kind, http, network))
++            with patch.object(m.sys, 'stderr', io.StringIO()):
++                m.record_archive_failure(dict(state=state), m.BundleTransferTimeout('bundle_transfer_deadline'))
++            saved = json.loads((state / 'LAST-FAILURE.json').read_text())
++            self.assertEqual((saved['error_type'], saved['http_status'], saved['network_error_type']), ('BundleTransferTimeout', None, None))
++            for failure in (dict(schema=m.TRANSFER_SCHEMA, state='FAILED', error_type='DO_NOT_PRINT private URL', http_status=None, network_error_type=None),
++                            dict(schema=m.TRANSFER_SCHEMA, state='FAILED', error_type='RuntimeError', http_status=503, network_error_type='ProtocolError')):
++                with self.assertRaises(m.BundleTransferError) as error: m.validate_transfer_result(1, failure, {})
++                self.assertIsNone(error.exception.evidence)
+ 
+     def test_r2_readback_retries_partial_network_fault_from_byte_zero_with_fresh_hash_and_count(self):
+         boto, urllib = self.r2_errors()
+--- a/hivezilla/deploy/direct-agave/storage_jobs.py
++++ b/hivezilla/deploy/direct-agave/storage_jobs.py
+@@ -18,7 +18,8 @@
+ SCHEMA = "blockzilla-storage-jobs-registry-v1"
+ STATUS_SCHEMA = "blockzilla-storage-jobs-status-v1"
+ MAX_JOBS = 16
+-TRANSIENT_TYPES = {"EndpointConnectionError", "ConnectionClosedError", "ConnectTimeoutError", "ReadTimeoutError"}
++TRANSIENT_TYPES = {"EndpointConnectionError", "ConnectionClosedError", "ConnectTimeoutError", "ReadTimeoutError",
++                   "BundleTransferTimeout"}
+ TRANSIENT_HTTP = {408, 429, 500, 502, 503, 504}
+ LIVE_UNIT = "hivezilla-native-cold-storage-20261012-live.service"
+ SHOW_PROPERTIES = "ActiveState,SubState,MainPID,Result,InvocationID,Restart,FreezerState"
+--- a/hivezilla/deploy/direct-agave/test_storage_jobs.py
++++ b/hivezilla/deploy/direct-agave/test_storage_jobs.py
+@@ -161,6 +161,7 @@
+ 
+     def test_only_network_types_and_fixed_transient_http_statuses_can_retry(self):
+         cases = [("ReadTimeoutError", None, True), ("EndpointConnectionError", None, True),
++                 ("BundleTransferTimeout", None, True), ("BundleTransferError", None, False),
+                  ("ConnectTimeoutError", None, True), ("ConnectionClosedError", None, True),
+                  ("ClientError", 503, True), ("ClientError", 429, True), ("ClientError", 403, False),
+                  ("ClientError", None, False), ("NoCredentialsError", 503, False),
+@@ -175,6 +176,22 @@
+             failure.update(error_type="ReadTimeoutError", invocation_id="d" * 32)
+             (f.state / "LAST-FAILURE.json").write_text(json.dumps(failure))
+             self.assertFalse(f.inspect()["retryable"])
++
++    def test_bundle_timeout_uses_existing_fresh_invocation_source_and_bounded_retry_policy(self):
++        with tempfile.TemporaryDirectory() as d:
++            f = Fixture(d); f.fail('BundleTransferTimeout'); state = {'jobs': {}}; saved = []
++            save = lambda value: saved.append(json.dumps(value))
++            m.retry_job(f.root, f.job, f.inspect(), state, save, 1000, runner=f.run, inspector=f.inspect)
++            self.assertEqual(f.mutations(), [])
++            m.retry_job(f.root, f.job, f.inspect(now_ms=61000), state, save, 61000, runner=f.run, inspector=f.inspect)
++            self.assertEqual(len(f.mutations()), 2)
++            self.assertEqual(state['jobs'][m.job_key(f.job)]['attempts'], 1)
++            m.retry_job(f.root, f.job, f.inspect(now_ms=100000), state, save, 100000, runner=f.run, inspector=f.inspect)
++            self.assertEqual(len(f.mutations()), 2)
++            f.fail('BundleTransferTimeout'); failure = json.loads((f.state / 'LAST-FAILURE.json').read_text())
++            failure['source'] = f.active
++            (f.state / 'LAST-FAILURE.json').write_text(json.dumps(failure))
++            self.assertFalse(f.inspect()['retryable'])
+ 
+     def test_stream_protocol_retry_requires_fixed_subtype_and_matching_failure_evidence(self):
+         with tempfile.TemporaryDirectory() as d:

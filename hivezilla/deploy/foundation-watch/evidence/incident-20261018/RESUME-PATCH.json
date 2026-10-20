@@ -1,0 +1,11 @@
+{
+  "schema": "blockzilla-incident-resume-patch-v1",
+  "tested_deployment_tests": 61,
+  "reviewed": true,
+  "local_source": "hivezilla/deploy/bank-stream-v2/recover_session.py",
+  "sha256": "d25366e623ecead4f7b5e38d64a86e62b0235841f499c89a5ffdce7c15b1c3f7",
+  "installed_path": "/home/ubuntu/live/hivezilla-validator-20260930/releases/incident-resume-20261018-d25366e623ecead4/recover_session.py",
+  "purpose": "Resume a saved same-revision source switch without another plugin reload.",
+  "older_reports_without_saved_evidence": "rejected",
+  "used_for_initial_recovery": false
+}

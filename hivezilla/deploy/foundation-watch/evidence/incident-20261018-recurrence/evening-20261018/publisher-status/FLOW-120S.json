@@ -1,0 +1,2727 @@
+{
+  "after_processes": {
+    "protected_pids": {
+      "hivezilla-bank-v2-origin": 2134416,
+      "hivezilla-bank-v2-producer": 917148,
+      "hivezilla-direct-worker": 916425,
+      "hivezilla-shred-hook-recorder": 2142799,
+      "hivezilla-stream-origin": 2135639,
+      "hivezilla-stream-relay": 2136117,
+      "hivezilla-validator": 2142808
+    },
+    "publisher_pid": 4167494
+  },
+  "before_processes": {
+    "protected_pids": {
+      "hivezilla-bank-v2-origin": 2134416,
+      "hivezilla-bank-v2-producer": 917148,
+      "hivezilla-direct-worker": 916425,
+      "hivezilla-shred-hook-recorder": 2142799,
+      "hivezilla-stream-origin": 2135639,
+      "hivezilla-stream-relay": 2136117,
+      "hivezilla-validator": 2142808
+    },
+    "publisher_pid": 4167494
+  },
+  "binary_sha256": "7fb9e39d75062546cb407586596ca2f5303caaf8dd25725e768025f8266b816a",
+  "build_sha256": "a001df9c1496cf6722a26b4cbfbe6298a3eb95843fcd516c1aecd56d2ae9515f",
+  "cloud_verification": false,
+  "completed_unix_ms": 1792349063733,
+  "duration_target_seconds": 120,
+  "elapsed_seconds": 120.139,
+  "end_sequence": 443019,
+  "errors": [],
+  "in_flight_samples": 120,
+  "installation_sha256": "004c3b7d94f0840c93b7054c01c8d4ee602615474bc0b0f491cdad96801740fb",
+  "max_status_age_ms": 4995,
+  "maximum_status_age_ms": 15000,
+  "observation_seconds": 120.034,
+  "publisher_identity": {
+    "namespace": "57f6beef58f71b68ac430120437e79363e65aba88ccb6536e805e1351d10f135",
+    "prefix": "native-stream/processed/direct-agave-live-v1/000000000000000018df884b2474cf8e-20b258",
+    "publisher_id": "283590d6695ed2464c6e28fbc20e4490abd50fe5cc5d617084fa0f068c024ee3",
+    "schema": "blockzilla-native-publisher-checkpoint-v1",
+    "session": "000000000000000018df884b2474cf8e-20b258",
+    "source": "/home/ubuntu/live/hivezilla-validator-20260930/compact/direct-agave-processed-live/000000000000000018df884b2474cf8e-20b258",
+    "start_slot": 1
+  },
+  "registry_sha256": "a52115479c26ccff6367b8439cd58dbb2354bb7b61d25691e797a96611655f6f",
+  "sample_count": 121,
+  "sample_interval_seconds": 1,
+  "samples": [
+    {
+      "batch_started_unix_ms": 1792348940664,
+      "durable_checkpoint": {
+        "blocks": 220976,
+        "bytes": 97860372387,
+        "cursor": "000000000000000018df884b2474cf8e-20b258:p441913:48c372a0a50295113396267edb0436470d018b6a43d7b1b2a70c3e5bf0b6b810",
+        "sequence": 441913
+      },
+      "elapsed_seconds": 0.0,
+      "in_flight": true,
+      "last_durable_progress_unix_ms": 1792348940599,
+      "phase": "upload_commit",
+      "sampled_unix_ms": 1792348943655,
+      "state": "RUNNING",
+      "status_age_ms": 2991,
+      "status_checkpoint": {
+        "blocks": 220976,
+        "bytes": 97860372387,
+        "cursor": "000000000000000018df884b2474cf8e-20b258:p441913:48c372a0a50295113396267edb0436470d018b6a43d7b1b2a70c3e5bf0b6b810",
+        "sequence": 441913
+      }
+    },
+    {
+      "batch_started_unix_ms": 1792348940664,
+      "durable_checkpoint": {
+        "blocks": 220976,
+        "bytes": 97860372387,
+        "cursor": "000000000000000018df884b2474cf8e-20b258:p441913:48c372a0a50295113396267edb0436470d018b6a43d7b1b2a70c3e5bf0b6b810",
+        "sequence": 441913
+      },
+      "elapsed_seconds": 1.0,
+      "in_flight": true,
+      "last_durable_progress_unix_ms": 1792348940599,
+      "phase": "upload_commit",
+      "sampled_unix_ms": 1792348944655,
+      "state": "RUNNING",
+      "status_age_ms": 3991,
+      "status_checkpoint": {
+        "blocks": 220976,
+        "bytes": 97860372387,
+        "cursor": "000000000000000018df884b2474cf8e-20b258:p441913:48c372a0a50295113396267edb0436470d018b6a43d7b1b2a70c3e5bf0b6b810",
+        "sequence": 441913
+      }
+    },
+    {
+      "batch_started_unix_ms": 1792348940664,
+      "durable_checkpoint": {
+        "blocks": 220976,
+        "bytes": 97860372387,
+        "cursor": "000000000000000018df884b2474cf8e-20b258:p441913:48c372a0a50295113396267edb0436470d018b6a43d7b1b2a70c3e5bf0b6b810",
+        "sequence": 441913
+      },
+      "elapsed_seconds": 2.0,
+      "in_flight": true,
+      "last_durable_progress_unix_ms": 1792348940599,
+      "phase": "upload_commit",
+      "sampled_unix_ms": 1792348945656,
+      "state": "RUNNING",
+      "status_age_ms": 4992,
+      "status_checkpoint": {
+        "blocks": 220976,
+        "bytes": 97860372387,
+        "cursor": "000000000000000018df884b2474cf8e-20b258:p441913:48c372a0a50295113396267edb0436470d018b6a43d7b1b2a70c3e5bf0b6b810",
+        "sequence": 441913
+      }
+    },
+    {
+      "batch_started_unix_ms": 1792348940664,
+      "durable_checkpoint": {
+        "blocks": 220976,
+        "bytes": 97860372387,
+        "cursor": "000000000000000018df884b2474cf8e-20b258:p441913:48c372a0a50295113396267edb0436470d018b6a43d7b1b2a70c3e5bf0b6b810",
+        "sequence": 441913
+      },
+      "elapsed_seconds": 3.0,
+      "in_flight": true,
+      "last_durable_progress_unix_ms": 1792348940599,
+      "phase": "upload_commit",
+      "sampled_unix_ms": 1792348946655,
+      "state": "RUNNING",
+      "status_age_ms": 991,
+      "status_checkpoint": {
+        "blocks": 220976,
+        "bytes": 97860372387,
+        "cursor": "000000000000000018df884b2474cf8e-20b258:p441913:48c372a0a50295113396267edb0436470d018b6a43d7b1b2a70c3e5bf0b6b810",
+        "sequence": 441913
+      }
+    },
+    {
+      "batch_started_unix_ms": 1792348940664,
+      "durable_checkpoint": {
+        "blocks": 220976,
+        "bytes": 97860372387,
+        "cursor": "000000000000000018df884b2474cf8e-20b258:p441913:48c372a0a50295113396267edb0436470d018b6a43d7b1b2a70c3e5bf0b6b810",
+        "sequence": 441913
+      },
+      "elapsed_seconds": 4.0,
+      "in_flight": true,
+      "last_durable_progress_unix_ms": 1792348940599,
+      "phase": "upload_commit",
+      "sampled_unix_ms": 1792348947655,
+      "state": "RUNNING",
+      "status_age_ms": 1991,
+      "status_checkpoint": {
+        "blocks": 220976,
+        "bytes": 97860372387,
+        "cursor": "000000000000000018df884b2474cf8e-20b258:p441913:48c372a0a50295113396267edb0436470d018b6a43d7b1b2a70c3e5bf0b6b810",
+        "sequence": 441913
+      }
+    },
+    {
+      "batch_started_unix_ms": 1792348940664,
+      "durable_checkpoint": {
+        "blocks": 220976,
+        "bytes": 97860372387,
+        "cursor": "000000000000000018df884b2474cf8e-20b258:p441913:48c372a0a50295113396267edb0436470d018b6a43d7b1b2a70c3e5bf0b6b810",
+        "sequence": 441913
+      },
+      "elapsed_seconds": 5.0,
+      "in_flight": true,
+      "last_durable_progress_unix_ms": 1792348940599,
+      "phase": "upload_commit",
+      "sampled_unix_ms": 1792348948655,
+      "state": "RUNNING",
+      "status_age_ms": 2991,
+      "status_checkpoint": {
+        "blocks": 220976,
+        "bytes": 97860372387,
+        "cursor": "000000000000000018df884b2474cf8e-20b258:p441913:48c372a0a50295113396267edb0436470d018b6a43d7b1b2a70c3e5bf0b6b810",
+        "sequence": 441913
+      }
+    },
+    {
+      "batch_started_unix_ms": 1792348940664,
+      "durable_checkpoint": {
+        "blocks": 220976,
+        "bytes": 97860372387,
+        "cursor": "000000000000000018df884b2474cf8e-20b258:p441913:48c372a0a50295113396267edb0436470d018b6a43d7b1b2a70c3e5bf0b6b810",
+        "sequence": 441913
+      },
+      "elapsed_seconds": 6.0,
+      "in_flight": true,
+      "last_durable_progress_unix_ms": 1792348940599,
+      "phase": "upload_commit",
+      "sampled_unix_ms": 1792348949655,
+      "state": "RUNNING",
+      "status_age_ms": 3991,
+      "status_checkpoint": {
+        "blocks": 220976,
+        "bytes": 97860372387,
+        "cursor": "000000000000000018df884b2474cf8e-20b258:p441913:48c372a0a50295113396267edb0436470d018b6a43d7b1b2a70c3e5bf0b6b810",
+        "sequence": 441913
+      }
+    },
+    {
+      "batch_started_unix_ms": 1792348940664,
+      "durable_checkpoint": {
+        "blocks": 220976,
+        "bytes": 97860372387,
+        "cursor": "000000000000000018df884b2474cf8e-20b258:p441913:48c372a0a50295113396267edb0436470d018b6a43d7b1b2a70c3e5bf0b6b810",
+        "sequence": 441913
+      },
+      "elapsed_seconds": 7.0,
+      "in_flight": true,
+      "last_durable_progress_unix_ms": 1792348940599,
+      "phase": "upload_commit",
+      "sampled_unix_ms": 1792348950655,
+      "state": "RUNNING",
+      "status_age_ms": 4991,
+      "status_checkpoint": {
+        "blocks": 220976,
+        "bytes": 97860372387,
+        "cursor": "000000000000000018df884b2474cf8e-20b258:p441913:48c372a0a50295113396267edb0436470d018b6a43d7b1b2a70c3e5bf0b6b810",
+        "sequence": 441913
+      }
+    },
+    {
+      "batch_started_unix_ms": 1792348951403,
+      "durable_checkpoint": {
+        "blocks": 221029,
+        "bytes": 97884891881,
+        "cursor": "000000000000000018df884b2474cf8e-20b258:p442019:ecf818aaf2176492fb1b05781ed202c36739e5285e788725e5851fb0a07a9a9b",
+        "sequence": 442019
+      },
+      "elapsed_seconds": 8.0,
+      "in_flight": true,
+      "last_durable_progress_unix_ms": 1792348951348,
+      "phase": "upload_commit",
+      "sampled_unix_ms": 1792348951655,
+      "state": "RUNNING",
+      "status_age_ms": 252,
+      "status_checkpoint": {
+        "blocks": 221029,
+        "bytes": 97884891881,
+        "cursor": "000000000000000018df884b2474cf8e-20b258:p442019:ecf818aaf2176492fb1b05781ed202c36739e5285e788725e5851fb0a07a9a9b",
+        "sequence": 442019
+      }
+    },
+    {
+      "batch_started_unix_ms": 1792348951403,
+      "durable_checkpoint": {
+        "blocks": 221029,
+        "bytes": 97884891881,
+        "cursor": "000000000000000018df884b2474cf8e-20b258:p442019:ecf818aaf2176492fb1b05781ed202c36739e5285e788725e5851fb0a07a9a9b",
+        "sequence": 442019
+      },
+      "elapsed_seconds": 9.0,
+      "in_flight": true,
+      "last_durable_progress_unix_ms": 1792348951348,
+      "phase": "upload_commit",
+      "sampled_unix_ms": 1792348952656,
+      "state": "RUNNING",
+      "status_age_ms": 1253,
+      "status_checkpoint": {
+        "blocks": 221029,
+        "bytes": 97884891881,
+        "cursor": "000000000000000018df884b2474cf8e-20b258:p442019:ecf818aaf2176492fb1b05781ed202c36739e5285e788725e5851fb0a07a9a9b",
+        "sequence": 442019
+      }
+    },
+    {
+      "batch_started_unix_ms": 1792348951403,
+      "durable_checkpoint": {
+        "blocks": 221029,
+        "bytes": 97884891881,
+        "cursor": "000000000000000018df884b2474cf8e-20b258:p442019:ecf818aaf2176492fb1b05781ed202c36739e5285e788725e5851fb0a07a9a9b",
+        "sequence": 442019
+      },
+      "elapsed_seconds": 10.035,
+      "in_flight": true,
+      "last_durable_progress_unix_ms": 1792348951348,
+      "phase": "upload_commit",
+      "sampled_unix_ms": 1792348953690,
+      "state": "RUNNING",
+      "status_age_ms": 2287,
+      "status_checkpoint": {
+        "blocks": 221029,
+        "bytes": 97884891881,
+        "cursor": "000000000000000018df884b2474cf8e-20b258:p442019:ecf818aaf2176492fb1b05781ed202c36739e5285e788725e5851fb0a07a9a9b",
+        "sequence": 442019
+      }
+    },
+    {
+      "batch_started_unix_ms": 1792348951403,
+      "durable_checkpoint": {
+        "blocks": 221029,
+        "bytes": 97884891881,
+        "cursor": "000000000000000018df884b2474cf8e-20b258:p442019:ecf818aaf2176492fb1b05781ed202c36739e5285e788725e5851fb0a07a9a9b",
+        "sequence": 442019
+      },
+      "elapsed_seconds": 11.0,
+      "in_flight": true,
+      "last_durable_progress_unix_ms": 1792348951348,
+      "phase": "upload_commit",
+      "sampled_unix_ms": 1792348954655,
+      "state": "RUNNING",
+      "status_age_ms": 3252,
+      "status_checkpoint": {
+        "blocks": 221029,
+        "bytes": 97884891881,
+        "cursor": "000000000000000018df884b2474cf8e-20b258:p442019:ecf818aaf2176492fb1b05781ed202c36739e5285e788725e5851fb0a07a9a9b",
+        "sequence": 442019
+      }
+    },
+    {
+      "batch_started_unix_ms": 1792348951403,
+      "durable_checkpoint": {
+        "blocks": 221029,
+        "bytes": 97884891881,
+        "cursor": "000000000000000018df884b2474cf8e-20b258:p442019:ecf818aaf2176492fb1b05781ed202c36739e5285e788725e5851fb0a07a9a9b",
+        "sequence": 442019
+      },
+      "elapsed_seconds": 12.0,
+      "in_flight": true,
+      "last_durable_progress_unix_ms": 1792348951348,
+      "phase": "upload_commit",
+      "sampled_unix_ms": 1792348955655,
+      "state": "RUNNING",
+      "status_age_ms": 4252,
+      "status_checkpoint": {
+        "blocks": 221029,
+        "bytes": 97884891881,
+        "cursor": "000000000000000018df884b2474cf8e-20b258:p442019:ecf818aaf2176492fb1b05781ed202c36739e5285e788725e5851fb0a07a9a9b",
+        "sequence": 442019
+      }
+    },
+    {
+      "batch_started_unix_ms": 1792348951403,
+      "durable_checkpoint": {
+        "blocks": 221029,
+        "bytes": 97884891881,
+        "cursor": "000000000000000018df884b2474cf8e-20b258:p442019:ecf818aaf2176492fb1b05781ed202c36739e5285e788725e5851fb0a07a9a9b",
+        "sequence": 442019
+      },
+      "elapsed_seconds": 13.0,
+      "in_flight": true,
+      "last_durable_progress_unix_ms": 1792348951348,
+      "phase": "upload_commit",
+      "sampled_unix_ms": 1792348956655,
+      "state": "RUNNING",
+      "status_age_ms": 251,
+      "status_checkpoint": {
+        "blocks": 221029,
+        "bytes": 97884891881,
+        "cursor": "000000000000000018df884b2474cf8e-20b258:p442019:ecf818aaf2176492fb1b05781ed202c36739e5285e788725e5851fb0a07a9a9b",
+        "sequence": 442019
+      }
+    },
+    {
+      "batch_started_unix_ms": 1792348951403,
+      "durable_checkpoint": {
+        "blocks": 221029,
+        "bytes": 97884891881,
+        "cursor": "000000000000000018df884b2474cf8e-20b258:p442019:ecf818aaf2176492fb1b05781ed202c36739e5285e788725e5851fb0a07a9a9b",
+        "sequence": 442019
+      },
+      "elapsed_seconds": 14.0,
+      "in_flight": true,
+      "last_durable_progress_unix_ms": 1792348951348,
+      "phase": "upload_commit",
+      "sampled_unix_ms": 1792348957655,
+      "state": "RUNNING",
+      "status_age_ms": 1251,
+      "status_checkpoint": {
+        "blocks": 221029,
+        "bytes": 97884891881,
+        "cursor": "000000000000000018df884b2474cf8e-20b258:p442019:ecf818aaf2176492fb1b05781ed202c36739e5285e788725e5851fb0a07a9a9b",
+        "sequence": 442019
+      }
+    },
+    {
+      "batch_started_unix_ms": 1792348951403,
+      "durable_checkpoint": {
+        "blocks": 221029,
+        "bytes": 97884891881,
+        "cursor": "000000000000000018df884b2474cf8e-20b258:p442019:ecf818aaf2176492fb1b05781ed202c36739e5285e788725e5851fb0a07a9a9b",
+        "sequence": 442019
+      },
+      "elapsed_seconds": 15.0,
+      "in_flight": true,
+      "last_durable_progress_unix_ms": 1792348951348,
+      "phase": "upload_commit",
+      "sampled_unix_ms": 1792348958655,
+      "state": "RUNNING",
+      "status_age_ms": 2251,
+      "status_checkpoint": {
+        "blocks": 221029,
+        "bytes": 97884891881,
+        "cursor": "000000000000000018df884b2474cf8e-20b258:p442019:ecf818aaf2176492fb1b05781ed202c36739e5285e788725e5851fb0a07a9a9b",
+        "sequence": 442019
+      }
+    },
+    {
+      "batch_started_unix_ms": 1792348951403,
+      "durable_checkpoint": {
+        "blocks": 221029,
+        "bytes": 97884891881,
+        "cursor": "000000000000000018df884b2474cf8e-20b258:p442019:ecf818aaf2176492fb1b05781ed202c36739e5285e788725e5851fb0a07a9a9b",
+        "sequence": 442019
+      },
+      "elapsed_seconds": 16.0,
+      "in_flight": true,
+      "last_durable_progress_unix_ms": 1792348951348,
+      "phase": "upload_commit",
+      "sampled_unix_ms": 1792348959656,
+      "state": "RUNNING",
+      "status_age_ms": 3252,
+      "status_checkpoint": {
+        "blocks": 221029,
+        "bytes": 97884891881,
+        "cursor": "000000000000000018df884b2474cf8e-20b258:p442019:ecf818aaf2176492fb1b05781ed202c36739e5285e788725e5851fb0a07a9a9b",
+        "sequence": 442019
+      }
+    },
+    {
+      "batch_started_unix_ms": 1792348951403,
+      "durable_checkpoint": {
+        "blocks": 221029,
+        "bytes": 97884891881,
+        "cursor": "000000000000000018df884b2474cf8e-20b258:p442019:ecf818aaf2176492fb1b05781ed202c36739e5285e788725e5851fb0a07a9a9b",
+        "sequence": 442019
+      },
+      "elapsed_seconds": 17.0,
+      "in_flight": true,
+      "last_durable_progress_unix_ms": 1792348951348,
+      "phase": "upload_commit",
+      "sampled_unix_ms": 1792348960655,
+      "state": "RUNNING",
+      "status_age_ms": 4251,
+      "status_checkpoint": {
+        "blocks": 221029,
+        "bytes": 97884891881,
+        "cursor": "000000000000000018df884b2474cf8e-20b258:p442019:ecf818aaf2176492fb1b05781ed202c36739e5285e788725e5851fb0a07a9a9b",
+        "sequence": 442019
+      }
+    },
+    {
+      "batch_started_unix_ms": 1792348951403,
+      "durable_checkpoint": {
+        "blocks": 221029,
+        "bytes": 97884891881,
+        "cursor": "000000000000000018df884b2474cf8e-20b258:p442019:ecf818aaf2176492fb1b05781ed202c36739e5285e788725e5851fb0a07a9a9b",
+        "sequence": 442019
+      },
+      "elapsed_seconds": 18.0,
+      "in_flight": true,
+      "last_durable_progress_unix_ms": 1792348951348,
+      "phase": "upload_commit",
+      "sampled_unix_ms": 1792348961655,
+      "state": "RUNNING",
+      "status_age_ms": 251,
+      "status_checkpoint": {
+        "blocks": 221029,
+        "bytes": 97884891881,
+        "cursor": "000000000000000018df884b2474cf8e-20b258:p442019:ecf818aaf2176492fb1b05781ed202c36739e5285e788725e5851fb0a07a9a9b",
+        "sequence": 442019
+      }
+    },
+    {
+      "batch_started_unix_ms": 1792348962487,
+      "durable_checkpoint": {
+        "blocks": 221074,
+        "bytes": 97907441446,
+        "cursor": "000000000000000018df884b2474cf8e-20b258:p442109:2150a4fb51fd1d19cadcead2a71b9c0fc0b09be703a878526e6be619ab42c9d9",
+        "sequence": 442109
+      },
+      "elapsed_seconds": 19.0,
+      "in_flight": true,
+      "last_durable_progress_unix_ms": 1792348962427,
+      "phase": "upload_commit",
+      "sampled_unix_ms": 1792348962655,
+      "state": "RUNNING",
+      "status_age_ms": 168,
+      "status_checkpoint": {
+        "blocks": 221074,
+        "bytes": 97907441446,
+        "cursor": "000000000000000018df884b2474cf8e-20b258:p442109:2150a4fb51fd1d19cadcead2a71b9c0fc0b09be703a878526e6be619ab42c9d9",
+        "sequence": 442109
+      }
+    },
+    {
+      "batch_started_unix_ms": 1792348962487,
+      "durable_checkpoint": {
+        "blocks": 221074,
+        "bytes": 97907441446,
+        "cursor": "000000000000000018df884b2474cf8e-20b258:p442109:2150a4fb51fd1d19cadcead2a71b9c0fc0b09be703a878526e6be619ab42c9d9",
+        "sequence": 442109
+      },
+      "elapsed_seconds": 20.0,
+      "in_flight": true,
+      "last_durable_progress_unix_ms": 1792348962427,
+      "phase": "upload_commit",
+      "sampled_unix_ms": 1792348963656,
+      "state": "RUNNING",
+      "status_age_ms": 1169,
+      "status_checkpoint": {
+        "blocks": 221074,
+        "bytes": 97907441446,
+        "cursor": "000000000000000018df884b2474cf8e-20b258:p442109:2150a4fb51fd1d19cadcead2a71b9c0fc0b09be703a878526e6be619ab42c9d9",
+        "sequence": 442109
+      }
+    },
+    {
+      "batch_started_unix_ms": 1792348962487,
+      "durable_checkpoint": {
+        "blocks": 221074,
+        "bytes": 97907441446,
+        "cursor": "000000000000000018df884b2474cf8e-20b258:p442109:2150a4fb51fd1d19cadcead2a71b9c0fc0b09be703a878526e6be619ab42c9d9",
+        "sequence": 442109
+      },
+      "elapsed_seconds": 21.035,
+      "in_flight": true,
+      "last_durable_progress_unix_ms": 1792348962427,
+      "phase": "upload_commit",
+      "sampled_unix_ms": 1792348964690,
+      "state": "RUNNING",
+      "status_age_ms": 2203,
+      "status_checkpoint": {
+        "blocks": 221074,
+        "bytes": 97907441446,
+        "cursor": "000000000000000018df884b2474cf8e-20b258:p442109:2150a4fb51fd1d19cadcead2a71b9c0fc0b09be703a878526e6be619ab42c9d9",
+        "sequence": 442109
+      }
+    },
+    {
+      "batch_started_unix_ms": 1792348962487,
+      "durable_checkpoint": {
+        "blocks": 221074,
+        "bytes": 97907441446,
+        "cursor": "000000000000000018df884b2474cf8e-20b258:p442109:2150a4fb51fd1d19cadcead2a71b9c0fc0b09be703a878526e6be619ab42c9d9",
+        "sequence": 442109
+      },
+      "elapsed_seconds": 22.0,
+      "in_flight": true,
+      "last_durable_progress_unix_ms": 1792348962427,
+      "phase": "upload_commit",
+      "sampled_unix_ms": 1792348965655,
+      "state": "RUNNING",
+      "status_age_ms": 3168,
+      "status_checkpoint": {
+        "blocks": 221074,
+        "bytes": 97907441446,
+        "cursor": "000000000000000018df884b2474cf8e-20b258:p442109:2150a4fb51fd1d19cadcead2a71b9c0fc0b09be703a878526e6be619ab42c9d9",
+        "sequence": 442109
+      }
+    },
+    {
+      "batch_started_unix_ms": 1792348962487,
+      "durable_checkpoint": {
+        "blocks": 221074,
+        "bytes": 97907441446,
+        "cursor": "000000000000000018df884b2474cf8e-20b258:p442109:2150a4fb51fd1d19cadcead2a71b9c0fc0b09be703a878526e6be619ab42c9d9",
+        "sequence": 442109
+      },
+      "elapsed_seconds": 23.0,
+      "in_flight": true,
+      "last_durable_progress_unix_ms": 1792348962427,
+      "phase": "upload_commit",
+      "sampled_unix_ms": 1792348966655,
+      "state": "RUNNING",
+      "status_age_ms": 4168,
+      "status_checkpoint": {
+        "blocks": 221074,
+        "bytes": 97907441446,
+        "cursor": "000000000000000018df884b2474cf8e-20b258:p442109:2150a4fb51fd1d19cadcead2a71b9c0fc0b09be703a878526e6be619ab42c9d9",
+        "sequence": 442109
+      }
+    },
+    {
+      "batch_started_unix_ms": 1792348962487,
+      "durable_checkpoint": {
+        "blocks": 221074,
+        "bytes": 97907441446,
+        "cursor": "000000000000000018df884b2474cf8e-20b258:p442109:2150a4fb51fd1d19cadcead2a71b9c0fc0b09be703a878526e6be619ab42c9d9",
+        "sequence": 442109
+      },
+      "elapsed_seconds": 24.0,
+      "in_flight": true,
+      "last_durable_progress_unix_ms": 1792348962427,
+      "phase": "upload_commit",
+      "sampled_unix_ms": 1792348967655,
+      "state": "RUNNING",
+      "status_age_ms": 167,
+      "status_checkpoint": {
+        "blocks": 221074,
+        "bytes": 97907441446,
+        "cursor": "000000000000000018df884b2474cf8e-20b258:p442109:2150a4fb51fd1d19cadcead2a71b9c0fc0b09be703a878526e6be619ab42c9d9",
+        "sequence": 442109
+      }
+    },
+    {
+      "batch_started_unix_ms": 1792348962487,
+      "durable_checkpoint": {
+        "blocks": 221074,
+        "bytes": 97907441446,
+        "cursor": "000000000000000018df884b2474cf8e-20b258:p442109:2150a4fb51fd1d19cadcead2a71b9c0fc0b09be703a878526e6be619ab42c9d9",
+        "sequence": 442109
+      },
+      "elapsed_seconds": 25.0,
+      "in_flight": true,
+      "last_durable_progress_unix_ms": 1792348962427,
+      "phase": "upload_commit",
+      "sampled_unix_ms": 1792348968655,
+      "state": "RUNNING",
+      "status_age_ms": 1167,
+      "status_checkpoint": {
+        "blocks": 221074,
+        "bytes": 97907441446,
+        "cursor": "000000000000000018df884b2474cf8e-20b258:p442109:2150a4fb51fd1d19cadcead2a71b9c0fc0b09be703a878526e6be619ab42c9d9",
+        "sequence": 442109
+      }
+    },
+    {
+      "batch_started_unix_ms": 1792348962487,
+      "durable_checkpoint": {
+        "blocks": 221074,
+        "bytes": 97907441446,
+        "cursor": "000000000000000018df884b2474cf8e-20b258:p442109:2150a4fb51fd1d19cadcead2a71b9c0fc0b09be703a878526e6be619ab42c9d9",
+        "sequence": 442109
+      },
+      "elapsed_seconds": 26.0,
+      "in_flight": true,
+      "last_durable_progress_unix_ms": 1792348962427,
+      "phase": "upload_commit",
+      "sampled_unix_ms": 1792348969655,
+      "state": "RUNNING",
+      "status_age_ms": 2167,
+      "status_checkpoint": {
+        "blocks": 221074,
+        "bytes": 97907441446,
+        "cursor": "000000000000000018df884b2474cf8e-20b258:p442109:2150a4fb51fd1d19cadcead2a71b9c0fc0b09be703a878526e6be619ab42c9d9",
+        "sequence": 442109
+      }
+    },
+    {
+      "batch_started_unix_ms": 1792348962487,
+      "durable_checkpoint": {
+        "blocks": 221074,
+        "bytes": 97907441446,
+        "cursor": "000000000000000018df884b2474cf8e-20b258:p442109:2150a4fb51fd1d19cadcead2a71b9c0fc0b09be703a878526e6be619ab42c9d9",
+        "sequence": 442109
+      },
+      "elapsed_seconds": 27.0,
+      "in_flight": true,
+      "last_durable_progress_unix_ms": 1792348962427,
+      "phase": "upload_commit",
+      "sampled_unix_ms": 1792348970655,
+      "state": "RUNNING",
+      "status_age_ms": 3167,
+      "status_checkpoint": {
+        "blocks": 221074,
+        "bytes": 97907441446,
+        "cursor": "000000000000000018df884b2474cf8e-20b258:p442109:2150a4fb51fd1d19cadcead2a71b9c0fc0b09be703a878526e6be619ab42c9d9",
+        "sequence": 442109
+      }
+    },
+    {
+      "batch_started_unix_ms": 1792348962487,
+      "durable_checkpoint": {
+        "blocks": 221074,
+        "bytes": 97907441446,
+        "cursor": "000000000000000018df884b2474cf8e-20b258:p442109:2150a4fb51fd1d19cadcead2a71b9c0fc0b09be703a878526e6be619ab42c9d9",
+        "sequence": 442109
+      },
+      "elapsed_seconds": 28.0,
+      "in_flight": true,
+      "last_durable_progress_unix_ms": 1792348962427,
+      "phase": "upload_commit",
+      "sampled_unix_ms": 1792348971655,
+      "state": "RUNNING",
+      "status_age_ms": 4167,
+      "status_checkpoint": {
+        "blocks": 221074,
+        "bytes": 97907441446,
+        "cursor": "000000000000000018df884b2474cf8e-20b258:p442109:2150a4fb51fd1d19cadcead2a71b9c0fc0b09be703a878526e6be619ab42c9d9",
+        "sequence": 442109
+      }
+    },
+    {
+      "batch_started_unix_ms": 1792348962487,
+      "durable_checkpoint": {
+        "blocks": 221074,
+        "bytes": 97907441446,
+        "cursor": "000000000000000018df884b2474cf8e-20b258:p442109:2150a4fb51fd1d19cadcead2a71b9c0fc0b09be703a878526e6be619ab42c9d9",
+        "sequence": 442109
+      },
+      "elapsed_seconds": 29.0,
+      "in_flight": true,
+      "last_durable_progress_unix_ms": 1792348962427,
+      "phase": "upload_commit",
+      "sampled_unix_ms": 1792348972655,
+      "state": "RUNNING",
+      "status_age_ms": 166,
+      "status_checkpoint": {
+        "blocks": 221074,
+        "bytes": 97907441446,
+        "cursor": "000000000000000018df884b2474cf8e-20b258:p442109:2150a4fb51fd1d19cadcead2a71b9c0fc0b09be703a878526e6be619ab42c9d9",
+        "sequence": 442109
+      }
+    },
+    {
+      "batch_started_unix_ms": 1792348962487,
+      "durable_checkpoint": {
+        "blocks": 221074,
+        "bytes": 97907441446,
+        "cursor": "000000000000000018df884b2474cf8e-20b258:p442109:2150a4fb51fd1d19cadcead2a71b9c0fc0b09be703a878526e6be619ab42c9d9",
+        "sequence": 442109
+      },
+      "elapsed_seconds": 30.0,
+      "in_flight": true,
+      "last_durable_progress_unix_ms": 1792348962427,
+      "phase": "upload_commit",
+      "sampled_unix_ms": 1792348973655,
+      "state": "RUNNING",
+      "status_age_ms": 1166,
+      "status_checkpoint": {
+        "blocks": 221074,
+        "bytes": 97907441446,
+        "cursor": "000000000000000018df884b2474cf8e-20b258:p442109:2150a4fb51fd1d19cadcead2a71b9c0fc0b09be703a878526e6be619ab42c9d9",
+        "sequence": 442109
+      }
+    },
+    {
+      "batch_started_unix_ms": 1792348962487,
+      "durable_checkpoint": {
+        "blocks": 221074,
+        "bytes": 97907441446,
+        "cursor": "000000000000000018df884b2474cf8e-20b258:p442109:2150a4fb51fd1d19cadcead2a71b9c0fc0b09be703a878526e6be619ab42c9d9",
+        "sequence": 442109
+      },
+      "elapsed_seconds": 31.0,
+      "in_flight": true,
+      "last_durable_progress_unix_ms": 1792348962427,
+      "phase": "upload_commit",
+      "sampled_unix_ms": 1792348974655,
+      "state": "RUNNING",
+      "status_age_ms": 2166,
+      "status_checkpoint": {
+        "blocks": 221074,
+        "bytes": 97907441446,
+        "cursor": "000000000000000018df884b2474cf8e-20b258:p442109:2150a4fb51fd1d19cadcead2a71b9c0fc0b09be703a878526e6be619ab42c9d9",
+        "sequence": 442109
+      }
+    },
+    {
+      "batch_started_unix_ms": 1792348975259,
+      "durable_checkpoint": {
+        "blocks": 221125,
+        "bytes": 97931515202,
+        "cursor": "000000000000000018df884b2474cf8e-20b258:p442211:2d35f9777c140d2b0309d725ff2a5d7815b096d8e2c96fb8ebe019e079fe67b6",
+        "sequence": 442211
+      },
+      "elapsed_seconds": 32.033,
+      "in_flight": true,
+      "last_durable_progress_unix_ms": 1792348975187,
+      "phase": "upload_commit",
+      "sampled_unix_ms": 1792348975688,
+      "state": "RUNNING",
+      "status_age_ms": 429,
+      "status_checkpoint": {
+        "blocks": 221125,
+        "bytes": 97931515202,
+        "cursor": "000000000000000018df884b2474cf8e-20b258:p442211:2d35f9777c140d2b0309d725ff2a5d7815b096d8e2c96fb8ebe019e079fe67b6",
+        "sequence": 442211
+      }
+    },
+    {
+      "batch_started_unix_ms": 1792348975259,
+      "durable_checkpoint": {
+        "blocks": 221125,
+        "bytes": 97931515202,
+        "cursor": "000000000000000018df884b2474cf8e-20b258:p442211:2d35f9777c140d2b0309d725ff2a5d7815b096d8e2c96fb8ebe019e079fe67b6",
+        "sequence": 442211
+      },
+      "elapsed_seconds": 33.0,
+      "in_flight": true,
+      "last_durable_progress_unix_ms": 1792348975187,
+      "phase": "upload_commit",
+      "sampled_unix_ms": 1792348976655,
+      "state": "RUNNING",
+      "status_age_ms": 1396,
+      "status_checkpoint": {
+        "blocks": 221125,
+        "bytes": 97931515202,
+        "cursor": "000000000000000018df884b2474cf8e-20b258:p442211:2d35f9777c140d2b0309d725ff2a5d7815b096d8e2c96fb8ebe019e079fe67b6",
+        "sequence": 442211
+      }
+    },
+    {
+      "batch_started_unix_ms": 1792348975259,
+      "durable_checkpoint": {
+        "blocks": 221125,
+        "bytes": 97931515202,
+        "cursor": "000000000000000018df884b2474cf8e-20b258:p442211:2d35f9777c140d2b0309d725ff2a5d7815b096d8e2c96fb8ebe019e079fe67b6",
+        "sequence": 442211
+      },
+      "elapsed_seconds": 34.0,
+      "in_flight": true,
+      "last_durable_progress_unix_ms": 1792348975187,
+      "phase": "upload_commit",
+      "sampled_unix_ms": 1792348977655,
+      "state": "RUNNING",
+      "status_age_ms": 2396,
+      "status_checkpoint": {
+        "blocks": 221125,
+        "bytes": 97931515202,
+        "cursor": "000000000000000018df884b2474cf8e-20b258:p442211:2d35f9777c140d2b0309d725ff2a5d7815b096d8e2c96fb8ebe019e079fe67b6",
+        "sequence": 442211
+      }
+    },
+    {
+      "batch_started_unix_ms": 1792348975259,
+      "durable_checkpoint": {
+        "blocks": 221125,
+        "bytes": 97931515202,
+        "cursor": "000000000000000018df884b2474cf8e-20b258:p442211:2d35f9777c140d2b0309d725ff2a5d7815b096d8e2c96fb8ebe019e079fe67b6",
+        "sequence": 442211
+      },
+      "elapsed_seconds": 35.0,
+      "in_flight": true,
+      "last_durable_progress_unix_ms": 1792348975187,
+      "phase": "upload_commit",
+      "sampled_unix_ms": 1792348978655,
+      "state": "RUNNING",
+      "status_age_ms": 3396,
+      "status_checkpoint": {
+        "blocks": 221125,
+        "bytes": 97931515202,
+        "cursor": "000000000000000018df884b2474cf8e-20b258:p442211:2d35f9777c140d2b0309d725ff2a5d7815b096d8e2c96fb8ebe019e079fe67b6",
+        "sequence": 442211
+      }
+    },
+    {
+      "batch_started_unix_ms": 1792348975259,
+      "durable_checkpoint": {
+        "blocks": 221125,
+        "bytes": 97931515202,
+        "cursor": "000000000000000018df884b2474cf8e-20b258:p442211:2d35f9777c140d2b0309d725ff2a5d7815b096d8e2c96fb8ebe019e079fe67b6",
+        "sequence": 442211
+      },
+      "elapsed_seconds": 36.0,
+      "in_flight": true,
+      "last_durable_progress_unix_ms": 1792348975187,
+      "phase": "upload_commit",
+      "sampled_unix_ms": 1792348979655,
+      "state": "RUNNING",
+      "status_age_ms": 4396,
+      "status_checkpoint": {
+        "blocks": 221125,
+        "bytes": 97931515202,
+        "cursor": "000000000000000018df884b2474cf8e-20b258:p442211:2d35f9777c140d2b0309d725ff2a5d7815b096d8e2c96fb8ebe019e079fe67b6",
+        "sequence": 442211
+      }
+    },
+    {
+      "batch_started_unix_ms": 1792348975259,
+      "durable_checkpoint": {
+        "blocks": 221125,
+        "bytes": 97931515202,
+        "cursor": "000000000000000018df884b2474cf8e-20b258:p442211:2d35f9777c140d2b0309d725ff2a5d7815b096d8e2c96fb8ebe019e079fe67b6",
+        "sequence": 442211
+      },
+      "elapsed_seconds": 37.0,
+      "in_flight": true,
+      "last_durable_progress_unix_ms": 1792348975187,
+      "phase": "upload_commit",
+      "sampled_unix_ms": 1792348980655,
+      "state": "RUNNING",
+      "status_age_ms": 396,
+      "status_checkpoint": {
+        "blocks": 221125,
+        "bytes": 97931515202,
+        "cursor": "000000000000000018df884b2474cf8e-20b258:p442211:2d35f9777c140d2b0309d725ff2a5d7815b096d8e2c96fb8ebe019e079fe67b6",
+        "sequence": 442211
+      }
+    },
+    {
+      "batch_started_unix_ms": 1792348975259,
+      "durable_checkpoint": {
+        "blocks": 221125,
+        "bytes": 97931515202,
+        "cursor": "000000000000000018df884b2474cf8e-20b258:p442211:2d35f9777c140d2b0309d725ff2a5d7815b096d8e2c96fb8ebe019e079fe67b6",
+        "sequence": 442211
+      },
+      "elapsed_seconds": 38.0,
+      "in_flight": true,
+      "last_durable_progress_unix_ms": 1792348975187,
+      "phase": "upload_commit",
+      "sampled_unix_ms": 1792348981655,
+      "state": "RUNNING",
+      "status_age_ms": 1396,
+      "status_checkpoint": {
+        "blocks": 221125,
+        "bytes": 97931515202,
+        "cursor": "000000000000000018df884b2474cf8e-20b258:p442211:2d35f9777c140d2b0309d725ff2a5d7815b096d8e2c96fb8ebe019e079fe67b6",
+        "sequence": 442211
+      }
+    },
+    {
+      "batch_started_unix_ms": 1792348975259,
+      "durable_checkpoint": {
+        "blocks": 221125,
+        "bytes": 97931515202,
+        "cursor": "000000000000000018df884b2474cf8e-20b258:p442211:2d35f9777c140d2b0309d725ff2a5d7815b096d8e2c96fb8ebe019e079fe67b6",
+        "sequence": 442211
+      },
+      "elapsed_seconds": 39.0,
+      "in_flight": true,
+      "last_durable_progress_unix_ms": 1792348975187,
+      "phase": "upload_commit",
+      "sampled_unix_ms": 1792348982656,
+      "state": "RUNNING",
+      "status_age_ms": 2397,
+      "status_checkpoint": {
+        "blocks": 221125,
+        "bytes": 97931515202,
+        "cursor": "000000000000000018df884b2474cf8e-20b258:p442211:2d35f9777c140d2b0309d725ff2a5d7815b096d8e2c96fb8ebe019e079fe67b6",
+        "sequence": 442211
+      }
+    },
+    {
+      "batch_started_unix_ms": 1792348975259,
+      "durable_checkpoint": {
+        "blocks": 221125,
+        "bytes": 97931515202,
+        "cursor": "000000000000000018df884b2474cf8e-20b258:p442211:2d35f9777c140d2b0309d725ff2a5d7815b096d8e2c96fb8ebe019e079fe67b6",
+        "sequence": 442211
+      },
+      "elapsed_seconds": 40.0,
+      "in_flight": true,
+      "last_durable_progress_unix_ms": 1792348975187,
+      "phase": "upload_commit",
+      "sampled_unix_ms": 1792348983655,
+      "state": "RUNNING",
+      "status_age_ms": 3396,
+      "status_checkpoint": {
+        "blocks": 221125,
+        "bytes": 97931515202,
+        "cursor": "000000000000000018df884b2474cf8e-20b258:p442211:2d35f9777c140d2b0309d725ff2a5d7815b096d8e2c96fb8ebe019e079fe67b6",
+        "sequence": 442211
+      }
+    },
+    {
+      "batch_started_unix_ms": 1792348975259,
+      "durable_checkpoint": {
+        "blocks": 221125,
+        "bytes": 97931515202,
+        "cursor": "000000000000000018df884b2474cf8e-20b258:p442211:2d35f9777c140d2b0309d725ff2a5d7815b096d8e2c96fb8ebe019e079fe67b6",
+        "sequence": 442211
+      },
+      "elapsed_seconds": 41.0,
+      "in_flight": true,
+      "last_durable_progress_unix_ms": 1792348975187,
+      "phase": "upload_commit",
+      "sampled_unix_ms": 1792348984656,
+      "state": "RUNNING",
+      "status_age_ms": 4397,
+      "status_checkpoint": {
+        "blocks": 221125,
+        "bytes": 97931515202,
+        "cursor": "000000000000000018df884b2474cf8e-20b258:p442211:2d35f9777c140d2b0309d725ff2a5d7815b096d8e2c96fb8ebe019e079fe67b6",
+        "sequence": 442211
+      }
+    },
+    {
+      "batch_started_unix_ms": 1792348975259,
+      "durable_checkpoint": {
+        "blocks": 221125,
+        "bytes": 97931515202,
+        "cursor": "000000000000000018df884b2474cf8e-20b258:p442211:2d35f9777c140d2b0309d725ff2a5d7815b096d8e2c96fb8ebe019e079fe67b6",
+        "sequence": 442211
+      },
+      "elapsed_seconds": 42.0,
+      "in_flight": true,
+      "last_durable_progress_unix_ms": 1792348975187,
+      "phase": "upload_commit",
+      "sampled_unix_ms": 1792348985655,
+      "state": "RUNNING",
+      "status_age_ms": 395,
+      "status_checkpoint": {
+        "blocks": 221125,
+        "bytes": 97931515202,
+        "cursor": "000000000000000018df884b2474cf8e-20b258:p442211:2d35f9777c140d2b0309d725ff2a5d7815b096d8e2c96fb8ebe019e079fe67b6",
+        "sequence": 442211
+      }
+    },
+    {
+      "batch_started_unix_ms": 1792348975259,
+      "durable_checkpoint": {
+        "blocks": 221125,
+        "bytes": 97931515202,
+        "cursor": "000000000000000018df884b2474cf8e-20b258:p442211:2d35f9777c140d2b0309d725ff2a5d7815b096d8e2c96fb8ebe019e079fe67b6",
+        "sequence": 442211
+      },
+      "elapsed_seconds": 43.035,
+      "in_flight": true,
+      "last_durable_progress_unix_ms": 1792348975187,
+      "phase": "upload_commit",
+      "sampled_unix_ms": 1792348986690,
+      "state": "RUNNING",
+      "status_age_ms": 1430,
+      "status_checkpoint": {
+        "blocks": 221125,
+        "bytes": 97931515202,
+        "cursor": "000000000000000018df884b2474cf8e-20b258:p442211:2d35f9777c140d2b0309d725ff2a5d7815b096d8e2c96fb8ebe019e079fe67b6",
+        "sequence": 442211
+      }
+    },
+    {
+      "batch_started_unix_ms": 1792348986923,
+      "durable_checkpoint": {
+        "blocks": 221185,
+        "bytes": 97959678685,
+        "cursor": "000000000000000018df884b2474cf8e-20b258:p442331:6c83f035020c1df799a347881692123350c3afdd55f9ab1e8962ad108a8a4530",
+        "sequence": 442331
+      },
+      "elapsed_seconds": 44.0,
+      "in_flight": true,
+      "last_durable_progress_unix_ms": 1792348986854,
+      "phase": "upload_commit",
+      "sampled_unix_ms": 1792348987656,
+      "state": "RUNNING",
+      "status_age_ms": 733,
+      "status_checkpoint": {
+        "blocks": 221185,
+        "bytes": 97959678685,
+        "cursor": "000000000000000018df884b2474cf8e-20b258:p442331:6c83f035020c1df799a347881692123350c3afdd55f9ab1e8962ad108a8a4530",
+        "sequence": 442331
+      }
+    },
+    {
+      "batch_started_unix_ms": 1792348986923,
+      "durable_checkpoint": {
+        "blocks": 221185,
+        "bytes": 97959678685,
+        "cursor": "000000000000000018df884b2474cf8e-20b258:p442331:6c83f035020c1df799a347881692123350c3afdd55f9ab1e8962ad108a8a4530",
+        "sequence": 442331
+      },
+      "elapsed_seconds": 45.0,
+      "in_flight": true,
+      "last_durable_progress_unix_ms": 1792348986854,
+      "phase": "upload_commit",
+      "sampled_unix_ms": 1792348988655,
+      "state": "RUNNING",
+      "status_age_ms": 1732,
+      "status_checkpoint": {
+        "blocks": 221185,
+        "bytes": 97959678685,
+        "cursor": "000000000000000018df884b2474cf8e-20b258:p442331:6c83f035020c1df799a347881692123350c3afdd55f9ab1e8962ad108a8a4530",
+        "sequence": 442331
+      }
+    },
+    {
+      "batch_started_unix_ms": 1792348986923,
+      "durable_checkpoint": {
+        "blocks": 221185,
+        "bytes": 97959678685,
+        "cursor": "000000000000000018df884b2474cf8e-20b258:p442331:6c83f035020c1df799a347881692123350c3afdd55f9ab1e8962ad108a8a4530",
+        "sequence": 442331
+      },
+      "elapsed_seconds": 46.0,
+      "in_flight": true,
+      "last_durable_progress_unix_ms": 1792348986854,
+      "phase": "upload_commit",
+      "sampled_unix_ms": 1792348989655,
+      "state": "RUNNING",
+      "status_age_ms": 2732,
+      "status_checkpoint": {
+        "blocks": 221185,
+        "bytes": 97959678685,
+        "cursor": "000000000000000018df884b2474cf8e-20b258:p442331:6c83f035020c1df799a347881692123350c3afdd55f9ab1e8962ad108a8a4530",
+        "sequence": 442331
+      }
+    },
+    {
+      "batch_started_unix_ms": 1792348986923,
+      "durable_checkpoint": {
+        "blocks": 221185,
+        "bytes": 97959678685,
+        "cursor": "000000000000000018df884b2474cf8e-20b258:p442331:6c83f035020c1df799a347881692123350c3afdd55f9ab1e8962ad108a8a4530",
+        "sequence": 442331
+      },
+      "elapsed_seconds": 47.0,
+      "in_flight": true,
+      "last_durable_progress_unix_ms": 1792348986854,
+      "phase": "upload_commit",
+      "sampled_unix_ms": 1792348990655,
+      "state": "RUNNING",
+      "status_age_ms": 3732,
+      "status_checkpoint": {
+        "blocks": 221185,
+        "bytes": 97959678685,
+        "cursor": "000000000000000018df884b2474cf8e-20b258:p442331:6c83f035020c1df799a347881692123350c3afdd55f9ab1e8962ad108a8a4530",
+        "sequence": 442331
+      }
+    },
+    {
+      "batch_started_unix_ms": 1792348986923,
+      "durable_checkpoint": {
+        "blocks": 221185,
+        "bytes": 97959678685,
+        "cursor": "000000000000000018df884b2474cf8e-20b258:p442331:6c83f035020c1df799a347881692123350c3afdd55f9ab1e8962ad108a8a4530",
+        "sequence": 442331
+      },
+      "elapsed_seconds": 48.0,
+      "in_flight": true,
+      "last_durable_progress_unix_ms": 1792348986854,
+      "phase": "upload_commit",
+      "sampled_unix_ms": 1792348991655,
+      "state": "RUNNING",
+      "status_age_ms": 4732,
+      "status_checkpoint": {
+        "blocks": 221185,
+        "bytes": 97959678685,
+        "cursor": "000000000000000018df884b2474cf8e-20b258:p442331:6c83f035020c1df799a347881692123350c3afdd55f9ab1e8962ad108a8a4530",
+        "sequence": 442331
+      }
+    },
+    {
+      "batch_started_unix_ms": 1792348986923,
+      "durable_checkpoint": {
+        "blocks": 221185,
+        "bytes": 97959678685,
+        "cursor": "000000000000000018df884b2474cf8e-20b258:p442331:6c83f035020c1df799a347881692123350c3afdd55f9ab1e8962ad108a8a4530",
+        "sequence": 442331
+      },
+      "elapsed_seconds": 49.0,
+      "in_flight": true,
+      "last_durable_progress_unix_ms": 1792348986854,
+      "phase": "upload_commit",
+      "sampled_unix_ms": 1792348992655,
+      "state": "RUNNING",
+      "status_age_ms": 731,
+      "status_checkpoint": {
+        "blocks": 221185,
+        "bytes": 97959678685,
+        "cursor": "000000000000000018df884b2474cf8e-20b258:p442331:6c83f035020c1df799a347881692123350c3afdd55f9ab1e8962ad108a8a4530",
+        "sequence": 442331
+      }
+    },
+    {
+      "batch_started_unix_ms": 1792348986923,
+      "durable_checkpoint": {
+        "blocks": 221185,
+        "bytes": 97959678685,
+        "cursor": "000000000000000018df884b2474cf8e-20b258:p442331:6c83f035020c1df799a347881692123350c3afdd55f9ab1e8962ad108a8a4530",
+        "sequence": 442331
+      },
+      "elapsed_seconds": 50.0,
+      "in_flight": true,
+      "last_durable_progress_unix_ms": 1792348986854,
+      "phase": "upload_commit",
+      "sampled_unix_ms": 1792348993655,
+      "state": "RUNNING",
+      "status_age_ms": 1731,
+      "status_checkpoint": {
+        "blocks": 221185,
+        "bytes": 97959678685,
+        "cursor": "000000000000000018df884b2474cf8e-20b258:p442331:6c83f035020c1df799a347881692123350c3afdd55f9ab1e8962ad108a8a4530",
+        "sequence": 442331
+      }
+    },
+    {
+      "batch_started_unix_ms": 1792348986923,
+      "durable_checkpoint": {
+        "blocks": 221185,
+        "bytes": 97959678685,
+        "cursor": "000000000000000018df884b2474cf8e-20b258:p442331:6c83f035020c1df799a347881692123350c3afdd55f9ab1e8962ad108a8a4530",
+        "sequence": 442331
+      },
+      "elapsed_seconds": 51.0,
+      "in_flight": true,
+      "last_durable_progress_unix_ms": 1792348986854,
+      "phase": "upload_commit",
+      "sampled_unix_ms": 1792348994655,
+      "state": "RUNNING",
+      "status_age_ms": 2731,
+      "status_checkpoint": {
+        "blocks": 221185,
+        "bytes": 97959678685,
+        "cursor": "000000000000000018df884b2474cf8e-20b258:p442331:6c83f035020c1df799a347881692123350c3afdd55f9ab1e8962ad108a8a4530",
+        "sequence": 442331
+      }
+    },
+    {
+      "batch_started_unix_ms": 1792348986923,
+      "durable_checkpoint": {
+        "blocks": 221185,
+        "bytes": 97959678685,
+        "cursor": "000000000000000018df884b2474cf8e-20b258:p442331:6c83f035020c1df799a347881692123350c3afdd55f9ab1e8962ad108a8a4530",
+        "sequence": 442331
+      },
+      "elapsed_seconds": 52.0,
+      "in_flight": true,
+      "last_durable_progress_unix_ms": 1792348986854,
+      "phase": "upload_commit",
+      "sampled_unix_ms": 1792348995655,
+      "state": "RUNNING",
+      "status_age_ms": 3731,
+      "status_checkpoint": {
+        "blocks": 221185,
+        "bytes": 97959678685,
+        "cursor": "000000000000000018df884b2474cf8e-20b258:p442331:6c83f035020c1df799a347881692123350c3afdd55f9ab1e8962ad108a8a4530",
+        "sequence": 442331
+      }
+    },
+    {
+      "batch_started_unix_ms": 1792348986923,
+      "durable_checkpoint": {
+        "blocks": 221185,
+        "bytes": 97959678685,
+        "cursor": "000000000000000018df884b2474cf8e-20b258:p442331:6c83f035020c1df799a347881692123350c3afdd55f9ab1e8962ad108a8a4530",
+        "sequence": 442331
+      },
+      "elapsed_seconds": 53.0,
+      "in_flight": true,
+      "last_durable_progress_unix_ms": 1792348986854,
+      "phase": "upload_commit",
+      "sampled_unix_ms": 1792348996655,
+      "state": "RUNNING",
+      "status_age_ms": 4731,
+      "status_checkpoint": {
+        "blocks": 221185,
+        "bytes": 97959678685,
+        "cursor": "000000000000000018df884b2474cf8e-20b258:p442331:6c83f035020c1df799a347881692123350c3afdd55f9ab1e8962ad108a8a4530",
+        "sequence": 442331
+      }
+    },
+    {
+      "batch_started_unix_ms": 1792348986923,
+      "durable_checkpoint": {
+        "blocks": 221185,
+        "bytes": 97959678685,
+        "cursor": "000000000000000018df884b2474cf8e-20b258:p442331:6c83f035020c1df799a347881692123350c3afdd55f9ab1e8962ad108a8a4530",
+        "sequence": 442331
+      },
+      "elapsed_seconds": 54.034,
+      "in_flight": true,
+      "last_durable_progress_unix_ms": 1792348986854,
+      "phase": "upload_commit",
+      "sampled_unix_ms": 1792348997689,
+      "state": "RUNNING",
+      "status_age_ms": 764,
+      "status_checkpoint": {
+        "blocks": 221185,
+        "bytes": 97959678685,
+        "cursor": "000000000000000018df884b2474cf8e-20b258:p442331:6c83f035020c1df799a347881692123350c3afdd55f9ab1e8962ad108a8a4530",
+        "sequence": 442331
+      }
+    },
+    {
+      "batch_started_unix_ms": 1792348998197,
+      "durable_checkpoint": {
+        "blocks": 221243,
+        "bytes": 97985399177,
+        "cursor": "000000000000000018df884b2474cf8e-20b258:p442447:872f3bafc25ba0f2cfb0612059b867b9c1a86928b559fec47f07e667a7419b2b",
+        "sequence": 442447
+      },
+      "elapsed_seconds": 55.0,
+      "in_flight": true,
+      "last_durable_progress_unix_ms": 1792348998134,
+      "phase": "upload_commit",
+      "sampled_unix_ms": 1792348998656,
+      "state": "RUNNING",
+      "status_age_ms": 459,
+      "status_checkpoint": {
+        "blocks": 221243,
+        "bytes": 97985399177,
+        "cursor": "000000000000000018df884b2474cf8e-20b258:p442447:872f3bafc25ba0f2cfb0612059b867b9c1a86928b559fec47f07e667a7419b2b",
+        "sequence": 442447
+      }
+    },
+    {
+      "batch_started_unix_ms": 1792348998197,
+      "durable_checkpoint": {
+        "blocks": 221243,
+        "bytes": 97985399177,
+        "cursor": "000000000000000018df884b2474cf8e-20b258:p442447:872f3bafc25ba0f2cfb0612059b867b9c1a86928b559fec47f07e667a7419b2b",
+        "sequence": 442447
+      },
+      "elapsed_seconds": 56.0,
+      "in_flight": true,
+      "last_durable_progress_unix_ms": 1792348998134,
+      "phase": "upload_commit",
+      "sampled_unix_ms": 1792348999655,
+      "state": "RUNNING",
+      "status_age_ms": 1458,
+      "status_checkpoint": {
+        "blocks": 221243,
+        "bytes": 97985399177,
+        "cursor": "000000000000000018df884b2474cf8e-20b258:p442447:872f3bafc25ba0f2cfb0612059b867b9c1a86928b559fec47f07e667a7419b2b",
+        "sequence": 442447
+      }
+    },
+    {
+      "batch_started_unix_ms": 1792348998197,
+      "durable_checkpoint": {
+        "blocks": 221243,
+        "bytes": 97985399177,
+        "cursor": "000000000000000018df884b2474cf8e-20b258:p442447:872f3bafc25ba0f2cfb0612059b867b9c1a86928b559fec47f07e667a7419b2b",
+        "sequence": 442447
+      },
+      "elapsed_seconds": 57.0,
+      "in_flight": true,
+      "last_durable_progress_unix_ms": 1792348998134,
+      "phase": "upload_commit",
+      "sampled_unix_ms": 1792349000655,
+      "state": "RUNNING",
+      "status_age_ms": 2458,
+      "status_checkpoint": {
+        "blocks": 221243,
+        "bytes": 97985399177,
+        "cursor": "000000000000000018df884b2474cf8e-20b258:p442447:872f3bafc25ba0f2cfb0612059b867b9c1a86928b559fec47f07e667a7419b2b",
+        "sequence": 442447
+      }
+    },
+    {
+      "batch_started_unix_ms": 1792348998197,
+      "durable_checkpoint": {
+        "blocks": 221243,
+        "bytes": 97985399177,
+        "cursor": "000000000000000018df884b2474cf8e-20b258:p442447:872f3bafc25ba0f2cfb0612059b867b9c1a86928b559fec47f07e667a7419b2b",
+        "sequence": 442447
+      },
+      "elapsed_seconds": 58.0,
+      "in_flight": true,
+      "last_durable_progress_unix_ms": 1792348998134,
+      "phase": "upload_commit",
+      "sampled_unix_ms": 1792349001655,
+      "state": "RUNNING",
+      "status_age_ms": 3458,
+      "status_checkpoint": {
+        "blocks": 221243,
+        "bytes": 97985399177,
+        "cursor": "000000000000000018df884b2474cf8e-20b258:p442447:872f3bafc25ba0f2cfb0612059b867b9c1a86928b559fec47f07e667a7419b2b",
+        "sequence": 442447
+      }
+    },
+    {
+      "batch_started_unix_ms": 1792348998197,
+      "durable_checkpoint": {
+        "blocks": 221243,
+        "bytes": 97985399177,
+        "cursor": "000000000000000018df884b2474cf8e-20b258:p442447:872f3bafc25ba0f2cfb0612059b867b9c1a86928b559fec47f07e667a7419b2b",
+        "sequence": 442447
+      },
+      "elapsed_seconds": 59.0,
+      "in_flight": true,
+      "last_durable_progress_unix_ms": 1792348998134,
+      "phase": "upload_commit",
+      "sampled_unix_ms": 1792349002655,
+      "state": "RUNNING",
+      "status_age_ms": 4458,
+      "status_checkpoint": {
+        "blocks": 221243,
+        "bytes": 97985399177,
+        "cursor": "000000000000000018df884b2474cf8e-20b258:p442447:872f3bafc25ba0f2cfb0612059b867b9c1a86928b559fec47f07e667a7419b2b",
+        "sequence": 442447
+      }
+    },
+    {
+      "batch_started_unix_ms": 1792348998197,
+      "durable_checkpoint": {
+        "blocks": 221243,
+        "bytes": 97985399177,
+        "cursor": "000000000000000018df884b2474cf8e-20b258:p442447:872f3bafc25ba0f2cfb0612059b867b9c1a86928b559fec47f07e667a7419b2b",
+        "sequence": 442447
+      },
+      "elapsed_seconds": 60.0,
+      "in_flight": true,
+      "last_durable_progress_unix_ms": 1792348998134,
+      "phase": "upload_commit",
+      "sampled_unix_ms": 1792349003656,
+      "state": "RUNNING",
+      "status_age_ms": 458,
+      "status_checkpoint": {
+        "blocks": 221243,
+        "bytes": 97985399177,
+        "cursor": "000000000000000018df884b2474cf8e-20b258:p442447:872f3bafc25ba0f2cfb0612059b867b9c1a86928b559fec47f07e667a7419b2b",
+        "sequence": 442447
+      }
+    },
+    {
+      "batch_started_unix_ms": 1792348998197,
+      "durable_checkpoint": {
+        "blocks": 221243,
+        "bytes": 97985399177,
+        "cursor": "000000000000000018df884b2474cf8e-20b258:p442447:872f3bafc25ba0f2cfb0612059b867b9c1a86928b559fec47f07e667a7419b2b",
+        "sequence": 442447
+      },
+      "elapsed_seconds": 61.0,
+      "in_flight": true,
+      "last_durable_progress_unix_ms": 1792348998134,
+      "phase": "upload_commit",
+      "sampled_unix_ms": 1792349004655,
+      "state": "RUNNING",
+      "status_age_ms": 1457,
+      "status_checkpoint": {
+        "blocks": 221243,
+        "bytes": 97985399177,
+        "cursor": "000000000000000018df884b2474cf8e-20b258:p442447:872f3bafc25ba0f2cfb0612059b867b9c1a86928b559fec47f07e667a7419b2b",
+        "sequence": 442447
+      }
+    },
+    {
+      "batch_started_unix_ms": 1792348998197,
+      "durable_checkpoint": {
+        "blocks": 221243,
+        "bytes": 97985399177,
+        "cursor": "000000000000000018df884b2474cf8e-20b258:p442447:872f3bafc25ba0f2cfb0612059b867b9c1a86928b559fec47f07e667a7419b2b",
+        "sequence": 442447
+      },
+      "elapsed_seconds": 62.0,
+      "in_flight": true,
+      "last_durable_progress_unix_ms": 1792348998134,
+      "phase": "upload_commit",
+      "sampled_unix_ms": 1792349005655,
+      "state": "RUNNING",
+      "status_age_ms": 2457,
+      "status_checkpoint": {
+        "blocks": 221243,
+        "bytes": 97985399177,
+        "cursor": "000000000000000018df884b2474cf8e-20b258:p442447:872f3bafc25ba0f2cfb0612059b867b9c1a86928b559fec47f07e667a7419b2b",
+        "sequence": 442447
+      }
+    },
+    {
+      "batch_started_unix_ms": 1792348998197,
+      "durable_checkpoint": {
+        "blocks": 221243,
+        "bytes": 97985399177,
+        "cursor": "000000000000000018df884b2474cf8e-20b258:p442447:872f3bafc25ba0f2cfb0612059b867b9c1a86928b559fec47f07e667a7419b2b",
+        "sequence": 442447
+      },
+      "elapsed_seconds": 63.0,
+      "in_flight": true,
+      "last_durable_progress_unix_ms": 1792348998134,
+      "phase": "upload_commit",
+      "sampled_unix_ms": 1792349006656,
+      "state": "RUNNING",
+      "status_age_ms": 3458,
+      "status_checkpoint": {
+        "blocks": 221243,
+        "bytes": 97985399177,
+        "cursor": "000000000000000018df884b2474cf8e-20b258:p442447:872f3bafc25ba0f2cfb0612059b867b9c1a86928b559fec47f07e667a7419b2b",
+        "sequence": 442447
+      }
+    },
+    {
+      "batch_started_unix_ms": 1792348998197,
+      "durable_checkpoint": {
+        "blocks": 221243,
+        "bytes": 97985399177,
+        "cursor": "000000000000000018df884b2474cf8e-20b258:p442447:872f3bafc25ba0f2cfb0612059b867b9c1a86928b559fec47f07e667a7419b2b",
+        "sequence": 442447
+      },
+      "elapsed_seconds": 64.0,
+      "in_flight": true,
+      "last_durable_progress_unix_ms": 1792348998134,
+      "phase": "upload_commit",
+      "sampled_unix_ms": 1792349007655,
+      "state": "RUNNING",
+      "status_age_ms": 4457,
+      "status_checkpoint": {
+        "blocks": 221243,
+        "bytes": 97985399177,
+        "cursor": "000000000000000018df884b2474cf8e-20b258:p442447:872f3bafc25ba0f2cfb0612059b867b9c1a86928b559fec47f07e667a7419b2b",
+        "sequence": 442447
+      }
+    },
+    {
+      "batch_started_unix_ms": 1792348998197,
+      "durable_checkpoint": {
+        "blocks": 221243,
+        "bytes": 97985399177,
+        "cursor": "000000000000000018df884b2474cf8e-20b258:p442447:872f3bafc25ba0f2cfb0612059b867b9c1a86928b559fec47f07e667a7419b2b",
+        "sequence": 442447
+      },
+      "elapsed_seconds": 65.034,
+      "in_flight": true,
+      "last_durable_progress_unix_ms": 1792348998134,
+      "phase": "upload_commit",
+      "sampled_unix_ms": 1792349008689,
+      "state": "RUNNING",
+      "status_age_ms": 490,
+      "status_checkpoint": {
+        "blocks": 221243,
+        "bytes": 97985399177,
+        "cursor": "000000000000000018df884b2474cf8e-20b258:p442447:872f3bafc25ba0f2cfb0612059b867b9c1a86928b559fec47f07e667a7419b2b",
+        "sequence": 442447
+      }
+    },
+    {
+      "batch_started_unix_ms": 1792349008766,
+      "durable_checkpoint": {
+        "blocks": 221295,
+        "bytes": 98009135952,
+        "cursor": "000000000000000018df884b2474cf8e-20b258:p442551:c99af939223b9b926a83ed8b1c4b7ba7bff25e8e065c2af89fedee02c8cf9a26",
+        "sequence": 442551
+      },
+      "elapsed_seconds": 66.0,
+      "in_flight": true,
+      "last_durable_progress_unix_ms": 1792349008712,
+      "phase": "upload_commit",
+      "sampled_unix_ms": 1792349009655,
+      "state": "RUNNING",
+      "status_age_ms": 889,
+      "status_checkpoint": {
+        "blocks": 221295,
+        "bytes": 98009135952,
+        "cursor": "000000000000000018df884b2474cf8e-20b258:p442551:c99af939223b9b926a83ed8b1c4b7ba7bff25e8e065c2af89fedee02c8cf9a26",
+        "sequence": 442551
+      }
+    },
+    {
+      "batch_started_unix_ms": 1792349008766,
+      "durable_checkpoint": {
+        "blocks": 221295,
+        "bytes": 98009135952,
+        "cursor": "000000000000000018df884b2474cf8e-20b258:p442551:c99af939223b9b926a83ed8b1c4b7ba7bff25e8e065c2af89fedee02c8cf9a26",
+        "sequence": 442551
+      },
+      "elapsed_seconds": 67.0,
+      "in_flight": true,
+      "last_durable_progress_unix_ms": 1792349008712,
+      "phase": "upload_commit",
+      "sampled_unix_ms": 1792349010655,
+      "state": "RUNNING",
+      "status_age_ms": 1889,
+      "status_checkpoint": {
+        "blocks": 221295,
+        "bytes": 98009135952,
+        "cursor": "000000000000000018df884b2474cf8e-20b258:p442551:c99af939223b9b926a83ed8b1c4b7ba7bff25e8e065c2af89fedee02c8cf9a26",
+        "sequence": 442551
+      }
+    },
+    {
+      "batch_started_unix_ms": 1792349008766,
+      "durable_checkpoint": {
+        "blocks": 221295,
+        "bytes": 98009135952,
+        "cursor": "000000000000000018df884b2474cf8e-20b258:p442551:c99af939223b9b926a83ed8b1c4b7ba7bff25e8e065c2af89fedee02c8cf9a26",
+        "sequence": 442551
+      },
+      "elapsed_seconds": 68.0,
+      "in_flight": true,
+      "last_durable_progress_unix_ms": 1792349008712,
+      "phase": "upload_commit",
+      "sampled_unix_ms": 1792349011656,
+      "state": "RUNNING",
+      "status_age_ms": 2890,
+      "status_checkpoint": {
+        "blocks": 221295,
+        "bytes": 98009135952,
+        "cursor": "000000000000000018df884b2474cf8e-20b258:p442551:c99af939223b9b926a83ed8b1c4b7ba7bff25e8e065c2af89fedee02c8cf9a26",
+        "sequence": 442551
+      }
+    },
+    {
+      "batch_started_unix_ms": 1792349008766,
+      "durable_checkpoint": {
+        "blocks": 221295,
+        "bytes": 98009135952,
+        "cursor": "000000000000000018df884b2474cf8e-20b258:p442551:c99af939223b9b926a83ed8b1c4b7ba7bff25e8e065c2af89fedee02c8cf9a26",
+        "sequence": 442551
+      },
+      "elapsed_seconds": 69.0,
+      "in_flight": true,
+      "last_durable_progress_unix_ms": 1792349008712,
+      "phase": "upload_commit",
+      "sampled_unix_ms": 1792349012656,
+      "state": "RUNNING",
+      "status_age_ms": 3890,
+      "status_checkpoint": {
+        "blocks": 221295,
+        "bytes": 98009135952,
+        "cursor": "000000000000000018df884b2474cf8e-20b258:p442551:c99af939223b9b926a83ed8b1c4b7ba7bff25e8e065c2af89fedee02c8cf9a26",
+        "sequence": 442551
+      }
+    },
+    {
+      "batch_started_unix_ms": 1792349008766,
+      "durable_checkpoint": {
+        "blocks": 221295,
+        "bytes": 98009135952,
+        "cursor": "000000000000000018df884b2474cf8e-20b258:p442551:c99af939223b9b926a83ed8b1c4b7ba7bff25e8e065c2af89fedee02c8cf9a26",
+        "sequence": 442551
+      },
+      "elapsed_seconds": 70.0,
+      "in_flight": true,
+      "last_durable_progress_unix_ms": 1792349008712,
+      "phase": "upload_commit",
+      "sampled_unix_ms": 1792349013655,
+      "state": "RUNNING",
+      "status_age_ms": 4889,
+      "status_checkpoint": {
+        "blocks": 221295,
+        "bytes": 98009135952,
+        "cursor": "000000000000000018df884b2474cf8e-20b258:p442551:c99af939223b9b926a83ed8b1c4b7ba7bff25e8e065c2af89fedee02c8cf9a26",
+        "sequence": 442551
+      }
+    },
+    {
+      "batch_started_unix_ms": 1792349008766,
+      "durable_checkpoint": {
+        "blocks": 221295,
+        "bytes": 98009135952,
+        "cursor": "000000000000000018df884b2474cf8e-20b258:p442551:c99af939223b9b926a83ed8b1c4b7ba7bff25e8e065c2af89fedee02c8cf9a26",
+        "sequence": 442551
+      },
+      "elapsed_seconds": 71.0,
+      "in_flight": true,
+      "last_durable_progress_unix_ms": 1792349008712,
+      "phase": "upload_commit",
+      "sampled_unix_ms": 1792349014655,
+      "state": "RUNNING",
+      "status_age_ms": 888,
+      "status_checkpoint": {
+        "blocks": 221295,
+        "bytes": 98009135952,
+        "cursor": "000000000000000018df884b2474cf8e-20b258:p442551:c99af939223b9b926a83ed8b1c4b7ba7bff25e8e065c2af89fedee02c8cf9a26",
+        "sequence": 442551
+      }
+    },
+    {
+      "batch_started_unix_ms": 1792349008766,
+      "durable_checkpoint": {
+        "blocks": 221295,
+        "bytes": 98009135952,
+        "cursor": "000000000000000018df884b2474cf8e-20b258:p442551:c99af939223b9b926a83ed8b1c4b7ba7bff25e8e065c2af89fedee02c8cf9a26",
+        "sequence": 442551
+      },
+      "elapsed_seconds": 72.0,
+      "in_flight": true,
+      "last_durable_progress_unix_ms": 1792349008712,
+      "phase": "upload_commit",
+      "sampled_unix_ms": 1792349015655,
+      "state": "RUNNING",
+      "status_age_ms": 1888,
+      "status_checkpoint": {
+        "blocks": 221295,
+        "bytes": 98009135952,
+        "cursor": "000000000000000018df884b2474cf8e-20b258:p442551:c99af939223b9b926a83ed8b1c4b7ba7bff25e8e065c2af89fedee02c8cf9a26",
+        "sequence": 442551
+      }
+    },
+    {
+      "batch_started_unix_ms": 1792349008766,
+      "durable_checkpoint": {
+        "blocks": 221295,
+        "bytes": 98009135952,
+        "cursor": "000000000000000018df884b2474cf8e-20b258:p442551:c99af939223b9b926a83ed8b1c4b7ba7bff25e8e065c2af89fedee02c8cf9a26",
+        "sequence": 442551
+      },
+      "elapsed_seconds": 73.0,
+      "in_flight": true,
+      "last_durable_progress_unix_ms": 1792349008712,
+      "phase": "upload_commit",
+      "sampled_unix_ms": 1792349016655,
+      "state": "RUNNING",
+      "status_age_ms": 2888,
+      "status_checkpoint": {
+        "blocks": 221295,
+        "bytes": 98009135952,
+        "cursor": "000000000000000018df884b2474cf8e-20b258:p442551:c99af939223b9b926a83ed8b1c4b7ba7bff25e8e065c2af89fedee02c8cf9a26",
+        "sequence": 442551
+      }
+    },
+    {
+      "batch_started_unix_ms": 1792349008766,
+      "durable_checkpoint": {
+        "blocks": 221295,
+        "bytes": 98009135952,
+        "cursor": "000000000000000018df884b2474cf8e-20b258:p442551:c99af939223b9b926a83ed8b1c4b7ba7bff25e8e065c2af89fedee02c8cf9a26",
+        "sequence": 442551
+      },
+      "elapsed_seconds": 74.0,
+      "in_flight": true,
+      "last_durable_progress_unix_ms": 1792349008712,
+      "phase": "upload_commit",
+      "sampled_unix_ms": 1792349017655,
+      "state": "RUNNING",
+      "status_age_ms": 3888,
+      "status_checkpoint": {
+        "blocks": 221295,
+        "bytes": 98009135952,
+        "cursor": "000000000000000018df884b2474cf8e-20b258:p442551:c99af939223b9b926a83ed8b1c4b7ba7bff25e8e065c2af89fedee02c8cf9a26",
+        "sequence": 442551
+      }
+    },
+    {
+      "batch_started_unix_ms": 1792349008766,
+      "durable_checkpoint": {
+        "blocks": 221295,
+        "bytes": 98009135952,
+        "cursor": "000000000000000018df884b2474cf8e-20b258:p442551:c99af939223b9b926a83ed8b1c4b7ba7bff25e8e065c2af89fedee02c8cf9a26",
+        "sequence": 442551
+      },
+      "elapsed_seconds": 75.0,
+      "in_flight": true,
+      "last_durable_progress_unix_ms": 1792349008712,
+      "phase": "upload_commit",
+      "sampled_unix_ms": 1792349018656,
+      "state": "RUNNING",
+      "status_age_ms": 4889,
+      "status_checkpoint": {
+        "blocks": 221295,
+        "bytes": 98009135952,
+        "cursor": "000000000000000018df884b2474cf8e-20b258:p442551:c99af939223b9b926a83ed8b1c4b7ba7bff25e8e065c2af89fedee02c8cf9a26",
+        "sequence": 442551
+      }
+    },
+    {
+      "batch_started_unix_ms": 1792349018964,
+      "durable_checkpoint": {
+        "blocks": 221342,
+        "bytes": 98030574569,
+        "cursor": "000000000000000018df884b2474cf8e-20b258:p442645:b8687d1c2d5a5379945d6bbc8b6eec84ac99d324c569a02d415a3c9d69362890",
+        "sequence": 442645
+      },
+      "elapsed_seconds": 76.035,
+      "in_flight": true,
+      "last_durable_progress_unix_ms": 1792349018911,
+      "phase": "upload_commit",
+      "sampled_unix_ms": 1792349019691,
+      "state": "RUNNING",
+      "status_age_ms": 727,
+      "status_checkpoint": {
+        "blocks": 221342,
+        "bytes": 98030574569,
+        "cursor": "000000000000000018df884b2474cf8e-20b258:p442645:b8687d1c2d5a5379945d6bbc8b6eec84ac99d324c569a02d415a3c9d69362890",
+        "sequence": 442645
+      }
+    },
+    {
+      "batch_started_unix_ms": 1792349018964,
+      "durable_checkpoint": {
+        "blocks": 221342,
+        "bytes": 98030574569,
+        "cursor": "000000000000000018df884b2474cf8e-20b258:p442645:b8687d1c2d5a5379945d6bbc8b6eec84ac99d324c569a02d415a3c9d69362890",
+        "sequence": 442645
+      },
+      "elapsed_seconds": 77.0,
+      "in_flight": true,
+      "last_durable_progress_unix_ms": 1792349018911,
+      "phase": "upload_commit",
+      "sampled_unix_ms": 1792349020655,
+      "state": "RUNNING",
+      "status_age_ms": 1691,
+      "status_checkpoint": {
+        "blocks": 221342,
+        "bytes": 98030574569,
+        "cursor": "000000000000000018df884b2474cf8e-20b258:p442645:b8687d1c2d5a5379945d6bbc8b6eec84ac99d324c569a02d415a3c9d69362890",
+        "sequence": 442645
+      }
+    },
+    {
+      "batch_started_unix_ms": 1792349018964,
+      "durable_checkpoint": {
+        "blocks": 221342,
+        "bytes": 98030574569,
+        "cursor": "000000000000000018df884b2474cf8e-20b258:p442645:b8687d1c2d5a5379945d6bbc8b6eec84ac99d324c569a02d415a3c9d69362890",
+        "sequence": 442645
+      },
+      "elapsed_seconds": 78.0,
+      "in_flight": true,
+      "last_durable_progress_unix_ms": 1792349018911,
+      "phase": "upload_commit",
+      "sampled_unix_ms": 1792349021655,
+      "state": "RUNNING",
+      "status_age_ms": 2691,
+      "status_checkpoint": {
+        "blocks": 221342,
+        "bytes": 98030574569,
+        "cursor": "000000000000000018df884b2474cf8e-20b258:p442645:b8687d1c2d5a5379945d6bbc8b6eec84ac99d324c569a02d415a3c9d69362890",
+        "sequence": 442645
+      }
+    },
+    {
+      "batch_started_unix_ms": 1792349018964,
+      "durable_checkpoint": {
+        "blocks": 221342,
+        "bytes": 98030574569,
+        "cursor": "000000000000000018df884b2474cf8e-20b258:p442645:b8687d1c2d5a5379945d6bbc8b6eec84ac99d324c569a02d415a3c9d69362890",
+        "sequence": 442645
+      },
+      "elapsed_seconds": 79.0,
+      "in_flight": true,
+      "last_durable_progress_unix_ms": 1792349018911,
+      "phase": "upload_commit",
+      "sampled_unix_ms": 1792349022655,
+      "state": "RUNNING",
+      "status_age_ms": 3691,
+      "status_checkpoint": {
+        "blocks": 221342,
+        "bytes": 98030574569,
+        "cursor": "000000000000000018df884b2474cf8e-20b258:p442645:b8687d1c2d5a5379945d6bbc8b6eec84ac99d324c569a02d415a3c9d69362890",
+        "sequence": 442645
+      }
+    },
+    {
+      "batch_started_unix_ms": 1792349018964,
+      "durable_checkpoint": {
+        "blocks": 221342,
+        "bytes": 98030574569,
+        "cursor": "000000000000000018df884b2474cf8e-20b258:p442645:b8687d1c2d5a5379945d6bbc8b6eec84ac99d324c569a02d415a3c9d69362890",
+        "sequence": 442645
+      },
+      "elapsed_seconds": 80.0,
+      "in_flight": true,
+      "last_durable_progress_unix_ms": 1792349018911,
+      "phase": "upload_commit",
+      "sampled_unix_ms": 1792349023655,
+      "state": "RUNNING",
+      "status_age_ms": 4691,
+      "status_checkpoint": {
+        "blocks": 221342,
+        "bytes": 98030574569,
+        "cursor": "000000000000000018df884b2474cf8e-20b258:p442645:b8687d1c2d5a5379945d6bbc8b6eec84ac99d324c569a02d415a3c9d69362890",
+        "sequence": 442645
+      }
+    },
+    {
+      "batch_started_unix_ms": 1792349018964,
+      "durable_checkpoint": {
+        "blocks": 221342,
+        "bytes": 98030574569,
+        "cursor": "000000000000000018df884b2474cf8e-20b258:p442645:b8687d1c2d5a5379945d6bbc8b6eec84ac99d324c569a02d415a3c9d69362890",
+        "sequence": 442645
+      },
+      "elapsed_seconds": 81.0,
+      "in_flight": true,
+      "last_durable_progress_unix_ms": 1792349018911,
+      "phase": "upload_commit",
+      "sampled_unix_ms": 1792349024655,
+      "state": "RUNNING",
+      "status_age_ms": 691,
+      "status_checkpoint": {
+        "blocks": 221342,
+        "bytes": 98030574569,
+        "cursor": "000000000000000018df884b2474cf8e-20b258:p442645:b8687d1c2d5a5379945d6bbc8b6eec84ac99d324c569a02d415a3c9d69362890",
+        "sequence": 442645
+      }
+    },
+    {
+      "batch_started_unix_ms": 1792349018964,
+      "durable_checkpoint": {
+        "blocks": 221342,
+        "bytes": 98030574569,
+        "cursor": "000000000000000018df884b2474cf8e-20b258:p442645:b8687d1c2d5a5379945d6bbc8b6eec84ac99d324c569a02d415a3c9d69362890",
+        "sequence": 442645
+      },
+      "elapsed_seconds": 82.0,
+      "in_flight": true,
+      "last_durable_progress_unix_ms": 1792349018911,
+      "phase": "upload_commit",
+      "sampled_unix_ms": 1792349025655,
+      "state": "RUNNING",
+      "status_age_ms": 1691,
+      "status_checkpoint": {
+        "blocks": 221342,
+        "bytes": 98030574569,
+        "cursor": "000000000000000018df884b2474cf8e-20b258:p442645:b8687d1c2d5a5379945d6bbc8b6eec84ac99d324c569a02d415a3c9d69362890",
+        "sequence": 442645
+      }
+    },
+    {
+      "batch_started_unix_ms": 1792349018964,
+      "durable_checkpoint": {
+        "blocks": 221342,
+        "bytes": 98030574569,
+        "cursor": "000000000000000018df884b2474cf8e-20b258:p442645:b8687d1c2d5a5379945d6bbc8b6eec84ac99d324c569a02d415a3c9d69362890",
+        "sequence": 442645
+      },
+      "elapsed_seconds": 83.0,
+      "in_flight": true,
+      "last_durable_progress_unix_ms": 1792349018911,
+      "phase": "upload_commit",
+      "sampled_unix_ms": 1792349026655,
+      "state": "RUNNING",
+      "status_age_ms": 2691,
+      "status_checkpoint": {
+        "blocks": 221342,
+        "bytes": 98030574569,
+        "cursor": "000000000000000018df884b2474cf8e-20b258:p442645:b8687d1c2d5a5379945d6bbc8b6eec84ac99d324c569a02d415a3c9d69362890",
+        "sequence": 442645
+      }
+    },
+    {
+      "batch_started_unix_ms": 1792349018964,
+      "durable_checkpoint": {
+        "blocks": 221342,
+        "bytes": 98030574569,
+        "cursor": "000000000000000018df884b2474cf8e-20b258:p442645:b8687d1c2d5a5379945d6bbc8b6eec84ac99d324c569a02d415a3c9d69362890",
+        "sequence": 442645
+      },
+      "elapsed_seconds": 84.0,
+      "in_flight": true,
+      "last_durable_progress_unix_ms": 1792349018911,
+      "phase": "upload_commit",
+      "sampled_unix_ms": 1792349027655,
+      "state": "RUNNING",
+      "status_age_ms": 3691,
+      "status_checkpoint": {
+        "blocks": 221342,
+        "bytes": 98030574569,
+        "cursor": "000000000000000018df884b2474cf8e-20b258:p442645:b8687d1c2d5a5379945d6bbc8b6eec84ac99d324c569a02d415a3c9d69362890",
+        "sequence": 442645
+      }
+    },
+    {
+      "batch_started_unix_ms": 1792349018964,
+      "durable_checkpoint": {
+        "blocks": 221342,
+        "bytes": 98030574569,
+        "cursor": "000000000000000018df884b2474cf8e-20b258:p442645:b8687d1c2d5a5379945d6bbc8b6eec84ac99d324c569a02d415a3c9d69362890",
+        "sequence": 442645
+      },
+      "elapsed_seconds": 85.0,
+      "in_flight": true,
+      "last_durable_progress_unix_ms": 1792349018911,
+      "phase": "upload_commit",
+      "sampled_unix_ms": 1792349028655,
+      "state": "RUNNING",
+      "status_age_ms": 4691,
+      "status_checkpoint": {
+        "blocks": 221342,
+        "bytes": 98030574569,
+        "cursor": "000000000000000018df884b2474cf8e-20b258:p442645:b8687d1c2d5a5379945d6bbc8b6eec84ac99d324c569a02d415a3c9d69362890",
+        "sequence": 442645
+      }
+    },
+    {
+      "batch_started_unix_ms": null,
+      "durable_checkpoint": {
+        "blocks": 221390,
+        "bytes": 98051440558,
+        "cursor": "000000000000000018df884b2474cf8e-20b258:p442740:73b4e2d84003e875838716bce7cb64947734dcb9bd2bbef0aab65d2b01e1774f",
+        "sequence": 442740
+      },
+      "elapsed_seconds": 86.0,
+      "in_flight": false,
+      "last_durable_progress_unix_ms": 1792349029604,
+      "phase": "waiting",
+      "sampled_unix_ms": 1792349029656,
+      "state": "RUNNING",
+      "status_age_ms": 51,
+      "status_checkpoint": {
+        "blocks": 221390,
+        "bytes": 98051440558,
+        "cursor": "000000000000000018df884b2474cf8e-20b258:p442740:73b4e2d84003e875838716bce7cb64947734dcb9bd2bbef0aab65d2b01e1774f",
+        "sequence": 442740
+      }
+    },
+    {
+      "batch_started_unix_ms": 1792349029660,
+      "durable_checkpoint": {
+        "blocks": 221390,
+        "bytes": 98051440558,
+        "cursor": "000000000000000018df884b2474cf8e-20b258:p442740:73b4e2d84003e875838716bce7cb64947734dcb9bd2bbef0aab65d2b01e1774f",
+        "sequence": 442740
+      },
+      "elapsed_seconds": 87.034,
+      "in_flight": true,
+      "last_durable_progress_unix_ms": 1792349029604,
+      "phase": "upload_commit",
+      "sampled_unix_ms": 1792349030690,
+      "state": "RUNNING",
+      "status_age_ms": 1030,
+      "status_checkpoint": {
+        "blocks": 221390,
+        "bytes": 98051440558,
+        "cursor": "000000000000000018df884b2474cf8e-20b258:p442740:73b4e2d84003e875838716bce7cb64947734dcb9bd2bbef0aab65d2b01e1774f",
+        "sequence": 442740
+      }
+    },
+    {
+      "batch_started_unix_ms": 1792349029660,
+      "durable_checkpoint": {
+        "blocks": 221390,
+        "bytes": 98051440558,
+        "cursor": "000000000000000018df884b2474cf8e-20b258:p442740:73b4e2d84003e875838716bce7cb64947734dcb9bd2bbef0aab65d2b01e1774f",
+        "sequence": 442740
+      },
+      "elapsed_seconds": 88.0,
+      "in_flight": true,
+      "last_durable_progress_unix_ms": 1792349029604,
+      "phase": "upload_commit",
+      "sampled_unix_ms": 1792349031656,
+      "state": "RUNNING",
+      "status_age_ms": 1996,
+      "status_checkpoint": {
+        "blocks": 221390,
+        "bytes": 98051440558,
+        "cursor": "000000000000000018df884b2474cf8e-20b258:p442740:73b4e2d84003e875838716bce7cb64947734dcb9bd2bbef0aab65d2b01e1774f",
+        "sequence": 442740
+      }
+    },
+    {
+      "batch_started_unix_ms": 1792349029660,
+      "durable_checkpoint": {
+        "blocks": 221390,
+        "bytes": 98051440558,
+        "cursor": "000000000000000018df884b2474cf8e-20b258:p442740:73b4e2d84003e875838716bce7cb64947734dcb9bd2bbef0aab65d2b01e1774f",
+        "sequence": 442740
+      },
+      "elapsed_seconds": 89.0,
+      "in_flight": true,
+      "last_durable_progress_unix_ms": 1792349029604,
+      "phase": "upload_commit",
+      "sampled_unix_ms": 1792349032655,
+      "state": "RUNNING",
+      "status_age_ms": 2995,
+      "status_checkpoint": {
+        "blocks": 221390,
+        "bytes": 98051440558,
+        "cursor": "000000000000000018df884b2474cf8e-20b258:p442740:73b4e2d84003e875838716bce7cb64947734dcb9bd2bbef0aab65d2b01e1774f",
+        "sequence": 442740
+      }
+    },
+    {
+      "batch_started_unix_ms": 1792349029660,
+      "durable_checkpoint": {
+        "blocks": 221390,
+        "bytes": 98051440558,
+        "cursor": "000000000000000018df884b2474cf8e-20b258:p442740:73b4e2d84003e875838716bce7cb64947734dcb9bd2bbef0aab65d2b01e1774f",
+        "sequence": 442740
+      },
+      "elapsed_seconds": 90.0,
+      "in_flight": true,
+      "last_durable_progress_unix_ms": 1792349029604,
+      "phase": "upload_commit",
+      "sampled_unix_ms": 1792349033655,
+      "state": "RUNNING",
+      "status_age_ms": 3995,
+      "status_checkpoint": {
+        "blocks": 221390,
+        "bytes": 98051440558,
+        "cursor": "000000000000000018df884b2474cf8e-20b258:p442740:73b4e2d84003e875838716bce7cb64947734dcb9bd2bbef0aab65d2b01e1774f",
+        "sequence": 442740
+      }
+    },
+    {
+      "batch_started_unix_ms": 1792349029660,
+      "durable_checkpoint": {
+        "blocks": 221390,
+        "bytes": 98051440558,
+        "cursor": "000000000000000018df884b2474cf8e-20b258:p442740:73b4e2d84003e875838716bce7cb64947734dcb9bd2bbef0aab65d2b01e1774f",
+        "sequence": 442740
+      },
+      "elapsed_seconds": 91.0,
+      "in_flight": true,
+      "last_durable_progress_unix_ms": 1792349029604,
+      "phase": "upload_commit",
+      "sampled_unix_ms": 1792349034655,
+      "state": "RUNNING",
+      "status_age_ms": 4995,
+      "status_checkpoint": {
+        "blocks": 221390,
+        "bytes": 98051440558,
+        "cursor": "000000000000000018df884b2474cf8e-20b258:p442740:73b4e2d84003e875838716bce7cb64947734dcb9bd2bbef0aab65d2b01e1774f",
+        "sequence": 442740
+      }
+    },
+    {
+      "batch_started_unix_ms": 1792349029660,
+      "durable_checkpoint": {
+        "blocks": 221390,
+        "bytes": 98051440558,
+        "cursor": "000000000000000018df884b2474cf8e-20b258:p442740:73b4e2d84003e875838716bce7cb64947734dcb9bd2bbef0aab65d2b01e1774f",
+        "sequence": 442740
+      },
+      "elapsed_seconds": 92.0,
+      "in_flight": true,
+      "last_durable_progress_unix_ms": 1792349029604,
+      "phase": "upload_commit",
+      "sampled_unix_ms": 1792349035656,
+      "state": "RUNNING",
+      "status_age_ms": 996,
+      "status_checkpoint": {
+        "blocks": 221390,
+        "bytes": 98051440558,
+        "cursor": "000000000000000018df884b2474cf8e-20b258:p442740:73b4e2d84003e875838716bce7cb64947734dcb9bd2bbef0aab65d2b01e1774f",
+        "sequence": 442740
+      }
+    },
+    {
+      "batch_started_unix_ms": 1792349029660,
+      "durable_checkpoint": {
+        "blocks": 221390,
+        "bytes": 98051440558,
+        "cursor": "000000000000000018df884b2474cf8e-20b258:p442740:73b4e2d84003e875838716bce7cb64947734dcb9bd2bbef0aab65d2b01e1774f",
+        "sequence": 442740
+      },
+      "elapsed_seconds": 93.0,
+      "in_flight": true,
+      "last_durable_progress_unix_ms": 1792349029604,
+      "phase": "upload_commit",
+      "sampled_unix_ms": 1792349036655,
+      "state": "RUNNING",
+      "status_age_ms": 1995,
+      "status_checkpoint": {
+        "blocks": 221390,
+        "bytes": 98051440558,
+        "cursor": "000000000000000018df884b2474cf8e-20b258:p442740:73b4e2d84003e875838716bce7cb64947734dcb9bd2bbef0aab65d2b01e1774f",
+        "sequence": 442740
+      }
+    },
+    {
+      "batch_started_unix_ms": 1792349029660,
+      "durable_checkpoint": {
+        "blocks": 221390,
+        "bytes": 98051440558,
+        "cursor": "000000000000000018df884b2474cf8e-20b258:p442740:73b4e2d84003e875838716bce7cb64947734dcb9bd2bbef0aab65d2b01e1774f",
+        "sequence": 442740
+      },
+      "elapsed_seconds": 94.0,
+      "in_flight": true,
+      "last_durable_progress_unix_ms": 1792349029604,
+      "phase": "upload_commit",
+      "sampled_unix_ms": 1792349037656,
+      "state": "RUNNING",
+      "status_age_ms": 2996,
+      "status_checkpoint": {
+        "blocks": 221390,
+        "bytes": 98051440558,
+        "cursor": "000000000000000018df884b2474cf8e-20b258:p442740:73b4e2d84003e875838716bce7cb64947734dcb9bd2bbef0aab65d2b01e1774f",
+        "sequence": 442740
+      }
+    },
+    {
+      "batch_started_unix_ms": 1792349029660,
+      "durable_checkpoint": {
+        "blocks": 221390,
+        "bytes": 98051440558,
+        "cursor": "000000000000000018df884b2474cf8e-20b258:p442740:73b4e2d84003e875838716bce7cb64947734dcb9bd2bbef0aab65d2b01e1774f",
+        "sequence": 442740
+      },
+      "elapsed_seconds": 95.0,
+      "in_flight": true,
+      "last_durable_progress_unix_ms": 1792349029604,
+      "phase": "upload_commit",
+      "sampled_unix_ms": 1792349038655,
+      "state": "RUNNING",
+      "status_age_ms": 3995,
+      "status_checkpoint": {
+        "blocks": 221390,
+        "bytes": 98051440558,
+        "cursor": "000000000000000018df884b2474cf8e-20b258:p442740:73b4e2d84003e875838716bce7cb64947734dcb9bd2bbef0aab65d2b01e1774f",
+        "sequence": 442740
+      }
+    },
+    {
+      "batch_started_unix_ms": 1792349029660,
+      "durable_checkpoint": {
+        "blocks": 221390,
+        "bytes": 98051440558,
+        "cursor": "000000000000000018df884b2474cf8e-20b258:p442740:73b4e2d84003e875838716bce7cb64947734dcb9bd2bbef0aab65d2b01e1774f",
+        "sequence": 442740
+      },
+      "elapsed_seconds": 96.0,
+      "in_flight": true,
+      "last_durable_progress_unix_ms": 1792349029604,
+      "phase": "upload_commit",
+      "sampled_unix_ms": 1792349039655,
+      "state": "RUNNING",
+      "status_age_ms": 4995,
+      "status_checkpoint": {
+        "blocks": 221390,
+        "bytes": 98051440558,
+        "cursor": "000000000000000018df884b2474cf8e-20b258:p442740:73b4e2d84003e875838716bce7cb64947734dcb9bd2bbef0aab65d2b01e1774f",
+        "sequence": 442740
+      }
+    },
+    {
+      "batch_started_unix_ms": 1792349040079,
+      "durable_checkpoint": {
+        "blocks": 221439,
+        "bytes": 98073116923,
+        "cursor": "000000000000000018df884b2474cf8e-20b258:p442840:a5f2a3229312f06244142fe15e9d9fbbb81fce005ebd4f607cc37db66ac2be33",
+        "sequence": 442840
+      },
+      "elapsed_seconds": 97.0,
+      "in_flight": true,
+      "last_durable_progress_unix_ms": 1792349040026,
+      "phase": "upload_commit",
+      "sampled_unix_ms": 1792349040656,
+      "state": "RUNNING",
+      "status_age_ms": 577,
+      "status_checkpoint": {
+        "blocks": 221439,
+        "bytes": 98073116923,
+        "cursor": "000000000000000018df884b2474cf8e-20b258:p442840:a5f2a3229312f06244142fe15e9d9fbbb81fce005ebd4f607cc37db66ac2be33",
+        "sequence": 442840
+      }
+    },
+    {
+      "batch_started_unix_ms": 1792349040079,
+      "durable_checkpoint": {
+        "blocks": 221439,
+        "bytes": 98073116923,
+        "cursor": "000000000000000018df884b2474cf8e-20b258:p442840:a5f2a3229312f06244142fe15e9d9fbbb81fce005ebd4f607cc37db66ac2be33",
+        "sequence": 442840
+      },
+      "elapsed_seconds": 98.034,
+      "in_flight": true,
+      "last_durable_progress_unix_ms": 1792349040026,
+      "phase": "upload_commit",
+      "sampled_unix_ms": 1792349041689,
+      "state": "RUNNING",
+      "status_age_ms": 1610,
+      "status_checkpoint": {
+        "blocks": 221439,
+        "bytes": 98073116923,
+        "cursor": "000000000000000018df884b2474cf8e-20b258:p442840:a5f2a3229312f06244142fe15e9d9fbbb81fce005ebd4f607cc37db66ac2be33",
+        "sequence": 442840
+      }
+    },
+    {
+      "batch_started_unix_ms": 1792349040079,
+      "durable_checkpoint": {
+        "blocks": 221439,
+        "bytes": 98073116923,
+        "cursor": "000000000000000018df884b2474cf8e-20b258:p442840:a5f2a3229312f06244142fe15e9d9fbbb81fce005ebd4f607cc37db66ac2be33",
+        "sequence": 442840
+      },
+      "elapsed_seconds": 99.0,
+      "in_flight": true,
+      "last_durable_progress_unix_ms": 1792349040026,
+      "phase": "upload_commit",
+      "sampled_unix_ms": 1792349042656,
+      "state": "RUNNING",
+      "status_age_ms": 2577,
+      "status_checkpoint": {
+        "blocks": 221439,
+        "bytes": 98073116923,
+        "cursor": "000000000000000018df884b2474cf8e-20b258:p442840:a5f2a3229312f06244142fe15e9d9fbbb81fce005ebd4f607cc37db66ac2be33",
+        "sequence": 442840
+      }
+    },
+    {
+      "batch_started_unix_ms": 1792349040079,
+      "durable_checkpoint": {
+        "blocks": 221439,
+        "bytes": 98073116923,
+        "cursor": "000000000000000018df884b2474cf8e-20b258:p442840:a5f2a3229312f06244142fe15e9d9fbbb81fce005ebd4f607cc37db66ac2be33",
+        "sequence": 442840
+      },
+      "elapsed_seconds": 100.0,
+      "in_flight": true,
+      "last_durable_progress_unix_ms": 1792349040026,
+      "phase": "upload_commit",
+      "sampled_unix_ms": 1792349043655,
+      "state": "RUNNING",
+      "status_age_ms": 3576,
+      "status_checkpoint": {
+        "blocks": 221439,
+        "bytes": 98073116923,
+        "cursor": "000000000000000018df884b2474cf8e-20b258:p442840:a5f2a3229312f06244142fe15e9d9fbbb81fce005ebd4f607cc37db66ac2be33",
+        "sequence": 442840
+      }
+    },
+    {
+      "batch_started_unix_ms": 1792349040079,
+      "durable_checkpoint": {
+        "blocks": 221439,
+        "bytes": 98073116923,
+        "cursor": "000000000000000018df884b2474cf8e-20b258:p442840:a5f2a3229312f06244142fe15e9d9fbbb81fce005ebd4f607cc37db66ac2be33",
+        "sequence": 442840
+      },
+      "elapsed_seconds": 101.0,
+      "in_flight": true,
+      "last_durable_progress_unix_ms": 1792349040026,
+      "phase": "upload_commit",
+      "sampled_unix_ms": 1792349044656,
+      "state": "RUNNING",
+      "status_age_ms": 4577,
+      "status_checkpoint": {
+        "blocks": 221439,
+        "bytes": 98073116923,
+        "cursor": "000000000000000018df884b2474cf8e-20b258:p442840:a5f2a3229312f06244142fe15e9d9fbbb81fce005ebd4f607cc37db66ac2be33",
+        "sequence": 442840
+      }
+    },
+    {
+      "batch_started_unix_ms": 1792349040079,
+      "durable_checkpoint": {
+        "blocks": 221439,
+        "bytes": 98073116923,
+        "cursor": "000000000000000018df884b2474cf8e-20b258:p442840:a5f2a3229312f06244142fe15e9d9fbbb81fce005ebd4f607cc37db66ac2be33",
+        "sequence": 442840
+      },
+      "elapsed_seconds": 102.0,
+      "in_flight": true,
+      "last_durable_progress_unix_ms": 1792349040026,
+      "phase": "upload_commit",
+      "sampled_unix_ms": 1792349045655,
+      "state": "RUNNING",
+      "status_age_ms": 576,
+      "status_checkpoint": {
+        "blocks": 221439,
+        "bytes": 98073116923,
+        "cursor": "000000000000000018df884b2474cf8e-20b258:p442840:a5f2a3229312f06244142fe15e9d9fbbb81fce005ebd4f607cc37db66ac2be33",
+        "sequence": 442840
+      }
+    },
+    {
+      "batch_started_unix_ms": 1792349040079,
+      "durable_checkpoint": {
+        "blocks": 221439,
+        "bytes": 98073116923,
+        "cursor": "000000000000000018df884b2474cf8e-20b258:p442840:a5f2a3229312f06244142fe15e9d9fbbb81fce005ebd4f607cc37db66ac2be33",
+        "sequence": 442840
+      },
+      "elapsed_seconds": 103.0,
+      "in_flight": true,
+      "last_durable_progress_unix_ms": 1792349040026,
+      "phase": "upload_commit",
+      "sampled_unix_ms": 1792349046655,
+      "state": "RUNNING",
+      "status_age_ms": 1576,
+      "status_checkpoint": {
+        "blocks": 221439,
+        "bytes": 98073116923,
+        "cursor": "000000000000000018df884b2474cf8e-20b258:p442840:a5f2a3229312f06244142fe15e9d9fbbb81fce005ebd4f607cc37db66ac2be33",
+        "sequence": 442840
+      }
+    },
+    {
+      "batch_started_unix_ms": 1792349040079,
+      "durable_checkpoint": {
+        "blocks": 221439,
+        "bytes": 98073116923,
+        "cursor": "000000000000000018df884b2474cf8e-20b258:p442840:a5f2a3229312f06244142fe15e9d9fbbb81fce005ebd4f607cc37db66ac2be33",
+        "sequence": 442840
+      },
+      "elapsed_seconds": 104.0,
+      "in_flight": true,
+      "last_durable_progress_unix_ms": 1792349040026,
+      "phase": "upload_commit",
+      "sampled_unix_ms": 1792349047655,
+      "state": "RUNNING",
+      "status_age_ms": 2576,
+      "status_checkpoint": {
+        "blocks": 221439,
+        "bytes": 98073116923,
+        "cursor": "000000000000000018df884b2474cf8e-20b258:p442840:a5f2a3229312f06244142fe15e9d9fbbb81fce005ebd4f607cc37db66ac2be33",
+        "sequence": 442840
+      }
+    },
+    {
+      "batch_started_unix_ms": 1792349040079,
+      "durable_checkpoint": {
+        "blocks": 221439,
+        "bytes": 98073116923,
+        "cursor": "000000000000000018df884b2474cf8e-20b258:p442840:a5f2a3229312f06244142fe15e9d9fbbb81fce005ebd4f607cc37db66ac2be33",
+        "sequence": 442840
+      },
+      "elapsed_seconds": 105.0,
+      "in_flight": true,
+      "last_durable_progress_unix_ms": 1792349040026,
+      "phase": "upload_commit",
+      "sampled_unix_ms": 1792349048655,
+      "state": "RUNNING",
+      "status_age_ms": 3576,
+      "status_checkpoint": {
+        "blocks": 221439,
+        "bytes": 98073116923,
+        "cursor": "000000000000000018df884b2474cf8e-20b258:p442840:a5f2a3229312f06244142fe15e9d9fbbb81fce005ebd4f607cc37db66ac2be33",
+        "sequence": 442840
+      }
+    },
+    {
+      "batch_started_unix_ms": 1792349040079,
+      "durable_checkpoint": {
+        "blocks": 221439,
+        "bytes": 98073116923,
+        "cursor": "000000000000000018df884b2474cf8e-20b258:p442840:a5f2a3229312f06244142fe15e9d9fbbb81fce005ebd4f607cc37db66ac2be33",
+        "sequence": 442840
+      },
+      "elapsed_seconds": 106.0,
+      "in_flight": true,
+      "last_durable_progress_unix_ms": 1792349040026,
+      "phase": "upload_commit",
+      "sampled_unix_ms": 1792349049655,
+      "state": "RUNNING",
+      "status_age_ms": 4576,
+      "status_checkpoint": {
+        "blocks": 221439,
+        "bytes": 98073116923,
+        "cursor": "000000000000000018df884b2474cf8e-20b258:p442840:a5f2a3229312f06244142fe15e9d9fbbb81fce005ebd4f607cc37db66ac2be33",
+        "sequence": 442840
+      }
+    },
+    {
+      "batch_started_unix_ms": 1792349040079,
+      "durable_checkpoint": {
+        "blocks": 221439,
+        "bytes": 98073116923,
+        "cursor": "000000000000000018df884b2474cf8e-20b258:p442840:a5f2a3229312f06244142fe15e9d9fbbb81fce005ebd4f607cc37db66ac2be33",
+        "sequence": 442840
+      },
+      "elapsed_seconds": 107.0,
+      "in_flight": true,
+      "last_durable_progress_unix_ms": 1792349040026,
+      "phase": "upload_commit",
+      "sampled_unix_ms": 1792349050656,
+      "state": "RUNNING",
+      "status_age_ms": 576,
+      "status_checkpoint": {
+        "blocks": 221439,
+        "bytes": 98073116923,
+        "cursor": "000000000000000018df884b2474cf8e-20b258:p442840:a5f2a3229312f06244142fe15e9d9fbbb81fce005ebd4f607cc37db66ac2be33",
+        "sequence": 442840
+      }
+    },
+    {
+      "batch_started_unix_ms": 1792349050868,
+      "durable_checkpoint": {
+        "blocks": 221484,
+        "bytes": 98094256767,
+        "cursor": "000000000000000018df884b2474cf8e-20b258:p442929:d566424cf57569f0027daee7dbcf241ab7f6e5ebed2b68a445e5389e69baf33c",
+        "sequence": 442929
+      },
+      "elapsed_seconds": 108.003,
+      "in_flight": true,
+      "last_durable_progress_unix_ms": 1792349050811,
+      "phase": "upload_commit",
+      "sampled_unix_ms": 1792349051658,
+      "state": "RUNNING",
+      "status_age_ms": 790,
+      "status_checkpoint": {
+        "blocks": 221484,
+        "bytes": 98094256767,
+        "cursor": "000000000000000018df884b2474cf8e-20b258:p442929:d566424cf57569f0027daee7dbcf241ab7f6e5ebed2b68a445e5389e69baf33c",
+        "sequence": 442929
+      }
+    },
+    {
+      "batch_started_unix_ms": 1792349050868,
+      "durable_checkpoint": {
+        "blocks": 221484,
+        "bytes": 98094256767,
+        "cursor": "000000000000000018df884b2474cf8e-20b258:p442929:d566424cf57569f0027daee7dbcf241ab7f6e5ebed2b68a445e5389e69baf33c",
+        "sequence": 442929
+      },
+      "elapsed_seconds": 109.034,
+      "in_flight": true,
+      "last_durable_progress_unix_ms": 1792349050811,
+      "phase": "upload_commit",
+      "sampled_unix_ms": 1792349052689,
+      "state": "RUNNING",
+      "status_age_ms": 1821,
+      "status_checkpoint": {
+        "blocks": 221484,
+        "bytes": 98094256767,
+        "cursor": "000000000000000018df884b2474cf8e-20b258:p442929:d566424cf57569f0027daee7dbcf241ab7f6e5ebed2b68a445e5389e69baf33c",
+        "sequence": 442929
+      }
+    },
+    {
+      "batch_started_unix_ms": 1792349050868,
+      "durable_checkpoint": {
+        "blocks": 221484,
+        "bytes": 98094256767,
+        "cursor": "000000000000000018df884b2474cf8e-20b258:p442929:d566424cf57569f0027daee7dbcf241ab7f6e5ebed2b68a445e5389e69baf33c",
+        "sequence": 442929
+      },
+      "elapsed_seconds": 110.0,
+      "in_flight": true,
+      "last_durable_progress_unix_ms": 1792349050811,
+      "phase": "upload_commit",
+      "sampled_unix_ms": 1792349053655,
+      "state": "RUNNING",
+      "status_age_ms": 2787,
+      "status_checkpoint": {
+        "blocks": 221484,
+        "bytes": 98094256767,
+        "cursor": "000000000000000018df884b2474cf8e-20b258:p442929:d566424cf57569f0027daee7dbcf241ab7f6e5ebed2b68a445e5389e69baf33c",
+        "sequence": 442929
+      }
+    },
+    {
+      "batch_started_unix_ms": 1792349050868,
+      "durable_checkpoint": {
+        "blocks": 221484,
+        "bytes": 98094256767,
+        "cursor": "000000000000000018df884b2474cf8e-20b258:p442929:d566424cf57569f0027daee7dbcf241ab7f6e5ebed2b68a445e5389e69baf33c",
+        "sequence": 442929
+      },
+      "elapsed_seconds": 111.0,
+      "in_flight": true,
+      "last_durable_progress_unix_ms": 1792349050811,
+      "phase": "upload_commit",
+      "sampled_unix_ms": 1792349054655,
+      "state": "RUNNING",
+      "status_age_ms": 3787,
+      "status_checkpoint": {
+        "blocks": 221484,
+        "bytes": 98094256767,
+        "cursor": "000000000000000018df884b2474cf8e-20b258:p442929:d566424cf57569f0027daee7dbcf241ab7f6e5ebed2b68a445e5389e69baf33c",
+        "sequence": 442929
+      }
+    },
+    {
+      "batch_started_unix_ms": 1792349050868,
+      "durable_checkpoint": {
+        "blocks": 221484,
+        "bytes": 98094256767,
+        "cursor": "000000000000000018df884b2474cf8e-20b258:p442929:d566424cf57569f0027daee7dbcf241ab7f6e5ebed2b68a445e5389e69baf33c",
+        "sequence": 442929
+      },
+      "elapsed_seconds": 112.0,
+      "in_flight": true,
+      "last_durable_progress_unix_ms": 1792349050811,
+      "phase": "upload_commit",
+      "sampled_unix_ms": 1792349055655,
+      "state": "RUNNING",
+      "status_age_ms": 4787,
+      "status_checkpoint": {
+        "blocks": 221484,
+        "bytes": 98094256767,
+        "cursor": "000000000000000018df884b2474cf8e-20b258:p442929:d566424cf57569f0027daee7dbcf241ab7f6e5ebed2b68a445e5389e69baf33c",
+        "sequence": 442929
+      }
+    },
+    {
+      "batch_started_unix_ms": 1792349050868,
+      "durable_checkpoint": {
+        "blocks": 221484,
+        "bytes": 98094256767,
+        "cursor": "000000000000000018df884b2474cf8e-20b258:p442929:d566424cf57569f0027daee7dbcf241ab7f6e5ebed2b68a445e5389e69baf33c",
+        "sequence": 442929
+      },
+      "elapsed_seconds": 113.0,
+      "in_flight": true,
+      "last_durable_progress_unix_ms": 1792349050811,
+      "phase": "upload_commit",
+      "sampled_unix_ms": 1792349056655,
+      "state": "RUNNING",
+      "status_age_ms": 784,
+      "status_checkpoint": {
+        "blocks": 221484,
+        "bytes": 98094256767,
+        "cursor": "000000000000000018df884b2474cf8e-20b258:p442929:d566424cf57569f0027daee7dbcf241ab7f6e5ebed2b68a445e5389e69baf33c",
+        "sequence": 442929
+      }
+    },
+    {
+      "batch_started_unix_ms": 1792349050868,
+      "durable_checkpoint": {
+        "blocks": 221484,
+        "bytes": 98094256767,
+        "cursor": "000000000000000018df884b2474cf8e-20b258:p442929:d566424cf57569f0027daee7dbcf241ab7f6e5ebed2b68a445e5389e69baf33c",
+        "sequence": 442929
+      },
+      "elapsed_seconds": 114.0,
+      "in_flight": true,
+      "last_durable_progress_unix_ms": 1792349050811,
+      "phase": "upload_commit",
+      "sampled_unix_ms": 1792349057655,
+      "state": "RUNNING",
+      "status_age_ms": 1784,
+      "status_checkpoint": {
+        "blocks": 221484,
+        "bytes": 98094256767,
+        "cursor": "000000000000000018df884b2474cf8e-20b258:p442929:d566424cf57569f0027daee7dbcf241ab7f6e5ebed2b68a445e5389e69baf33c",
+        "sequence": 442929
+      }
+    },
+    {
+      "batch_started_unix_ms": 1792349050868,
+      "durable_checkpoint": {
+        "blocks": 221484,
+        "bytes": 98094256767,
+        "cursor": "000000000000000018df884b2474cf8e-20b258:p442929:d566424cf57569f0027daee7dbcf241ab7f6e5ebed2b68a445e5389e69baf33c",
+        "sequence": 442929
+      },
+      "elapsed_seconds": 115.0,
+      "in_flight": true,
+      "last_durable_progress_unix_ms": 1792349050811,
+      "phase": "upload_commit",
+      "sampled_unix_ms": 1792349058655,
+      "state": "RUNNING",
+      "status_age_ms": 2784,
+      "status_checkpoint": {
+        "blocks": 221484,
+        "bytes": 98094256767,
+        "cursor": "000000000000000018df884b2474cf8e-20b258:p442929:d566424cf57569f0027daee7dbcf241ab7f6e5ebed2b68a445e5389e69baf33c",
+        "sequence": 442929
+      }
+    },
+    {
+      "batch_started_unix_ms": 1792349050868,
+      "durable_checkpoint": {
+        "blocks": 221484,
+        "bytes": 98094256767,
+        "cursor": "000000000000000018df884b2474cf8e-20b258:p442929:d566424cf57569f0027daee7dbcf241ab7f6e5ebed2b68a445e5389e69baf33c",
+        "sequence": 442929
+      },
+      "elapsed_seconds": 116.0,
+      "in_flight": true,
+      "last_durable_progress_unix_ms": 1792349050811,
+      "phase": "upload_commit",
+      "sampled_unix_ms": 1792349059655,
+      "state": "RUNNING",
+      "status_age_ms": 3784,
+      "status_checkpoint": {
+        "blocks": 221484,
+        "bytes": 98094256767,
+        "cursor": "000000000000000018df884b2474cf8e-20b258:p442929:d566424cf57569f0027daee7dbcf241ab7f6e5ebed2b68a445e5389e69baf33c",
+        "sequence": 442929
+      }
+    },
+    {
+      "batch_started_unix_ms": 1792349050868,
+      "durable_checkpoint": {
+        "blocks": 221484,
+        "bytes": 98094256767,
+        "cursor": "000000000000000018df884b2474cf8e-20b258:p442929:d566424cf57569f0027daee7dbcf241ab7f6e5ebed2b68a445e5389e69baf33c",
+        "sequence": 442929
+      },
+      "elapsed_seconds": 117.0,
+      "in_flight": true,
+      "last_durable_progress_unix_ms": 1792349050811,
+      "phase": "upload_commit",
+      "sampled_unix_ms": 1792349060655,
+      "state": "RUNNING",
+      "status_age_ms": 4784,
+      "status_checkpoint": {
+        "blocks": 221484,
+        "bytes": 98094256767,
+        "cursor": "000000000000000018df884b2474cf8e-20b258:p442929:d566424cf57569f0027daee7dbcf241ab7f6e5ebed2b68a445e5389e69baf33c",
+        "sequence": 442929
+      }
+    },
+    {
+      "batch_started_unix_ms": 1792349061226,
+      "durable_checkpoint": {
+        "blocks": 221529,
+        "bytes": 98117027412,
+        "cursor": "000000000000000018df884b2474cf8e-20b258:p443019:38ea9e1d020b14e72040d2d6748b67624497d299b9094acd83b7c0b9a5f4e02f",
+        "sequence": 443019
+      },
+      "elapsed_seconds": 118.0,
+      "in_flight": true,
+      "last_durable_progress_unix_ms": 1792349061166,
+      "phase": "upload_commit",
+      "sampled_unix_ms": 1792349061655,
+      "state": "RUNNING",
+      "status_age_ms": 429,
+      "status_checkpoint": {
+        "blocks": 221529,
+        "bytes": 98117027412,
+        "cursor": "000000000000000018df884b2474cf8e-20b258:p443019:38ea9e1d020b14e72040d2d6748b67624497d299b9094acd83b7c0b9a5f4e02f",
+        "sequence": 443019
+      }
+    },
+    {
+      "batch_started_unix_ms": 1792349061226,
+      "durable_checkpoint": {
+        "blocks": 221529,
+        "bytes": 98117027412,
+        "cursor": "000000000000000018df884b2474cf8e-20b258:p443019:38ea9e1d020b14e72040d2d6748b67624497d299b9094acd83b7c0b9a5f4e02f",
+        "sequence": 443019
+      },
+      "elapsed_seconds": 119.0,
+      "in_flight": true,
+      "last_durable_progress_unix_ms": 1792349061166,
+      "phase": "upload_commit",
+      "sampled_unix_ms": 1792349062655,
+      "state": "RUNNING",
+      "status_age_ms": 1429,
+      "status_checkpoint": {
+        "blocks": 221529,
+        "bytes": 98117027412,
+        "cursor": "000000000000000018df884b2474cf8e-20b258:p443019:38ea9e1d020b14e72040d2d6748b67624497d299b9094acd83b7c0b9a5f4e02f",
+        "sequence": 443019
+      }
+    },
+    {
+      "batch_started_unix_ms": 1792349061226,
+      "durable_checkpoint": {
+        "blocks": 221529,
+        "bytes": 98117027412,
+        "cursor": "000000000000000018df884b2474cf8e-20b258:p443019:38ea9e1d020b14e72040d2d6748b67624497d299b9094acd83b7c0b9a5f4e02f",
+        "sequence": 443019
+      },
+      "elapsed_seconds": 120.034,
+      "in_flight": true,
+      "last_durable_progress_unix_ms": 1792349061166,
+      "phase": "upload_commit",
+      "sampled_unix_ms": 1792349063689,
+      "state": "RUNNING",
+      "status_age_ms": 2463,
+      "status_checkpoint": {
+        "blocks": 221529,
+        "bytes": 98117027412,
+        "cursor": "000000000000000018df884b2474cf8e-20b258:p443019:38ea9e1d020b14e72040d2d6748b67624497d299b9094acd83b7c0b9a5f4e02f",
+        "sequence": 443019
+      }
+    }
+  ],
+  "schema": "blockzilla-publisher-status-flow-v1",
+  "scope": "local_process_status_and_durable_checkpoint_progress_only",
+  "sequence_advance": 1106,
+  "source": {
+    "agave_revision": "87167f3906bdf5111e99ead64d8f4098b7874e33",
+    "genesis_hash": "5eykt4UsFv8P8NJdTREpY1vzqKqZKvdpKuc147dw2N9d",
+    "node_identity": "J7qpvCEWhdBgPdYRV3s3btWPrRVXa2qnAzgvxWTvtbrQ",
+    "session_id": "000000000000000018df884b2474cf8e-20b258"
+  },
+  "start_sequence": 441913,
+  "started_unix_ms": 1792348943594,
+  "state": "PASSED"
+}

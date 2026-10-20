@@ -1,0 +1,36 @@
+{
+  "schema": "blockzilla-transfer-deadline-review-v1",
+  "state": "PASSED_NOT_ACTIVE",
+  "recorded_unix_ms": 1792320139930,
+  "patch_sha256": "498831996a2dc34c3eccc73df94b901219d81e3707038790b77c3531ae24731e",
+  "patch_manifest_sha256": "d9f09c18aaef0bd2022595923dd6a20c9cc5aa8e4c6e9b9470ed119894e5e3da",
+  "release_manifest_sha256": "90661d5e0d5c02f465056a8109faf8975f856d28b84a46c764232232c10aa03a",
+  "activation_helper_sha256": "a8ec7e7dd2d9699d1760ac6949750b6bfafed9dc7561f6e8283c547da58d9566",
+  "reviewers": [
+    "root",
+    "upgrade_review"
+  ],
+  "focused_tests": {
+    "local": 51,
+    "host": 51,
+    "passed": true
+  },
+  "activation_synthetic_tests": {
+    "count": 4,
+    "reported_by": "upgrade_review",
+    "passed": true,
+    "file": "test_activate.py",
+    "sha256": "61ac78186722cc2b4fe71f813d14e28c7468dc6ef211a4c4cc2a8b53fa2b31cb"
+  },
+  "gates": [
+    "Both canonical finite cleanup completion proofs must pass at registry c813 before activation.",
+    "Both finite helper rows and absolute caps stay unchanged.",
+    "The exact active source and all eight protected process IDs must remain unchanged.",
+    "Only live cold storage and its supervisor can restart.",
+    "A new live bundle needs independent complete cloud readback after activation."
+  ],
+  "limits": [
+    "Tar packing is outside the network transfer deadline.",
+    "Fixed total metadata storage is not implemented."
+  ]
+}

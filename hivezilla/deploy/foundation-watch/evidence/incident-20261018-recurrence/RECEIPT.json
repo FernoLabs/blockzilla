@@ -1,0 +1,105 @@
+{
+  "schema": "blockzilla-alert-recurrence-repair-v1",
+  "state": "REPAIRS_ACTIVE_CAPACITY_WARNING_EXTRA_ALLOWANCE_PENDING",
+  "sampled_unix_ms": 1792314406295,
+  "source": {
+    "genesis_hash": "5eykt4UsFv8P8NJdTREpY1vzqKqZKvdpKuc147dw2N9d",
+    "node_identity": "J7qpvCEWhdBgPdYRV3s3btWPrRVXa2qnAzgvxWTvtbrQ",
+    "agave_revision": "87167f3906bdf5111e99ead64d8f4098b7874e33",
+    "session_id": "000000000000000018df884b2474cf8e-20b258"
+  },
+  "validator": {
+    "version": "4.3.2",
+    "pid": 2142808,
+    "no_voting": true,
+    "restarted": false
+  },
+  "head_repair": {
+    "release": "/home/ubuntu/live/hivezilla-validator-20260930/releases/bank-head-health-20261018-c319ba5d-e769871d5197",
+    "binary_sha256": "e769871d519750a187814a82e1a1f3e48cfc9bde0948410674a70dca7c97d1b7",
+    "status_interval_ms": 1000,
+    "health_expiry_ms": 5000,
+    "old_origin_pid": 917181,
+    "new_origin_pid": 1834760,
+    "other_protected_pids_unchanged": true,
+    "source_or_spool_changed": false,
+    "before_stale_samples": 4,
+    "before_samples": 57,
+    "after_samples": 112,
+    "after_faults": 0,
+    "after_seconds": 120.043,
+    "after_max_source_lag_ms": 1891
+  },
+  "readback_repair": {
+    "release": "/home/ubuntu/live/hivezilla-validator-20260930/releases/readback-retry-20261018-e5db5eeaf39a4f88",
+    "helper_sha256": "5a320696a79da06a8f8e5ddd550e9d53da808b37119407c8708a44bd4c64c923",
+    "whole_readback_attempts": 3,
+    "typed_network_faults_only": true,
+    "size_and_hash_checks_unchanged": true
+  },
+  "verification": {
+    "final_live_check": "PASSED",
+    "private_payload_hash_and_rpc_bank_match": true,
+    "public_sse_advances": true,
+    "rooted_compact_lag_slots": 0,
+    "storage_jobs": "HEALTHY",
+    "archived_banks": 25159,
+    "retired_banks": 25159,
+    "current_monitor_issues": [
+      "telemetry:snapshot_capacity_headroom_low"
+    ],
+    "active_monitor_incident": [
+      "telemetry:snapshot_capacity_headroom_low"
+    ],
+    "pending_alerts": 0
+  },
+  "tests": {
+    "transport_library_on_host": 33,
+    "cold_storage_on_host": 29,
+    "focused_storage_supervisor_local": 38,
+    "counts_overlap_and_are_not_additive": true
+  },
+  "capacity": {
+    "free_disk_bytes": 640141398016,
+    "early_warning_target_bytes": 674309865472,
+    "actual_capture_stop_reserve_bytes": 429496729600,
+    "snapshot_overlap_complete": true,
+    "current_warning_valid": true,
+    "thresholds_lowered": false
+  },
+  "extra_retirement": {
+    "state": "AWAITING_USER_APPROVAL",
+    "source": {
+      "agave_revision": "d688dd0e3a576b048a848e5faf2e8d277f8feb6e",
+      "genesis_hash": "5eykt4UsFv8P8NJdTREpY1vzqKqZKvdpKuc147dw2N9d",
+      "node_identity": "J7qpvCEWhdBgPdYRV3s3btWPrRVXa2qnAzgvxWTvtbrQ",
+      "session_id": "000000000000000018ddd9a6bb6fc50e-282459"
+    },
+    "absolute_total_cap": 308768,
+    "maximum_additional_banks": 51606,
+    "estimated_release_bytes": 124000000000,
+    "previous_785546_cap_unchanged": true,
+    "started": false,
+    "approval_reason": "Previous finite allowances are complete; this is a separate additional allowance."
+  },
+  "remaining": {
+    "total_local_disk_use_bounded": false,
+    "metadata_migration": "DESIGNED_NOT_DEPLOYED",
+    "raw_capture": "FAILED_OPTIONAL",
+    "capture_gaps_rebuilt": false
+  },
+  "evidence": {
+    "FINAL.json": "f65ee4a4204334d7257b67672210f95f52260d828094f5802cdfd217531cd67c",
+    "LIVE-3.json": "c770675a1df23045d46a3599f90e8425376d39fee92b81b5608414b64f1aa33a",
+    "MONITOR-BEFORE.json": "80248b5b81f9db3b3ffbe7aa8984b2caa34592bb57b128fac0ce231f5096f1b3",
+    "STORAGE-PLAN.json": "de5dde9c63f48ef17bcfedc8301764614608d7a6881d9c22a5934ec3f067ee3b",
+    "LEDGER-SNAPSHOT-FINDINGS.json": "73424ff25246efbd2ba1d4fbd941de5a21d1d7086307715500cc4323da42e6a8",
+    "HEAD-FLOW.json": "9df97df3cbe0bb2fd919eab3e49e84240d2630140ee33b1a5aa3b28002993733",
+    "head-health/FLOW.json": "8f197b2f62d886d7b409505566030baad99b9b89098a5f78938d1ec6c200a870",
+    "head-health/BUILD.json": "76b573a64742093c6f79f0163fa4869a760c4776b440e683e440abc636669e34",
+    "head-health/INSTALLATION.json": "a99628f56161903d7904da0cb8576d418ec04ca586f5cb643ac7cc578f76ba78",
+    "head-health/TIMING-DIAGNOSIS.json": "051e42e6aa5a5ec260422a9a3e4fe4536e0e7b381a8534056808953976abf5a8",
+    "head-health/SOURCE-COMPARISON.json": "d8394c83c27d628466e7f8c85af406ab9d65994a4f3d32bf775b551d4cb2b7f1",
+    "MONITOR-FINAL.json": "cfcb463fbc868b1d08ee028c996eab1548c24b96cbe65c116f1ae11f5b63636c"
+  }
+}

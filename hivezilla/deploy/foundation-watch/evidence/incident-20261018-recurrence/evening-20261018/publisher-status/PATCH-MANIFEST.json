@@ -1,0 +1,23 @@
+{
+  "expected_library_tests": 44,
+  "files": {
+    "hivezilla/stream-relay/src/publisher.rs": {
+      "after_sha256": "b31fba2acf86a93dd1506cfdd0d6d0a1cea174d91fba461dc7689561943f75dd",
+      "before_sha256": "4b2a92f90cfe282614cea8a599e6212e55da353cd2fd2484e67f5941fed25ce6"
+    }
+  },
+  "implementation_manifest_sha256": "1fd23a9c4589d5bd5e86c8dca78f4c4d9d4c262a097d35b929cd592294428a6b",
+  "patch_sha256": "92f2376d361a62b4e34f4671e93c1b5f70bcf1b1f95c9c8b653a3c70c94c708e",
+  "required_tests": [
+    "publisher::tests::cancelled_object_upload_joins_without_starting_manifest_or_head",
+    "publisher::tests::final_status_write_failure_after_remote_head_does_not_commit",
+    "publisher::tests::initial_status_write_failure_starts_no_remote_work",
+    "publisher::tests::remote_failure_joins_before_failed_status_and_keeps_intent",
+    "publisher::tests::slow_batch_log_is_bounded_and_only_reports_completed_slow_batches",
+    "publisher::tests::status_write_failure_during_head_readback_does_not_commit",
+    "publisher::tests::upload_status_is_live_during_blocked_objects_without_advancing_checkpoint",
+    "publisher::tests::upload_status_is_live_during_head_readback_without_advancing_checkpoint"
+  ],
+  "schema": "blockzilla-publisher-status-patch-v1",
+  "scope": "publisher.rs only; existing S3Client, intent, object, manifest, HEAD/readback and checkpoint contracts unchanged. No monitoring threshold changes."
+}

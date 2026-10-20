@@ -1,0 +1,54 @@
+{
+  "clean_head": "c03e07f772aba1c8fb7265465574e65e6320141a",
+  "fixture_root": "/tmp/megaloadon-sse-production-graph-20261018",
+  "byte_equal": [
+    "crates/blockzilla-bank-stream-v2/Cargo.toml",
+    "hivezilla/object-store/Cargo.toml",
+    "hivezilla/object-store/src/bin/blockzilla-s3-upload.rs",
+    "hivezilla/object-store/src/lib.rs",
+    "hivezilla/object-store/src/r2.rs",
+    "hivezilla/object-store/src/uploader/b2.rs",
+    "hivezilla/object-store/src/uploader/compact_archive.rs",
+    "hivezilla/object-store/src/uploader/config.rs",
+    "hivezilla/object-store/src/uploader/dirfd.rs",
+    "hivezilla/object-store/src/uploader/generation.rs",
+    "hivezilla/object-store/src/uploader/mod.rs",
+    "hivezilla/object-store/src/uploader/retention.rs",
+    "hivezilla/object-store/src/uploader/s3.rs",
+    "hivezilla/stream-relay/Cargo.lock",
+    "hivezilla/stream-relay/Cargo.toml",
+    "hivezilla/stream-relay/src/frame.rs",
+    "hivezilla/stream-relay/src/source.rs",
+    "hivezilla/stream-relay/src/store.rs",
+    "hivezilla/stream-relay/src/upstream.rs"
+  ],
+  "format_equal": [
+    "crates/blockzilla-bank-stream-v2/src/artifact.rs",
+    "crates/blockzilla-bank-stream-v2/src/chain.rs",
+    "crates/blockzilla-bank-stream-v2/src/client.rs",
+    "crates/blockzilla-bank-stream-v2/src/fixtures.rs",
+    "crates/blockzilla-bank-stream-v2/src/lib.rs",
+    "crates/blockzilla-bank-stream-v2/src/tests.rs",
+    "hivezilla/stream-relay/src/bank_source.rs",
+    "hivezilla/stream-relay/src/bank_store.rs",
+    "hivezilla/stream-relay/src/lib.rs",
+    "hivezilla/stream-relay/src/main.rs",
+    "hivezilla/stream-relay/src/publisher.rs",
+    "hivezilla/stream-relay/src/server.rs"
+  ],
+  "different": [
+    {
+      "path": "Cargo.toml",
+      "diff": "--- host/Cargo.toml\n+++ HEAD/Cargo.toml\n@@ -42,6 +42,7 @@\n     \"blockzilla/monitor\",\n     \"hivezilla/service\",\n     \"hivezilla/dashboard\",\n+    \"hivezilla/epoch-runner\",\n     \"hivezilla/protocol\",\n     \"hivezilla/shred-hook-abi\",\n     \"hivezilla/shred-hook\",\n"
+    },
+    {
+      "path": "hivezilla/stream-relay/src/bank_server.rs",
+      "diff": "--- host/hivezilla/stream-relay/src/bank_server.rs\n+++ HEAD/hivezilla/stream-relay/src/bank_server.rs\n@@ -181,7 +181,7 @@\n     fn api(store: Arc<BankStore>) -> Api {\n         Api {\n             store: Store::open(\"fixture-session:0:-\".into(), v2::MAX_FRAME, None).unwrap(),\n-            token: Arc::new(\"test-key-for-banks-01234567890123456789\".into()),\n+            token: Arc::new(\"k\".repeat(32)),\n             cors: None,\n             requests: Arc::new(Semaphore::new(16)),\n             allow_query_api_key: true,\n@@ -211,7 +211,7 @@\n         });\n         let client = reqwest::Client::new();\n         let url = format!(\"http://{addr}\");\n-        let key = \"test-key-for-banks-01234567890123456789\";\n+        let key = \"k\".repeat(32);\n         assert_eq!(\n             client\n                 .get(format!(\"{url}/v2/banks/head?api_key={key}\"))\n@@ -224,7 +224,7 @@\n         assert_eq!(\n             client\n                 .get(format!(\"{url}/v2/banks/head\"))\n-                .bearer_auth(key)\n+                .bearer_auth(&key)\n                 .send()\n                 .await\n                 .unwrap()\n@@ -233,7 +233,7 @@\n         );\n         let mut r = client\n             .get(format!(\"{url}/v2/banks/events?after={base}\"))\n-            .bearer_auth(key)\n+            .bearer_auth(&key)\n             .send()\n             .await\n             .unwrap();\n@@ -246,7 +246,7 @@\n         let r = client\n             .get(format!(\"{url}/v2/banks/events?after={base}\"))\n             .header(\"last-event-id\", &b.cursor)\n-            .bearer_auth(key)\n+            .bearer_auth(&key)\n             .send()\n             .await\n             .unwrap();\n@@ -257,7 +257,7 @@\n         );\n         let r = client\n             .get(format!(\"{url}/v2/banks/events?after=other-session:p0:-\"))\n-            .bearer_auth(key)\n+            .bearer_auth(&key)\n             .send()\n             .await\n             .unwrap();\n@@ -267,7 +267,7 @@\n         assert_eq!(gap[\"head\"][\"profile\"], v2::PROFILE);\n         let r = client\n             .get(format!(\"{url}/v2/banks/chunks/{}\", b.sha256))\n-            .bearer_auth(key)\n+            .bearer_auth(&key)\n             .send()\n             .await\n             .unwrap();\n@@ -276,7 +276,7 @@\n         store.set_health(\"failed\", None);\n         let r = client\n             .get(format!(\"{url}/v2/banks/events?after={}\", b.cursor))\n-            .bearer_auth(key)\n+            .bearer_auth(&key)\n             .send()\n             .await\n             .unwrap();\n"
+    },
+    {
+      "path": "hivezilla/stream-relay/src/bank_upstream.rs",
+      "diff": "--- host/hivezilla/stream-relay/src/bank_upstream.rs\n+++ HEAD/hivezilla/stream-relay/src/bank_upstream.rs\n@@ -340,7 +340,7 @@\n     fn api(banks: Arc<BankStore>, origin: bool) -> Api {\n         Api {\n             store: Store::open(\"fixture-session:0:-\".into(), v2::MAX_FRAME, None).unwrap(),\n-            token: Arc::new(\"test-key-for-banks-01234567890123456789\".into()),\n+            token: Arc::new(\"k\".repeat(32)),\n             cors: None,\n             requests: Arc::new(Semaphore::new(16)),\n             allow_query_api_key: false,\n@@ -357,7 +357,7 @@\n     fn upstream(addr: std::net::SocketAddr) -> Upstream {\n         Upstream {\n             url: format!(\"http://{addr}/\"),\n-            token: \"test-key-for-banks-01234567890123456789\".into(),\n+            token: \"k\".repeat(32),\n             ca: None,\n             identity: None,\n         }\n"
+    }
+  ],
+  "errors": []
+}

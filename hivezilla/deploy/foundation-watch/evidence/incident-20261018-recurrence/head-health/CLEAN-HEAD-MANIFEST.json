@@ -1,0 +1,13 @@
+{
+  "base_commit": "c03e07f772aba1c8fb7265465574e65e6320141a",
+  "files": {
+    "hivezilla/stream-relay/src/bank_server.rs": {
+      "before_sha256": "25f1fa5fff823edd1f3a3c0b80207aa22b29bb94a55dfe41ea5b6ba7a249b8d9",
+      "after_sha256": "a314dd9faf0b9e8c8da21ccb6948c8a81c52cc9f66b0bc87fcaae4ddd7c9026a"
+    },
+    "hivezilla/stream-relay/src/bank_store.rs": {
+      "before_sha256": "1c0f66fbae0dd4c22a2ecb5e25d4591ca5d0b305b46eb5147f01602bea36ffa2",
+      "after_sha256": "e88942b76a64785db50691e68f1c0501c9eeedbc71233122ad6342331007f24a"
+    }
+  }
+}

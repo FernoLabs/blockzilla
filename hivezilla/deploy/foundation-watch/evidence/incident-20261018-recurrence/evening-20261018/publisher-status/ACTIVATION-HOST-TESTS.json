@@ -1,0 +1,18 @@
+{
+  "schema": "blockzilla-publisher-activation-host-fixtures-v1",
+  "state": "PASSED",
+  "completed_unix_ms": 1792348974615,
+  "platform": "Foundation Linux",
+  "command": [
+    "env",
+    "PYTHONDONTWRITEBYTECODE=1",
+    "python3",
+    "test_activate.py"
+  ],
+  "tests": 11,
+  "failed": 0,
+  "scope": "Isolated temporary fixtures only; fake ACTIVE line in test output is fixture data, not a host activation.",
+  "actual_activation_sha256": "004c3b7d94f0840c93b7054c01c8d4ee602615474bc0b0f491cdad96801740fb",
+  "helper_sha256": "ceeea38c212d8dbc0c83b62a0b26a20c56c6d0bf033e4404249af5b04ade49fb",
+  "tests_sha256": "81ac7d8959363ecc897f9eaff5abcbda0c564d8d826f2ccb66ef908350126aeb"
+}

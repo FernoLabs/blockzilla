@@ -1,0 +1,2009 @@
+{
+  "schema": "blockzilla-native-storage-tuning-pilot-v1",
+  "event": "a3cdcf23-2192-4f5d-881c-a362b67dfa2e",
+  "host": "ubuntu@213.239.141.61",
+  "root": "/home/ubuntu/live/hivezilla-validator-20260930",
+  "scope": {
+    "server_mutations_by_this_observer": false,
+    "cloud_writes_by_this_observer": false,
+    "private_stream_key_read": false
+  },
+  "initial_evidence": "incident-20261016-a3cdcf23-storage.json",
+  "tuning_receipt": {
+    "schema": "blockzilla-native-storage-tuning-v1",
+    "changed_unix_ms": 1792132733977,
+    "unit": "hivezilla-native-cold-storage-20261016-source-18de229d.service",
+    "old_parallel_bundles": 2,
+    "parallel_bundles": 4,
+    "cpu_quota": "200%",
+    "memory_max": "4G",
+    "batch_banks": 64,
+    "initial_archived_banks": 720010,
+    "archived_banks_after_stop": 721482,
+    "new_banks_already_indexed": 1472,
+    "max_batches_per_new_invocation": 1001,
+    "original_max_new_banks": 65536,
+    "original_bank_cap_preserved": true,
+    "restart": "no",
+    "helper_changed": false,
+    "storage_gates_changed": false,
+    "reason": "Initial two-transfer pilot released 10.41 MB/s while filesystem free space fell by 10.10 MB/s.",
+    "before_status": {
+      "schema": "blockzilla-native-cold-storage-status-v1",
+      "state": "RUNNING",
+      "archived_banks": 721418,
+      "retired_banks": 721418,
+      "freed_bytes_this_run": 3698671616,
+      "keep_seconds": 7200,
+      "batch_bank_limit": 64,
+      "parallel_bundle_limit": 2,
+      "pending_bundles": 2,
+      "last_batch_banks": 64,
+      "last_batch_seconds": 26.203524342970923,
+      "full_remote_readback_required": true,
+      "updated_unix_ms": 1792132725648
+    },
+    "guard_before": {
+      "state": "BACKGROUND_RUNNING",
+      "updated_unix_ms": 1792132730656,
+      "source": "000000000000000018deede1d641da13-275b05",
+      "slot_lag": 0,
+      "event_lag": 298,
+      "capture_sequence": 13616895,
+      "capture_rooted_slot": 457540175,
+      "healthy": true,
+      "capture_progress_observed": true,
+      "capture_progress_healthy": true,
+      "capture_sequence_age_seconds": 0,
+      "capture_root_age_seconds": 0,
+      "capture_progress_timeout_seconds": 60
+    },
+    "validator_pid_unchanged": 2579205,
+    "current_unit_sha256": "ae6bcd5d923192eb981ecdb0df04228d4d17469b3d5d63e0a9d7a11ce8f264e4"
+  },
+  "configuration": "Only the failed 18de229d source job changed from two to four parallel bundles. Batch size 64, CPU 200%, MemoryMax 4G, Nice 19, IOWeight 10, two-hour retention and all verification gates remained.",
+  "samples": [
+    {
+      "checked_utc": "2026-10-16T06:40:03.936783+00:00",
+      "checked_unix_ms": 1792132803936,
+      "root_available_bytes": 564122460160,
+      "service": {
+        "ActiveState": "active",
+        "SubState": "running",
+        "Restart": "no",
+        "MainPID": "3100803",
+        "Result": "success",
+        "NRestarts": "0",
+        "ControlGroup": "/system.slice/hivezilla-native-cold-storage-20261016-source-18de229d.service",
+        "CPUQuotaPerSecUSec": "2s",
+        "IOWeight": "10",
+        "MemoryMax": "4294967296",
+        "Nice": "19"
+      },
+      "selected_flags": {
+        "--parallel-bundles": "4",
+        "--max-batches": "1001",
+        "--batch-banks": "64",
+        "--keep-seconds": "7200",
+        "follow": true,
+        "retire": true
+      },
+      "cpu_stat": {
+        "usage_usec": 68715888,
+        "user_usec": 27351574,
+        "system_usec": 41364313,
+        "nice_usec": 27314000,
+        "core_sched.force_idle_usec": 0,
+        "nr_periods": 699,
+        "nr_throttled": 1,
+        "throttled_usec": 9507,
+        "nr_bursts": 0,
+        "burst_usec": 0
+      },
+      "memory_current_bytes": 810971136,
+      "memory_peak_bytes": 948420608,
+      "memory_stat": {
+        "anon": 75374592,
+        "file": 706650112,
+        "kernel": 12685312,
+        "file_dirty": 0,
+        "file_writeback": 0,
+        "slab_reclaimable": 12244880,
+        "slab_unreclaimable": 122400
+      },
+      "memory_events": {
+        "low": 0,
+        "high": 0,
+        "max": 0,
+        "oom": 0,
+        "oom_kill": 0,
+        "oom_group_kill": 0,
+        "sock_throttled": 0
+      },
+      "io_stat": [
+        "259:0 rbytes=756314112 wbytes=494497792 rios=38700 wios=7016 dbytes=0 dios=0"
+      ],
+      "pressure": {
+        "cpu": [
+          "some avg10=0.00 avg60=0.00 avg300=0.00 total=10835",
+          "full avg10=0.00 avg60=0.00 avg300=0.00 total=10835"
+        ],
+        "memory": [
+          "some avg10=0.00 avg60=0.00 avg300=0.00 total=0",
+          "full avg10=0.00 avg60=0.00 avg300=0.00 total=0"
+        ],
+        "io": [
+          "some avg10=0.33 avg60=0.15 avg300=0.04 total=432356",
+          "full avg10=0.33 avg60=0.15 avg300=0.04 total=432356"
+        ]
+      },
+      "host_memory": {
+        "MemTotal": 1212137078784,
+        "MemAvailable": 996992311296,
+        "SwapFree": 0
+      },
+      "status": {
+        "schema": "blockzilla-native-cold-storage-status-v1",
+        "state": "RUNNING",
+        "archived_banks": 721610,
+        "retired_banks": 721610,
+        "freed_bytes_this_run": 306720768,
+        "keep_seconds": 7200,
+        "batch_bank_limit": 64,
+        "parallel_bundle_limit": 4,
+        "pending_bundles": 2,
+        "last_batch_banks": 64,
+        "last_batch_seconds": 14.249717517988756,
+        "full_remote_readback_required": true,
+        "updated_unix_ms": 1792132791274
+      },
+      "archive_index_banks": 721674,
+      "latest_archive_receipt": {
+        "slot": 457224683,
+        "retired": 1,
+        "key": "native-custody/processed-v1/000000000000000018de229d3fc8a9d9-275b05/d1f239faf112cf289a58c26b2b23117e371ecf5606298ab6d1ac708f7a4ee68d.tar",
+        "bundle_sha256": "d1f239faf112cf289a58c26b2b23117e371ecf5606298ab6d1ac708f7a4ee68d",
+        "namespace": "1a93d01e2c293e1f61c246747319a92fea69ab27060f050b986304c4c4715bcf",
+        "remote_custody_notes": [
+          {
+            "path": "/home/ubuntu/live/hivezilla-validator-20260930/compact/direct-agave-processed-live/000000000000000018de229d3fc8a9d9-275b05/epoch-1058/457224683-723809.compact/REMOTE-CUSTODY.json",
+            "all_record_fields_match": true
+          },
+          {
+            "path": "/home/ubuntu/live/hivezilla-validator-20260930/compact/direct-agave-processed-live/000000000000000018de229d3fc8a9d9-275b05/custody/457224683-723809/REMOTE-CUSTODY.json",
+            "all_record_fields_match": true
+          }
+        ]
+      },
+      "bundle_files": [
+        {
+          "name": "bundle-1.tar",
+          "bytes": 178872320,
+          "allocated_bytes": 178884608
+        }
+      ],
+      "guard_status": {
+        "state": "BACKGROUND_RUNNING",
+        "updated_unix_ms": 1792132803418,
+        "source": "000000000000000018deede1d641da13-275b05",
+        "slot_lag": 0,
+        "event_lag": 236,
+        "capture_sequence": 14278802,
+        "capture_rooted_slot": 457540511,
+        "healthy": true,
+        "capture_progress_observed": true,
+        "capture_progress_healthy": true,
+        "capture_sequence_age_seconds": 0,
+        "capture_root_age_seconds": 0,
+        "capture_progress_timeout_seconds": 60
+      },
+      "critical_services": {
+        "hivezilla-validator.service": {
+          "ActiveState": "active",
+          "SubState": "running",
+          "MainPID": "2579205",
+          "Result": "success",
+          "NRestarts": "1"
+        },
+        "hivezilla-direct-worker.service": {
+          "ActiveState": "active",
+          "SubState": "running",
+          "MainPID": "2995168",
+          "Result": "success",
+          "NRestarts": "0"
+        },
+        "hivezilla-bank-v2-producer.service": {
+          "ActiveState": "active",
+          "SubState": "running",
+          "MainPID": "2995833",
+          "Result": "success",
+          "NRestarts": "0"
+        },
+        "hivezilla-bank-v2-origin.service": {
+          "ActiveState": "active",
+          "SubState": "running",
+          "MainPID": "2995862",
+          "Result": "success",
+          "NRestarts": "0"
+        },
+        "hivezilla-stream-origin.service": {
+          "ActiveState": "active",
+          "SubState": "running",
+          "MainPID": "2995861",
+          "Result": "success",
+          "NRestarts": "0"
+        },
+        "hivezilla-stream-relay.service": {
+          "ActiveState": "active",
+          "SubState": "running",
+          "MainPID": "2996001",
+          "Result": "success",
+          "NRestarts": "0"
+        },
+        "hivezilla-bank-v2-r2-publisher.service": {
+          "ActiveState": "active",
+          "SubState": "running",
+          "MainPID": "2996002",
+          "Result": "success",
+          "NRestarts": "0"
+        },
+        "hivezilla-native-cold-storage-20261012-live.service": {
+          "ActiveState": "active",
+          "SubState": "running",
+          "MainPID": "2996042",
+          "Result": "success",
+          "NRestarts": "0"
+        },
+        "hivezilla-live-priority-20261012.service": {
+          "ActiveState": "active",
+          "SubState": "running",
+          "MainPID": "3069817",
+          "Result": "success",
+          "NRestarts": "0"
+        }
+      },
+      "newest_full_snapshot": {
+        "name": "snapshot-457464166-8fh3Dmextuv1wKJ3FBkGH16CBWbxCkHkghnEF54ZTFdB.tar.zst",
+        "bytes": 123986510937,
+        "allocated_bytes": 123997741056,
+        "mtime_unix_ms": 1792118041272
+      },
+      "newest_incremental_snapshot": {
+        "name": "incremental-snapshot-457464166-457540374-6zsmueUZpXU6mH66Qtm7Mgye7u3vCVpdTmwXj2q2Qp5r.tar.zst",
+        "bytes": 613790597,
+        "allocated_bytes": 613810176,
+        "mtime_unix_ms": 1792132777402
+      }
+    },
+    {
+      "checked_utc": "2026-10-16T06:41:37.813853+00:00",
+      "checked_unix_ms": 1792132897813,
+      "root_available_bytes": 562078547968,
+      "service": {
+        "ActiveState": "active",
+        "SubState": "running",
+        "Restart": "no",
+        "MainPID": "3100803",
+        "Result": "success",
+        "NRestarts": "0",
+        "ControlGroup": "/system.slice/hivezilla-native-cold-storage-20261016-source-18de229d.service",
+        "CPUQuotaPerSecUSec": "2s",
+        "IOWeight": "10",
+        "MemoryMax": "4294967296",
+        "Nice": "19"
+      },
+      "selected_flags": {
+        "--parallel-bundles": "4",
+        "--max-batches": "1001",
+        "--batch-banks": "64",
+        "--keep-seconds": "7200",
+        "follow": true,
+        "retire": true
+      },
+      "cpu_stat": {
+        "usage_usec": 160960505,
+        "user_usec": 63399275,
+        "system_usec": 97561229,
+        "nice_usec": 63300000,
+        "core_sched.force_idle_usec": 0,
+        "nr_periods": 1637,
+        "nr_throttled": 1,
+        "throttled_usec": 9507,
+        "nr_bursts": 0,
+        "burst_usec": 0
+      },
+      "memory_current_bytes": 944779264,
+      "memory_peak_bytes": 1378189312,
+      "memory_stat": {
+        "anon": 81551360,
+        "file": 834985984,
+        "kernel": 21450752,
+        "file_dirty": 16384,
+        "file_writeback": 0,
+        "slab_reclaimable": 20998400,
+        "slab_unreclaimable": 123368
+      },
+      "memory_events": {
+        "low": 0,
+        "high": 0,
+        "max": 0,
+        "oom": 0,
+        "oom_kill": 0,
+        "oom_group_kill": 0,
+        "sock_throttled": 0
+      },
+      "io_stat": [
+        "259:0 rbytes=1753079808 wbytes=1646170112 rios=67548 wios=23715 dbytes=0 dios=0"
+      ],
+      "pressure": {
+        "cpu": [
+          "some avg10=0.00 avg60=0.00 avg300=0.00 total=24794",
+          "full avg10=0.00 avg60=0.00 avg300=0.00 total=24794"
+        ],
+        "memory": [
+          "some avg10=0.00 avg60=0.00 avg300=0.00 total=0",
+          "full avg10=0.00 avg60=0.00 avg300=0.00 total=0"
+        ],
+        "io": [
+          "some avg10=0.49 avg60=0.36 avg300=0.14 total=1246711",
+          "full avg10=0.49 avg60=0.36 avg300=0.14 total=1246711"
+        ]
+      },
+      "host_memory": {
+        "MemTotal": 1212137078784,
+        "MemAvailable": 994976329728,
+        "SwapFree": 0
+      },
+      "status": {
+        "schema": "blockzilla-native-cold-storage-status-v1",
+        "state": "RUNNING",
+        "archived_banks": 722058,
+        "retired_banks": 722058,
+        "freed_bytes_this_run": 1464614912,
+        "keep_seconds": 7200,
+        "batch_bank_limit": 64,
+        "parallel_bundle_limit": 4,
+        "pending_bundles": 2,
+        "last_batch_banks": 64,
+        "last_batch_seconds": 16.199595127021894,
+        "full_remote_readback_required": true,
+        "updated_unix_ms": 1792132895163
+      },
+      "archive_index_banks": 722058,
+      "latest_archive_receipt": {
+        "slot": 457225067,
+        "retired": 1,
+        "key": "native-custody/processed-v1/000000000000000018de229d3fc8a9d9-275b05/7c7fd73bca5720fc0ad4cd6bc10fdb4817f2aa0d3ef5d466bfb506536434ae01.tar",
+        "bundle_sha256": "7c7fd73bca5720fc0ad4cd6bc10fdb4817f2aa0d3ef5d466bfb506536434ae01",
+        "namespace": "1a93d01e2c293e1f61c246747319a92fea69ab27060f050b986304c4c4715bcf",
+        "remote_custody_notes": [
+          {
+            "path": "/home/ubuntu/live/hivezilla-validator-20260930/compact/direct-agave-processed-live/000000000000000018de229d3fc8a9d9-275b05/epoch-1058/457225067-724193.compact/REMOTE-CUSTODY.json",
+            "all_record_fields_match": true
+          },
+          {
+            "path": "/home/ubuntu/live/hivezilla-validator-20260930/compact/direct-agave-processed-live/000000000000000018de229d3fc8a9d9-275b05/custody/457225067-724193/REMOTE-CUSTODY.json",
+            "all_record_fields_match": true
+          }
+        ]
+      },
+      "bundle_files": [
+        {
+          "name": "bundle-0.tar",
+          "bytes": 147824640,
+          "allocated_bytes": 147836928
+        },
+        {
+          "name": "bundle-2.tar",
+          "bytes": 154664960,
+          "allocated_bytes": 154677248
+        }
+      ],
+      "guard_status": {
+        "state": "BACKGROUND_RUNNING",
+        "updated_unix_ms": 1792132897346,
+        "source": "000000000000000018deede1d641da13-275b05",
+        "slot_lag": 0,
+        "event_lag": 198,
+        "capture_sequence": 15124352,
+        "capture_rooted_slot": 457540949,
+        "healthy": true,
+        "capture_progress_observed": true,
+        "capture_progress_healthy": true,
+        "capture_sequence_age_seconds": 0,
+        "capture_root_age_seconds": 0,
+        "capture_progress_timeout_seconds": 60
+      },
+      "critical_services": {
+        "hivezilla-validator.service": {
+          "ActiveState": "active",
+          "SubState": "running",
+          "MainPID": "2579205",
+          "Result": "success",
+          "NRestarts": "1"
+        },
+        "hivezilla-direct-worker.service": {
+          "ActiveState": "active",
+          "SubState": "running",
+          "MainPID": "2995168",
+          "Result": "success",
+          "NRestarts": "0"
+        },
+        "hivezilla-bank-v2-producer.service": {
+          "ActiveState": "active",
+          "SubState": "running",
+          "MainPID": "2995833",
+          "Result": "success",
+          "NRestarts": "0"
+        },
+        "hivezilla-bank-v2-origin.service": {
+          "ActiveState": "active",
+          "SubState": "running",
+          "MainPID": "2995862",
+          "Result": "success",
+          "NRestarts": "0"
+        },
+        "hivezilla-stream-origin.service": {
+          "ActiveState": "active",
+          "SubState": "running",
+          "MainPID": "2995861",
+          "Result": "success",
+          "NRestarts": "0"
+        },
+        "hivezilla-stream-relay.service": {
+          "ActiveState": "active",
+          "SubState": "running",
+          "MainPID": "2996001",
+          "Result": "success",
+          "NRestarts": "0"
+        },
+        "hivezilla-bank-v2-r2-publisher.service": {
+          "ActiveState": "active",
+          "SubState": "running",
+          "MainPID": "2996002",
+          "Result": "success",
+          "NRestarts": "0"
+        },
+        "hivezilla-native-cold-storage-20261012-live.service": {
+          "ActiveState": "active",
+          "SubState": "running",
+          "MainPID": "2996042",
+          "Result": "success",
+          "NRestarts": "0"
+        },
+        "hivezilla-live-priority-20261012.service": {
+          "ActiveState": "active",
+          "SubState": "running",
+          "MainPID": "3069817",
+          "Result": "success",
+          "NRestarts": "0"
+        }
+      },
+      "newest_full_snapshot": {
+        "name": "snapshot-457464166-8fh3Dmextuv1wKJ3FBkGH16CBWbxCkHkghnEF54ZTFdB.tar.zst",
+        "bytes": 123986510937,
+        "allocated_bytes": 123997741056,
+        "mtime_unix_ms": 1792118041272
+      },
+      "newest_incremental_snapshot": {
+        "name": "incremental-snapshot-457464166-457540774-8Zk6fo89kZzKfnKYEqpFJKWRiH2cnMzMeUq7HHK9jpZE.tar.zst",
+        "bytes": 613777504,
+        "allocated_bytes": 613797888,
+        "mtime_unix_ms": 1792132863649
+      }
+    },
+    {
+      "checked_utc": "2026-10-16T06:43:21.174681+00:00",
+      "checked_unix_ms": 1792133001174,
+      "root_available_bytes": 562961735680,
+      "service": {
+        "ActiveState": "active",
+        "SubState": "running",
+        "Restart": "no",
+        "MainPID": "3100803",
+        "Result": "success",
+        "NRestarts": "0",
+        "ControlGroup": "/system.slice/hivezilla-native-cold-storage-20261016-source-18de229d.service",
+        "CPUQuotaPerSecUSec": "2s",
+        "IOWeight": "10",
+        "MemoryMax": "4294967296",
+        "Nice": "19"
+      },
+      "selected_flags": {
+        "--parallel-bundles": "4",
+        "--max-batches": "1001",
+        "--batch-banks": "64",
+        "--keep-seconds": "7200",
+        "follow": true,
+        "retire": true
+      },
+      "cpu_stat": {
+        "usage_usec": 265020571,
+        "user_usec": 103668666,
+        "system_usec": 161351904,
+        "nice_usec": 103563000,
+        "core_sched.force_idle_usec": 0,
+        "nr_periods": 2671,
+        "nr_throttled": 3,
+        "throttled_usec": 20475,
+        "nr_bursts": 0,
+        "burst_usec": 0
+      },
+      "memory_current_bytes": 693342208,
+      "memory_peak_bytes": 1378189312,
+      "memory_stat": {
+        "anon": 84221952,
+        "file": 579149824,
+        "kernel": 22122496,
+        "file_dirty": 1462272,
+        "file_writeback": 0,
+        "slab_reclaimable": 21674200,
+        "slab_unreclaimable": 123096
+      },
+      "memory_events": {
+        "low": 0,
+        "high": 0,
+        "max": 0,
+        "oom": 0,
+        "oom_kill": 0,
+        "oom_group_kill": 0,
+        "sock_throttled": 0
+      },
+      "io_stat": [
+        "259:0 rbytes=2866262016 wbytes=2780979200 rios=100862 wios=40642 dbytes=0 dios=0"
+      ],
+      "pressure": {
+        "cpu": [
+          "some avg10=0.00 avg60=0.00 avg300=0.00 total=42389",
+          "full avg10=0.00 avg60=0.00 avg300=0.00 total=42389"
+        ],
+        "memory": [
+          "some avg10=0.00 avg60=0.00 avg300=0.00 total=0",
+          "full avg10=0.00 avg60=0.00 avg300=0.00 total=0"
+        ],
+        "io": [
+          "some avg10=0.63 avg60=0.34 avg300=0.18 total=2080540",
+          "full avg10=0.63 avg60=0.34 avg300=0.18 total=2080494"
+        ]
+      },
+      "host_memory": {
+        "MemTotal": 1212137078784,
+        "MemAvailable": 996418076672,
+        "SwapFree": 0
+      },
+      "status": {
+        "schema": "blockzilla-native-cold-storage-status-v1",
+        "state": "RUNNING",
+        "archived_banks": 722442,
+        "retired_banks": 722442,
+        "freed_bytes_this_run": 2402885632,
+        "keep_seconds": 7200,
+        "batch_bank_limit": 64,
+        "parallel_bundle_limit": 4,
+        "pending_bundles": 3,
+        "last_batch_banks": 64,
+        "last_batch_seconds": 29.52684638905339,
+        "full_remote_readback_required": true,
+        "updated_unix_ms": 1792132999933
+      },
+      "archive_index_banks": 722570,
+      "latest_archive_receipt": {
+        "slot": 457225579,
+        "retired": 1,
+        "key": "native-custody/processed-v1/000000000000000018de229d3fc8a9d9-275b05/cd9c93a7c2d89c3bdf43b425b2e134d328d4263c72507091ea9d5a93037a517c.tar",
+        "bundle_sha256": "cd9c93a7c2d89c3bdf43b425b2e134d328d4263c72507091ea9d5a93037a517c",
+        "namespace": "1a93d01e2c293e1f61c246747319a92fea69ab27060f050b986304c4c4715bcf",
+        "remote_custody_notes": [
+          {
+            "path": "/home/ubuntu/live/hivezilla-validator-20260930/compact/direct-agave-processed-live/000000000000000018de229d3fc8a9d9-275b05/epoch-1058/457225579-724705.compact/REMOTE-CUSTODY.json",
+            "all_record_fields_match": true
+          },
+          {
+            "path": "/home/ubuntu/live/hivezilla-validator-20260930/compact/direct-agave-processed-live/000000000000000018de229d3fc8a9d9-275b05/custody/457225579-724705/REMOTE-CUSTODY.json",
+            "all_record_fields_match": true
+          }
+        ]
+      },
+      "bundle_files": [
+        {
+          "name": "bundle-0.tar",
+          "bytes": 168683520,
+          "allocated_bytes": 168697856
+        }
+      ],
+      "guard_status": {
+        "state": "BACKGROUND_RUNNING",
+        "updated_unix_ms": 1792133000359,
+        "source": "000000000000000018deede1d641da13-275b05",
+        "slot_lag": 0,
+        "event_lag": 102,
+        "capture_sequence": 16084017,
+        "capture_rooted_slot": 457541432,
+        "healthy": true,
+        "capture_progress_observed": true,
+        "capture_progress_healthy": true,
+        "capture_sequence_age_seconds": 0,
+        "capture_root_age_seconds": 0,
+        "capture_progress_timeout_seconds": 60
+      },
+      "critical_services": {
+        "hivezilla-validator.service": {
+          "ActiveState": "active",
+          "SubState": "running",
+          "MainPID": "2579205",
+          "Result": "success",
+          "NRestarts": "1"
+        },
+        "hivezilla-direct-worker.service": {
+          "ActiveState": "active",
+          "SubState": "running",
+          "MainPID": "2995168",
+          "Result": "success",
+          "NRestarts": "0"
+        },
+        "hivezilla-bank-v2-producer.service": {
+          "ActiveState": "active",
+          "SubState": "running",
+          "MainPID": "2995833",
+          "Result": "success",
+          "NRestarts": "0"
+        },
+        "hivezilla-bank-v2-origin.service": {
+          "ActiveState": "active",
+          "SubState": "running",
+          "MainPID": "2995862",
+          "Result": "success",
+          "NRestarts": "0"
+        },
+        "hivezilla-stream-origin.service": {
+          "ActiveState": "active",
+          "SubState": "running",
+          "MainPID": "2995861",
+          "Result": "success",
+          "NRestarts": "0"
+        },
+        "hivezilla-stream-relay.service": {
+          "ActiveState": "active",
+          "SubState": "running",
+          "MainPID": "2996001",
+          "Result": "success",
+          "NRestarts": "0"
+        },
+        "hivezilla-bank-v2-r2-publisher.service": {
+          "ActiveState": "active",
+          "SubState": "running",
+          "MainPID": "2996002",
+          "Result": "success",
+          "NRestarts": "0"
+        },
+        "hivezilla-native-cold-storage-20261012-live.service": {
+          "ActiveState": "active",
+          "SubState": "running",
+          "MainPID": "2996042",
+          "Result": "success",
+          "NRestarts": "0"
+        },
+        "hivezilla-live-priority-20261012.service": {
+          "ActiveState": "active",
+          "SubState": "running",
+          "MainPID": "3069817",
+          "Result": "success",
+          "NRestarts": "0"
+        }
+      },
+      "newest_full_snapshot": {
+        "name": "snapshot-457464166-8fh3Dmextuv1wKJ3FBkGH16CBWbxCkHkghnEF54ZTFdB.tar.zst",
+        "bytes": 123986510937,
+        "allocated_bytes": 123997741056,
+        "mtime_unix_ms": 1792118041272
+      },
+      "newest_incremental_snapshot": {
+        "name": "incremental-snapshot-457464166-457541374-3HB1LWcGeDGCsi4Zo4PuZTL4rX7MtEUP2JdvRbzwUu1L.tar.zst",
+        "bytes": 616245400,
+        "allocated_bytes": 616263680,
+        "mtime_unix_ms": 1792132992534
+      }
+    }
+  ],
+  "complete_window": {
+    "elapsed_seconds": 197.238,
+    "pid_unchanged": true,
+    "retired_banks_delta": 832,
+    "archive_index_banks_delta": 896,
+    "freed_bytes_delta": 2096164864,
+    "freed_bytes_per_second": 10627591.356635131,
+    "root_available_bytes_delta": -1160724480,
+    "root_available_bytes_delta_per_second": -5884892.769141849,
+    "cpu_cores_used": 0.9952680670053439,
+    "cpu_stat_delta": {
+      "usage_usec": 196304683,
+      "user_usec": 76317092,
+      "system_usec": 119987591,
+      "nice_usec": 76249000,
+      "core_sched.force_idle_usec": 0,
+      "nr_periods": 1972,
+      "nr_throttled": 2,
+      "throttled_usec": 10968,
+      "nr_bursts": 0,
+      "burst_usec": 0
+    },
+    "memory_events_delta": {
+      "low": 0,
+      "high": 0,
+      "max": 0,
+      "oom": 0,
+      "oom_kill": 0,
+      "oom_group_kill": 0,
+      "sock_throttled": 0
+    },
+    "io_stat_delta": {
+      "259:0": {
+        "rbytes": 2109947904,
+        "wbytes": 2286481408,
+        "rios": 62162,
+        "wios": 33626,
+        "dbytes": 0,
+        "dios": 0
+      }
+    }
+  },
+  "first_segment": {
+    "elapsed_seconds": 93.877,
+    "pid_unchanged": true,
+    "retired_banks_delta": 448,
+    "archive_index_banks_delta": 384,
+    "freed_bytes_delta": 1157894144,
+    "freed_bytes_per_second": 12334162.190951992,
+    "root_available_bytes_delta": -2043912192,
+    "root_available_bytes_delta_per_second": -21772235.92573261,
+    "cpu_cores_used": 0.9826114703281955,
+    "cpu_stat_delta": {
+      "usage_usec": 92244617,
+      "user_usec": 36047701,
+      "system_usec": 56196916,
+      "nice_usec": 35986000,
+      "core_sched.force_idle_usec": 0,
+      "nr_periods": 938,
+      "nr_throttled": 0,
+      "throttled_usec": 0,
+      "nr_bursts": 0,
+      "burst_usec": 0
+    },
+    "memory_events_delta": {
+      "low": 0,
+      "high": 0,
+      "max": 0,
+      "oom": 0,
+      "oom_kill": 0,
+      "oom_group_kill": 0,
+      "sock_throttled": 0
+    },
+    "io_stat_delta": {
+      "259:0": {
+        "rbytes": 996765696,
+        "wbytes": 1151672320,
+        "rios": 28848,
+        "wios": 16699,
+        "dbytes": 0,
+        "dios": 0
+      }
+    }
+  },
+  "second_segment": {
+    "elapsed_seconds": 103.361,
+    "pid_unchanged": true,
+    "retired_banks_delta": 384,
+    "archive_index_banks_delta": 512,
+    "freed_bytes_delta": 938270720,
+    "freed_bytes_per_second": 9077608.769265004,
+    "root_available_bytes_delta": 883187712,
+    "root_available_bytes_delta_per_second": 8544690.086202726,
+    "cpu_cores_used": 1.0067633440078947,
+    "cpu_stat_delta": {
+      "usage_usec": 104060066,
+      "user_usec": 40269391,
+      "system_usec": 63790675,
+      "nice_usec": 40263000,
+      "core_sched.force_idle_usec": 0,
+      "nr_periods": 1034,
+      "nr_throttled": 2,
+      "throttled_usec": 10968,
+      "nr_bursts": 0,
+      "burst_usec": 0
+    },
+    "memory_events_delta": {
+      "low": 0,
+      "high": 0,
+      "max": 0,
+      "oom": 0,
+      "oom_kill": 0,
+      "oom_group_kill": 0,
+      "sock_throttled": 0
+    },
+    "io_stat_delta": {
+      "259:0": {
+        "rbytes": 1113182208,
+        "wbytes": 1134809088,
+        "rios": 33314,
+        "wios": 16927,
+        "dbytes": 0,
+        "dios": 0
+      }
+    }
+  },
+  "assessment": {
+    "retirement_materially_faster_than_initial_pilot": false,
+    "filesystem_free_space_rising_over_complete_window": false,
+    "target_30000000_bytes_per_second_met": false,
+    "memory_limit_pressure_observed": false,
+    "cpu_quota_material_bottleneck_observed": false,
+    "conclusion": "Four transfers fit the resource bounds, but this window did not show sustainable disk capacity. The serial unindexed v2 artifact gate remains the measured limit."
+  },
+  "earlier_15_second_two_transfer_measurement": {
+    "checked_start_utc": "2026-10-16T06:38:22.945873+00:00",
+    "checked_end_utc": "2026-10-16T06:38:37.952024+00:00",
+    "elapsed_seconds": 15.00614296621643,
+    "cpu_cores_used": 0.5786336315433159,
+    "cpu_stat_delta": {
+      "nr_bursts": 0,
+      "system_usec": 5281049,
+      "core_sched.force_idle_usec": 0,
+      "burst_usec": 0,
+      "user_usec": 3402009,
+      "nice_usec": 3381000,
+      "usage_usec": 8683059,
+      "throttled_usec": 0,
+      "nr_periods": 150,
+      "nr_throttled": 0
+    },
+    "memory_peak_bytes": 1337176064,
+    "memory_events": {
+      "low": 0,
+      "high": 0,
+      "max": 0,
+      "oom": 0,
+      "oom_kill": 0,
+      "oom_group_kill": 0,
+      "sock_throttled": 0
+    },
+    "host_available_memory_bytes": 996764725248,
+    "main_thread_state": "R",
+    "transfer_thread_states": [
+      {
+        "tid": 3073688,
+        "state": "S",
+        "cpu_ticks": 777,
+        "wchan": "futex_do_wait"
+      },
+      {
+        "tid": 3076722,
+        "state": "S",
+        "cpu_ticks": 611,
+        "wchan": "futex_do_wait"
+      }
+    ]
+  },
+  "read_only_bank_cost_measurement": {
+    "checked_utc": "2026-10-16T06:38:57.543854+00:00",
+    "read_only_bank_cost_samples": [
+      {
+        "slot": 457225516,
+        "v2_event": 2167617,
+        "v2_event_query_seconds": 0.20631525898352265,
+        "build_bank_full_hash_seconds": 0.007004149025306106,
+        "native_ack_query_seconds": 0.0005673158448189497,
+        "bank_bytes": 3167996,
+        "native_unacknowledged": false
+      },
+      {
+        "slot": 457225517,
+        "v2_event": 2167619,
+        "v2_event_query_seconds": 0.22452883305959404,
+        "build_bank_full_hash_seconds": 0.0056978981010615826,
+        "native_ack_query_seconds": 0.00003200792707502842,
+        "bank_bytes": 2102744,
+        "native_unacknowledged": false
+      },
+      {
+        "slot": 457225518,
+        "v2_event": 2167622,
+        "v2_event_query_seconds": 0.21102722990326583,
+        "build_bank_full_hash_seconds": 0.005033315159380436,
+        "native_ack_query_seconds": 0.00003929878585040569,
+        "bank_bytes": 2191860,
+        "native_unacknowledged": false
+      },
+      {
+        "slot": 457225519,
+        "v2_event": 2167626,
+        "v2_event_query_seconds": 0.20519162411801517,
+        "build_bank_full_hash_seconds": 0.006301628891378641,
+        "native_ack_query_seconds": 0.00004175305366516113,
+        "bank_bytes": 2447108,
+        "native_unacknowledged": false
+      },
+      {
+        "slot": 457225520,
+        "v2_event": 2167629,
+        "v2_event_query_seconds": 0.2079704070929438,
+        "build_bank_full_hash_seconds": 0.005712589947506785,
+        "native_ack_query_seconds": 0.000035893870517611504,
+        "bank_bytes": 2407081,
+        "native_unacknowledged": false
+      },
+      {
+        "slot": 457225521,
+        "v2_event": 2167630,
+        "v2_event_query_seconds": 0.20486063393764198,
+        "build_bank_full_hash_seconds": 0.004941806895658374,
+        "native_ack_query_seconds": 0.00003507314249873161,
+        "bank_bytes": 1843042,
+        "native_unacknowledged": false
+      },
+      {
+        "slot": 457225522,
+        "v2_event": 2167635,
+        "v2_event_query_seconds": 0.20368464989587665,
+        "build_bank_full_hash_seconds": 0.005771940108388662,
+        "native_ack_query_seconds": 0.000037706922739744186,
+        "bank_bytes": 2238744,
+        "native_unacknowledged": false
+      },
+      {
+        "slot": 457225523,
+        "v2_event": 2167637,
+        "v2_event_query_seconds": 0.21418797899968922,
+        "build_bank_full_hash_seconds": 0.005786200985312462,
+        "native_ack_query_seconds": 0.00003472296521067619,
+        "bank_bytes": 2347731,
+        "native_unacknowledged": false
+      }
+    ],
+    "sample_count": 8,
+    "mean_v2_event_query_seconds": 0.20972082699881867,
+    "mean_build_bank_seconds": 0.005781191139249131,
+    "mean_native_ack_query_seconds": 0.00010297156404703856,
+    "v2_artifact_query_plan": [
+      [
+        3,
+        0,
+        0,
+        "SEARCH feed_events"
+      ]
+    ]
+  },
+  "schema_findings": {
+    "old_v2_db": "compact/bank-v2-live/000000000000000018de229d3fc8a9d9-275b05/feed.sqlite",
+    "old_checked_utc": "2026-10-16T06:40:43.431229Z",
+    "active_v2_db": "compact/bank-v2-live/000000000000000018deede1d641da13-275b05/feed.sqlite",
+    "active_checked_utc": "2026-10-16T06:42:15.409826Z",
+    "feed_events_columns": [
+      "sequence",
+      "artifact",
+      "event_json",
+      "frame_sha256"
+    ],
+    "both_present_indices": [
+      "frame_lookup(frame_sha256)"
+    ],
+    "missing_declared_index": "CREATE INDEX IF NOT EXISTS event_artifact ON feed_events(artifact,sequence)",
+    "declared_in_local_source": "hivezilla/direct-agave/src/confirmed.rs:48",
+    "active_producer_executable": "/home/ubuntu/live/hivezilla-validator-20260930/releases/bank-stream-v2-clients-r2-20261010/hivezilla-direct-agave",
+    "active_producer_pid": 2995833,
+    "active_WORKER_lock_owner_pid": 2995833,
+    "index_was_not_created_by_this_observer": true,
+    "index_change_semantics": "The exact declared artifact+sequence index keeps the existing max(sequence) WHERE artifact=? gate. No slot/bank narrowing is needed or supported by this table."
+  },
+  "limits": [
+    "This is a finite 197.238-second pilot. Filesystem free space was not monotonic; the complete-window trend remained negative.",
+    "STATUS and archive index are sampled separately and can differ by committed batches.",
+    "The total bank allowance remains 65,536 from initial archive count 720010. After 1,472 new indexed banks, the restarted invocation limit was 1001 batches of 64.",
+    "--max-batches resets on each process start. Restart=no prevents an automatic reset. --follow may wait for eligible work and does not guarantee an end time.",
+    "R2 full readback is streamed in 1 MiB chunks. Four 512 MiB disk-backed bundle files have a 2 GiB file bound; page cache counts toward MemoryMax.",
+    "The archive/custody records show the helper's normal full-readback requirement. This pilot did not fetch full remote bundles again.",
+    "The active source also lacks the artifact index. An old-source-only migration does not fix future live-source lookup cost."
+  ],
+  "post_index_pilot": {
+    "first_sample_utc": "2026-10-16T06:46:29.508424+00:00",
+    "last_sample_utc": "2026-10-16T06:49:48.893087+00:00",
+    "migration_completed_utc_reported_by_operator": "2026-10-16T06:45:27.311Z",
+    "migration_evidence": "incident-20261016-a3cdcf23-bank-artifact-index.json",
+    "unchanged_configuration": {
+      "unit": "hivezilla-native-cold-storage-20261016-source-18de229d.service",
+      "main_pid": 3100803,
+      "parallel_bundles": 4,
+      "batch_banks": 64,
+      "max_batches_current_invocation": 1001,
+      "original_total_new_bank_cap": 65536,
+      "cpu_quota": "200%",
+      "memory_max_bytes": 4294967296,
+      "nice": 19,
+      "io_weight": 10,
+      "keep_seconds": 7200,
+      "restart": "no",
+      "follow": true,
+      "retire": true
+    },
+    "summary": {
+      "elapsed_seconds": 199.385,
+      "retired_banks_delta": 2944,
+      "freed_bytes_delta": 7175372800,
+      "freed_bytes_per_second": 35987525.64134715,
+      "root_available_bytes_at_start": 563380568064,
+      "root_available_bytes_at_end": 567368585216,
+      "root_available_bytes_delta": 3988017152,
+      "root_available_bytes_delta_per_second": 20001590.6512526,
+      "cpu_cores_used": 0.4424746796398927,
+      "cpu_throttled_periods_delta": 8,
+      "cpu_throttled_usec_delta": 40499,
+      "max_memory_peak_bytes": 1925148672,
+      "memory_event_deltas": {
+        "low": 0,
+        "high": 0,
+        "max": 0,
+        "oom": 0,
+        "oom_kill": 0,
+        "oom_group_kill": 0,
+        "sock_throttled": 0
+      },
+      "io_stat_deltas": {
+        "259:0": {
+          "rbytes": 7246495744,
+          "wbytes": 7337615360,
+          "rios": 207441,
+          "wios": 112610,
+          "dbytes": 0,
+          "dios": 0
+        }
+      },
+      "storage_pid_unchanged": true,
+      "critical_services_active_all_samples": true,
+      "critical_service_pids_unchanged": true,
+      "guard_healthy_all_samples": true,
+      "native_ack_all_samples": true,
+      "artifact_max_sequences_unchanged": true,
+      "target_30000000_bytes_per_second_met": true,
+      "positive_net_free_both_segments": true
+    },
+    "segments": [
+      {
+        "elapsed_seconds": 103.077,
+        "retired_banks_delta": 1600,
+        "freed_bytes_delta": 3870961664,
+        "freed_bytes_per_second": 37554077.670091294,
+        "root_available_bytes_delta": 3088736256,
+        "root_available_bytes_delta_per_second": 29965329.375127334
+      },
+      {
+        "elapsed_seconds": 96.308,
+        "retired_banks_delta": 1344,
+        "freed_bytes_delta": 3304411136,
+        "freed_bytes_per_second": 34310868.62981268,
+        "root_available_bytes_delta": 899280896,
+        "root_available_bytes_delta_per_second": 9337551.356065955
+      }
+    ],
+    "samples": [
+      {
+        "checked_utc": "2026-10-16T06:46:29.508424+00:00",
+        "checked_unix_ms": 1792133189508,
+        "root_available_bytes": 563380568064,
+        "service": {
+          "ActiveState": "active",
+          "SubState": "running",
+          "Restart": "no",
+          "MainPID": "3100803",
+          "Result": "success",
+          "NRestarts": "0",
+          "ControlGroup": "/system.slice/hivezilla-native-cold-storage-20261016-source-18de229d.service",
+          "CPUQuotaPerSecUSec": "2s",
+          "IOWeight": "10",
+          "MemoryMax": "4294967296",
+          "Nice": "19"
+        },
+        "selected_flags": {
+          "--parallel-bundles": "4",
+          "--max-batches": "1001",
+          "--batch-banks": "64",
+          "--keep-seconds": "7200",
+          "follow": true,
+          "retire": true
+        },
+        "cpu_stat": {
+          "usage_usec": 418920330,
+          "user_usec": 167470151,
+          "system_usec": 251450179,
+          "nice_usec": 167160000,
+          "core_sched.force_idle_usec": 0,
+          "nr_periods": 4554,
+          "nr_throttled": 9,
+          "throttled_usec": 40201,
+          "nr_bursts": 0,
+          "burst_usec": 0
+        },
+        "memory_current_bytes": 1671536640,
+        "memory_peak_bytes": 1824239616,
+        "memory_stat": {
+          "anon": 92913664,
+          "file": 1508036608,
+          "kernel": 60923904,
+          "file_dirty": 2469888,
+          "file_writeback": 0,
+          "slab_reclaimable": 60362304,
+          "slab_unreclaimable": 163120
+        },
+        "memory_events": {
+          "low": 0,
+          "high": 0,
+          "max": 0,
+          "oom": 0,
+          "oom_kill": 0,
+          "oom_group_kill": 0,
+          "sock_throttled": 0
+        },
+        "io_stat": [
+          "259:0 rbytes=6911397888 wbytes=6857035776 rios=227350 wios=97810 dbytes=0 dios=0"
+        ],
+        "pressure": {
+          "cpu": [
+            "some avg10=0.00 avg60=0.00 avg300=0.00 total=77638",
+            "full avg10=0.00 avg60=0.00 avg300=0.00 total=77628"
+          ],
+          "memory": [
+            "some avg10=0.00 avg60=0.00 avg300=0.00 total=0",
+            "full avg10=0.00 avg60=0.00 avg300=0.00 total=0"
+          ],
+          "io": [
+            "some avg10=0.71 avg60=0.54 avg300=0.28 total=3653335",
+            "full avg10=0.71 avg60=0.54 avg300=0.28 total=3653104"
+          ]
+        },
+        "status": {
+          "schema": "blockzilla-native-cold-storage-status-v1",
+          "state": "RUNNING",
+          "archived_banks": 723978,
+          "retired_banks": 723978,
+          "freed_bytes_this_run": 6293606400,
+          "keep_seconds": 7200,
+          "batch_bank_limit": 64,
+          "parallel_bundle_limit": 4,
+          "pending_bundles": 4,
+          "last_batch_banks": 64,
+          "last_batch_seconds": 13.2695248760283,
+          "full_remote_readback_required": true,
+          "updated_unix_ms": 1792133188492
+        },
+        "archive_index_banks": 723978,
+        "latest_archive_receipt": {
+          "slot": 457226991,
+          "retired": 1,
+          "key": "native-custody/processed-v1/000000000000000018de229d3fc8a9d9-275b05/5eff0d9c52a90feeca926ccbadc5ca963d0a81ee2511ea7988b3d3949ae45f74.tar",
+          "bundle_sha256": "5eff0d9c52a90feeca926ccbadc5ca963d0a81ee2511ea7988b3d3949ae45f74",
+          "namespace": "1a93d01e2c293e1f61c246747319a92fea69ab27060f050b986304c4c4715bcf",
+          "remote_custody_notes": [
+            {
+              "path": "/home/ubuntu/live/hivezilla-validator-20260930/compact/direct-agave-processed-live/000000000000000018de229d3fc8a9d9-275b05/epoch-1058/457226991-726115.compact/REMOTE-CUSTODY.json",
+              "all_record_fields_match": true
+            },
+            {
+              "path": "/home/ubuntu/live/hivezilla-validator-20260930/compact/direct-agave-processed-live/000000000000000018de229d3fc8a9d9-275b05/custody/457226991-726115/REMOTE-CUSTODY.json",
+              "all_record_fields_match": true
+            }
+          ]
+        },
+        "native_ack_sample": {
+          "slot": 457226991,
+          "bank": 726115,
+          "through_sequence": 1603220170,
+          "unacknowledged_native_rows": false
+        },
+        "bundle_files": [
+          {
+            "name": "bundle-3.tar",
+            "bytes": 142694400,
+            "allocated_bytes": 142704640
+          },
+          {
+            "name": "bundle-1.tar",
+            "bytes": 148725760,
+            "allocated_bytes": 148738048
+          },
+          {
+            "name": "bundle-0.tar",
+            "bytes": 146176000,
+            "allocated_bytes": 146190336
+          },
+          {
+            "name": "bundle-2.tar",
+            "bytes": 164300800,
+            "allocated_bytes": 164315136
+          }
+        ],
+        "v2_index_state": {
+          "indices": [
+            [
+              0,
+              "event_artifact",
+              0,
+              "c",
+              0
+            ],
+            [
+              1,
+              "frame_lookup",
+              1,
+              "c",
+              0
+            ]
+          ],
+          "artifact_query_plan": [
+            [
+              3,
+              0,
+              0,
+              "SEARCH feed_events USING COVERING INDEX event_artifact (artifact=?)"
+            ]
+          ],
+          "probe": [
+            {
+              "expected_max_sequence": 2167617,
+              "actual_max_sequence": 2167617,
+              "same": true,
+              "seconds": 0.000039489008486270905
+            },
+            {
+              "expected_max_sequence": 2167619,
+              "actual_max_sequence": 2167619,
+              "same": true,
+              "seconds": 0.000006009126082062721
+            },
+            {
+              "expected_max_sequence": 2167622,
+              "actual_max_sequence": 2167622,
+              "same": true,
+              "seconds": 0.000003525055944919586
+            },
+            {
+              "expected_max_sequence": 2167626,
+              "actual_max_sequence": 2167626,
+              "same": true,
+              "seconds": 0.0000030440278351306915
+            },
+            {
+              "expected_max_sequence": 2167629,
+              "actual_max_sequence": 2167629,
+              "same": true,
+              "seconds": 0.000002895016223192215
+            },
+            {
+              "expected_max_sequence": 2167630,
+              "actual_max_sequence": 2167630,
+              "same": true,
+              "seconds": 0.000002834014594554901
+            },
+            {
+              "expected_max_sequence": 2167635,
+              "actual_max_sequence": 2167635,
+              "same": true,
+              "seconds": 0.000004466855898499489
+            },
+            {
+              "expected_max_sequence": 2167637,
+              "actual_max_sequence": 2167637,
+              "same": true,
+              "seconds": 0.000002754153683781624
+            }
+          ]
+        },
+        "guard_status": {
+          "state": "BACKGROUND_RUNNING",
+          "updated_unix_ms": 1792133188373,
+          "source": "000000000000000018deede1d641da13-275b05",
+          "slot_lag": 0,
+          "event_lag": 150,
+          "capture_sequence": 17783424,
+          "capture_rooted_slot": 457542299,
+          "healthy": true,
+          "capture_progress_observed": true,
+          "capture_progress_healthy": true,
+          "capture_sequence_age_seconds": 0,
+          "capture_root_age_seconds": 0,
+          "capture_progress_timeout_seconds": 60
+        },
+        "critical_services": {
+          "hivezilla-validator.service": {
+            "ActiveState": "active",
+            "SubState": "running",
+            "MainPID": "2579205",
+            "Result": "success",
+            "NRestarts": "1"
+          },
+          "hivezilla-direct-worker.service": {
+            "ActiveState": "active",
+            "SubState": "running",
+            "MainPID": "2995168",
+            "Result": "success",
+            "NRestarts": "0"
+          },
+          "hivezilla-bank-v2-producer.service": {
+            "ActiveState": "active",
+            "SubState": "running",
+            "MainPID": "2995833",
+            "Result": "success",
+            "NRestarts": "0"
+          },
+          "hivezilla-bank-v2-origin.service": {
+            "ActiveState": "active",
+            "SubState": "running",
+            "MainPID": "2995862",
+            "Result": "success",
+            "NRestarts": "0"
+          },
+          "hivezilla-stream-origin.service": {
+            "ActiveState": "active",
+            "SubState": "running",
+            "MainPID": "2995861",
+            "Result": "success",
+            "NRestarts": "0"
+          },
+          "hivezilla-stream-relay.service": {
+            "ActiveState": "active",
+            "SubState": "running",
+            "MainPID": "2996001",
+            "Result": "success",
+            "NRestarts": "0"
+          },
+          "hivezilla-bank-v2-r2-publisher.service": {
+            "ActiveState": "active",
+            "SubState": "running",
+            "MainPID": "2996002",
+            "Result": "success",
+            "NRestarts": "0"
+          },
+          "hivezilla-native-cold-storage-20261012-live.service": {
+            "ActiveState": "active",
+            "SubState": "running",
+            "MainPID": "2996042",
+            "Result": "success",
+            "NRestarts": "0"
+          },
+          "hivezilla-live-priority-20261012.service": {
+            "ActiveState": "active",
+            "SubState": "running",
+            "MainPID": "3069817",
+            "Result": "success",
+            "NRestarts": "0"
+          }
+        },
+        "newest_full_snapshot": {
+          "name": "snapshot-457464166-8fh3Dmextuv1wKJ3FBkGH16CBWbxCkHkghnEF54ZTFdB.tar.zst",
+          "bytes": 123986510937,
+          "allocated_bytes": 123997741056,
+          "mtime_unix_ms": 1792118041272
+        },
+        "newest_incremental_snapshot": {
+          "name": "incremental-snapshot-457464166-457542174-BimrE7xWHRRYN9MAKvNVuRDSgUNGsnTgr7uaMH4KJNNp.tar.zst",
+          "bytes": 617835196,
+          "allocated_bytes": 617852928,
+          "mtime_unix_ms": 1792133164909
+        }
+      },
+      {
+        "checked_utc": "2026-10-16T06:48:12.585345+00:00",
+        "checked_unix_ms": 1792133292585,
+        "root_available_bytes": 566469304320,
+        "service": {
+          "ActiveState": "active",
+          "SubState": "running",
+          "Restart": "no",
+          "MainPID": "3100803",
+          "Result": "success",
+          "NRestarts": "0",
+          "ControlGroup": "/system.slice/hivezilla-native-cold-storage-20261016-source-18de229d.service",
+          "CPUQuotaPerSecUSec": "2s",
+          "IOWeight": "10",
+          "MemoryMax": "4294967296",
+          "Nice": "19"
+        },
+        "selected_flags": {
+          "--parallel-bundles": "4",
+          "--max-batches": "1001",
+          "--batch-banks": "64",
+          "--keep-seconds": "7200",
+          "follow": true,
+          "retire": true
+        },
+        "cpu_stat": {
+          "usage_usec": 465404631,
+          "user_usec": 191988769,
+          "system_usec": 273415862,
+          "nice_usec": 191453000,
+          "core_sched.force_idle_usec": 0,
+          "nr_periods": 5585,
+          "nr_throttled": 12,
+          "throttled_usec": 60624,
+          "nr_bursts": 0,
+          "burst_usec": 0
+        },
+        "memory_current_bytes": 1812844544,
+        "memory_peak_bytes": 1879736320,
+        "memory_stat": {
+          "anon": 92696576,
+          "file": 1627607040,
+          "kernel": 83742720,
+          "file_dirty": 20480,
+          "file_writeback": 0,
+          "slab_reclaimable": 83188848,
+          "slab_unreclaimable": 163704
+        },
+        "memory_events": {
+          "low": 0,
+          "high": 0,
+          "max": 0,
+          "oom": 0,
+          "oom_kill": 0,
+          "oom_group_kill": 0,
+          "sock_throttled": 0
+        },
+        "io_stat": [
+          "259:0 rbytes=10842144768 wbytes=10830098432 rios=335956 wios=157470 dbytes=0 dios=0"
+        ],
+        "pressure": {
+          "cpu": [
+            "some avg10=0.00 avg60=0.00 avg300=0.00 total=103390",
+            "full avg10=0.00 avg60=0.00 avg300=0.00 total=103379"
+          ],
+          "memory": [
+            "some avg10=0.00 avg60=0.00 avg300=0.00 total=0",
+            "full avg10=0.00 avg60=0.00 avg300=0.00 total=0"
+          ],
+          "io": [
+            "some avg10=0.77 avg60=0.83 avg300=0.47 total=4845898",
+            "full avg10=0.77 avg60=0.83 avg300=0.47 total=4845568"
+          ]
+        },
+        "status": {
+          "schema": "blockzilla-native-cold-storage-status-v1",
+          "state": "RUNNING",
+          "archived_banks": 725578,
+          "retired_banks": 725578,
+          "freed_bytes_this_run": 10164568064,
+          "keep_seconds": 7200,
+          "batch_bank_limit": 64,
+          "parallel_bundle_limit": 4,
+          "pending_bundles": 4,
+          "last_batch_banks": 64,
+          "last_batch_seconds": 19.602438829140738,
+          "full_remote_readback_required": true,
+          "updated_unix_ms": 1792133292308
+        },
+        "archive_index_banks": 725578,
+        "latest_archive_receipt": {
+          "slot": 457228591,
+          "retired": 1,
+          "key": "native-custody/processed-v1/000000000000000018de229d3fc8a9d9-275b05/63ec5d764fc31b34c76bf7e7fa9bc91c1eedff7cc1416a0be615a221f83257bd.tar",
+          "bundle_sha256": "63ec5d764fc31b34c76bf7e7fa9bc91c1eedff7cc1416a0be615a221f83257bd",
+          "namespace": "1a93d01e2c293e1f61c246747319a92fea69ab27060f050b986304c4c4715bcf",
+          "remote_custody_notes": [
+            {
+              "path": "/home/ubuntu/live/hivezilla-validator-20260930/compact/direct-agave-processed-live/000000000000000018de229d3fc8a9d9-275b05/epoch-1058/457228591-727715.compact/REMOTE-CUSTODY.json",
+              "all_record_fields_match": true
+            },
+            {
+              "path": "/home/ubuntu/live/hivezilla-validator-20260930/compact/direct-agave-processed-live/000000000000000018de229d3fc8a9d9-275b05/custody/457228591-727715/REMOTE-CUSTODY.json",
+              "all_record_fields_match": true
+            }
+          ]
+        },
+        "native_ack_sample": {
+          "slot": 457228591,
+          "bank": 727715,
+          "through_sequence": 1606570405,
+          "unacknowledged_native_rows": false
+        },
+        "bundle_files": [
+          {
+            "name": "bundle-3.tar",
+            "bytes": 173199360,
+            "allocated_bytes": 173211648
+          },
+          {
+            "name": "bundle-1.tar",
+            "bytes": 144916480,
+            "allocated_bytes": 144928768
+          },
+          {
+            "name": "bundle-0.tar",
+            "bytes": 151121920,
+            "allocated_bytes": 151134208
+          },
+          {
+            "name": "bundle-2.tar",
+            "bytes": 159057920,
+            "allocated_bytes": 159072256
+          }
+        ],
+        "v2_index_state": {
+          "indices": [
+            [
+              0,
+              "event_artifact",
+              0,
+              "c",
+              0
+            ],
+            [
+              1,
+              "frame_lookup",
+              1,
+              "c",
+              0
+            ]
+          ],
+          "artifact_query_plan": [
+            [
+              3,
+              0,
+              0,
+              "SEARCH feed_events USING COVERING INDEX event_artifact (artifact=?)"
+            ]
+          ],
+          "probe": [
+            {
+              "expected_max_sequence": 2167617,
+              "actual_max_sequence": 2167617,
+              "same": true,
+              "seconds": 0.00003619398921728134
+            },
+            {
+              "expected_max_sequence": 2167619,
+              "actual_max_sequence": 2167619,
+              "same": true,
+              "seconds": 0.000004547182470560074
+            },
+            {
+              "expected_max_sequence": 2167622,
+              "actual_max_sequence": 2167622,
+              "same": true,
+              "seconds": 0.0000031047966331243515
+            },
+            {
+              "expected_max_sequence": 2167626,
+              "actual_max_sequence": 2167626,
+              "same": true,
+              "seconds": 0.000002312939614057541
+            },
+            {
+              "expected_max_sequence": 2167629,
+              "actual_max_sequence": 2167629,
+              "same": true,
+              "seconds": 0.000002042856067419052
+            },
+            {
+              "expected_max_sequence": 2167630,
+              "actual_max_sequence": 2167630,
+              "same": true,
+              "seconds": 0.0000019329600036144257
+            },
+            {
+              "expected_max_sequence": 2167635,
+              "actual_max_sequence": 2167635,
+              "same": true,
+              "seconds": 0.0000031141098588705063
+            },
+            {
+              "expected_max_sequence": 2167637,
+              "actual_max_sequence": 2167637,
+              "same": true,
+              "seconds": 0.0000020330771803855896
+            }
+          ]
+        },
+        "guard_status": {
+          "state": "BACKGROUND_RUNNING",
+          "updated_unix_ms": 1792133291409,
+          "source": "000000000000000018deede1d641da13-275b05",
+          "slot_lag": 0,
+          "event_lag": 312,
+          "capture_sequence": 18789324,
+          "capture_rooted_slot": 457542784,
+          "healthy": true,
+          "capture_progress_observed": true,
+          "capture_progress_healthy": true,
+          "capture_sequence_age_seconds": 0,
+          "capture_root_age_seconds": 0,
+          "capture_progress_timeout_seconds": 60
+        },
+        "critical_services": {
+          "hivezilla-validator.service": {
+            "ActiveState": "active",
+            "SubState": "running",
+            "MainPID": "2579205",
+            "Result": "success",
+            "NRestarts": "1"
+          },
+          "hivezilla-direct-worker.service": {
+            "ActiveState": "active",
+            "SubState": "running",
+            "MainPID": "2995168",
+            "Result": "success",
+            "NRestarts": "0"
+          },
+          "hivezilla-bank-v2-producer.service": {
+            "ActiveState": "active",
+            "SubState": "running",
+            "MainPID": "2995833",
+            "Result": "success",
+            "NRestarts": "0"
+          },
+          "hivezilla-bank-v2-origin.service": {
+            "ActiveState": "active",
+            "SubState": "running",
+            "MainPID": "2995862",
+            "Result": "success",
+            "NRestarts": "0"
+          },
+          "hivezilla-stream-origin.service": {
+            "ActiveState": "active",
+            "SubState": "running",
+            "MainPID": "2995861",
+            "Result": "success",
+            "NRestarts": "0"
+          },
+          "hivezilla-stream-relay.service": {
+            "ActiveState": "active",
+            "SubState": "running",
+            "MainPID": "2996001",
+            "Result": "success",
+            "NRestarts": "0"
+          },
+          "hivezilla-bank-v2-r2-publisher.service": {
+            "ActiveState": "active",
+            "SubState": "running",
+            "MainPID": "2996002",
+            "Result": "success",
+            "NRestarts": "0"
+          },
+          "hivezilla-native-cold-storage-20261012-live.service": {
+            "ActiveState": "active",
+            "SubState": "running",
+            "MainPID": "2996042",
+            "Result": "success",
+            "NRestarts": "0"
+          },
+          "hivezilla-live-priority-20261012.service": {
+            "ActiveState": "active",
+            "SubState": "running",
+            "MainPID": "3069817",
+            "Result": "success",
+            "NRestarts": "0"
+          }
+        },
+        "newest_full_snapshot": {
+          "name": "snapshot-457464166-8fh3Dmextuv1wKJ3FBkGH16CBWbxCkHkghnEF54ZTFdB.tar.zst",
+          "bytes": 123986510937,
+          "allocated_bytes": 123997741056,
+          "mtime_unix_ms": 1792118041272
+        },
+        "newest_incremental_snapshot": {
+          "name": "incremental-snapshot-457464166-457542574-GAggJa6ESaHGVZjr95ku6XPYAZ2fKyDhMRf8eyEiWRTG.tar.zst",
+          "bytes": 619542738,
+          "allocated_bytes": 619560960,
+          "mtime_unix_ms": 1792133249927
+        }
+      },
+      {
+        "checked_utc": "2026-10-16T06:49:48.893087+00:00",
+        "checked_unix_ms": 1792133388893,
+        "root_available_bytes": 567368585216,
+        "service": {
+          "ActiveState": "active",
+          "SubState": "running",
+          "Restart": "no",
+          "MainPID": "3100803",
+          "Result": "success",
+          "NRestarts": "0",
+          "ControlGroup": "/system.slice/hivezilla-native-cold-storage-20261016-source-18de229d.service",
+          "CPUQuotaPerSecUSec": "2s",
+          "IOWeight": "10",
+          "MemoryMax": "4294967296",
+          "Nice": "19"
+        },
+        "selected_flags": {
+          "--parallel-bundles": "4",
+          "--max-batches": "1001",
+          "--batch-banks": "64",
+          "--keep-seconds": "7200",
+          "follow": true,
+          "retire": true
+        },
+        "cpu_stat": {
+          "usage_usec": 507143144,
+          "user_usec": 213951810,
+          "system_usec": 293191334,
+          "nice_usec": 213254000,
+          "core_sched.force_idle_usec": 0,
+          "nr_periods": 6547,
+          "nr_throttled": 17,
+          "throttled_usec": 80700,
+          "nr_bursts": 0,
+          "burst_usec": 0
+        },
+        "memory_current_bytes": 1851678720,
+        "memory_peak_bytes": 1925148672,
+        "memory_stat": {
+          "anon": 92712960,
+          "file": 1651580928,
+          "kernel": 101695488,
+          "file_dirty": 16384,
+          "file_writeback": 0,
+          "slab_reclaimable": 101145056,
+          "slab_unreclaimable": 163304
+        },
+        "memory_events": {
+          "low": 0,
+          "high": 0,
+          "max": 0,
+          "oom": 0,
+          "oom_kill": 0,
+          "oom_group_kill": 0,
+          "sock_throttled": 0
+        },
+        "io_stat": [
+          "259:0 rbytes=14157893632 wbytes=14194651136 rios=434791 wios=210420 dbytes=0 dios=0"
+        ],
+        "pressure": {
+          "cpu": [
+            "some avg10=0.00 avg60=0.00 avg300=0.00 total=130530",
+            "full avg10=0.00 avg60=0.00 avg300=0.00 total=130484"
+          ],
+          "memory": [
+            "some avg10=0.00 avg60=0.00 avg300=0.00 total=0",
+            "full avg10=0.00 avg60=0.00 avg300=0.00 total=0"
+          ],
+          "io": [
+            "some avg10=0.50 avg60=0.63 avg300=0.50 total=5670185",
+            "full avg10=0.50 avg60=0.63 avg300=0.50 total=5669735"
+          ]
+        },
+        "status": {
+          "schema": "blockzilla-native-cold-storage-status-v1",
+          "state": "RUNNING",
+          "archived_banks": 726922,
+          "retired_banks": 726922,
+          "freed_bytes_this_run": 13468979200,
+          "keep_seconds": 7200,
+          "batch_bank_limit": 64,
+          "parallel_bundle_limit": 4,
+          "pending_bundles": 4,
+          "last_batch_banks": 64,
+          "last_batch_seconds": 22.16762550594285,
+          "full_remote_readback_required": true,
+          "updated_unix_ms": 1792133388300
+        },
+        "archive_index_banks": 726922,
+        "latest_archive_receipt": {
+          "slot": 457229935,
+          "retired": 1,
+          "key": "native-custody/processed-v1/000000000000000018de229d3fc8a9d9-275b05/9c97c71211f22b76fa1e7d554dd61ec3fcac8d601f5a19a99472bf73dff50459.tar",
+          "bundle_sha256": "9c97c71211f22b76fa1e7d554dd61ec3fcac8d601f5a19a99472bf73dff50459",
+          "namespace": "1a93d01e2c293e1f61c246747319a92fea69ab27060f050b986304c4c4715bcf",
+          "remote_custody_notes": [
+            {
+              "path": "/home/ubuntu/live/hivezilla-validator-20260930/compact/direct-agave-processed-live/000000000000000018de229d3fc8a9d9-275b05/epoch-1058/457229935-729059.compact/REMOTE-CUSTODY.json",
+              "all_record_fields_match": true
+            },
+            {
+              "path": "/home/ubuntu/live/hivezilla-validator-20260930/compact/direct-agave-processed-live/000000000000000018de229d3fc8a9d9-275b05/custody/457229935-729059/REMOTE-CUSTODY.json",
+              "all_record_fields_match": true
+            }
+          ]
+        },
+        "native_ack_sample": {
+          "slot": 457229935,
+          "bank": 729059,
+          "through_sequence": 1609365462,
+          "unacknowledged_native_rows": false
+        },
+        "bundle_files": [
+          {
+            "name": "bundle-3.tar",
+            "bytes": 141844480,
+            "allocated_bytes": 141852672
+          },
+          {
+            "name": "bundle-1.tar",
+            "bytes": 150958080,
+            "allocated_bytes": 150970368
+          },
+          {
+            "name": "bundle-0.tar",
+            "bytes": 170035200,
+            "allocated_bytes": 170045440
+          },
+          {
+            "name": "bundle-2.tar",
+            "bytes": 148869120,
+            "allocated_bytes": 148881408
+          }
+        ],
+        "v2_index_state": {
+          "indices": [
+            [
+              0,
+              "event_artifact",
+              0,
+              "c",
+              0
+            ],
+            [
+              1,
+              "frame_lookup",
+              1,
+              "c",
+              0
+            ]
+          ],
+          "artifact_query_plan": [
+            [
+              3,
+              0,
+              0,
+              "SEARCH feed_events USING COVERING INDEX event_artifact (artifact=?)"
+            ]
+          ],
+          "probe": [
+            {
+              "expected_max_sequence": 2167617,
+              "actual_max_sequence": 2167617,
+              "same": true,
+              "seconds": 0.00004711095243692398
+            },
+            {
+              "expected_max_sequence": 2167619,
+              "actual_max_sequence": 2167619,
+              "same": true,
+              "seconds": 0.000005138106644153595
+            },
+            {
+              "expected_max_sequence": 2167622,
+              "actual_max_sequence": 2167622,
+              "same": true,
+              "seconds": 0.0000031441450119018555
+            },
+            {
+              "expected_max_sequence": 2167626,
+              "actual_max_sequence": 2167626,
+              "same": true,
+              "seconds": 0.0000023029278963804245
+            },
+            {
+              "expected_max_sequence": 2167629,
+              "actual_max_sequence": 2167629,
+              "same": true,
+              "seconds": 0.000002023065462708473
+            },
+            {
+              "expected_max_sequence": 2167630,
+              "actual_max_sequence": 2167630,
+              "same": true,
+              "seconds": 0.0000020631123334169388
+            },
+            {
+              "expected_max_sequence": 2167635,
+              "actual_max_sequence": 2167635,
+              "same": true,
+              "seconds": 0.000003044959157705307
+            },
+            {
+              "expected_max_sequence": 2167637,
+              "actual_max_sequence": 2167637,
+              "same": true,
+              "seconds": 0.000001962995156645775
+            }
+          ]
+        },
+        "guard_status": {
+          "state": "BACKGROUND_RUNNING",
+          "updated_unix_ms": 1792133388431,
+          "source": "000000000000000018deede1d641da13-275b05",
+          "slot_lag": 0,
+          "event_lag": 181,
+          "capture_sequence": 19683587,
+          "capture_rooted_slot": 457543232,
+          "healthy": true,
+          "capture_progress_observed": true,
+          "capture_progress_healthy": true,
+          "capture_sequence_age_seconds": 0,
+          "capture_root_age_seconds": 0,
+          "capture_progress_timeout_seconds": 60
+        },
+        "critical_services": {
+          "hivezilla-validator.service": {
+            "ActiveState": "active",
+            "SubState": "running",
+            "MainPID": "2579205",
+            "Result": "success",
+            "NRestarts": "1"
+          },
+          "hivezilla-direct-worker.service": {
+            "ActiveState": "active",
+            "SubState": "running",
+            "MainPID": "2995168",
+            "Result": "success",
+            "NRestarts": "0"
+          },
+          "hivezilla-bank-v2-producer.service": {
+            "ActiveState": "active",
+            "SubState": "running",
+            "MainPID": "2995833",
+            "Result": "success",
+            "NRestarts": "0"
+          },
+          "hivezilla-bank-v2-origin.service": {
+            "ActiveState": "active",
+            "SubState": "running",
+            "MainPID": "2995862",
+            "Result": "success",
+            "NRestarts": "0"
+          },
+          "hivezilla-stream-origin.service": {
+            "ActiveState": "active",
+            "SubState": "running",
+            "MainPID": "2995861",
+            "Result": "success",
+            "NRestarts": "0"
+          },
+          "hivezilla-stream-relay.service": {
+            "ActiveState": "active",
+            "SubState": "running",
+            "MainPID": "2996001",
+            "Result": "success",
+            "NRestarts": "0"
+          },
+          "hivezilla-bank-v2-r2-publisher.service": {
+            "ActiveState": "active",
+            "SubState": "running",
+            "MainPID": "2996002",
+            "Result": "success",
+            "NRestarts": "0"
+          },
+          "hivezilla-native-cold-storage-20261012-live.service": {
+            "ActiveState": "active",
+            "SubState": "running",
+            "MainPID": "2996042",
+            "Result": "success",
+            "NRestarts": "0"
+          },
+          "hivezilla-live-priority-20261012.service": {
+            "ActiveState": "active",
+            "SubState": "running",
+            "MainPID": "3069817",
+            "Result": "success",
+            "NRestarts": "0"
+          }
+        },
+        "newest_full_snapshot": {
+          "name": "snapshot-457464166-8fh3Dmextuv1wKJ3FBkGH16CBWbxCkHkghnEF54ZTFdB.tar.zst",
+          "bytes": 123986510937,
+          "allocated_bytes": 123997741056,
+          "mtime_unix_ms": 1792118041272
+        },
+        "newest_incremental_snapshot": {
+          "name": "incremental-snapshot-457464166-457543174-CVbPrqAjABXc6vSmZ8RaWyNKAZte6xdwHEFQ1As9aNeg.tar.zst",
+          "bytes": 620633475,
+          "allocated_bytes": 620650496,
+          "mtime_unix_ms": 1792133380137
+        }
+      }
+    ],
+    "assessment": "After the exact artifact index was added, this measured window exceeded the 30 MB/s retirement target and had positive filesystem free-space growth in both segments. This is finite capacity evidence, not proof through the next full snapshot or a sustained workload.",
+    "remaining_limits": [
+      "The active source still lacked event_artifact at the earlier 06:42:15 UTC check. This old-source migration does not prove that the active source has the index.",
+      "The bounded old-source run stops after its remaining allowance. Continued live storage capacity after that stop remains unproved.",
+      "The original per-bank source, marker age, hash, replay, native acknowledgement and full remote body verification gates remain required.",
+      "Filesystem free space includes all concurrent host writes and temporary bundle or snapshot allocation. The pilot does not isolate each source of growth.",
+      "No server or cloud mutations were made by this observer. No private stream key was read."
+    ]
+  }
+}

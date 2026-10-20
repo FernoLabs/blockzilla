@@ -12,6 +12,8 @@ use blockzilla_bank_stream_v2::{self as v2, Notice};
 use serde::Deserialize;
 use serde_json::json;
 use std::{path::PathBuf, sync::Arc, time::Duration};
+// Keep delivery margin inside the unchanged five-second health lifetime.
+pub(crate) const STATUS_INTERVAL: Duration = Duration::from_secs(1);
 #[derive(Clone)]
 pub struct BankApi {
     pub store: Arc<BankStore>,
@@ -99,7 +101,7 @@ async fn events(
     let start = after.clone();
     let stream = async_stream::stream! {
         yield Ok::<bytes::Bytes,std::io::Error>(format!("event: status\ndata: {}\n\n",serde_json::to_string(&store.head()).unwrap()).into());
-        let mut next_status=tokio::time::Instant::now()+Duration::from_secs(5);
+        let mut next_status=tokio::time::Instant::now()+STATUS_INTERVAL;
         loop {
             let head=store.head();
             if head.status=="failed" {
@@ -108,7 +110,7 @@ async fn events(
             }
             if tokio::time::Instant::now()>=next_status {
                 yield Ok(format!("event: status\ndata: {}\n\n",serde_json::to_string(&head).unwrap()).into());
-                next_status=tokio::time::Instant::now()+Duration::from_secs(5);
+                next_status=tokio::time::Instant::now()+STATUS_INTERVAL;
             }
             let ready=store.notify.notified();
             match store.after(&after) {

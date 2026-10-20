@@ -1,0 +1,19 @@
+{
+  "state": "PASSED",
+  "command": [
+    "python3",
+    "-B",
+    "-m",
+    "unittest",
+    "test_cold_storage",
+    "test_storage_jobs"
+  ],
+  "working_directory": "hivezilla/deploy/direct-agave",
+  "tests": 64,
+  "cold_tests": 53,
+  "guardian_tests": 11,
+  "failures": 0,
+  "elapsed_seconds": 1.452,
+  "runtime_review": "PASS on unchanged runtime f757f2be29f01378448cbe5bb5b529db2625e6654c065f0f17ebd8ba3cbb6d41; final additional test-only durability regression included in64-test run",
+  "host_execution": false
+}

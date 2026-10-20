@@ -1,0 +1,100 @@
+{
+  "bank_cap_changes": [],
+  "cold_sha256": "f757f2be29f01378448cbe5bb5b529db2625e6654c065f0f17ebd8ba3cbb6d41",
+  "completed_unix_ms": 1792477000876,
+  "files": {
+    "cold_storage.py": {
+      "bytes": 63344,
+      "sha256": "f757f2be29f01378448cbe5bb5b529db2625e6654c065f0f17ebd8ba3cbb6d41"
+    },
+    "sdk-smoke.py": {
+      "bytes": 3102,
+      "sha256": "3cd88663dff90dc910c7f38361e4128015bfeace60e9ed756af73641a8ecb4ba"
+    },
+    "storage_jobs.py": {
+      "bytes": 22150,
+      "sha256": "567c15e41b3f21665a765fbfaa5b2c70d9a565d1280463da959d946472a3c87c"
+    },
+    "test_cold_storage.py": {
+      "bytes": 90798,
+      "sha256": "3a5fe9b96e7b3503c4d8c2d1a4efb8009f79889f4d92dbaa07420bc215e41cee"
+    },
+    "test_storage_jobs.py": {
+      "bytes": 19170,
+      "sha256": "6eef654a016d1f18be588f28bafd287d69b8aa95d8e9d02695df7cab858d7827"
+    }
+  },
+  "guardian_sha256": "567c15e41b3f21665a765fbfaa5b2c70d9a565d1280463da959d946472a3c87c",
+  "protected_pids": {
+    "hivezilla-bank-v2-origin": 2134416,
+    "hivezilla-bank-v2-producer": 917148,
+    "hivezilla-bank-v2-r2-publisher": 4167494,
+    "hivezilla-direct-worker": 916425,
+    "hivezilla-shred-hook-recorder": 2142799,
+    "hivezilla-stream-origin": 2135639,
+    "hivezilla-stream-relay": 2136117,
+    "hivezilla-validator": 2142808
+  },
+  "release": "/home/ubuntu/live/hivezilla-validator-20260930/releases/storage-recovery-20261020-f757f2be29f0-3a5fe9b9",
+  "required_tests": [
+    "test_recovery_crash_after_verified_index_resumes_partial_retirement_without_upload",
+    "test_recovery_failed_latch_write_is_not_claimed_durable_and_can_be_retried",
+    "test_recovery_latch_write_fault_still_reports_safe_failed_evidence",
+    "test_recovery_lost_put_reply_then_412_requires_full_readback_before_retirement",
+    "test_recovery_nonfollow_restart_keeps_outage_and_waits_for_due_probe",
+    "test_recovery_outage_reservations_and_probe_cadence_survive_restarts",
+    "test_recovery_parallel_failures_share_budget_keep_caps_and_commit_only_proofs",
+    "test_recovery_permanent_fault_is_durably_blocked_across_restart",
+    "test_recovery_rejects_missing_corrupt_foreign_and_permanent_retry_state",
+    "test_recovery_reset_needs_sixty_fresh_seconds_and_later_durable_progress",
+    "test_recovery_restart_allows_only_one_due_probe_group_then_real_progress",
+    "test_recovery_source_gate_fault_outside_transfer_durably_blocks",
+    "test_recovery_successful_old_sibling_does_not_reset_outage"
+  ],
+  "schema": "blockzilla-storage-recovery-build-v1",
+  "sdk_command": [
+    "/usr/bin/python3",
+    "-B",
+    "/home/ubuntu/benchmarks/storage-recovery-20261020-f757f2be29f0-3a5fe9b9-3cd88663/sdk-smoke.py",
+    "--cold",
+    "/home/ubuntu/benchmarks/storage-recovery-20261020-f757f2be29f0-3a5fe9b9-3cd88663/cold_storage.py",
+    "--sha256",
+    "f757f2be29f01378448cbe5bb5b529db2625e6654c065f0f17ebd8ba3cbb6d41"
+  ],
+  "sdk_smoke": {
+    "accepted_put_412_then_full_get": true,
+    "boto3": "1.40.72",
+    "botocore": "1.40.72",
+    "forbidden_put_does_not_get_or_retry": true,
+    "generic_wrapper_rejected": true,
+    "network_used": false,
+    "real_streaming_body": true,
+    "real_typed_protocol_wrapper": true,
+    "schema": "blockzilla-storage-recovery-sdk-smoke-v1",
+    "sha256": "f757f2be29f01378448cbe5bb5b529db2625e6654c065f0f17ebd8ba3cbb6d41",
+    "state": "PASSED",
+    "urllib3": "2.6.3",
+    "wrapped_stream_closed_before_retry": true
+  },
+  "service_actions": [],
+  "source_before_cold_sha256": "8a95785f2df4e2f53b414322f0fc42a8d2edd93a02f04cfca6358bb312c19800",
+  "stage": "/home/ubuntu/benchmarks/storage-recovery-20261020-f757f2be29f0-3a5fe9b9-3cd88663",
+  "started_unix_ms": 1792476999625,
+  "state": "READY_NOT_ACTIVE",
+  "test_cold_sha256": "3a5fe9b96e7b3503c4d8c2d1a4efb8009f79889f4d92dbaa07420bc215e41cee",
+  "test_command": [
+    "/usr/bin/python3",
+    "-B",
+    "-m",
+    "unittest",
+    "-v",
+    "test_cold_storage.py",
+    "test_storage_jobs.py"
+  ],
+  "test_guardian_sha256": "6eef654a016d1f18be588f28bafd287d69b8aa95d8e9d02695df7cab858d7827",
+  "test_log": "/home/ubuntu/live/hivezilla-validator-20260930/reports/native-recovery-20261018/recurrence/incident-20261020-storage/circuit/stage-f757f2be29f0-3a5fe9b9-3cd88663/unit-tests.log",
+  "test_log_sha256": "8a1c8b6ac0195a46202de9b2c8a6789e6c457393bdd8cf135e7f5d44b6dd642a",
+  "tests_count": 64,
+  "tests_failed": 0,
+  "tests_passed": true
+}

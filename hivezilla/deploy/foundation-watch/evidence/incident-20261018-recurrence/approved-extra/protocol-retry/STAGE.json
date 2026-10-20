@@ -1,0 +1,13 @@
+{
+  "state": "STAGED_TESTED_NOT_ACTIVE",
+  "release": "/home/ubuntu/live/hivezilla-validator-20260930/releases/protocol-retry-20261018-ccc4e4475ec568d1",
+  "manifest": {
+    "cold_storage.py": "837b89f1c2dcfac6fb34415f783d88274ae0fd8d9200c53d5a70333cfbc57b63",
+    "storage_jobs.py": "9c586efd91790488dedaa282e88f16625c3a187791c6316c62e269bf2a12b376",
+    "test_cold_storage.py": "f6ca12d56954b7d7dd11233520c554c1c92536fdcc047ac81ff93269e1f5875d",
+    "test_storage_jobs.py": "85fc4351dcb2561fb477a88f02ff99b8061b74e0d50b75f7fc3a7eb8df41092f"
+  },
+  "manifest_sha256": "ccc4e4475ec568d16cd8791a9bb3f0fc45399298b2f5787685c772aaccba350b",
+  "test_output": "........................................\n----------------------------------------------------------------------\nRan 40 tests in 0.190s\n\nOK",
+  "service_actions": []
+}

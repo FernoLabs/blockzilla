@@ -1,0 +1,29 @@
+{
+  "schema": "blockzilla-native-storage-authorization-v1",
+  "verified_at_utc": "2026-10-16",
+  "source": {
+    "thread": {
+      "id": "01a10824-953e-7010-8e94-7e904dc5c5d8",
+      "title": "Upload data to Fondation bucket"
+    },
+    "turn": {
+      "id": "01a13108-0137-7e90-9944-278d7150d481",
+      "startedAt": 1791823970,
+      "completedAt": 1791843673
+    },
+    "approval": [
+      {
+        "type": "userMessage",
+        "id": "01a1313a-5677-7dd0-ba9a-4a53bb7a9c05",
+        "content": [
+          {
+            "type": "text",
+            "text": "<send_user_message_question_reply>\n[{\"questionItemId\":\"[\\\"request_user_input_async\\\",\\\"call_2f632ac3d782436d8f3d22c29b0f1ac5\\\",0]\",\"question\":\"To keep live capture running, may I enable the tested storage process that keeps at least two hours locally, copies older compact files and native validation evidence to the Foundation bucket, verifies the exact bytes, then removes the local copies? This adds native evidence beyond your earlier query-data-only upload scope.\",\"answer\":\"Enable verified cloud storage (Recommended)\"}]\n</send_user_message_question_reply>\n"
+          }
+        ]
+      }
+    ]
+  },
+  "interpretation": "The human enabled the continuing native storage process with two-hour retention and exact cloud-byte checks before local retirement. The resumed job uses that same saved command and source; it does not change those gates.",
+  "separate_20261016_question_answered": false
+}

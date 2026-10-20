@@ -1,0 +1,293 @@
+{
+  "state": "PASSED",
+  "agave_revision": "87167f3906bdf5111e99ead64d8f4098b7874e33",
+  "started_unix_ms": 1792180424121,
+  "commands": [
+    {
+      "label": "builder-tests",
+      "cwd": "/home/ubuntu/benchmarks/agave-upgrade-4.3.2-20261016/provider",
+      "argv": [
+        "/home/ubuntu/.cargo/bin/cargo",
+        "+1.98.0",
+        "test",
+        "--offline",
+        "--locked",
+        "-p",
+        "blockzilla",
+        "--bin",
+        "blockzilla",
+        "direct_agave"
+      ],
+      "started_unix_ms": 1792180424122,
+      "returncode": 0,
+      "completed_unix_ms": 1792180544305
+    },
+    {
+      "label": "builder-build",
+      "cwd": "/home/ubuntu/benchmarks/agave-upgrade-4.3.2-20261016/provider",
+      "argv": [
+        "/home/ubuntu/.cargo/bin/cargo",
+        "+1.98.0",
+        "build",
+        "--offline",
+        "--locked",
+        "--release",
+        "-p",
+        "blockzilla",
+        "--bin",
+        "blockzilla"
+      ],
+      "started_unix_ms": 1792180544305,
+      "returncode": 0,
+      "completed_unix_ms": 1792180807352
+    },
+    {
+      "label": "shared-tests",
+      "cwd": "/home/ubuntu/benchmarks/agave-upgrade-4.3.2-20261016/provider/crates/blockzilla-bank-stream-v2",
+      "argv": [
+        "/home/ubuntu/.cargo/bin/cargo",
+        "+1.97.1",
+        "test",
+        "--offline"
+      ],
+      "started_unix_ms": 1792180807365,
+      "returncode": 0,
+      "completed_unix_ms": 1792180807537
+    },
+    {
+      "label": "native-tests",
+      "cwd": "/home/ubuntu/benchmarks/agave-upgrade-4.3.2-20261016/provider/hivezilla/direct-agave",
+      "argv": [
+        "/home/ubuntu/.cargo/bin/cargo",
+        "+1.97.1",
+        "test",
+        "--ignore-rust-version",
+        "--features",
+        "bank-v2",
+        "--config",
+        "patch.\"https://github.com/anza-xyz/agave\".agave-geyser-plugin-interface.path=\"/home/ubuntu/benchmarks/agave-upgrade-4.3.2-20261016/agave/geyser-plugin-interface\"",
+        "--config",
+        "patch.\"https://github.com/anza-xyz/agave\".solana-transaction-status.path=\"/home/ubuntu/benchmarks/agave-upgrade-4.3.2-20261016/agave/transaction-status\"",
+        "--config",
+        "patch.\"https://github.com/anza-xyz/agave\".solana-transaction-status-client-types.path=\"/home/ubuntu/benchmarks/agave-upgrade-4.3.2-20261016/agave/transaction-status-client-types\""
+      ],
+      "started_unix_ms": 1792180807537,
+      "returncode": 0,
+      "completed_unix_ms": 1792180808506
+    },
+    {
+      "label": "native-builder-tests",
+      "cwd": "/home/ubuntu/benchmarks/agave-upgrade-4.3.2-20261016/provider/hivezilla/direct-agave",
+      "argv": [
+        "/home/ubuntu/.cargo/bin/cargo",
+        "+1.97.1",
+        "test",
+        "--offline",
+        "--locked",
+        "--ignore-rust-version",
+        "--lib",
+        "--features",
+        "bank-v2",
+        "--config",
+        "patch.\"https://github.com/anza-xyz/agave\".agave-geyser-plugin-interface.path=\"/home/ubuntu/benchmarks/agave-upgrade-4.3.2-20261016/agave/geyser-plugin-interface\"",
+        "--config",
+        "patch.\"https://github.com/anza-xyz/agave\".solana-transaction-status.path=\"/home/ubuntu/benchmarks/agave-upgrade-4.3.2-20261016/agave/transaction-status\"",
+        "--config",
+        "patch.\"https://github.com/anza-xyz/agave\".solana-transaction-status-client-types.path=\"/home/ubuntu/benchmarks/agave-upgrade-4.3.2-20261016/agave/transaction-status-client-types\"",
+        "--",
+        "--ignored"
+      ],
+      "started_unix_ms": 1792180808506,
+      "returncode": 0,
+      "completed_unix_ms": 1792180808792
+    },
+    {
+      "label": "native-build",
+      "cwd": "/home/ubuntu/benchmarks/agave-upgrade-4.3.2-20261016/provider/hivezilla/direct-agave",
+      "argv": [
+        "/home/ubuntu/.cargo/bin/cargo",
+        "+1.97.1",
+        "build",
+        "--offline",
+        "--locked",
+        "--ignore-rust-version",
+        "--release",
+        "--features",
+        "bank-v2",
+        "--config",
+        "patch.\"https://github.com/anza-xyz/agave\".agave-geyser-plugin-interface.path=\"/home/ubuntu/benchmarks/agave-upgrade-4.3.2-20261016/agave/geyser-plugin-interface\"",
+        "--config",
+        "patch.\"https://github.com/anza-xyz/agave\".solana-transaction-status.path=\"/home/ubuntu/benchmarks/agave-upgrade-4.3.2-20261016/agave/transaction-status\"",
+        "--config",
+        "patch.\"https://github.com/anza-xyz/agave\".solana-transaction-status-client-types.path=\"/home/ubuntu/benchmarks/agave-upgrade-4.3.2-20261016/agave/transaction-status-client-types\""
+      ],
+      "started_unix_ms": 1792180808792,
+      "returncode": 0,
+      "completed_unix_ms": 1792180897159
+    },
+    {
+      "label": "native-host-load",
+      "cwd": "/home/ubuntu/benchmarks/agave-upgrade-4.3.2-20261016/agave",
+      "argv": [
+        "/home/ubuntu/.cargo/bin/cargo",
+        "+1.97.1",
+        "test",
+        "--release",
+        "-p",
+        "solana-geyser-plugin-manager",
+        "--features",
+        "agave-unstable-api",
+        "--lib",
+        "native_bank_v2_actual_plugin_load",
+        "--",
+        "--ignored",
+        "--nocapture"
+      ],
+      "started_unix_ms": 1792180897159,
+      "returncode": 0,
+      "completed_unix_ms": 1792180938562
+    },
+    {
+      "label": "host-tuple-tests",
+      "cwd": "/home/ubuntu/benchmarks/agave-upgrade-4.3.2-20261016/agave",
+      "argv": [
+        "/home/ubuntu/.cargo/bin/cargo",
+        "+1.97.1",
+        "test",
+        "--offline",
+        "--release",
+        "-p",
+        "solana-rpc",
+        "--features",
+        "agave-unstable-api",
+        "--lib",
+        "test_hivezilla_native_bank_tuple_v2"
+      ],
+      "started_unix_ms": 1792180938565,
+      "returncode": 0,
+      "completed_unix_ms": 1792180997391
+    },
+    {
+      "label": "host-build",
+      "cwd": "/home/ubuntu/benchmarks/agave-upgrade-4.3.2-20261016/agave",
+      "argv": [
+        "/home/ubuntu/.cargo/bin/cargo",
+        "+1.97.1",
+        "build",
+        "--offline",
+        "--release",
+        "--bin",
+        "agave-validator"
+      ],
+      "started_unix_ms": 1792180997391,
+      "returncode": 0,
+      "completed_unix_ms": 1792181081284
+    }
+  ],
+  "native_manifest_sha256": "45fd63d444c1caf717254ed14ef8deda1e333d5e8abad64262b5fb71ef4517ee",
+  "native_canary": {
+    "load": {
+      "bank_id": 1,
+      "block_height": 1,
+      "blockhash": [
+        32,
+        141,
+        157,
+        135,
+        130,
+        133,
+        40,
+        200,
+        209,
+        82,
+        177,
+        250,
+        87,
+        92,
+        119,
+        129,
+        157,
+        192,
+        225,
+        251,
+        184,
+        235,
+        37,
+        214,
+        115,
+        175,
+        173,
+        192,
+        98,
+        184,
+        211,
+        148
+      ],
+      "confirmed": true,
+      "last_valid_block_height": 151,
+      "load_result": "hivezilla-direct-agave-v1",
+      "observed_at_unix_ms": 1792180938532,
+      "parent_blockhash": [
+        32,
+        141,
+        157,
+        135,
+        130,
+        133,
+        40,
+        200,
+        209,
+        82,
+        177,
+        250,
+        87,
+        92,
+        119,
+        129,
+        157,
+        192,
+        225,
+        251,
+        184,
+        235,
+        37,
+        214,
+        115,
+        175,
+        173,
+        192,
+        98,
+        184,
+        211,
+        148
+      ],
+      "parent_slot": 0,
+      "slot": 17,
+      "state": "PASSED"
+    },
+    "events": {
+      "bank_state_v2": 2
+    },
+    "source_revision": "87167f3906bdf5111e99ead64d8f4098b7874e33"
+  },
+  "artifacts": {
+    "agave-validator": {
+      "path": "/home/ubuntu/benchmarks/agave-upgrade-4.3.2-20261016/target-host/release/agave-validator",
+      "sha256": "d8371d630a8ca6dc4c7d38aea35c9ebac2308fa36fb63b4d8a30702dbb94a15b"
+    },
+    "hivezilla-direct-agave": {
+      "path": "/home/ubuntu/benchmarks/agave-upgrade-4.3.2-20261016/target-native/release/hivezilla-direct-agave",
+      "sha256": "79b459267cbbfaea9de9db4495b5ec5eb957b089658c57bbf5dca632d972da5c"
+    },
+    "libhivezilla_direct_agave.so": {
+      "path": "/home/ubuntu/benchmarks/agave-upgrade-4.3.2-20261016/target-native/release/libhivezilla_direct_agave.so",
+      "sha256": "56dc96e0bdff0b1be906687c0460d995025f4e761c12d49003236a823e66f337"
+    },
+    "blockzilla": {
+      "path": "/home/ubuntu/benchmarks/agave-upgrade-4.3.2-20261016/blockzilla",
+      "sha256": "14c2622f8a0e073916a17613fb299cddfcc3f1204b0793f6b57d18593d431bbe"
+    }
+  },
+  "validator_version": "agave-validator 4.3.2 (src:87167f39; feat:c9ad34d2, client:Agave)",
+  "completed_unix_ms": 1792181081353
+}

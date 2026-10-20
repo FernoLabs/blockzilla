@@ -29,10 +29,11 @@ function sample() {
       'hivezilla-bank-v2-r2-publisher', 'hivezilla-native-cold-storage-20261012-live', 'hivezilla-live-priority-20261012'].map(x => [x + '.service', 'active'])),
     rpc: { healthy: true, finalized_slot: 200 }, errors: [] };
 }
-async function setup(t, webhook, extra = {}, streamReply = null, telegramReply = null) {
+async function setup(t, webhook, extra = {}, streamReply = null, telegramReply = null, inspectStorage = false) {
   const dir = await mkdtemp(join(tmpdir(), 'foundation-watch-test-'));
   const calls = [];
   const options = {
+    ...(inspectStorage ? { name: 'foundation-watch-history-fixture', unsafeInspectDurableObjects: true } : {}),
     modules: true, scriptPath: '.wrangler/dry-run/index.js', compatibilityDate: '2026-10-12', compatibilityFlags: ['nodejs_compat'],
     durableObjects: { WATCH: { className: 'FoundationWatch', useSQLite: true } }, durableObjectsPersist: dir,
     bindings: { MACHINE_LABEL: 'Megaloadon', TELEGRAM_BOT_USERNAME: 'megaloadon_alerts_bot', STREAM_URL: 'https://stream.blockzilla.dev/v1/blockhashes',
@@ -59,6 +60,187 @@ async function setup(t, webhook, extra = {}, streamReply = null, telegramReply =
   }
   return { mf, options, calls, request, status: async () => (await request('/status')).json() };
 }
+
+async function historySetup(t, webhook = null) {
+  const app = await setup(t, webhook, {}, null, null, true);
+  // Use Miniflare's local storage inspector; production needs no test method.
+  await app.status();
+  const storage = await app.mf.unsafeGetDurableObjectStorage(
+    'foundation-watch-history-fixture', 'FoundationWatch', { name: 'foundation' });
+  return { ...app, storage };
+}
+function historyRow(number, changes = {}) {
+  const id = '00000000-0000-4000-8000-' + String(number).padStart(12, '0');
+  return { id, event: JSON.stringify({ id, kind: 'failure', issues: ['capture_not_running'], createdMs: number }),
+    status: 'pending', attempts: 0, ...changes };
+}
+async function insertHistory(storage, rows) {
+  for (let start = 0; start < rows.length; start += 20) {
+    const group = rows.slice(start, start + 20);
+    await storage.exec('INSERT INTO alerts(id,event,status,attempts) VALUES ' + group.map(() => '(?,?,?,?)').join(','),
+      ...group.flatMap(row => [row.id, row.event, row.status, row.attempts]));
+  }
+}
+
+test('alert history requires the admin token, accepts only GET, and leaves an empty watcher unchanged', { timeout: TEST_TIMEOUT_MS }, async t => {
+  const app = await historySetup(t);
+  const before = await app.status();
+  for (const headers of [{}, hb, { Authorization: 'Bearer wrong' }]) {
+    for (const method of ['GET', 'POST']) {
+      assert.equal((await app.request('/history', method, headers)).status, 401);
+    }
+  }
+  for (const method of ['HEAD', 'POST', 'PUT', 'PATCH', 'DELETE', 'OPTIONS']) {
+    assert.equal((await app.request('/history', method)).status, 405);
+  }
+  const response = await app.request('/history');
+  assert.equal(response.status, 200);
+  assert.equal(response.headers.get('cache-control'), 'no-store');
+  assert.deepEqual(await response.json(), {
+    schema: 'blockzilla-foundation-alert-history-v1', limit: 100, truncated: false, alerts: [],
+  });
+  assert.deepEqual(await app.status(), before);
+  assert.equal(before.next_alarm_ms, null);
+  assert.equal(app.calls.length, 0);
+});
+
+test('alert history returns stored failure and recovery events newest first after restart', { timeout: TEST_TIMEOUT_MS }, async t => {
+  const delivered = [];
+  const app = await historySetup(t, async request => {
+    delivered.push(await request.json()); return new MFResponse(null, { status: 204 });
+  });
+  const payload = sample(); payload.errors = ['bank_v2_not_live'];
+  await app.request('/heartbeat', 'POST', hb, JSON.stringify(payload));
+  const failure = JSON.parse((await app.storage.exec('SELECT state FROM watch WHERE id=1'))[0].state);
+  const issue = 'telemetry:bank_v2_not_live';
+  failure.incident = { active: [], candidate: [issue], candidateSinceMs: Date.now() - 61_000,
+    issueSinceMs: { [issue]: Date.now() - 61_000 } };
+  await app.storage.exec('UPDATE watch SET state=? WHERE id=1', JSON.stringify(failure));
+  await app.request('/check', 'POST');
+  assert.equal(delivered[0].kind, 'failure');
+  await app.request('/heartbeat', 'POST', hb, JSON.stringify({ ...sample(), monotonic_ms: payload.monotonic_ms + 1 }));
+  const recovery = JSON.parse((await app.storage.exec('SELECT state FROM watch WHERE id=1'))[0].state);
+  recovery.incident = { ...recovery.incident, candidate: [], candidateSinceMs: Date.now() - 61_000, issueSinceMs: {} };
+  await app.storage.exec('UPDATE watch SET state=? WHERE id=1', JSON.stringify(recovery));
+  await app.request('/check', 'POST');
+  assert.deepEqual(delivered.map(event => event.kind), ['failure', 'recovery']);
+  const stored = await app.storage.exec('SELECT id,event,status,attempts FROM alerts ORDER BY rowid DESC');
+  assert.equal(stored.length, 2);
+  await app.mf.setOptions(convertV4MiniflareOptions(app.options));
+  const before = await app.status(), calls = app.calls.length;
+  const response = await app.request('/history');
+  assert.equal(response.status, 200);
+  const history = await response.json();
+  assert.equal(history.truncated, false);
+  assert.deepEqual(history.alerts, stored.map(row => ({ ...JSON.parse(row.event), status: row.status, attempts: row.attempts })));
+  assert.deepEqual(history.alerts.map(event => event.kind), ['recovery', 'failure']);
+  assert.deepEqual(history.alerts.map(event => event.id), delivered.map(event => event.event_id).reverse());
+  assert.deepEqual(history.alerts.map(event => event.status), ['delivered', 'delivered']);
+  assert.deepEqual(history.alerts.map(event => event.attempts), [1, 1]);
+  assert.deepEqual(await app.status(), before);
+  assert.equal(app.calls.length, calls);
+});
+
+test('alert history projects safe fields without delivering pending alerts or changing state and alarms', { timeout: TEST_TIMEOUT_MS }, async t => {
+  const app = await historySetup(t, () => { throw new Error('History must not deliver'); });
+  await app.request('/heartbeat', 'POST', hb, JSON.stringify(sample()));
+  const row = historyRow(1, { status: 'sending', attempts: 2 });
+  const event = { ...JSON.parse(row.event), kind: 'test', createdMs: 0,
+    issues: ['a'.repeat(80), 'telemetry:' + 'b'.repeat(80), 'service:hivezilla-validator.service'],
+    secret: 'NEVER_RETURN_SECRET', recipient: 'NEVER_RETURN_RECIPIENT', url: 'https://secret.invalid',
+    headers: { Authorization: 'Bearer NEVER_RETURN_HEADER' }, raw: 'NEVER_RETURN_RAW' };
+  row.event = JSON.stringify(event);
+  await insertHistory(app.storage, [row]);
+  const before = await app.status();
+  const stored = await app.storage.exec('SELECT * FROM alerts ORDER BY rowid');
+  const tables = await app.storage.exec("SELECT name,sql FROM sqlite_master WHERE type='table' ORDER BY name");
+  const response = await app.request('/history');
+  assert.equal(response.status, 200);
+  const text = await response.text(), history = JSON.parse(text);
+  assert.deepEqual(history.alerts, [{ id: row.id, kind: event.kind, issues: event.issues,
+    createdMs: 0, status: 'sending', attempts: 2 }]);
+  for (const privateValue of ['NEVER_RETURN', 'secret.invalid', 'Authorization', 'recipient', 'headers', 'raw']) {
+    assert.equal(text.includes(privateValue), false);
+  }
+  assert.deepEqual(await app.status(), before);
+  assert.ok(before.next_alarm_ms > 0);
+  assert.deepEqual(await app.storage.exec('SELECT * FROM alerts ORDER BY rowid'), stored);
+  assert.deepEqual(await app.storage.exec("SELECT name,sql FROM sqlite_master WHERE type='table' ORDER BY name"), tables);
+  assert.equal(app.calls.length, 0);
+});
+
+test('alert history has a fixed 100-row limit and uses insertion order, not event time', { timeout: TEST_TIMEOUT_MS }, async t => {
+  const app = await historySetup(t);
+  const rows = Array.from({ length: 100 }, (_, i) => {
+    const row = historyRow(i + 1);
+    row.event = JSON.stringify({ ...JSON.parse(row.event), createdMs: 1000 - i });
+    return row;
+  });
+  await insertHistory(app.storage, rows);
+  let history = await (await app.request('/history?limit=1&order=oldest')).json();
+  assert.equal(history.limit, 100);
+  assert.equal(history.truncated, false);
+  assert.deepEqual(history.alerts.map(row => row.id), rows.map(row => row.id).reverse());
+  await insertHistory(app.storage, [historyRow(101)]);
+  history = await (await app.request('/history?limit=1000000')).json();
+  assert.equal(history.limit, 100);
+  assert.equal(history.truncated, true);
+  assert.equal(history.alerts.length, 100);
+  assert.deepEqual(history.alerts.map(row => row.id), [historyRow(101).id, ...rows.slice(1).map(row => row.id).reverse()]);
+  assert.equal((await app.storage.exec('SELECT count(*) AS count FROM alerts'))[0].count, 101);
+  assert.equal(app.calls.length, 0);
+});
+
+test('alert history rejects corrupt stored records with one generic response and no partial output', { timeout: TEST_TIMEOUT_MS }, async t => {
+  const app = await historySetup(t);
+  const valid = historyRow(1);
+  await insertHistory(app.storage, [valid, historyRow(2)]);
+  const event = JSON.parse(valid.event);
+  const invalidEvents = [
+    '{broken NEVER_RETURN_SECRET', 'null', '[]',
+    JSON.stringify({ ...event, id: historyRow(99).id }),
+    JSON.stringify({ ...event, kind: 'unknown' }),
+    ...[-1, 0.5, Number.MAX_SAFE_INTEGER + 1, '1'].map(createdMs => JSON.stringify({ ...event, createdMs })),
+    JSON.stringify({ ...event, issues: null }),
+    JSON.stringify({ ...event, issues: Array(81).fill('capture_stalled') }),
+    ...[null, 1, '', 'a'.repeat(81), 'telemetry:' + 'b'.repeat(81), 'x'.repeat(121),
+      'service:hivezilla-stream-relay.service', 'service:hivezilla-validator.service/private', 'bad:code', 'UPPER', 'contains space']
+      .map(issue => JSON.stringify({ ...event, issues: [issue] })),
+    JSON.stringify({ ...event, private: 'é'.repeat(8192) }),
+    JSON.stringify({ ...event, private: 'x'.repeat(100_000) }),
+    valid.event + '\0' + 'x'.repeat(20_000),
+  ];
+  const cases = [
+    ...invalidEvents.map(value => ({ event: value, status: 'pending', attempts: 0 })),
+    ...['unknown', '', 'delivered/private', 'pending\0', 'x'.repeat(100_000)].map(status => ({ event: valid.event, status, attempts: 0 })),
+    ...[-1, 0.5, Number.MAX_SAFE_INTEGER + 1, 'invalid'].map(attempts => ({ event: valid.event, status: 'pending', attempts })),
+  ];
+  const before = await app.status();
+  for (const row of cases) {
+    await app.storage.exec('UPDATE alerts SET event=?,status=?,attempts=? WHERE id=?', row.event, row.status, row.attempts, valid.id);
+    const response = await app.request('/history');
+    assert.equal(response.status, 500, JSON.stringify(row));
+    assert.equal(response.headers.get('cache-control'), 'no-store');
+    assert.deepEqual(await response.json(), { error: 'alert_history_unavailable' });
+  }
+  await app.storage.exec('UPDATE alerts SET event=?,status=?,attempts=zeroblob(100000) WHERE id=?', valid.event, valid.status, valid.id);
+  assert.equal((await app.request('/history')).status, 500);
+  await app.storage.exec('UPDATE alerts SET event=?,status=?,attempts=? WHERE id=?', valid.event, valid.status, valid.attempts, valid.id);
+  await app.storage.exec('UPDATE alerts SET id=?,event=? WHERE id=?', 'x'.repeat(100_000),
+    JSON.stringify({ ...event, id: 'x'.repeat(100_000) }), valid.id);
+  assert.equal((await app.request('/history')).status, 500);
+  await app.storage.exec('UPDATE alerts SET id=?,event=? WHERE id=?', valid.id, valid.event, 'x'.repeat(100_000));
+  await app.storage.exec('UPDATE alerts SET id=? WHERE id=?', valid.id + '\0extra', valid.id);
+  assert.equal((await app.request('/history')).status, 500);
+  await app.storage.exec('UPDATE alerts SET id=? WHERE id=?', valid.id, valid.id + '\0extra');
+  // Equal non-UUID values in the SQL key and event must also fail validation.
+  await app.storage.exec('UPDATE alerts SET id=?,event=? WHERE id=?', 'not-a-uuid', JSON.stringify({ ...event, id: 'not-a-uuid' }), valid.id);
+  const response = await app.request('/history');
+  assert.equal(response.status, 500);
+  assert.deepEqual(await response.json(), { error: 'alert_history_unavailable' });
+  assert.deepEqual(await app.status(), before);
+  assert.equal(app.calls.length, 0);
+});
 
 test('private routes reject missing or wrong credentials', { timeout: TEST_TIMEOUT_MS }, async t => {
   const app = await setup(t, null);

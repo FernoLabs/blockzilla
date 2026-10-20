@@ -1,12 +1,57 @@
 import { DurableObject } from "cloudflare:workers";
 import { timingSafeEqual } from "node:crypto";
-import { heartbeat, issues, progress, transition } from "./model";
+import { heartbeat, issues, progress, transition, REQUIRED_SERVICES } from "./model";
 import type { Alert, Heartbeat, Incident, Progress } from "./model";
 import { telegramCommand, telegramHelp, telegramStatus } from "./telegram";
 import type { TelegramCommand } from "./telegram";
 
 const LIMIT = 64 * 1024;
 const ALARM_INTERVAL_MS = 30_000;
+const HISTORY_LIMIT = 100;
+const HISTORY_EVENT_BYTES = 16 * 1024;
+interface AlertHistoryItem {
+  id: string;
+  kind: Alert["kind"];
+  issues: string[];
+  createdMs: number;
+  status: "pending" | "sending" | "delivered";
+  attempts: number;
+}
+interface AlertHistory {
+  schema: "blockzilla-foundation-alert-history-v1";
+  limit: number;
+  truncated: boolean;
+  alerts: AlertHistoryItem[];
+}
+
+function historyItem(row: { id: string; event: string; status: string; attempts: number }): AlertHistoryItem {
+  if (typeof row.event !== "string" || row.event.length > HISTORY_EVENT_BYTES ||
+      new TextEncoder().encode(row.event).byteLength > HISTORY_EVENT_BYTES) {
+    throw new Error("alert_history_invalid");
+  }
+  let parsed: unknown;
+  try { parsed = JSON.parse(row.event); }
+  catch { throw new Error("alert_history_invalid"); }
+  if (!parsed || typeof parsed !== "object" || Array.isArray(parsed)) throw new Error("alert_history_invalid");
+  const event = parsed as Record<string, unknown>;
+  if (typeof event.id !== "string" || event.id !== row.id ||
+      !/^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i.test(event.id) ||
+      (event.kind !== "failure" && event.kind !== "recovery" && event.kind !== "test") ||
+      typeof event.createdMs !== "number" || !Number.isSafeInteger(event.createdMs) || event.createdMs < 0 ||
+      !Array.isArray(event.issues) || event.issues.length > 80 ||
+      (row.status !== "pending" && row.status !== "sending" && row.status !== "delivered") ||
+      !Number.isSafeInteger(row.attempts) || row.attempts < 0) throw new Error("alert_history_invalid");
+  const codes = event.issues.map((code: unknown) => {
+    if (typeof code !== "string" || code.length > 120 ||
+        !(/^[a-z0-9_]{1,80}$/.test(code) || /^telemetry:[a-z0-9_]{1,80}$/.test(code) ||
+          REQUIRED_SERVICES.some(name => code === "service:" + name))) throw new Error("alert_history_invalid");
+    return code;
+  });
+  // Project only this DTO. Unknown event fields never leave private storage.
+  return { id: event.id, kind: event.kind, issues: codes, createdMs: event.createdMs,
+    status: row.status, attempts: row.attempts };
+}
+
 interface WatchState {
   startedMs: number;
   armed: boolean;
@@ -333,6 +378,24 @@ export class FoundationWatch extends DurableObject<Env> {
     await this.deliver();
     return { event_id: event.id };
   }
+  async history(): Promise<AlertHistory> {
+    // One fixed, bounded, read-only query. The extra row only marks truncation.
+    const rows = this.ctx.storage.sql.exec<{ id: string; event: string; status: string; attempts: number }>(
+      "SELECT CASE WHEN typeof(id)='text' AND length(CAST(id AS BLOB))=36 THEN id ELSE NULL END AS id," +
+      "CASE WHEN typeof(event)='text' AND length(CAST(event AS BLOB))<=16384 THEN event ELSE NULL END AS event," +
+      "CASE WHEN typeof(status)='text' AND length(CAST(status AS BLOB))<=9 THEN status ELSE NULL END AS status," +
+      "CASE WHEN typeof(attempts)='integer' THEN attempts ELSE NULL END AS attempts " +
+      "FROM alerts ORDER BY rowid DESC LIMIT 101");
+    const alerts: AlertHistoryItem[] = [];
+    let truncated = false;
+    // Consume synchronously, validating one event before loading the next.
+    for (const row of rows) {
+      if (alerts.length < HISTORY_LIMIT) alerts.push(historyItem(row));
+      else truncated = true;
+    }
+    return { schema: "blockzilla-foundation-alert-history-v1", limit: HISTORY_LIMIT,
+      truncated, alerts };
+  }
   async status(): Promise<WatchState & { alert_delivery_configured: boolean; alert_delivery_channel: "telegram" | "webhook" | null;
       telegram_commands_configured: boolean; pending_commands: number; pending_alerts: number; next_alarm_ms: number | null }> {
     const { destination } = alertDestination(this.env);
@@ -375,9 +438,13 @@ export default {
         return Response.json(await stub.ingest(sample), { status: 202, headers: { "Cache-Control": "no-store" } });
       } catch { return new Response("Invalid heartbeat", { status: 400 }); }
     }
-    if (!["/status", "/check", "/test-alert"].includes(path)) return new Response("Not found", { status: 404 });
+    if (!["/status", "/history", "/check", "/test-alert"].includes(path)) return new Response("Not found", { status: 404 });
     if (!await authorized(request, env.ADMIN_TOKEN)) return new Response("Unauthorized", { status: 401 });
     if (path === "/status" && request.method === "GET") return Response.json(await stub.status(), { headers: { "Cache-Control": "no-store" } });
+    if (path === "/history" && request.method === "GET") {
+      try { return Response.json(await stub.history(), { headers: { "Cache-Control": "no-store" } }); }
+      catch { return Response.json({ error: "alert_history_unavailable" }, { status: 500, headers: { "Cache-Control": "no-store" } }); }
+    }
     if (path === "/check" && request.method === "POST") { await stub.check(); return Response.json(await stub.status()); }
     if (path === "/test-alert" && request.method === "POST") return Response.json(await stub.testAlert(), { status: 202 });
     return new Response("Method not allowed", { status: 405 });

@@ -1,0 +1,416 @@
+{
+  "schema": "blockzilla-foundation-incident-final-flow-v1",
+  "post_index_check": {
+    "completed_at_utc": "2026-10-16T06:50:11.988689+00:00",
+    "reported_storage_pilot_completed_at_utc": "2026-10-16T06:49:48Z",
+    "requested_earliest_check_utc": "2026-10-16T06:49:29Z",
+    "reported_index_changes": [
+      {
+        "source_session": "000000000000000018de229d3fc8a9d9-275b05",
+        "completed_at_utc": "2026-10-16T06:45:27Z",
+        "service_restart": false
+      },
+      {
+        "source_session": "000000000000000018deede1d641da13-275b05",
+        "completed_at_utc": "2026-10-16T06:46:48Z",
+        "write_transaction_ms": 28,
+        "reported_unchanged_producer_pid": 2995833
+      }
+    ],
+    "watcher_check": {
+      "checked_at_unix_ms": 1792133397736,
+      "checked_at_utc": "2026-10-16T06:49:57.736000+00:00",
+      "cloud_event_queue": 166,
+      "compact_slot_lag": 0,
+      "rooted_minus_compact_slots": -29,
+      "sample": {
+        "capture": {
+          "durable_sequence": 19548237,
+          "latest_rooted_slot": 457543162,
+          "session": "000000000000000018deede1d641da13-275b05",
+          "state": "CAPTURING",
+          "updated_unix_ms": null
+        },
+        "capture_reserve_bytes": 429496729600,
+        "cold_storage": {
+          "retired_banks": 0,
+          "state": "RUNNING",
+          "updated_unix_ms": 1792133371798
+        },
+        "compact": {
+          "event_sequence": 19665,
+          "last_compact_slot": 457543191,
+          "source_sequence": 19545128,
+          "state": "RUNNING",
+          "updated_unix_ms": 1792133373301
+        },
+        "errors": [],
+        "free_disk_bytes": 566904463360,
+        "mem_available_bytes": 992071979008,
+        "publisher": {
+          "sequence": 19499,
+          "state": "RUNNING",
+          "updated_unix_ms": 1792133368797
+        },
+        "rpc": {
+          "finalized_slot": 457543161,
+          "healthy": true
+        },
+        "sampled_unix_ms": 1792133373401,
+        "services": {
+          "hivezilla-bank-v2-producer.service": "active",
+          "hivezilla-bank-v2-r2-publisher.service": "active",
+          "hivezilla-direct-worker.service": "active",
+          "hivezilla-live-priority-20261012.service": "active",
+          "hivezilla-native-cold-storage-20261012-live.service": "active",
+          "hivezilla-validator.service": "active"
+        }
+      },
+      "source_matches_expected": true,
+      "watcher": {
+        "active_incident_issues": [],
+        "armed": true,
+        "currentIssues": [],
+        "lastCheckMs": 1792133388988,
+        "lastReceivedMs": 1792133373644,
+        "streamIssue": null
+      }
+    },
+    "public_free_sse_check": {
+      "block_slots": [
+        457543372,
+        457543373
+      ],
+      "bytes_read": 1095,
+      "checked_at_utc": "2026-10-16T06:50:11.988689+00:00",
+      "elapsed_ms": 390,
+      "event_types": [
+        "status",
+        "root",
+        "status",
+        "block",
+        "status",
+        "block"
+      ],
+      "result": "two_advancing_slots"
+    },
+    "all_clear": true,
+    "public_progress_verified": true,
+    "authenticated_private_v2_http_check": "NOT_RUN",
+    "scope": "Finite watcher and free public SSE observation after the reported index changes and the requested storage-pilot end time. Earlier flow checks are preserved."
+  },
+  "post_storage_tuning_check": {
+    "completed_at_utc": "2026-10-16T06:42:49.093038+00:00",
+    "reported_storage_tuning": {
+      "applied_at_utc": "2026-10-16T06:38:53Z",
+      "parallel_bundles_before": 2,
+      "parallel_bundles_after": 4
+    },
+    "watcher_check": {
+      "checked_at_unix_ms": 1792132955691,
+      "checked_at_utc": "2026-10-16T06:42:35.691000+00:00",
+      "cloud_event_queue": 176,
+      "compact_slot_lag": 0,
+      "rooted_minus_compact_slots": -30,
+      "sample": {
+        "capture": {
+          "durable_sequence": 15599564,
+          "latest_rooted_slot": 457541191,
+          "session": "000000000000000018deede1d641da13-275b05",
+          "state": "CAPTURING",
+          "updated_unix_ms": null
+        },
+        "capture_reserve_bytes": 429496729600,
+        "cold_storage": {
+          "retired_banks": 0,
+          "state": "RUNNING",
+          "updated_unix_ms": 1792132935966
+        },
+        "compact": {
+          "event_sequence": 15725,
+          "last_compact_slot": 457541221,
+          "source_sequence": 15596195,
+          "state": "RUNNING",
+          "updated_unix_ms": 1792132948898
+        },
+        "errors": [],
+        "free_disk_bytes": 562901516288,
+        "mem_available_bytes": 995163348992,
+        "publisher": {
+          "sequence": 15549,
+          "state": "RUNNING",
+          "updated_unix_ms": 1792132947587
+        },
+        "rpc": {
+          "finalized_slot": 457541191,
+          "healthy": true
+        },
+        "sampled_unix_ms": 1792132948948,
+        "services": {
+          "hivezilla-bank-v2-producer.service": "active",
+          "hivezilla-bank-v2-r2-publisher.service": "active",
+          "hivezilla-direct-worker.service": "active",
+          "hivezilla-live-priority-20261012.service": "active",
+          "hivezilla-native-cold-storage-20261012-live.service": "active",
+          "hivezilla-validator.service": "active"
+        }
+      },
+      "source_matches_expected": true,
+      "watcher": {
+        "active_incident_issues": [],
+        "armed": true,
+        "currentIssues": [],
+        "lastCheckMs": 1792132939631,
+        "lastReceivedMs": 1792132949210,
+        "streamIssue": null
+      }
+    },
+    "public_free_sse_check": {
+      "block_slots": [
+        457541312,
+        457541313
+      ],
+      "bytes_read": 1095,
+      "checked_at_utc": "2026-10-16T06:42:49.093038+00:00",
+      "elapsed_ms": 373,
+      "event_types": [
+        "status",
+        "block",
+        "status",
+        "root",
+        "status",
+        "block"
+      ],
+      "result": "two_advancing_slots"
+    },
+    "all_clear": true,
+    "public_progress_verified": true,
+    "authenticated_private_v2_http_check": "NOT_RUN",
+    "scope": "Finite watcher and free public SSE observation after the reported storage-only tuning. Earlier two samples are preserved."
+  },
+  "event_id": "a3cdcf23-2192-4f5d-881c-a362b67dfa2e",
+  "incident_reported_at_utc": "2026-10-16T05:34:47.137Z",
+  "source_session": "000000000000000018deede1d641da13-275b05",
+  "scope": "Two finite read-only watcher and free public SSE checks after guard deployment, plus bounded read-only compact source boundary queries.",
+  "completed_at_utc": "2026-10-16T06:34:24.350731+00:00",
+  "endpoints": {
+    "private_monitor": "https://blockzilla-foundation-watch.cheron-augustin.workers.dev/status",
+    "free_public_sse": "https://stream.blockzilla.dev/v1/blockhashes"
+  },
+  "watcher_checks": [
+    {
+      "checked_at_unix_ms": 1792132350963,
+      "checked_at_utc": "2026-10-16T06:32:30.963000+00:00",
+      "cloud_event_queue": 212,
+      "compact_slot_lag": 0,
+      "rooted_minus_compact_slots": -31,
+      "sample": {
+        "capture": {
+          "durable_sequence": 9904242,
+          "latest_rooted_slot": 457538372,
+          "session": "000000000000000018deede1d641da13-275b05",
+          "state": "CAPTURING",
+          "updated_unix_ms": null
+        },
+        "capture_reserve_bytes": 429496729600,
+        "cold_storage": {
+          "retired_banks": 0,
+          "state": "RUNNING",
+          "updated_unix_ms": 1792132334516
+        },
+        "compact": {
+          "event_sequence": 10089,
+          "last_compact_slot": 457538403,
+          "source_sequence": 9904239,
+          "state": "RUNNING",
+          "updated_unix_ms": 1792132340990
+        },
+        "errors": [],
+        "free_disk_bytes": 566258266112,
+        "mem_available_bytes": 998665166848,
+        "publisher": {
+          "sequence": 9877,
+          "state": "RUNNING",
+          "updated_unix_ms": 1792132329605
+        },
+        "rpc": {
+          "finalized_slot": 457538371,
+          "healthy": true
+        },
+        "sampled_unix_ms": 1792132340933,
+        "services": {
+          "hivezilla-bank-v2-producer.service": "active",
+          "hivezilla-bank-v2-r2-publisher.service": "active",
+          "hivezilla-direct-worker.service": "active",
+          "hivezilla-live-priority-20261012.service": "active",
+          "hivezilla-native-cold-storage-20261012-live.service": "active",
+          "hivezilla-validator.service": "active"
+        }
+      },
+      "source_matches_expected": true,
+      "watcher": {
+        "active_incident_issues": [],
+        "armed": true,
+        "currentIssues": [],
+        "lastCheckMs": 1792132339159,
+        "lastReceivedMs": 1792132341191,
+        "streamIssue": null
+      }
+    },
+    {
+      "checked_at_unix_ms": 1792132450737,
+      "checked_at_utc": "2026-10-16T06:34:10.737000+00:00",
+      "cloud_event_queue": 421,
+      "compact_slot_lag": 0,
+      "rooted_minus_compact_slots": -29,
+      "sample": {
+        "capture": {
+          "durable_sequence": 10753797,
+          "latest_rooted_slot": 457538796,
+          "session": "000000000000000018deede1d641da13-275b05",
+          "state": "CAPTURING",
+          "updated_unix_ms": null
+        },
+        "capture_reserve_bytes": 429496729600,
+        "cold_storage": {
+          "retired_banks": 0,
+          "state": "RUNNING",
+          "updated_unix_ms": 1792132424707
+        },
+        "compact": {
+          "event_sequence": 10933,
+          "last_compact_slot": 457538825,
+          "source_sequence": 10749486,
+          "state": "RUNNING",
+          "updated_unix_ms": 1792132432459
+        },
+        "errors": [],
+        "free_disk_bytes": 562690793472,
+        "mem_available_bytes": 998964162560,
+        "publisher": {
+          "sequence": 10512,
+          "state": "RUNNING",
+          "updated_unix_ms": 1792132411115
+        },
+        "rpc": {
+          "finalized_slot": 457538796,
+          "healthy": true
+        },
+        "sampled_unix_ms": 1792132432693,
+        "services": {
+          "hivezilla-bank-v2-producer.service": "active",
+          "hivezilla-bank-v2-r2-publisher.service": "active",
+          "hivezilla-direct-worker.service": "active",
+          "hivezilla-live-priority-20261012.service": "active",
+          "hivezilla-native-cold-storage-20261012-live.service": "active",
+          "hivezilla-validator.service": "active"
+        }
+      },
+      "source_matches_expected": true,
+      "watcher": {
+        "active_incident_issues": [],
+        "armed": true,
+        "currentIssues": [],
+        "lastCheckMs": 1792132428557,
+        "lastReceivedMs": 1792132432933,
+        "streamIssue": null
+      }
+    }
+  ],
+  "watcher_check_interval_ms": 99774,
+  "machine_sample_interval_ms": 91760,
+  "all_clear_at_both_samples": true,
+  "public_free_sse_checks": [
+    {
+      "block_slots": [
+        457538515,
+        457538516
+      ],
+      "bytes_read": 1405,
+      "checked_at_utc": "2026-10-16T06:32:46.215850+00:00",
+      "elapsed_ms": 566,
+      "event_types": [
+        "status",
+        "block",
+        "status",
+        "root",
+        "status",
+        "root",
+        "status",
+        "block"
+      ],
+      "result": "two_advancing_slots"
+    },
+    {
+      "block_slots": [
+        457538973,
+        457538974
+      ],
+      "bytes_read": 1095,
+      "checked_at_utc": "2026-10-16T06:34:24.350731+00:00",
+      "elapsed_ms": 437,
+      "event_types": [
+        "status",
+        "block",
+        "status",
+        "root",
+        "status",
+        "block"
+      ],
+      "result": "two_advancing_slots"
+    }
+  ],
+  "public_progress_at_both_samples": true,
+  "compact_source_boundaries": {
+    "checked_at_utc": "2026-10-16T06:31:31.570728+00:00",
+    "coverage_interpretation": "Source separation only; no produced/skipped-slot or finalized coverage audit was performed.",
+    "new": {
+      "bank_id": 1032430,
+      "boundary": "minimum_published_block_slot",
+      "event_sequence": 1,
+      "indexed_rows_read": 4096,
+      "parent_slot": 457533343,
+      "slot": 457533344,
+      "source_session": "000000000000000018deede1d641da13-275b05"
+    },
+    "old": {
+      "bank_id": 958751,
+      "boundary": "maximum_published_block_slot",
+      "event_sequence": 1913215,
+      "indexed_rows_read": 4096,
+      "parent_slot": 457459656,
+      "slot": 457459657,
+      "source_session": "000000000000000018de229d3fc8a9d9-275b05"
+    },
+    "slot_numbers_strictly_between": 73686,
+    "numeric_slot_interval_strictly_between": {
+      "first_slot": 457459658,
+      "last_slot": 457533343,
+      "slot_number_count": 73686
+    },
+    "query_contract": {
+      "database_pattern": "ROOT/compact/direct-agave-processed-live/SESSION/feed.sqlite",
+      "table": "feed_events",
+      "index": "feed_bank_events",
+      "columns": "sequence,kind,slot,bank,event_json",
+      "ordering": "old descending and new ascending by slot, bank and sequence",
+      "maximum_indexed_rows_per_source": 4096,
+      "connection": "SQLite mode=ro with PRAGMA query_only=ON",
+      "query_time_limit_seconds": 2
+    },
+    "interpretation": "The last compact block slot in the old source and first compact block slot in the new source are separated by 73686 slot numbers. This is not a count of produced or finalized blocks lost. No produced/skipped-slot, fork, retained native-source recovery or other archive-source coverage audit was performed."
+  },
+  "authenticated_private_v2_http_check": {
+    "state": "BLOCKED_NOT_RUN",
+    "head_progress_verified": false,
+    "confirmed_live_verified": false,
+    "payload_hash_verified": false,
+    "credentials_accessed_in_final_checks": false,
+    "reason": "Earlier automatic approval review rejected the proposed authenticated stream check because exact trusted user authorization for the Foundation stream-key use and external destination was not present. That check was not retried; these final checks use only the permitted monitor and free public feed."
+  },
+  "limits": [
+    "Rooted compaction lag is clamped to zero when processed compact output is ahead of the latest rooted capture slot; the raw difference is also retained.",
+    "Public SSE probe duration is not callback-to-consumer latency.",
+    "These finite checks do not prove uninterrupted coverage, a full epoch, complete gap recovery, or sustained capacity."
+  ]
+}

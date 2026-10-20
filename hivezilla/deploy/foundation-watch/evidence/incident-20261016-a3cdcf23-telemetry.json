@@ -1,0 +1,154 @@
+{
+  "checked_at_unix_ms": 1792129106376,
+  "checked_at_utc": "2026-10-16T05:38:26.376000+00:00",
+  "event_id": "a3cdcf23-2192-4f5d-881c-a362b67dfa2e",
+  "incident_reported_at_utc": "2026-10-16T05:34:47.137Z",
+  "request_latency_ms": 118,
+  "sample": {
+    "capture": {
+      "durable_sequence": 2160849722,
+      "latest_rooted_slot": 457464456,
+      "session": "000000000000000018de229d3fc8a9d9-275b05",
+      "state": "FAILED",
+      "updated_unix_ms": null
+    },
+    "capture_reserve_bytes": 429496729600,
+    "cold_storage": {
+      "retired_banks": 711626,
+      "state": "RUNNING",
+      "updated_unix_ms": 1792129074266
+    },
+    "compact": {
+      "event_sequence": null,
+      "last_compact_slot": null,
+      "source_sequence": null,
+      "state": "FAILED",
+      "updated_unix_ms": null
+    },
+    "errors": [
+      "capture_stale",
+      "compact_failed",
+      "compact_stale",
+      "service_producer_inactive",
+      "service_publisher_inactive",
+      "service_worker_inactive"
+    ],
+    "free_disk_bytes": 545392459776,
+    "machine_id": "foundation",
+    "mem_available_bytes": 988258435072,
+    "monotonic_ms": 1420228365,
+    "publisher": {
+      "sequence": 1913192,
+      "state": "FAILED",
+      "updated_unix_ms": 1792129082263
+    },
+    "rpc": {
+      "finalized_slot": 457523227,
+      "healthy": true
+    },
+    "sampled_unix_ms": 1792129082445,
+    "schema": "blockzilla-foundation-heartbeat-v1",
+    "services": {
+      "hivezilla-bank-v2-producer.service": "activating",
+      "hivezilla-bank-v2-r2-publisher.service": "activating",
+      "hivezilla-direct-worker.service": "failed",
+      "hivezilla-live-priority-20261012.service": "active",
+      "hivezilla-native-cold-storage-20261012-live.service": "active",
+      "hivezilla-validator.service": "active"
+    }
+  },
+  "schema": "blockzilla-foundation-incident-telemetry-v1",
+  "status_endpoint": "https://blockzilla-foundation-watch.cheron-augustin.workers.dev/status",
+  "timing_notes": [
+    "Timestamp field names are preserved from the private monitor schema.",
+    "Counter ChangedMs timestamps record when the external monitor last observed an increase; they are not exact capture failure times.",
+    "No host FAILURE.json or file modification timestamp was read."
+  ],
+  "watcher": {
+    "armed": true,
+    "counters": {
+      "captureRoot": 457464456,
+      "captureRootChangedMs": 1792116401696,
+      "captureSequence": 2160849722,
+      "captureSequenceChangedMs": 1792116401696,
+      "publisherChangedMs": 1792116069664,
+      "publisherSequence": 1913192,
+      "session": "000000000000000018de229d3fc8a9d9-275b05"
+    },
+    "currentIssues": [
+      "capture_not_running",
+      "capture_stalled",
+      "compaction_not_running",
+      "compaction_status_stale",
+      "public_stream_stale",
+      "publisher_not_running",
+      "service:hivezilla-bank-v2-producer.service",
+      "service:hivezilla-bank-v2-r2-publisher.service",
+      "service:hivezilla-direct-worker.service",
+      "telemetry:capture_stale",
+      "telemetry:compact_failed",
+      "telemetry:compact_stale",
+      "telemetry:service_producer_inactive",
+      "telemetry:service_publisher_inactive",
+      "telemetry:service_worker_inactive"
+    ],
+    "incident": {
+      "active": [
+        "capture_not_running",
+        "capture_stalled",
+        "compaction_not_running",
+        "compaction_status_stale",
+        "public_stream_stale",
+        "publisher_not_running",
+        "service:hivezilla-bank-v2-producer.service",
+        "service:hivezilla-bank-v2-r2-publisher.service",
+        "service:hivezilla-direct-worker.service",
+        "telemetry:capture_stale",
+        "telemetry:compact_failed",
+        "telemetry:compact_stale",
+        "telemetry:service_producer_inactive",
+        "telemetry:service_publisher_inactive",
+        "telemetry:service_worker_inactive"
+      ],
+      "candidate": [
+        "capture_not_running",
+        "capture_stalled",
+        "compaction_not_running",
+        "compaction_status_stale",
+        "public_stream_stale",
+        "publisher_not_running",
+        "service:hivezilla-bank-v2-producer.service",
+        "service:hivezilla-bank-v2-r2-publisher.service",
+        "service:hivezilla-direct-worker.service",
+        "telemetry:capture_stale",
+        "telemetry:compact_failed",
+        "telemetry:compact_stale",
+        "telemetry:service_producer_inactive",
+        "telemetry:service_publisher_inactive",
+        "telemetry:service_worker_inactive"
+      ],
+      "candidateSinceMs": 1792129098993,
+      "issueSinceMs": {
+        "capture_not_running": 1792116405123,
+        "capture_stalled": 1792116495147,
+        "compaction_not_running": 1792116075135,
+        "compaction_status_stale": 1792116075135,
+        "public_stream_stale": 1792116075135,
+        "publisher_not_running": 1792116075135,
+        "service:hivezilla-bank-v2-producer.service": 1792128226705,
+        "service:hivezilla-bank-v2-r2-publisher.service": 1792128827086,
+        "service:hivezilla-direct-worker.service": 1792116075135,
+        "telemetry:capture_stale": 1792116525123,
+        "telemetry:compact_failed": 1792116075135,
+        "telemetry:compact_stale": 1792116075135,
+        "telemetry:service_producer_inactive": 1792128226705,
+        "telemetry:service_publisher_inactive": 1792128827086,
+        "telemetry:service_worker_inactive": 1792116075135
+      }
+    },
+    "lastCheckMs": 1792129098993,
+    "lastReceivedMs": 1792129082725,
+    "startedMs": 1791846078202,
+    "streamIssue": "public_stream_stale"
+  }
+}

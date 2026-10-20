@@ -1,0 +1,13 @@
+{
+  "schema": "blockzilla-incident-evidence-mirror-v1",
+  "state": "VERIFIED",
+  "destination": "/home/ubuntu/live/hivezilla-validator-20260930/reports/native-recovery-20261018/recurrence/incident-20261020-storage",
+  "created": 45,
+  "existing_identical": 24,
+  "verified_files": 69,
+  "receipt_sha256": "f87a172904102c6a35c7d6eab278449ae14ccce1eed94e6151c3161e089e863e",
+  "manifest_sha256": "dbe4358a63d4ce568e912bfaa7bf5c16bece9f22265a74ae194f0efb80ce54bc",
+  "pids_source_registry_unchanged": true,
+  "service_actions": [],
+  "production_data_mutations": []
+}

@@ -1,0 +1,128 @@
+{
+  "active_temporary_archive_count": 0,
+  "admission_free_disk_bytes": 693754458112,
+  "admission_minimum_free_bytes": 601295421440,
+  "binary": "/home/ubuntu/live/hivezilla-validator-20260930/releases/bank-connection-idle-20261018-2f3cbe5e-73506f06cdc6/hivezilla-stream",
+  "binary_sha256": "73506f06cdc646437a1a635ec9186ce6b3dd01146ae5474d8828a1f9f66c1d7d",
+  "build_flags": "-C target-cpu=x86-64 -C target-feature=+aes,+sse2",
+  "commands": [
+    {
+      "argv": [
+        "ionice",
+        "-c3",
+        "nice",
+        "-n",
+        "19",
+        "/home/ubuntu/.rustup/toolchains/1.98.0-x86_64-unknown-linux-gnu/bin/cargo",
+        "test",
+        "--locked",
+        "--offline",
+        "-j",
+        "4"
+      ],
+      "completed_unix_ms": 1792317981345,
+      "cwd": "/home/ubuntu/benchmarks/bank-connection-idle-20261018-2f3cbe5e/provider/hivezilla/stream-relay",
+      "log": "/home/ubuntu/live/hivezilla-validator-20260930/reports/native-recovery-20261018/recurrence/connection-idle/lib-tests.log",
+      "log_sha256": "87a51beba02b31b65dba7a7586523d6abac48f694e787aab47cae3bd0fd3ccdd",
+      "phase": "TESTING",
+      "returncode": 0,
+      "started_unix_ms": 1792317941271
+    },
+    {
+      "argv": [
+        "ionice",
+        "-c3",
+        "nice",
+        "-n",
+        "19",
+        "/home/ubuntu/.rustup/toolchains/1.98.0-x86_64-unknown-linux-gnu/bin/cargo",
+        "build",
+        "--release",
+        "--bin",
+        "hivezilla-stream",
+        "--locked",
+        "--offline",
+        "-j",
+        "4"
+      ],
+      "completed_unix_ms": 1792318153245,
+      "cwd": "/home/ubuntu/benchmarks/bank-connection-idle-20261018-2f3cbe5e/provider/hivezilla/stream-relay",
+      "log": "/home/ubuntu/live/hivezilla-validator-20260930/reports/native-recovery-20261018/recurrence/connection-idle/release-build-attempt-2.log",
+      "log_sha256": "d7d8bc4d7ffce08bf6e8e94ac7ef87872e81401b85833e8d9eecc42eae984fab",
+      "phase": "BUILDING",
+      "returncode": 0,
+      "started_unix_ms": 1792318077991
+    }
+  ],
+  "completed_unix_ms": 1792318153309,
+  "donor_manifest_sha256": "0099305fcfc27cb0ef00ec684260909636867c43ee436e0863f56772f2044dd4",
+  "free_disk_bytes": 696818728960,
+  "graph_manifest_sha256": "c973ce7a8e2d220b3496d77ca9e0f0c242c1aaa8d51b7a7bf3274437584564d5",
+  "patch_manifest_sha256": "e194f2c8d8c4b2b9ee9c22080a7de8e3f95b3cdb14e2949d64acf680b4a61c24",
+  "patch_sha256": "2f3cbe5eb0c7e52180d8a072a5e82a9e1db71b271d46fcfaacadc2110fae6b95",
+  "previous_attempts": [
+    {
+      "reason": "Target allocation du scan returned exit 1 during compilation. The guard stopped only its compiler group. Original source, logs and receipts are preserved.",
+      "receipt": "/home/ubuntu/live/hivezilla-validator-20260930/reports/native-recovery-20261018/recurrence/connection-idle/BUILD-ATTEMPT-1.json",
+      "sha256": "e33828bcf94a9448ecee38589fc9084150324b68fbccbe89ae8cf83b9d453e47"
+    }
+  ],
+  "red_comparison_command": {
+    "argv": [
+      "ionice",
+      "-c3",
+      "nice",
+      "-n",
+      "19",
+      "/home/ubuntu/.rustup/toolchains/1.98.0-x86_64-unknown-linux-gnu/bin/cargo",
+      "test",
+      "--lib",
+      "--locked",
+      "--offline",
+      "-j",
+      "4",
+      "server::tests::active_sse_survives_multiple_connection_idle_intervals",
+      "--",
+      "--exact"
+    ],
+    "completed_unix_ms": 1792317991420,
+    "cwd": "/home/ubuntu/benchmarks/bank-connection-idle-20261018-2f3cbe5e/red-fixture/provider/hivezilla/stream-relay",
+    "log": "/home/ubuntu/live/hivezilla-validator-20260930/reports/native-recovery-20261018/recurrence/connection-idle/red-comparison.log",
+    "log_sha256": "a411aa8ef9171045f7a0426c412539006fd4f9d38e2cc2ae6cba4e6cffb0edbe",
+    "phase": "RED_COMPARISON",
+    "returncode": 101,
+    "started_unix_ms": 1792317981395
+  },
+  "red_comparison_passed": true,
+  "red_comparison_receipt_sha256": "d3ea6f299456a09b4319b0fb1ce0833ee31830c0f71577de3ceab43ab0162627",
+  "release": "/home/ubuntu/live/hivezilla-validator-20260930/releases/bank-connection-idle-20261018-2f3cbe5e-73506f06cdc6",
+  "report": "/home/ubuntu/live/hivezilla-validator-20260930/reports/native-recovery-20261018/recurrence/connection-idle",
+  "required_regression_tests": [
+    "server::tests::active_sse_survives_multiple_connection_idle_intervals",
+    "server::tests::silent_http_connection_expires_and_releases_its_task",
+    "server::tests::zero_progress_reads_and_blocked_writes_do_not_renew_idle_time",
+    "bank_store::tests::status_cadence_leaves_delivery_margin_but_a_real_health_stall_expires"
+  ],
+  "retirement_cap_changes": [],
+  "retry_admission_free_disk_bytes": 696269316096,
+  "retry_started_unix_ms": 1792318077977,
+  "schema": "blockzilla-bank-connection-idle-build-v1",
+  "service_operations": [],
+  "source_files": 963,
+  "source_manifest_sha256": "58ca93f632098973f8353632e87415a2dc9e01a98bedf786c453ec3178fae41b",
+  "stage": "/home/ubuntu/benchmarks/bank-connection-idle-20261018-2f3cbe5e",
+  "started_unix_ms": 1792317940941,
+  "state": "READY_NOT_ACTIVE",
+  "target_allocated_bytes": 2288668672,
+  "target_budget_bytes": 34359738368,
+  "target_scan_policy": "Fail on all scan errors except a maximum of five retries for target paths that vanish during concurrent compilation. Every accepted scan must return exit zero.",
+  "tests_count": 36,
+  "tests_failed": 0,
+  "tests_passed": true,
+  "toolchain": {
+    "cargo": "cargo 1.98.0 (797e8a9bc 2026-08-05)",
+    "rustc": "rustc 1.98.0 (88d9e12ae 2026-08-18)"
+  },
+  "updated_unix_ms": 1792318138209,
+  "updated_utc": "2026-10-18T10:08:58.209+00:00"
+}

@@ -1,0 +1,33 @@
+{
+  "files": {
+    "BUILD.json": {
+      "bytes": 4391,
+      "sha256": "ee1b8ae9ffcaf8b1eaf91f0a6ef487bf35560c2bdefa2d7ca7b1b328777c1d8e"
+    },
+    "SDK-SMOKE.json": {
+      "bytes": 495,
+      "sha256": "051a8d22c8f475cb675e923f2afb4c1ae7adacb80d19df6b841f39b680dea14c"
+    },
+    "cold_storage.py": {
+      "bytes": 63344,
+      "sha256": "f757f2be29f01378448cbe5bb5b529db2625e6654c065f0f17ebd8ba3cbb6d41"
+    },
+    "sdk-smoke.py": {
+      "bytes": 3102,
+      "sha256": "3cd88663dff90dc910c7f38361e4128015bfeace60e9ed756af73641a8ecb4ba"
+    },
+    "storage_jobs.py": {
+      "bytes": 22150,
+      "sha256": "567c15e41b3f21665a765fbfaa5b2c70d9a565d1280463da959d946472a3c87c"
+    },
+    "test_cold_storage.py": {
+      "bytes": 90798,
+      "sha256": "3a5fe9b96e7b3503c4d8c2d1a4efb8009f79889f4d92dbaa07420bc215e41cee"
+    },
+    "test_storage_jobs.py": {
+      "bytes": 19170,
+      "sha256": "6eef654a016d1f18be588f28bafd287d69b8aa95d8e9d02695df7cab858d7827"
+    }
+  },
+  "schema": "blockzilla-storage-recovery-release-v1"
+}

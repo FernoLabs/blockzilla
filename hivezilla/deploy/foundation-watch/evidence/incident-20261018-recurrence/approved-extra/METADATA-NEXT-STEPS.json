@@ -1,0 +1,245 @@
+{
+  "schema": "blockzilla-fixed-local-metadata-implementation-checklist-v1",
+  "state": "SCOPED_NOT_IMPLEMENTED",
+  "scope": "A complete source-bound metadata read, archive and expiry path. No standalone unused resolver API and no metadata deletion before reader migration.",
+  "existing_design": {
+    "path": "hivezilla/deploy/foundation-watch/evidence/incident-20261018/METADATA-PLAN.json",
+    "sha256": "13df6ceb1a6a86d2979c3d73d7147abd7abdc4dc7f1d066bf76c776315ec2a78",
+    "modified": false
+  },
+  "authority": {
+    "current_approved_work": "Existing verified payload retirement for source 000000000000000018ddd9a6bb6fc50e-282459, at absolute cap 308768, with at most 51606 additional banks. Root controls its live preflight and installation.",
+    "this_review_production_mutations": [],
+    "new_metadata_retirement_started": false,
+    "finite_payload_allowance_is_metadata_deletion_authority": false
+  },
+  "measured_basis": {
+    "sample_banks": 64,
+    "retained_metadata_allocated_bytes_per_bank": 36864,
+    "measured_sqlite_bytes_per_rooted_bank": 14606,
+    "combined_bytes_per_bank": 51470,
+    "estimated_metadata_growth_bytes_per_day": [
+      10000000000,
+      21000000000
+    ],
+    "lossless_trial_compressed_bytes_per_bank": 2637,
+    "trial_excludes_indexes_and_manifests": true,
+    "sampling_limit": "These values are samples, not host peak-space bounds."
+  },
+  "current_break_points": [
+    {
+      "path": "hivezilla/deploy/direct-agave/cold_storage.py",
+      "functions": [
+        "restore",
+        "build_bank",
+        "retire",
+        "candidates",
+        "database"
+      ],
+      "issue": "Restore requires a per-bank REMOTE-CUSTODY.json and an existing parent directory. The archive index holds bundle locations and file hashes but not all exact marker bytes. Archive rows also grow without a cold expiry path."
+    },
+    {
+      "path": "hivezilla/direct-agave/src/processed.rs",
+      "functions": [
+        "retained_records",
+        "read_retained_file",
+        "prepare_payload",
+        "custody",
+        "process_banks",
+        "database"
+      ],
+      "issue": "Late callback audit reads CUSTODY.json directly, restores native evidence to persistent local paths, and uses historical bank/projection rows. Marker and SQL removal must preserve these checks."
+    },
+    {
+      "path": "hivezilla/direct-agave/src/retention.rs",
+      "functions": [
+        "read_file",
+        "verify_source",
+        "process_one"
+      ],
+      "issue": "This reader is absent from the earlier plan. New native retirement requests verify the custody marker, compact marker and payload bytes before native event deletion. Do not rely on old requests always having completed or on late requests never occurring."
+    },
+    {
+      "path": "hivezilla/direct-agave/src/journal.rs",
+      "functions": [
+        "journal database initialization"
+      ],
+      "issue": "Capture events.sqlite also retains retire_jobs history. It needs a separate proof-preserving bound or archival contract; trimming only processed and v2 SQLite is incomplete."
+    },
+    {
+      "path": "hivezilla/direct-agave/src/worker.rs",
+      "functions": [
+        "validate_compact_commit",
+        "retained compact/evidence readers"
+      ],
+      "issue": "Commit reuse and restart audit read exact marker and evidence paths."
+    },
+    {
+      "path": "crates/blockzilla-bank-stream-v2/src/artifact.rs",
+      "functions": [
+        "build",
+        "checked_path",
+        "bounded_file"
+      ],
+      "issue": "Every frame build reads the original compact marker and verifies its expected digest and source."
+    },
+    {
+      "path": "hivezilla/stream-relay/src/source.rs",
+      "functions": [
+        "processed event and artifact readers"
+      ],
+      "issue": "V1 reads the compact marker directly. Cold cursor and chunk requests must keep explicit expiry behavior."
+    },
+    {
+      "path": "hivezilla/stream-relay/src/bank_source.rs",
+      "functions": [
+        "BankSource::seek",
+        "BankSource::next_once",
+        "BankSource::chunk",
+        "archived_payload"
+      ],
+      "issue": "V2 detects unavailable cold payloads through REMOTE-CUSTODY.json. Removing that note without an authoritative cold lookup can turn the current 410 result into an error."
+    },
+    {
+      "path": "hivezilla/direct-agave/src/confirmed.rs",
+      "functions": [
+        "block",
+        "control",
+        "stored_payload",
+        "observation"
+      ],
+      "issue": "The v2 producer uses archived payload identity, historical observations and control dependencies. SQL expiry must keep or resolve these dependencies."
+    }
+  ],
+  "implementation_order": [
+    {
+      "step": 1,
+      "name": "Define one complete exact-byte metadata read contract",
+      "deliverables": [
+        "Define a shared key: all four source fields, cloud namespace, slot, bank, canonical relative path and expected SHA-256.",
+        "Read local regular files within a strict size bound; reject symlink ancestors, traversal, duplicate paths and wrong source/namespace.",
+        "Provide catalog fallback that returns the original bytes without parsing and reserializing marker JSON. Check the expected digest before returning bytes.",
+        "When local and catalog copies both exist, reject conflicts. An absent or invalid catalog entry must fail closed.",
+        "Use primary-key bank lookup and indexed object paths. Do not scan all archive JSON rows for every read.",
+        "Keep the existing on-disk format working during migration. Integrate the resolver into its callers in the same change slice; do not publish an unused API."
+      ]
+    },
+    {
+      "step": 2,
+      "name": "Seal exact metadata and the SQL evidence needed after expiry",
+      "deliverables": [
+        "Pack both original markers: DIRECT-AGAVE-COMPACT.v1.json and CUSTODY.json.",
+        "Pack the exact REMOTE-CUSTODY.json bytes at both original paths. These notes are created after the existing payload bundle, so their bytes are not already in that bundle.",
+        "Preserve raw archive-row JSON bytes and typed historical rows needed for projection comparison, source observations, controls and retirement deduplication before their SQL expiry.",
+        "Bind each entry to the existing verified payload bundle key, bundle SHA-256, source tuple, namespace, slot/bank and original relative paths.",
+        "Use versioned immutable metadata shards and a recoverable authenticated catalog root. Verify full cloud readback before publishing the durable catalog commit.",
+        "Specify and test catalog-root recovery after complete machine loss before any local metadata retirement.",
+        "Use a cloud-backed range/tree index and a bounded local root/cache. A permanent local index entry per historical bank would leave the growth problem in place."
+      ]
+    },
+    {
+      "step": 3,
+      "name": "Migrate every live reader before marker removal",
+      "deliverables": [
+        "Integrate the contract into the Rust and Python paths listed above, including retention.rs.",
+        "Keep cloud network work out of the native Geyser callback path. Missing retirement proof must preserve captured events and block that retirement request.",
+        "Make cold reads preserve source verification, payload hashes, late duplicate detection, conflicting callback rejection and competing-bank identity.",
+        "Keep cold/expired live API reads explicit. Preserve 410 and replay-gap behavior rather than silently restoring arbitrary history into the live window.",
+        "Audit the offline readers listed below; either make them catalog-aware or provide an explicit verified restore path before verification. Do not report a cold marker as data corruption.",
+        "Build from a pinned clean source graph. Do not include the unrelated dirty chain.rs or tests.rs working changes."
+      ]
+    },
+    {
+      "step": 4,
+      "name": "Add bounded metadata retirement with durable recovery",
+      "deliverables": [
+        "Require archived=committed, retired=acknowledged, full cloud readback, current age/replay/publication/native-writer ACK checks, and no pending dependency for the exact bank.",
+        "Check stable file identity and expected hashes again before unlink. Keep a conflicting or newly restored inode.",
+        "Commit the catalog root before local metadata removal. Sync affected directories and record completion only after durable removal.",
+        "Support restart at each boundary without widening bank/source scope or deleting an unverified file.",
+        "Leave unresolved forks, bankless callbacks, partial sessions, gaps, raw captures and retirement history outside removal until their separate evidence contract is defined."
+      ]
+    },
+    {
+      "step": 5,
+      "name": "Bound all local SQLite history and restored copies",
+      "deliverables": [
+        "Define separate processed, v2 and native-retirement-history expiry frontiers. Keep unresolved work, current chain anchors, parent links and replay/publisher dependencies.",
+        "Resolve historical bank/projection/control state from the catalog before accepting late callbacks as new work.",
+        "Commit a truthful replay floor before SQL expiry. Old cursors must return an explicit expiry/gap.",
+        "Measure and enforce SQLite page, index, freelist, WAL and checkpoint limits. DELETE alone does not shrink allocated files.",
+        "Do not run an unbudgeted VACUUM or database replacement on the live host. Include old/new database overlap and WAL in any migration budget.",
+        "Add reader leases or a bounded verified streaming-read path before restored payload eviction. The current helper releases its restore lock before Rust reads the published file, so that lock alone is not a reader lease.",
+        "Use exact source/path/hash/inode identity and process-safe lock lifetime. Prevent PID reuse, stale leases, restore/eviction races and unbounded per-file lease metadata."
+      ]
+    },
+    {
+      "step": 6,
+      "name": "Admit work against a complete local peak-space budget",
+      "deliverables": [
+        "Select production byte limits from allocated-byte measurements; record every installed limit separately from the design.",
+        "Sum hot payloads/metadata, SQLite pages/WAL, bounded catalog roots/cache, restored leases, packing/upload staging and all concurrent working space.",
+        "Include validator accounts/shrink, ledger and one future full-snapshot overlap. The current 128 GiB archive observation is a floor, not a proved maximum.",
+        "Include a separate cloud-outage buffer from measured input and release rates. Pause optional disk consumers first.",
+        "On exhausted protected capacity, keep explicit failure/gap records; do not silently drop evidence, lower the capture reserve or expand old-source authority.",
+        "Avoid double-counting shared inodes and snapshot overlap. Capacity and priority monitors must report the installed budget and enforcement failures."
+      ]
+    }
+  ],
+  "proposed_bounded_format_limits": {
+    "installed": false,
+    "shard_max_banks": 4096,
+    "shard_max_decoded_bytes": 67108864,
+    "shard_max_compressed_bytes": 16777216,
+    "local_shard_cache_max_bytes": 1073741824,
+    "rules": [
+      "Apply all limits independently; stop at the first bound. A 4096-bank shard is an upper bound, not a fixed count.",
+      "Bound decompression while reading, including gzip/binary framing overhead, duplicate records and expansion bombs.",
+      "Cap pack/upload concurrency and working space before activation.",
+      "Production SQL, hot-window, restored-file, unresolved-evidence and outage-buffer byte limits remain unselected."
+    ]
+  },
+  "offline_reader_audit": [
+    "hivezilla/deploy/direct-agave/verify_epoch.py",
+    "hivezilla/deploy/direct-agave/compare_car_epoch.py",
+    "blockzilla/cli/src/archive_verify.rs",
+    "blockzilla/cli/src/archive_v2/direct_agave.rs",
+    "hivezilla/deploy/foundation-upload/native_backup.py: audit profile boundaries; RPC backup provenance is separate and must not be merged with native custody"
+  ],
+  "required_tests": [
+    "Restore all 16 original archived files with both metadata directories absent, and compare every original byte hash.",
+    "Read exact original marker and note bytes through local and catalog paths; reject conflicting copies.",
+    "Reject wrong source tuple, namespace, slot/bank, expected hash, payload-bundle hash, unsafe/symlink path, duplicate member and malformed/oversized shard.",
+    "Resume after interruption before/after cloud readback, catalog publication, local unlink, directory fsync and completion commit.",
+    "Exercise new native retirement requests and restart, including retention.rs proof lookup; never delete events for missing or conflicting proof.",
+    "Exercise late identical and conflicting callbacks, competing banks, duplicate retirement requests and catalog lookup after processed/native SQL expiry.",
+    "Keep the current v1/v2 cursor-expiry and 410 behavior, exact current source and all control/payload dependencies at the hot-window boundary.",
+    "Exercise concurrent restore/read/eviction, slow readers, crashes, stale leases and PID reuse; no active reader loses its verified bytes.",
+    "Force each local byte cap, WAL/checkpoint pressure, pack expansion and cloud outage; prove bounded staging and explicit failure behavior.",
+    "Observe allocated bytes, SQLite pages/WAL, indexes and caches for at least two hot-window lengths, plus a complete full-snapshot write/purge cycle."
+  ],
+  "acceptance_claims": {
+    "first_implementation_slice": "An end-to-end metadata read/catalog/restore slice with migration disabled can be implemented and tested separately from the active finite retirement. It does not establish a fixed total disk bound.",
+    "fixed_local_metadata_bound_requires": [
+      "All deployed readers use the contract.",
+      "Verified catalog custody is durable and recoverable.",
+      "Marker, SQL and restore-cache expiry are installed with explicit byte caps.",
+      "The evidence classes that remain outside retirement have a bounded custody/outage policy.",
+      "Long-run and snapshot-overlap checks pass under the full host budget."
+    ],
+    "larger_disk_alone_is_lasting_fix": false,
+    "production_disk_bound_proved": false
+  },
+  "effort_and_risk": {
+    "safe_during_current_retirement": "Finish the finite approved job and its live proof. Keep this checklist as a separate design artifact; do not change its running helper, source or cap for metadata work.",
+    "practical_this_turn": "Scope and fixtures are practical now. No new implementation is started by this review. A future coding slice must connect writer, catalog and readers together with metadata migration disabled until checks pass.",
+    "full_migration": "A coordinated change across the native worker/plugin retirement reader, transport readers, Python archive/restore and several SQLite histories. It is not a two-file retention adjustment.",
+    "main_risks": [
+      "Missing proof can stop native retirement or late-callback audit.",
+      "Incorrect SQL expiry can lose duplicate/conflict checks or control dependencies.",
+      "Cache eviction without leases can race readers.",
+      "A local per-bank catalog or retired-job table can keep unbounded metadata growth.",
+      "Incomplete publication/recovery ordering can leave no authoritative copy."
+    ]
+  }
+}

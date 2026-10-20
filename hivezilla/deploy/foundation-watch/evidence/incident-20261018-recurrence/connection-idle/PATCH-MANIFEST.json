@@ -1,0 +1,25 @@
+{
+  "scope": "server.rs only; active streams have no total lifetime cutoff",
+  "files": {
+    "hivezilla/stream-relay/src/server.rs": {
+      "before_sha256": "4bec1805c02212249f2761e842046f7e23e23ed9e8a0d0917b08decdaf930f2a",
+      "after_sha256": "ce54960f27b284e001d4fe744f4e876fb2ea0756baaf88c5594dbfa424d818ee"
+    }
+  },
+  "patch_sha256": "2f3cbe5eb0c7e52180d8a072a5e82a9e1db71b271d46fcfaacadc2110fae6b95",
+  "test_command": [
+    "cargo",
+    "+1.98.0",
+    "test",
+    "--offline",
+    "--locked"
+  ],
+  "expected_library_tests": 36,
+  "required_tests": [
+    "server::tests::active_sse_survives_multiple_connection_idle_intervals",
+    "server::tests::silent_http_connection_expires_and_releases_its_task",
+    "server::tests::zero_progress_reads_and_blocked_writes_do_not_renew_idle_time"
+  ],
+  "local_targeted_tests_passed": 10,
+  "local_total_lifetime_red_comparison": "not run: compiler output failed due to local disk exhaustion; final code restored"
+}

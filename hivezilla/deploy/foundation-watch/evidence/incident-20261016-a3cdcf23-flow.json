@@ -1,0 +1,175 @@
+{
+  "schema": "blockzilla-foundation-incident-flow-v1",
+  "event_id": "a3cdcf23-2192-4f5d-881c-a362b67dfa2e",
+  "incident_reported_at_utc": "2026-10-16T05:34:47.137Z",
+  "source_session": "000000000000000018deede1d641da13-275b05",
+  "scope": "Finite read-only recovery checks; selected telemetry only.",
+  "monitor_status_endpoint": "https://blockzilla-foundation-watch.cheron-augustin.workers.dev/status",
+  "monitor_checks": [
+    {
+      "checked_at_unix_ms": 1792131345413,
+      "checked_at_utc": "2026-10-16T06:15:45.413000+00:00",
+      "cloud_event_queue": 60,
+      "compact_slot_lag": 0,
+      "sample": {
+        "capture": {
+          "durable_sequence": 824366,
+          "latest_rooted_slot": 457533728,
+          "session": "000000000000000018deede1d641da13-275b05",
+          "state": "CAPTURING",
+          "updated_unix_ms": null
+        },
+        "capture_reserve_bytes": 429496729600,
+        "cold_storage": {
+          "retired_banks": 0,
+          "state": "RUNNING",
+          "updated_unix_ms": 1792131343461
+        },
+        "compact": {
+          "event_sequence": 799,
+          "last_compact_slot": 457533758,
+          "source_sequence": 822377,
+          "state": "RUNNING",
+          "updated_unix_ms": 1792131344603
+        },
+        "errors": [],
+        "free_disk_bytes": 569074561024,
+        "mem_available_bytes": 1006301777920,
+        "publisher": {
+          "sequence": 739,
+          "state": "RUNNING",
+          "updated_unix_ms": 1792131343508
+        },
+        "rpc": {
+          "finalized_slot": 457533726,
+          "healthy": true
+        },
+        "sampled_unix_ms": 1792131344666,
+        "services": {
+          "hivezilla-bank-v2-producer.service": "active",
+          "hivezilla-bank-v2-r2-publisher.service": "active",
+          "hivezilla-direct-worker.service": "active",
+          "hivezilla-live-priority-20261012.service": "active",
+          "hivezilla-native-cold-storage-20261012-live.service": "active",
+          "hivezilla-validator.service": "active"
+        }
+      },
+      "watcher": {
+        "active_incident_issues": [
+          "capture_not_running",
+          "capture_stalled",
+          "compaction_not_running",
+          "compaction_status_stale",
+          "public_stream_stale",
+          "publisher_not_running",
+          "service:hivezilla-bank-v2-r2-publisher.service",
+          "service:hivezilla-direct-worker.service",
+          "telemetry:capture_stale",
+          "telemetry:compact_failed",
+          "telemetry:compact_stale",
+          "telemetry:service_publisher_inactive",
+          "telemetry:service_worker_inactive"
+        ],
+        "armed": true,
+        "currentIssues": [],
+        "lastCheckMs": 1792131321082,
+        "lastReceivedMs": 1792131344920,
+        "streamIssue": null
+      },
+      "rooted_minus_compact_slots": -30
+    },
+    {
+      "checked_at_unix_ms": 1792131495390,
+      "checked_at_utc": "2026-10-16T06:18:15.390000+00:00",
+      "cloud_event_queue": 76,
+      "compact_slot_lag": 0,
+      "sample": {
+        "capture": {
+          "durable_sequence": 1954175,
+          "latest_rooted_slot": 457534286,
+          "session": "000000000000000018deede1d641da13-275b05",
+          "state": "CAPTURING",
+          "updated_unix_ms": null
+        },
+        "capture_reserve_bytes": 429496729600,
+        "cold_storage": {
+          "retired_banks": 0,
+          "state": "RUNNING",
+          "updated_unix_ms": 1792131463501
+        },
+        "compact": {
+          "event_sequence": 1913,
+          "last_compact_slot": 457534315,
+          "source_sequence": 1948258,
+          "state": "RUNNING",
+          "updated_unix_ms": 1792131465044
+        },
+        "errors": [],
+        "free_disk_bytes": 567772942336,
+        "mem_available_bytes": 1005711679488,
+        "publisher": {
+          "sequence": 1837,
+          "state": "RUNNING",
+          "updated_unix_ms": 1792131462060
+        },
+        "rpc": {
+          "finalized_slot": 457534286,
+          "healthy": true
+        },
+        "sampled_unix_ms": 1792131465337,
+        "services": {
+          "hivezilla-bank-v2-producer.service": "active",
+          "hivezilla-bank-v2-r2-publisher.service": "active",
+          "hivezilla-direct-worker.service": "active",
+          "hivezilla-live-priority-20261012.service": "active",
+          "hivezilla-native-cold-storage-20261012-live.service": "active",
+          "hivezilla-validator.service": "active"
+        }
+      },
+      "watcher": {
+        "active_incident_issues": [],
+        "armed": true,
+        "currentIssues": [],
+        "lastCheckMs": 1792131468386,
+        "lastReceivedMs": 1792131465571,
+        "streamIssue": null
+      },
+      "rooted_minus_compact_slots": -29
+    }
+  ],
+  "monitor_check_interval_ms": 149977,
+  "all_clear": true,
+  "public_free_sse": {
+    "endpoint": "https://stream.blockzilla.dev/v1/blockhashes",
+    "block_slots": [
+      457534402,
+      457534403
+    ],
+    "bytes_read": 1089,
+    "checked_at_utc": "2026-10-16T06:18:03.932571+00:00",
+    "elapsed_ms": 555,
+    "event_types": [
+      "status",
+      "root",
+      "status",
+      "block",
+      "status",
+      "block"
+    ],
+    "result": "two_advancing_slots"
+  },
+  "authenticated_private_stream_check": {
+    "state": "BLOCKED_NOT_RUN",
+    "head_progress_verified": false,
+    "confirmed_live_verified": false,
+    "payload_hash_verified": false,
+    "credential_read": false,
+    "reason": "Automatic approval review rejected the proposed Foundation stream-key read and authenticated request to stream.blockzilla.dev because exact trusted user authorization for that credential use and destination was not present.",
+    "no_retry_or_workaround_used": true
+  },
+  "limits": [
+    "Public SSE progress does not prove authenticated private v2 HTTP payload delivery.",
+    "Negative rooted_minus_compact_slots means processed compaction is ahead of the latest rooted capture slot; compact_slot_lag is clamped to zero.",
+    "This finite check does not prove uninterrupted coverage or sustained capacity."
+  ]
+}

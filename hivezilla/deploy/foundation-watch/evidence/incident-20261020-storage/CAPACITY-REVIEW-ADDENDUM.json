@@ -1,0 +1,16 @@
+{
+  "cache_survey_sha256": "b878fabb907a9dabcf7fdd6ec71869d3f64c8fa8a0580deedb3296d096c12190",
+  "conclusions": [
+    "The named compiler caches total approximately 22.7 GB; the largest surveyed old Agave cache is approximately 10.48 GB.",
+    "The surveyed caches do not cover the estimated 90 to 103 GB additional pre-full-snapshot capacity target.",
+    "Cache deletion is not a lasting disk-capacity fix. No cache deletion is planned or authorized by this review.",
+    "A durable byte bound for retained native metadata remains designed and unimplemented."
+  ],
+  "deleted_files": [],
+  "deletion_authority_inferred": false,
+  "prior_review_sha256": "d58716b26c0d431059c0ce1bc8f9fa1a7cdf2ef7dd8d9a4eeca6af3699e6c306",
+  "reviewed_unix_ms": 1792476799756,
+  "schema": "blockzilla-capacity-review-addendum-v1",
+  "service_actions": [],
+  "state": "READ_ONLY_FINDINGS"
+}

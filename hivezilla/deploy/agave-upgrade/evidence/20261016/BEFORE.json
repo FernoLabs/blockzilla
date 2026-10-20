@@ -1,0 +1,52 @@
+{
+  "source": {
+    "genesis_hash": "5eykt4UsFv8P8NJdTREpY1vzqKqZKvdpKuc147dw2N9d",
+    "node_identity": "J7qpvCEWhdBgPdYRV3s3btWPrRVXa2qnAzgvxWTvtbrQ",
+    "agave_revision": "d688dd0e3a576b048a848e5faf2e8d277f8feb6e",
+    "session_id": "000000000000000018deede1d641da13-275b05"
+  },
+  "sampled_unix_ms": 1792181161750,
+  "processed": {
+    "canonical": false,
+    "event_sequence": 461945,
+    "last_compact_slot": 457764364,
+    "profile": "native-processed-compact-v1",
+    "publication_ready": false,
+    "retirement_supported": true,
+    "source_sequence": 516784178,
+    "state": "RUNNING",
+    "updated_unix_ms": 1792181161610
+  },
+  "banks": {
+    "event_sequence": 692924,
+    "profile": "native-bank-compact-v2",
+    "source_state": "RUNNING",
+    "state": "RUNNING",
+    "updated_unix_ms": 1792181161722
+  },
+  "publisher": {
+    "checkpoint": {
+      "blocks": 230921,
+      "bytes": 112582016893,
+      "cursor": "000000000000000018deede1d641da13-275b05:p461796:9209ad338ac5b85ca5c394585a59ce4f9a2a44cd37fae4ee7a94f93a1ba1c275",
+      "last_first_slot": 461796,
+      "namespace": "57f6beef58f71b68ac430120437e79363e65aba88ccb6536e805e1351d10f135",
+      "prefix": "native-stream/processed/direct-agave-live-v1/000000000000000018deede1d641da13-275b05",
+      "publisher_id": "5c1a1c73ebf3b8e3b82a7b5c4f5f7837db5821d5371fe50bf99ae2ff9e67cf49",
+      "schema": "blockzilla-native-publisher-checkpoint-v1",
+      "sequence": 461796,
+      "session": "000000000000000018deede1d641da13-275b05",
+      "source": "/home/ubuntu/live/hivezilla-validator-20260930/compact/direct-agave-processed-live/000000000000000018deede1d641da13-275b05",
+      "start_slot": 1
+    },
+    "last_batch": {
+      "bytes": 23151474,
+      "events": 87,
+      "source_read_ms": 58,
+      "upload_commit_ms": 9122,
+      "upload_workers": 64
+    },
+    "state": "RUNNING",
+    "updated_unix_ms": 1792181154531
+  }
+}

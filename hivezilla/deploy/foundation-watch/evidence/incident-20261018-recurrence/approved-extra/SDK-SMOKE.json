@@ -1,0 +1,9 @@
+{
+  "state": "PASSED",
+  "host": "ubuntu@213.239.141.61",
+  "release": "protocol-retry-20261018-ccc4e4475ec568d1",
+  "real_sdk_typed_protocol_wrapper": true,
+  "generic_and_length_faults_blocked": true,
+  "reference": "https://raw.githubusercontent.com/boto/botocore/develop/botocore/response.py",
+  "network_used": false
+}

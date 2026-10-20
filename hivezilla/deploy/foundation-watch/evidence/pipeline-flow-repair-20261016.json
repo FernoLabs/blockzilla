@@ -1,0 +1,470 @@
+{
+  "schema": "blockzilla-pipeline-flow-repair-20261016-v1",
+  "state": "INSTALLED_FINITE_FLOW_CHECK_PASSED",
+  "host": "ubuntu@213.239.141.61",
+  "root": "/home/ubuntu/live/hivezilla-validator-20260930",
+  "source": {
+    "genesis_hash": "5eykt4UsFv8P8NJdTREpY1vzqKqZKvdpKuc147dw2N9d",
+    "node_identity": "J7qpvCEWhdBgPdYRV3s3btWPrRVXa2qnAzgvxWTvtbrQ",
+    "agave_revision": "d688dd0e3a576b048a848e5faf2e8d277f8feb6e",
+    "session_id": "000000000000000018deede1d641da13-275b05"
+  },
+  "change": {
+    "cold_storage": "Freeze a catalog ceiling for each scan sweep. Revisit banks blocked by age, replay or writer acknowledgement on the next sweep.",
+    "durable_progress": "Save the last archive commit time in the archive index transaction. Report eligible transfer waits with no durable progress for 900 seconds.",
+    "private_bank_v2": "Check the authenticated loopback v2 head with the existing on-host key. Validate source, live state and source lag. Send fixed error codes to the existing watcher.",
+    "retirement_gates_changed": false,
+    "full_remote_readback_required": true
+  },
+  "deployment": {
+    "cold_storage": {
+      "schema": "blockzilla-cold-storage-flow-repair-install-v1",
+      "state": "INSTALLED_PENDING_FLOW_CHECK",
+      "source": {
+        "genesis_hash": "5eykt4UsFv8P8NJdTREpY1vzqKqZKvdpKuc147dw2N9d",
+        "node_identity": "J7qpvCEWhdBgPdYRV3s3btWPrRVXa2qnAzgvxWTvtbrQ",
+        "agave_revision": "d688dd0e3a576b048a848e5faf2e8d277f8feb6e",
+        "session_id": "000000000000000018deede1d641da13-275b05"
+      },
+      "protected_pids": {
+        "hivezilla-validator.service": 2579205,
+        "hivezilla-direct-worker.service": 2995168,
+        "hivezilla-bank-v2-producer.service": 2995833,
+        "hivezilla-bank-v2-origin.service": 2995862,
+        "hivezilla-stream-origin.service": 2995861,
+        "hivezilla-stream-relay.service": 2996001,
+        "hivezilla-bank-v2-r2-publisher.service": 2996002,
+        "hivezilla-live-priority-20261012.service": 3069817
+      },
+      "release": "/home/ubuntu/live/hivezilla-validator-20260930/releases/cold-storage-flow-20261016-6369a7ed78291021",
+      "artifact_sha256": {
+        "archive_status.py": "fb7adbd6cb6d03fb33dc54974eca3f593d581e6586f5a70be672587fb5e5937f",
+        "cold_storage.py": "d25f1c82945ee58c727e8f8d948ff936d0fbd9982573d9bde015c2a9890fa9fd",
+        "heartbeat.py": "4eae61ceb0580f4c8e4e932ee05055ffb2d616d67fbf4d83c3924c2c4c32202f",
+        "test_archive_status.py": "d0e07e943e56cd7c56b39cad509e3f9a59f988fb2f3e2be35c874a47ca013e9a",
+        "test_cold_storage.py": "9f57810c78548cfd47ea7434a564df1cde8e718d18632706fbd618bfaf920370",
+        "test_heartbeat.py": "363ddb3190a3914a7d9bd91519a3686ac751fd1f932976b6af46f1c4afd4601e"
+      },
+      "dropins": {
+        "hivezilla-native-cold-storage-20261012-live.service": "/etc/systemd/system/hivezilla-native-cold-storage-20261012-live.service.d/zzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzz-native-source.conf",
+        "hivezilla-foundation-heartbeat.service": "/etc/systemd/system/hivezilla-foundation-heartbeat.service.d/zzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzz-storage-patch.conf"
+      },
+      "restarted_units": [
+        "hivezilla-native-cold-storage-20261012-live.service",
+        "hivezilla-foundation-heartbeat.service"
+      ],
+      "validator_restarted": false,
+      "updated_unix_ms": 1792148660604,
+      "protected_pids_unchanged": true
+    },
+    "private_v2_monitor": {
+      "schema": "blockzilla-private-v2-monitor-install-v1",
+      "state": "INSTALLED",
+      "source": {
+        "genesis_hash": "5eykt4UsFv8P8NJdTREpY1vzqKqZKvdpKuc147dw2N9d",
+        "node_identity": "J7qpvCEWhdBgPdYRV3s3btWPrRVXa2qnAzgvxWTvtbrQ",
+        "agave_revision": "d688dd0e3a576b048a848e5faf2e8d277f8feb6e",
+        "session_id": "000000000000000018deede1d641da13-275b05"
+      },
+      "protected_pids": {
+        "hivezilla-validator.service": 2579205,
+        "hivezilla-direct-worker.service": 2995168,
+        "hivezilla-bank-v2-producer.service": 2995833,
+        "hivezilla-bank-v2-origin.service": 2995862,
+        "hivezilla-stream-origin.service": 2995861,
+        "hivezilla-stream-relay.service": 2996001,
+        "hivezilla-bank-v2-r2-publisher.service": 2996002,
+        "hivezilla-live-priority-20261012.service": 3069817
+      },
+      "storage_pid": 29100,
+      "release": "/home/ubuntu/live/hivezilla-validator-20260930/releases/bank-v2-health-20261016-0c5a62ac594f8dd8",
+      "artifact_sha256": {
+        "archive_status.py": "fb7adbd6cb6d03fb33dc54974eca3f593d581e6586f5a70be672587fb5e5937f",
+        "cold_storage.py": "d25f1c82945ee58c727e8f8d948ff936d0fbd9982573d9bde015c2a9890fa9fd",
+        "heartbeat.py": "bf141c1e2f76249b0001b9095b2165e564b5c9bbaed44fd295af21c93881e4c7",
+        "test_archive_status.py": "d0e07e943e56cd7c56b39cad509e3f9a59f988fb2f3e2be35c874a47ca013e9a",
+        "test_cold_storage.py": "9f57810c78548cfd47ea7434a564df1cde8e718d18632706fbd618bfaf920370",
+        "test_heartbeat.py": "788921de72789be0c124b37bd0929a6f7ff83700b02601f900f874629a532cea"
+      },
+      "target": "/etc/systemd/system/hivezilla-foundation-heartbeat.service.d/zzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzz-storage-patch.conf",
+      "private_key_copied": false,
+      "feed_services_restarted": false,
+      "sender": {
+        "schema": "blockzilla-foundation-heartbeat-sender-v1",
+        "state": "SENT",
+        "sampled_unix_ms": 1792149348877,
+        "errors": [],
+        "send_error": null
+      },
+      "protected_pids_unchanged": true,
+      "storage_pid_unchanged": true,
+      "updated_unix_ms": 1792149349288
+    }
+  },
+  "tests": {
+    "cold_storage": 17,
+    "heartbeat_and_archive": 39,
+    "total": 56,
+    "local_and_foundation_passed": true,
+    "resource_warnings_are_errors": true
+  },
+  "flow_check": {
+    "schema": "blockzilla-repaired-pipeline-flow-check-v1",
+    "state": "PASS",
+    "elapsed_seconds": 903.588,
+    "samples": 61,
+    "source": "000000000000000018deede1d641da13-275b05",
+    "validator_pid": 2579205,
+    "faults": [],
+    "first": {
+      "elapsed_seconds": 0.06,
+      "heartbeat": {
+        "schema": "blockzilla-foundation-heartbeat-v1",
+        "machine_id": "foundation",
+        "sampled_unix_ms": 1792148844833,
+        "monotonic_ms": 1439990753,
+        "boot_id": "5caa7ddd-4731-4b83-8233-6b3c6a2e203d",
+        "free_disk_bytes": 1442653655040,
+        "capture_reserve_bytes": 429496729600,
+        "mem_available_bytes": 982466940928,
+        "capture": {
+          "session": "000000000000000018deede1d641da13-275b05",
+          "state": "CAPTURING",
+          "durable_sequence": 165690551,
+          "latest_rooted_slot": 457614981,
+          "updated_unix_ms": null
+        },
+        "compact": {
+          "state": "RUNNING",
+          "last_compact_slot": 457615011,
+          "event_sequence": 163294,
+          "source_sequence": 165686557,
+          "updated_unix_ms": 1792148844637
+        },
+        "publisher": {
+          "state": "RUNNING",
+          "sequence": 163114,
+          "updated_unix_ms": 1792148834554
+        },
+        "cold_storage": {
+          "state": "RUNNING",
+          "retired_banks": 1216,
+          "updated_unix_ms": 1792148844587,
+          "storage_progress": "TRANSFERRING",
+          "progress_stall_seconds": 900,
+          "eligible_wait_since_unix_ms": 1792148824384,
+          "last_archive_progress_unix_ms": 1792148833754
+        },
+        "services": {
+          "hivezilla-validator.service": "active",
+          "hivezilla-direct-worker.service": "active",
+          "hivezilla-bank-v2-producer.service": "active",
+          "hivezilla-bank-v2-r2-publisher.service": "active",
+          "hivezilla-native-cold-storage-20261012-live.service": "active",
+          "hivezilla-live-priority-20261012.service": "active"
+        },
+        "rpc": {
+          "healthy": true,
+          "finalized_slot": 457614981
+        },
+        "errors": [],
+        "archive": {
+          "state": "COMPLETE",
+          "epoch": 1054,
+          "updated_unix_ms": 1792148844833,
+          "stage_updated_unix_ms": 1791888439162,
+          "progress_updated_unix_ms": null,
+          "progress_percent": null,
+          "bytes_per_second": null,
+          "eta_seconds": null,
+          "eta_scope": null,
+          "paused": false,
+          "epoch_eta_min_seconds": null,
+          "epoch_eta_max_seconds": null,
+          "queue_eta_min_seconds": null,
+          "queue_eta_max_seconds": null,
+          "last_completed_epoch": 1054,
+          "last_compact_bytes": 122250037731,
+          "completed_epochs": [
+            1048,
+            1049,
+            1050,
+            1051,
+            1052,
+            1053,
+            1054
+          ],
+          "upload_queue_epochs": []
+        }
+      },
+      "storage": {
+        "schema": "blockzilla-native-cold-storage-status-v1",
+        "state": "RUNNING",
+        "archived_banks": 1216,
+        "retired_banks": 1216,
+        "freed_bytes_this_run": 3007905792,
+        "keep_seconds": 7200,
+        "batch_bank_limit": 64,
+        "parallel_bundle_limit": 2,
+        "pending_bundles": 2,
+        "last_batch_banks": 64,
+        "last_batch_seconds": 15.389525461941957,
+        "scan_sweeps_started": 1,
+        "scan_sweeps_completed": 0,
+        "scan_pages_this_run": 21,
+        "scan_rows_this_run": 1344,
+        "scan_after_slot": 457534687,
+        "scan_after_bank": 1033773,
+        "scan_through_slot": 457614117,
+        "last_candidate_seen_unix_ms": 1792148834006,
+        "last_candidate_eligible_unix_ms": 1792148834347,
+        "last_scan_skip_counts": {
+          "frame_replay": 0,
+          "pending": 0,
+          "archived": 0,
+          "retention": 0,
+          "bank_replay": 0,
+          "writer_ack": 0
+        },
+        "full_remote_readback_required": true,
+        "updated_unix_ms": 1792148844587,
+        "storage_progress": "TRANSFERRING",
+        "progress_stall_seconds": 900,
+        "last_archive_progress_unix_ms": 1792148833754,
+        "eligible_wait_since_unix_ms": 1792148824384,
+        "oldest_eligible_pending_slot": 457534560
+      },
+      "validator_pid": 2579205
+    },
+    "last": {
+      "elapsed_seconds": 903.588,
+      "heartbeat": {
+        "schema": "blockzilla-foundation-heartbeat-v1",
+        "machine_id": "foundation",
+        "sampled_unix_ms": 1792149748358,
+        "monotonic_ms": 1440894278,
+        "boot_id": "5caa7ddd-4731-4b83-8233-6b3c6a2e203d",
+        "free_disk_bytes": 1445702316032,
+        "capture_reserve_bytes": 429496729600,
+        "mem_available_bytes": 982586646528,
+        "capture": {
+          "session": "000000000000000018deede1d641da13-275b05",
+          "state": "CAPTURING",
+          "durable_sequence": 174677234,
+          "latest_rooted_slot": 457619179,
+          "updated_unix_ms": null
+        },
+        "compact": {
+          "state": "RUNNING",
+          "last_compact_slot": 457619209,
+          "event_sequence": 171690,
+          "source_sequence": 174675940,
+          "updated_unix_ms": 1792149748144
+        },
+        "publisher": {
+          "state": "RUNNING",
+          "sequence": 171514,
+          "updated_unix_ms": 1792149746674
+        },
+        "cold_storage": {
+          "state": "RUNNING",
+          "retired_banks": 7424,
+          "updated_unix_ms": 1792149747874,
+          "storage_progress": "TRANSFERRING",
+          "progress_stall_seconds": 900,
+          "eligible_wait_since_unix_ms": 1792149747870,
+          "last_archive_progress_unix_ms": 1792149747316
+        },
+        "services": {
+          "hivezilla-validator.service": "active",
+          "hivezilla-direct-worker.service": "active",
+          "hivezilla-bank-v2-producer.service": "active",
+          "hivezilla-bank-v2-r2-publisher.service": "active",
+          "hivezilla-native-cold-storage-20261012-live.service": "active",
+          "hivezilla-live-priority-20261012.service": "active"
+        },
+        "rpc": {
+          "healthy": true,
+          "finalized_slot": 457619178
+        },
+        "errors": [],
+        "archive": {
+          "state": "COMPLETE",
+          "epoch": 1054,
+          "updated_unix_ms": 1792149748358,
+          "stage_updated_unix_ms": 1791888439162,
+          "progress_updated_unix_ms": null,
+          "progress_percent": null,
+          "bytes_per_second": null,
+          "eta_seconds": null,
+          "eta_scope": null,
+          "paused": false,
+          "epoch_eta_min_seconds": null,
+          "epoch_eta_max_seconds": null,
+          "queue_eta_min_seconds": null,
+          "queue_eta_max_seconds": null,
+          "last_completed_epoch": 1054,
+          "last_compact_bytes": 122250037731,
+          "completed_epochs": [
+            1048,
+            1049,
+            1050,
+            1051,
+            1052,
+            1053,
+            1054
+          ],
+          "upload_queue_epochs": []
+        }
+      },
+      "storage": {
+        "schema": "blockzilla-native-cold-storage-status-v1",
+        "state": "RUNNING",
+        "archived_banks": 7424,
+        "retired_banks": 7424,
+        "freed_bytes_this_run": 17809846272,
+        "keep_seconds": 7200,
+        "batch_bank_limit": 64,
+        "parallel_bundle_limit": 2,
+        "pending_bundles": 1,
+        "last_batch_banks": 64,
+        "last_batch_seconds": 12.135405567009002,
+        "scan_sweeps_started": 1,
+        "scan_sweeps_completed": 0,
+        "scan_pages_this_run": 117,
+        "scan_rows_this_run": 7488,
+        "scan_after_slot": 457540831,
+        "scan_after_bank": 1039917,
+        "scan_through_slot": 457614117,
+        "last_candidate_seen_unix_ms": 1792149747562,
+        "last_candidate_eligible_unix_ms": 1792149747870,
+        "last_scan_skip_counts": {
+          "frame_replay": 0,
+          "pending": 0,
+          "archived": 0,
+          "retention": 0,
+          "bank_replay": 0,
+          "writer_ack": 0
+        },
+        "full_remote_readback_required": true,
+        "updated_unix_ms": 1792149747874,
+        "storage_progress": "TRANSFERRING",
+        "progress_stall_seconds": 900,
+        "last_archive_progress_unix_ms": 1792149747316,
+        "eligible_wait_since_unix_ms": 1792149747870,
+        "oldest_eligible_pending_slot": 457540768
+      },
+      "validator_pid": 2579205
+    },
+    "archived_banks_advanced": 6208,
+    "retired_banks_advanced": 6208,
+    "released_bytes": 14801940480
+  },
+  "later_health": {
+    "schema": "blockzilla-foundation-heartbeat-v1",
+    "machine_id": "foundation",
+    "sampled_unix_ms": 1792149958764,
+    "monotonic_ms": 1441104684,
+    "boot_id": "5caa7ddd-4731-4b83-8233-6b3c6a2e203d",
+    "free_disk_bytes": 1446729752576,
+    "capture_reserve_bytes": 429496729600,
+    "mem_available_bytes": 983365705728,
+    "capture": {
+      "session": "000000000000000018deede1d641da13-275b05",
+      "state": "CAPTURING",
+      "durable_sequence": 176783447,
+      "latest_rooted_slot": 457620154,
+      "updated_unix_ms": null
+    },
+    "compact": {
+      "state": "RUNNING",
+      "last_compact_slot": 457620183,
+      "event_sequence": 173638,
+      "source_sequence": 176779623,
+      "updated_unix_ms": 1792149958765
+    },
+    "publisher": {
+      "state": "RUNNING",
+      "sequence": 173516,
+      "updated_unix_ms": 1792149955544
+    },
+    "cold_storage": {
+      "state": "RUNNING",
+      "retired_banks": 8960,
+      "updated_unix_ms": 1792149957649,
+      "storage_progress": "TRANSFERRING",
+      "progress_stall_seconds": 900,
+      "eligible_wait_since_unix_ms": 1792149942291,
+      "last_archive_progress_unix_ms": 1792149956864
+    },
+    "services": {
+      "hivezilla-validator.service": "active",
+      "hivezilla-direct-worker.service": "active",
+      "hivezilla-bank-v2-producer.service": "active",
+      "hivezilla-bank-v2-r2-publisher.service": "active",
+      "hivezilla-native-cold-storage-20261012-live.service": "active",
+      "hivezilla-live-priority-20261012.service": "active"
+    },
+    "rpc": {
+      "healthy": true,
+      "finalized_slot": 457620153
+    },
+    "errors": [],
+    "bank_v2": {
+      "status": "live",
+      "confirmed_slot": 457620178,
+      "source_observed_at_unix_ms": 1792149957138,
+      "sampled_at_unix_ms": 1792149958794,
+      "source_lag_ms": 1656
+    },
+    "archive": {
+      "state": "COMPLETE",
+      "epoch": 1054,
+      "updated_unix_ms": 1792149958764,
+      "stage_updated_unix_ms": 1791888439162,
+      "progress_updated_unix_ms": null,
+      "progress_percent": null,
+      "bytes_per_second": null,
+      "eta_seconds": null,
+      "eta_scope": null,
+      "paused": false,
+      "epoch_eta_min_seconds": null,
+      "epoch_eta_max_seconds": null,
+      "queue_eta_min_seconds": null,
+      "queue_eta_max_seconds": null,
+      "last_completed_epoch": 1054,
+      "last_compact_bytes": 122250037731,
+      "completed_epochs": [
+        1048,
+        1049,
+        1050,
+        1051,
+        1052,
+        1053,
+        1054
+      ],
+      "upload_queue_epochs": []
+    }
+  },
+  "proof_files": {
+    "flow": {
+      "sha256": "cd608e89e2b07444cb9348a17a5f50074e0f085c02dc3eba0f2c963cb2bb633c",
+      "remote_path": "ROOT/reports/cold-storage-flow-check-20261016-r1/RESULT.json"
+    },
+    "cold_install": {
+      "sha256": "b60877ca43cdc9ed8ca32bd2da9195491099dbfca2da2e40a23a63141750b81a",
+      "remote_path": "ROOT/reports/cold-storage-flow-repair-20261016-apply/INSTALLATION.json"
+    },
+    "monitor_install": {
+      "sha256": "8a2f777ae9ee40cb2aeaf34dcb55144a096162021ccab639a0afda8696e6661f",
+      "remote_path": "ROOT/reports/bank-v2-readiness-20261016-apply/INSTALLATION.json"
+    }
+  },
+  "limits": [
+    "This finite flow check does not prove uninterrupted future coverage or sustained capacity.",
+    "Downstream source handoff is not automated by the watcher.",
+    "The old-source finite drain stopped before its existing cap and needs a separately bounded resume.",
+    "Native source gaps and publication flags remain unchanged.",
+    "The external watcher received fixed host fault codes; no external Worker code was changed."
+  ]
+}

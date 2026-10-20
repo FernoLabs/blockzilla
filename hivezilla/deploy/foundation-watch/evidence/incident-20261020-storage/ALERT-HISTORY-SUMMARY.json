@@ -1,0 +1,309 @@
+{
+  "schema": "blockzilla-evening-alert-history-summary-v1",
+  "sampled_unix_ms": 1792475639800,
+  "history_sha256": "8262b1f7625947466e9d6c22be1bc8a551c8506f663481c1735899c9b4f987cb",
+  "returned_alerts": 100,
+  "truncated": false,
+  "events_since_morning_check": [
+    {
+      "id": "bbdb2969-0b9e-4ae6-99a3-cd8d9087a47f",
+      "kind": "failure",
+      "issues": [
+        "cloud_storage_not_running",
+        "telemetry:cold_storage_failed",
+        "telemetry:storage_jobs_degraded"
+      ],
+      "createdMs": 1792475544348,
+      "status": "delivered",
+      "attempts": 1,
+      "paris_time": "2026-10-20T07:52:24.348000+02:00"
+    },
+    {
+      "id": "c03176b2-2a3c-40fe-b91d-cfa908d00339",
+      "kind": "recovery",
+      "issues": [],
+      "createdMs": 1792475050330,
+      "status": "delivered",
+      "attempts": 1,
+      "paris_time": "2026-10-20T07:44:10.330000+02:00"
+    },
+    {
+      "id": "32eaa13a-ad10-4738-a86d-76dd106d4b71",
+      "kind": "failure",
+      "issues": [
+        "cloud_storage_not_running",
+        "telemetry:cold_storage_failed",
+        "telemetry:storage_jobs_degraded"
+      ],
+      "createdMs": 1792474750509,
+      "status": "delivered",
+      "attempts": 1,
+      "paris_time": "2026-10-20T07:39:10.509000+02:00"
+    },
+    {
+      "id": "2a5311f4-ffd4-49b0-8603-681c8618a1e9",
+      "kind": "recovery",
+      "issues": [],
+      "createdMs": 1792474480676,
+      "status": "delivered",
+      "attempts": 1,
+      "paris_time": "2026-10-20T07:34:40.676000+02:00"
+    },
+    {
+      "id": "140d611c-0e8b-4db0-81a3-73e15c671b7c",
+      "kind": "failure",
+      "issues": [
+        "cloud_storage_not_running",
+        "service:hivezilla-native-cold-storage-20261012-live.service",
+        "telemetry:cold_storage_failed",
+        "telemetry:service_cold_storage_inactive",
+        "telemetry:storage_jobs_degraded"
+      ],
+      "createdMs": 1792474360408,
+      "status": "delivered",
+      "attempts": 1,
+      "paris_time": "2026-10-20T07:32:40.408000+02:00"
+    },
+    {
+      "id": "44689825-2e9d-4ef6-a9ed-a04341bdc860",
+      "kind": "failure",
+      "issues": [
+        "cloud_storage_not_running",
+        "telemetry:cold_storage_failed",
+        "telemetry:storage_jobs_degraded"
+      ],
+      "createdMs": 1792474330559,
+      "status": "delivered",
+      "attempts": 1,
+      "paris_time": "2026-10-20T07:32:10.559000+02:00"
+    },
+    {
+      "id": "a7ce47dd-50ba-4a6d-b0b5-ef66325646d5",
+      "kind": "failure",
+      "issues": [
+        "cloud_storage_not_running",
+        "telemetry:cold_storage_failed"
+      ],
+      "createdMs": 1792474300108,
+      "status": "delivered",
+      "attempts": 1,
+      "paris_time": "2026-10-20T07:31:40.108000+02:00"
+    },
+    {
+      "id": "77ce9552-d7ac-4790-8e15-c5e54d27bf76",
+      "kind": "recovery",
+      "issues": [],
+      "createdMs": 1792464025865,
+      "status": "delivered",
+      "attempts": 1,
+      "paris_time": "2026-10-20T04:40:25.865000+02:00"
+    },
+    {
+      "id": "a0f64b9d-57ee-4488-8f15-ae676abbde04",
+      "kind": "failure",
+      "issues": [
+        "telemetry:snapshot_capacity_headroom_low"
+      ],
+      "createdMs": 1792463604963,
+      "status": "delivered",
+      "attempts": 1,
+      "paris_time": "2026-10-20T04:33:24.963000+02:00"
+    },
+    {
+      "id": "29551a44-a3e6-4faf-8713-a7af48e47a6a",
+      "kind": "recovery",
+      "issues": [],
+      "createdMs": 1792458218866,
+      "status": "delivered",
+      "attempts": 1,
+      "paris_time": "2026-10-20T03:03:38.866000+02:00"
+    },
+    {
+      "id": "b0980d33-d99a-41e6-a79f-2f6f6c2c6370",
+      "kind": "failure",
+      "issues": [
+        "telemetry:storage_jobs_degraded"
+      ],
+      "createdMs": 1792458129201,
+      "status": "delivered",
+      "attempts": 1,
+      "paris_time": "2026-10-20T03:02:09.201000+02:00"
+    },
+    {
+      "id": "7f253bd9-245d-4ca8-ba0c-457b7999d53b",
+      "kind": "failure",
+      "issues": [
+        "cloud_storage_not_running",
+        "service:hivezilla-native-cold-storage-20261012-live.service",
+        "telemetry:cold_storage_failed",
+        "telemetry:service_cold_storage_inactive"
+      ],
+      "createdMs": 1792458099153,
+      "status": "delivered",
+      "attempts": 1,
+      "paris_time": "2026-10-20T03:01:39.153000+02:00"
+    },
+    {
+      "id": "fe78c90a-7bce-46e7-a04f-f19281b6caad",
+      "kind": "recovery",
+      "issues": [],
+      "createdMs": 1792442163924,
+      "status": "delivered",
+      "attempts": 1,
+      "paris_time": "2026-10-19T22:36:03.924000+02:00"
+    },
+    {
+      "id": "6c9ded18-d2fb-4028-ae43-1509efbf5879",
+      "kind": "failure",
+      "issues": [
+        "telemetry:snapshot_capacity_headroom_low"
+      ],
+      "createdMs": 1792441649204,
+      "status": "delivered",
+      "attempts": 1,
+      "paris_time": "2026-10-19T22:27:29.204000+02:00"
+    },
+    {
+      "id": "4ac43ff7-e3e6-4051-abfe-5de13df67948",
+      "kind": "recovery",
+      "issues": [],
+      "createdMs": 1792436161235,
+      "status": "delivered",
+      "attempts": 1,
+      "paris_time": "2026-10-19T20:56:01.235000+02:00"
+    },
+    {
+      "id": "c45a890e-5306-4e78-9e23-570585817e7a",
+      "kind": "failure",
+      "issues": [
+        "telemetry:bank_v2_not_live",
+        "telemetry:bank_v2_stale"
+      ],
+      "createdMs": 1792435891464,
+      "status": "delivered",
+      "attempts": 1,
+      "paris_time": "2026-10-19T20:51:31.464000+02:00"
+    },
+    {
+      "id": "642e404c-1abd-4a23-a6fd-cb96f1c973c0",
+      "kind": "recovery",
+      "issues": [],
+      "createdMs": 1792420404743,
+      "status": "delivered",
+      "attempts": 1,
+      "paris_time": "2026-10-19T16:33:24.743000+02:00"
+    },
+    {
+      "id": "2600118b-6920-4a0a-a56d-03357c60a139",
+      "kind": "failure",
+      "issues": [
+        "telemetry:snapshot_capacity_headroom_low"
+      ],
+      "createdMs": 1792420103370,
+      "status": "delivered",
+      "attempts": 1,
+      "paris_time": "2026-10-19T16:28:23.370000+02:00"
+    },
+    {
+      "id": "986dfea3-bd0a-4cc7-a628-770c75e0099b",
+      "kind": "recovery",
+      "issues": [],
+      "createdMs": 1792417839431,
+      "status": "delivered",
+      "attempts": 1,
+      "paris_time": "2026-10-19T15:50:39.431000+02:00"
+    },
+    {
+      "id": "85dd0342-002e-4269-806f-8facc4ebd664",
+      "kind": "failure",
+      "issues": [
+        "telemetry:bank_v2_not_live",
+        "telemetry:bank_v2_stale"
+      ],
+      "createdMs": 1792416685791,
+      "status": "delivered",
+      "attempts": 1,
+      "paris_time": "2026-10-19T15:31:25.791000+02:00"
+    },
+    {
+      "id": "2496cc8e-7ad4-4894-af37-afb419680e1e",
+      "kind": "recovery",
+      "issues": [],
+      "createdMs": 1792411309606,
+      "status": "delivered",
+      "attempts": 1,
+      "paris_time": "2026-10-19T14:01:49.606000+02:00"
+    },
+    {
+      "id": "8b291f9a-66bd-4019-87c4-f97bc865a529",
+      "kind": "failure",
+      "issues": [
+        "telemetry:storage_jobs_degraded"
+      ],
+      "createdMs": 1792411219691,
+      "status": "delivered",
+      "attempts": 1,
+      "paris_time": "2026-10-19T14:00:19.691000+02:00"
+    },
+    {
+      "id": "47596ed6-1d4c-4085-845b-cdc77a3f18e5",
+      "kind": "recovery",
+      "issues": [],
+      "createdMs": 1792398764078,
+      "status": "delivered",
+      "attempts": 1,
+      "paris_time": "2026-10-19T10:32:44.078000+02:00"
+    },
+    {
+      "id": "623955e4-4f8d-40ed-b0b9-99a3283f9aa1",
+      "kind": "failure",
+      "issues": [
+        "telemetry:snapshot_capacity_headroom_low"
+      ],
+      "createdMs": 1792398508000,
+      "status": "delivered",
+      "attempts": 1,
+      "paris_time": "2026-10-19T10:28:28+02:00"
+    },
+    {
+      "id": "61ed922f-db97-43ca-84aa-171d61ecfa8c",
+      "kind": "recovery",
+      "issues": [],
+      "createdMs": 1792393332269,
+      "status": "delivered",
+      "attempts": 1,
+      "paris_time": "2026-10-19T09:02:12.269000+02:00"
+    },
+    {
+      "id": "419855dc-6cdb-4c92-b8ec-f751a4e40990",
+      "kind": "failure",
+      "issues": [
+        "telemetry:storage_jobs_degraded"
+      ],
+      "createdMs": 1792393237331,
+      "status": "delivered",
+      "attempts": 1,
+      "paris_time": "2026-10-19T09:00:37.331000+02:00"
+    },
+    {
+      "id": "f6a3b5fc-3b08-413f-90fd-555d8de8efa2",
+      "kind": "recovery",
+      "issues": [],
+      "createdMs": 1792377071024,
+      "status": "delivered",
+      "attempts": 1,
+      "paris_time": "2026-10-19T04:31:11.024000+02:00"
+    },
+    {
+      "id": "f4be02c1-3719-4638-ad84-281ee1efbb96",
+      "kind": "failure",
+      "issues": [
+        "telemetry:snapshot_capacity_headroom_low"
+      ],
+      "createdMs": 1792376828281,
+      "status": "delivered",
+      "attempts": 1,
+      "paris_time": "2026-10-19T04:27:08.281000+02:00"
+    }
+  ]
+}

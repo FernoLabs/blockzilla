@@ -1,0 +1,47 @@
+{
+  "completed_unix_ms": 1792319664681,
+  "files": {
+    "cold_storage.py": "8a95785f2df4e2f53b414322f0fc42a8d2edd93a02f04cfca6358bb312c19800",
+    "storage_jobs.py": "567c15e41b3f21665a765fbfaa5b2c70d9a565d1280463da959d946472a3c87c",
+    "test_cold_storage.py": "2e2d5f16bcb5a67b6e10e28c8d32a3926b294cb3b2fbcca44075422d897934b6",
+    "test_storage_jobs.py": "6eef654a016d1f18be588f28bafd287d69b8aa95d8e9d02695df7cab858d7827"
+  },
+  "finite_helper_changes": [],
+  "manifest": {
+    "PATCH-MANIFEST.json": "d9f09c18aaef0bd2022595923dd6a20c9cc5aa8e4c6e9b9470ed119894e5e3da",
+    "SDK-SMOKE.json": "d9f2891f59ac968a8164593ed09804d7cb94c29780989e47375dc242b8b8a1a1",
+    "STAGE-PROVENANCE.json": "67156032a06f4783c2849e6746f3c7a80ceecdde60af95f0e00b503da85dfdf5",
+    "cold_storage.py": "8a95785f2df4e2f53b414322f0fc42a8d2edd93a02f04cfca6358bb312c19800",
+    "storage_jobs.py": "567c15e41b3f21665a765fbfaa5b2c70d9a565d1280463da959d946472a3c87c",
+    "test_cold_storage.py": "2e2d5f16bcb5a67b6e10e28c8d32a3926b294cb3b2fbcca44075422d897934b6",
+    "test_storage_jobs.py": "6eef654a016d1f18be588f28bafd287d69b8aa95d8e9d02695df7cab858d7827",
+    "transfer-deadline.patch": "498831996a2dc34c3eccc73df94b901219d81e3707038790b77c3531ae24731e"
+  },
+  "manifest_sha256": "90661d5e0d5c02f465056a8109faf8975f856d28b84a46c764232232c10aa03a",
+  "patch_manifest_sha256": "d9f09c18aaef0bd2022595923dd6a20c9cc5aa8e4c6e9b9470ed119894e5e3da",
+  "patch_sha256": "498831996a2dc34c3eccc73df94b901219d81e3707038790b77c3531ae24731e",
+  "previous_attempt_sha256": "c9716d8d5a50f6abe5f446685b38df436a8fcfd29039cdaf58113eb041d167f5",
+  "python_version": "Python 3.14.4",
+  "registry_changes": [],
+  "release": "/home/ubuntu/live/hivezilla-validator-20260930/releases/transfer-deadline-20261018-498831996a2dc34c",
+  "schema": "blockzilla-transfer-deadline-stage-v1",
+  "sdk": {
+    "boto3": "1.40.72",
+    "botocore": "1.40.72",
+    "generic_wrapper_rejected": true,
+    "network_used": false,
+    "real_stubbed_put_get": true,
+    "real_typed_protocol_wrapper": true,
+    "state": "PASSED",
+    "urllib3": "2.6.3"
+  },
+  "sdk_smoke_sha256": "d9f2891f59ac968a8164593ed09804d7cb94c29780989e47375dc242b8b8a1a1",
+  "service_operations": [],
+  "started_unix_ms": 1792319663545,
+  "state": "STAGED_TESTED_NOT_ACTIVE",
+  "test_log_sha256": "ef629fedd66bdc85c44c51bae104f2907cb3903fd7af09a4085779cfee3377e9",
+  "test_seconds": 0.834,
+  "tests_count": 51,
+  "tests_passed": true,
+  "work": "/home/ubuntu/benchmarks/transfer-deadline-20261018-49883199-retry2"
+}

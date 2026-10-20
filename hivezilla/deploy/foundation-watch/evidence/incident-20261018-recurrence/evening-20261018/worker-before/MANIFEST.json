@@ -1,0 +1,12 @@
+{
+  "schema": "blockzilla-monitor-deployed-content-v1",
+  "http_status": 200,
+  "content_type": "multipart/form-data; boundary=7e3475ae7334a681c85e87db1c4585b4c33d4fa56023f5c072601baf4a96",
+  "parts": [
+    {
+      "file": "index.js",
+      "bytes": 42151,
+      "sha256": "d1c0833666833261bdf2728199d8bfa88244df1013f91b44ffe5ff49068d1565"
+    }
+  ]
+}

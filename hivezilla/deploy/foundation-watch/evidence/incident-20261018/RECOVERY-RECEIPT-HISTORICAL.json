@@ -1,0 +1,66 @@
+{
+  "schema": "blockzilla-megaloadon-repair-receipt-v1",
+  "date": "2026-10-18",
+  "state": "NATIVE_FEEDS_RECOVERED_STORAGE_APPROVAL_PENDING",
+  "host": "ubuntu@213.239.141.61",
+  "validator": {
+    "version": "4.3.2",
+    "pid": 2142808,
+    "no_voting": true,
+    "restarted": false
+  },
+  "source": {
+    "agave_revision": "87167f3906bdf5111e99ead64d8f4098b7874e33",
+    "genesis_hash": "5eykt4UsFv8P8NJdTREpY1vzqKqZKvdpKuc147dw2N9d",
+    "node_identity": "J7qpvCEWhdBgPdYRV3s3btWPrRVXa2qnAzgvxWTvtbrQ",
+    "session_id": "000000000000000018df884b2474cf8e-20b258"
+  },
+  "native_capture_gap_rebuilt": false,
+  "old_publisher_tail": {
+    "completed_events": 14,
+    "final_sequence": 1000493
+  },
+  "verification": {
+    "live_checks_passed": 3,
+    "stable_seconds": 526.223,
+    "all_nine_service_pids_unchanged": true,
+    "native_capture_and_compact_advance": true,
+    "publisher_sequence": 5077,
+    "rooted_compact_lag_slots": 0,
+    "private_frame_hash_and_rpc_bank_match": true,
+    "public_sse_advances": true,
+    "current_monitor_issues": [],
+    "active_monitor_incident": []
+  },
+  "tests": {
+    "bank_stream_deployment": 61,
+    "cold_storage_local": 22,
+    "cold_storage_on_host": 22
+  },
+  "raw_capture": {
+    "state": "FAILED",
+    "session": "d90d7aea9cda2212fc9d0a1c275fff88",
+    "reason": "filesystem reserve reached",
+    "requires_validator_restart_to_resume": true,
+    "service_active_does_not_prove_recording": true
+  },
+  "storage_patch": {
+    "helper_path": "/home/ubuntu/live/hivezilla-validator-20260930/releases/cold-storage-cap-20261018-2deb8d9ea7f5cd1c/cold_storage.py",
+    "sha256": "2deb8d9ea7f5cd1c52a1b6e4f8e6ed8c988f952b74ca7959570cfc122d19e9f9",
+    "old_source_job_started": false,
+    "approval_state": "AUTOMATIC_REVIEW_REJECTED_AWAITING_DIRECT_USER_APPROVAL",
+    "maximum_additional_banks": 29440,
+    "absolute_total_cap": 785546,
+    "plan": "STORAGE-PLAN.json"
+  },
+  "evidence": {
+    "LIVE-2.json": "5a8f26d4ee96c1b2ce45b52ddcd5f55d50842f6dd7dff2cb4eea1c93ac29de02",
+    "LIVE-3.json": "cdbe2cc7679c1bfa28f95e242b7e383f7ed9811000a1211d31cc0dea9c49c69d",
+    "MONITOR-BEFORE.json": "9bd3c9c0a13d55f0c49afee46abcd95e1c2fc6c9d9902bb8a802d5e4e6471401",
+    "MONITOR-FINAL.json": "6e9d2072d2b5349908980e3a6b017badbf49885019daedde4e711813891d8e83",
+    "MONITOR-RECOVERED.json": "68b9de22a4c4abad6f1c541edc9dbb6188b2fa1e4178a612b185ebc4e7398c2b",
+    "RECOVERY-EVIDENCE.json": "3359f82ba6971f03025da4f20d1d7658411cf8b101e309929b329d2ffa6122ab",
+    "RESUME-PATCH.json": "9e4ebe017b5ef18df7c084bc2f6fe9ce6977b4ae758bff876ba74d45c0064b07",
+    "STORAGE-PLAN.json": "0c3c160dd49ee67d5f2af374010d8b409fc228ecb5a01b91f4f9e7950ef1bd1f"
+  }
+}

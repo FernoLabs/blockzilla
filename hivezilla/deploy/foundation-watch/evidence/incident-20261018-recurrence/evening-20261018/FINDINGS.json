@@ -1,0 +1,169 @@
+{
+  "configuration_changes": [],
+  "credential_values_or_exception_text_recorded": false,
+  "deletions": [],
+  "disk": {
+    "accounts_allocated_bytes_1": 522778656768,
+    "accounts_allocated_bytes_2": 522779451392,
+    "allocation_sample_1_utc": "2026-10-18T18:16:32Z",
+    "allocation_sample_2_utc": "2026-10-18T18:20:33Z",
+    "evidence": [
+      "ALLOCATIONS-SNAPSHOTS.json",
+      "ALLOCATION-COMPARISON.json",
+      "FLAT-ALLOCATIONS.json"
+    ],
+    "ledger_allocated_bytes_1": 455090147328,
+    "ledger_allocated_bytes_2": 457387012096,
+    "observation": "This short interval shows about 2.30 GB of ledger allocation growth and negligible accounts growth. Active 100 million shred cleanup and RocksDB churn remain visible. This does not prove a sustained ledger leak.",
+    "seven_hour_directory_baseline_available": false,
+    "seven_hour_free_drop_fully_attributed": false
+  },
+  "earlier_storage_event": {
+    "current_live_pid": 3646032,
+    "evidence": [
+      "HOST-SAMPLE-2.json",
+      "LATEST-STATUS.json"
+    ],
+    "external_recovery_timestamp_precision": "seconds",
+    "failure_unix_ms": 1792341008535,
+    "guardian_pid": 2353836,
+    "healthy_observed_unix_ms": 1792340991240,
+    "issue": "storage_jobs_degraded",
+    "oldest_pending_submit_unix_ms": 1792340593459,
+    "recovery_unix_ms": 1792341116000,
+    "retry_attempts_now": 0,
+    "retry_exhaustion_observed": false,
+    "retry_reset_unix_ms": 1792341051863,
+    "scope": "One retained live invocation failed and the strict supervisor recovered it. Both finite jobs remained complete and unchanged.",
+    "supervisor_retry_started_unix_ms": 1792340960738,
+    "systemd_exit_unix_ms": 1792340897755,
+    "transfer_failure_unix_ms": 1792340893894,
+    "typed_failure": "BundleTransferTimeout"
+  },
+  "latest_alert": {
+    "attempt": 1,
+    "evidence": [
+      "PUBLISHERS-1800-1812.json",
+      "PUBLISHER-RETRY-TYPE.json"
+    ],
+    "external_history_source": "Exact stored incident history read by parent; no monitor logic change",
+    "failure_unix_ms": 1792346818432,
+    "interpretation": "A slow or retried commit can make the old publisher status stale because STATUS is written only after commit_batch returns. The exact past batch duration was overwritten. No socket timeout was logged for this event.",
+    "issue": "publisher_status_stale",
+    "journal_entry_count_1800_1812": 1,
+    "method": "GET",
+    "object_category": "commit",
+    "publisher_failed_or_exited_in_window": false,
+    "publisher_pid": 917318,
+    "publisher_restarted": false,
+    "publisher_retry_unix_ms": 1792346796310,
+    "recovery_unix_ms": 1792346908362,
+    "retry_cause": "HTTP500",
+    "retry_limit": 3,
+    "sleep_seconds": 1
+  },
+  "latest_status_sample": {
+    "all_protected_feed_pids_unchanged": true,
+    "capacity": {
+      "active_temporary_archive_count": 0,
+      "capacity_state": "OK",
+      "capture_reserve_bytes": 429496729600,
+      "estimated_seconds_to_capture_reserve": 308584.503,
+      "estimated_seconds_to_snapshot_headroom_exhaustion": 168337.673,
+      "free_disk_bytes": 744213450752,
+      "net_disk_growth_bytes_per_second": 1019872.088,
+      "next_archive_budget_bytes": 137438953472,
+      "non_archive_growth_bytes_per_second": 1053108.107,
+      "recovery_headroom_bytes": 69903585280,
+      "recovery_minimum_free_bytes": 536870912000,
+      "schema": "blockzilla-native-capacity-v1",
+      "snapshot_archive_allocated_bytes": 124642783232,
+      "snapshot_capture_reserve_at_risk": false,
+      "snapshot_headroom_bytes": 177277767680,
+      "snapshot_headroom_low": false,
+      "source": {
+        "agave_revision": "87167f3906bdf5111e99ead64d8f4098b7874e33",
+        "genesis_hash": "5eykt4UsFv8P8NJdTREpY1vzqKqZKvdpKuc147dw2N9d",
+        "node_identity": "J7qpvCEWhdBgPdYRV3s3btWPrRVXa2qnAzgvxWTvtbrQ",
+        "session_id": "000000000000000018df884b2474cf8e-20b258"
+      },
+      "state": "RUNNING",
+      "total_disk_bytes": 7450013548544,
+      "updated_unix_ms": 1792347773801
+    },
+    "evidence": "LATEST-STATUS.json",
+    "finite_caps": [
+      785546,
+      308768
+    ],
+    "live_cold": {
+      "archived_banks": 179035,
+      "batch_bank_limit": 64,
+      "eligible_wait_since_unix_ms": 1792347787602,
+      "freed_bytes_this_run": 89856167936,
+      "full_remote_readback_required": true,
+      "keep_seconds": 7200,
+      "last_archive_progress_unix_ms": 1792347789851,
+      "last_batch_banks": 64,
+      "last_batch_seconds": 28.095686488086358,
+      "last_candidate_eligible_unix_ms": 1792347790391,
+      "last_candidate_seen_unix_ms": 1792347790128,
+      "oldest_eligible_pending_slot": 458496347,
+      "parallel_bundle_limit": 2,
+      "pending_bundles": 2,
+      "progress_stall_seconds": 900,
+      "retired_banks": 179035,
+      "schema": "blockzilla-native-cold-storage-status-v1",
+      "state": "RUNNING",
+      "storage_progress": "TRANSFERRING",
+      "updated_unix_ms": 1792347797588
+    },
+    "sampled_unix_ms": 1792347797626
+  },
+  "limits": [
+    "The latest publisher HTTP500 is distinct from the16:28 storage transfer deadline.",
+    "No16\u201318UTC full archive was visible in the sampled filesystem.",
+    "A larger disk alone does not establish a fixed metadata bound.",
+    "The warning threshold and both finite source/cap authorities remain unchanged."
+  ],
+  "recorded_unix_ms": 1792348802774,
+  "registry_sha256": "a52115479c26ccff6367b8439cd58dbb2354bb7b61d25691e797a96611655f6f",
+  "runtime": {
+    "agave_version": "4.3.2",
+    "evidence": [
+      "RPC-ERROR-JOURNAL.json",
+      "JOURNAL-HISTORY-BOUNDS.json"
+    ],
+    "memory_available_bytes": 966574120960,
+    "retained_kernel_oom_events_since1109": 0,
+    "retained_rpc_panic_memory_error_matches_in_bounded_query": 0,
+    "rpc_health": "ok",
+    "sender_history_limit": "The heartbeat unit records lifecycle events and overwrites one latest report. Its journal has no per-run historical error arrays.",
+    "swap_bytes": 0,
+    "validator_journal_suppression_observed": true
+  },
+  "schema": "blockzilla-evening-findings-v1",
+  "service_actions": [],
+  "snapshot": {
+    "active_temporary_archives_at_sample": 0,
+    "evidence": [
+      "HOST-SAMPLE-2.json",
+      "ALLOCATIONS-SNAPSHOTS.json"
+    ],
+    "exact_application_start_completion_or_purge_time_proved": false,
+    "full_allocated_bytes": 124185071616,
+    "full_file_birth_utc": "2026-10-18T14:16:37Z",
+    "full_file_last_write_utc": "2026-10-18T14:26:10Z",
+    "retained_full_count": 1,
+    "retained_incremental_count": 1,
+    "time_limit": "The two full file times are inode observations. The bounded application journal query did not recover the exact start/completion/purge records."
+  },
+  "source": {
+    "agave_revision": "87167f3906bdf5111e99ead64d8f4098b7874e33",
+    "genesis_hash": "5eykt4UsFv8P8NJdTREpY1vzqKqZKvdpKuc147dw2N9d",
+    "node_identity": "J7qpvCEWhdBgPdYRV3s3btWPrRVXa2qnAzgvxWTvtbrQ",
+    "session_id": "000000000000000018df884b2474cf8e-20b258"
+  },
+  "source_pin_sha256": "ddfe097a2915a946c0917adcc135a2c7d997b1517d578044bfea80aadd7ea315",
+  "state": "READ_ONLY_DIAGNOSIS_COMPLETE"
+}

@@ -1,0 +1,21 @@
+{
+  "files": {
+    "FAILURE-POLICY.json": {
+      "bytes": 2355,
+      "sha256": "788294edce69ff1b4e856ef0a58cfd3bd950b8626dbf9c05dbe45ca7eda5fd97"
+    },
+    "FINDINGS.json": {
+      "bytes": 8245,
+      "sha256": "1b398f2b86f70b3e4f2bc45739f4e34190753f23796dbe0dd8af29d60e47c71e"
+    },
+    "HOST-DETAILS-2.json": {
+      "bytes": 3175,
+      "sha256": "2f34c79caa5bc997c28ee1ad5a8d38b80ae5f9ddab6c3abed84e58d08d35b4cf"
+    },
+    "HOST-SAMPLE-1.json": {
+      "bytes": 26220,
+      "sha256": "30e8cbe24a314585916aeb89c9b21b899b6f63536e96e031e54fb4be94ff7b58"
+    }
+  },
+  "schema": "blockzilla-storage-incident-manifest-20261020-v1"
+}

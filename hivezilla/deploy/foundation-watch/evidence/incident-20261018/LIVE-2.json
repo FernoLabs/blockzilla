@@ -1,0 +1,176 @@
+{
+  "checks": {
+    "capture": {
+      "details": {
+        "closed": false,
+        "durable_sequence": 1968355,
+        "failure_state": null,
+        "latest_rooted_slot": 458318302,
+        "state": "CAPTURING",
+        "writer_lock_held": true
+      },
+      "state": "PASSED"
+    },
+    "private_head_and_frame": {
+      "details": {
+        "bank_id": 553830,
+        "block_height": 436353593,
+        "blockhash": "BEwpuBwfRQC5vnmXbS5TkMn2564eEXe1VKfnqU9k8hwZ",
+        "cursor": "000000000000000018df884b2474cf8e-20b258:p3076:163ac1a1f884850190c760539acee36f85bcd9c86d3ad0c50bb314af28c46550",
+        "last_valid_block_height": 436353743,
+        "parent_blockhash": "6PKjrNTxkWP41BJr7djHvrqjcCLKybXUYCketaJqxKpy",
+        "parent_slot": 458318330,
+        "payload_frame_sha256": "926a51d5acff370276814f824cefa080081e8baf0702ca84196b5336eab84244",
+        "payload_len": 367034,
+        "rpc_bank_match": true,
+        "slot": 458318331,
+        "source_lag_ms": 441,
+        "status": "live"
+      },
+      "state": "PASSED"
+    },
+    "processed": {
+      "details": {
+        "event_sequence": 2041,
+        "lag_slots": 0,
+        "last_compact_slot": 458318331,
+        "source_sequence": 1964514,
+        "state": "RUNNING",
+        "updated_unix_ms": 1792301256107
+      },
+      "state": "PASSED"
+    },
+    "public_sse": {
+      "details": {
+        "advancing": true,
+        "block_events": 5,
+        "elapsed_seconds": 0.765,
+        "slots": [
+          458318332,
+          458318333,
+          458318334,
+          458318335,
+          458318336
+        ]
+      },
+      "state": "PASSED"
+    },
+    "publisher": {
+      "details": {
+        "blocks": 681,
+        "bytes": 278121627,
+        "cursor": "000000000000000018df884b2474cf8e-20b258:p1330:a09b8ac1991d2743b06c6382e94fa63d3d144012d74b68555dbd1d23660bfef8",
+        "sequence": 1330,
+        "state": "RUNNING",
+        "updated_unix_ms": 1792301255020
+      },
+      "state": "PASSED"
+    },
+    "rpc": {
+      "details": {
+        "finalized_slot": 458318301,
+        "genesis_hash": "5eykt4UsFv8P8NJdTREpY1vzqKqZKvdpKuc147dw2N9d",
+        "health": "ok",
+        "identity": "J7qpvCEWhdBgPdYRV3s3btWPrRVXa2qnAzgvxWTvtbrQ",
+        "version": "4.3.2"
+      },
+      "state": "PASSED"
+    },
+    "services": {
+      "details": {
+        "livecold": {
+          "active_state": "active",
+          "pid": 917356,
+          "sub_state": "running",
+          "unit": "hivezilla-native-cold-storage-20261012-live.service"
+        },
+        "producer": {
+          "active_state": "active",
+          "pid": 917148,
+          "sub_state": "running",
+          "unit": "hivezilla-bank-v2-producer.service"
+        },
+        "rawrecorder": {
+          "active_state": "active",
+          "pid": 2142799,
+          "sub_state": "running",
+          "unit": "hivezilla-shred-hook-recorder.service"
+        },
+        "relay": {
+          "active_state": "active",
+          "pid": 917317,
+          "sub_state": "running",
+          "unit": "hivezilla-stream-relay.service"
+        },
+        "v1origin": {
+          "active_state": "active",
+          "pid": 917180,
+          "sub_state": "running",
+          "unit": "hivezilla-stream-origin.service"
+        },
+        "v2origin": {
+          "active_state": "active",
+          "pid": 917181,
+          "sub_state": "running",
+          "unit": "hivezilla-bank-v2-origin.service"
+        },
+        "v2publisher": {
+          "active_state": "active",
+          "pid": 917318,
+          "sub_state": "running",
+          "unit": "hivezilla-bank-v2-r2-publisher.service"
+        },
+        "validator": {
+          "active_state": "active",
+          "pid": 2142808,
+          "sub_state": "running",
+          "unit": "hivezilla-validator.service"
+        },
+        "worker": {
+          "active_state": "active",
+          "pid": 916425,
+          "sub_state": "running",
+          "unit": "hivezilla-direct-worker.service"
+        }
+      },
+      "state": "PASSED"
+    },
+    "source": {
+      "details": {
+        "exact_source_loaded": true
+      },
+      "state": "PASSED"
+    },
+    "validator": {
+      "details": {
+        "full_snapshots": "1",
+        "incremental_snapshots": "1",
+        "no_voting": true,
+        "pid": 2142808,
+        "source_pid_match": true
+      },
+      "state": "PASSED"
+    }
+  },
+  "completed_at_unix_ms": 1792301256986,
+  "pids": {
+    "livecold": 917356,
+    "producer": 917148,
+    "rawrecorder": 2142799,
+    "relay": 917317,
+    "v1origin": 917180,
+    "v2origin": 917181,
+    "v2publisher": 917318,
+    "validator": 2142808,
+    "worker": 916425
+  },
+  "sampled_at_unix_ms": 1792301256170,
+  "schema": "blockzilla-agave-upgrade-live-sample-v1",
+  "source": {
+    "agave_revision": "87167f3906bdf5111e99ead64d8f4098b7874e33",
+    "genesis_hash": "5eykt4UsFv8P8NJdTREpY1vzqKqZKvdpKuc147dw2N9d",
+    "node_identity": "J7qpvCEWhdBgPdYRV3s3btWPrRVXa2qnAzgvxWTvtbrQ",
+    "session_id": "000000000000000018df884b2474cf8e-20b258"
+  },
+  "state": "PASSED"
+}

@@ -1,0 +1,10 @@
+{
+  "boto3": "1.40.72",
+  "botocore": "1.40.72",
+  "generic_wrapper_rejected": true,
+  "network_used": false,
+  "real_stubbed_put_get": true,
+  "real_typed_protocol_wrapper": true,
+  "state": "PASSED",
+  "urllib3": "2.6.3"
+}

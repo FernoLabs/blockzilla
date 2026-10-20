@@ -1,0 +1,186 @@
+{
+  "schema": "blockzilla-megaloadon-repair-final-v1",
+  "state": "REPAIRS_ACTIVE_APPROVED_CLEANUP_COMPLETE",
+  "recorded_unix_ms": 1792321667851,
+  "source": {
+    "agave_revision": "87167f3906bdf5111e99ead64d8f4098b7874e33",
+    "genesis_hash": "5eykt4UsFv8P8NJdTREpY1vzqKqZKvdpKuc147dw2N9d",
+    "node_identity": "J7qpvCEWhdBgPdYRV3s3btWPrRVXa2qnAzgvxWTvtbrQ",
+    "session_id": "000000000000000018df884b2474cf8e-20b258"
+  },
+  "validator": {
+    "version": "4.3.2",
+    "no_voting": true,
+    "pid": 2142808,
+    "restarted_for_these_repairs": false
+  },
+  "protected_pids": {
+    "hivezilla-bank-v2-origin": 2134416,
+    "hivezilla-bank-v2-producer": 917148,
+    "hivezilla-bank-v2-r2-publisher": 917318,
+    "hivezilla-direct-worker": 916425,
+    "hivezilla-shred-hook-recorder": 2142799,
+    "hivezilla-stream-origin": 2135639,
+    "hivezilla-stream-relay": 2136117,
+    "hivezilla-validator": 2142808
+  },
+  "cleanup": {
+    "additional_banks": 51606,
+    "absolute_cap": 308768,
+    "previous_absolute_cap": 785546,
+    "pending_bundles": 0,
+    "finite_jobs": {
+      "hivezilla-native-cold-storage-20261016-source-18de229d.service": {
+        "archived_banks": 785546,
+        "retired_banks": 785546,
+        "absolute_cap": 785546,
+        "state": "COMPLETE",
+        "active_state": "inactive"
+      },
+      "hivezilla-native-cold-storage-20261016-source-18ddd9a6.service": {
+        "archived_banks": 308768,
+        "retired_banks": 308768,
+        "absolute_cap": 308768,
+        "state": "COMPLETE",
+        "active_state": "inactive"
+      }
+    },
+    "helper_reported_allocated_bytes_removed_this_run": 143707332608,
+    "completion_free_disk_bytes": 788295614464,
+    "net_free_space_change_bytes": 151371489280,
+    "net_free_space_change_is_cleanup_only": false,
+    "independent_readback_scope": "independent_final_new_bundle",
+    "final_bundle_banks": 64,
+    "final_bundle_object_bytes": 200171520
+  },
+  "transport": {
+    "binary_sha256": "73506f06cdc646437a1a635ec9186ce6b3dd01146ae5474d8828a1f9f66c1d7d",
+    "idle_limit_seconds": 300,
+    "status_interval_seconds": 1,
+    "sustained_single_connection_seconds": 630.508,
+    "private_head_samples": 613,
+    "faults": 0,
+    "later_observation_seconds": 3018.909,
+    "later_observation_samples": 301,
+    "later_observation_faults": 0
+  },
+  "live_storage": {
+    "registry_sha256": "a52115479c26ccff6367b8439cd58dbb2354bb7b61d25691e797a96611655f6f",
+    "transfer_deadline_seconds": 300,
+    "tar_packing_inside_deadline": false,
+    "live_pid": 2353823,
+    "guardian_pid": 2353836,
+    "prior_live_counts": {
+      "archived_banks": 60649,
+      "last_archive_progress_unix_ms": 1792321411244,
+      "max_archive_rowid": 60649,
+      "metadata": {
+        "namespace": "1a93d01e2c293e1f61c246747319a92fea69ab27060f050b986304c4c4715bcf",
+        "source": {
+          "agave_revision": "87167f3906bdf5111e99ead64d8f4098b7874e33",
+          "genesis_hash": "5eykt4UsFv8P8NJdTREpY1vzqKqZKvdpKuc147dw2N9d",
+          "node_identity": "J7qpvCEWhdBgPdYRV3s3btWPrRVXa2qnAzgvxWTvtbrQ",
+          "session_id": "000000000000000018df884b2474cf8e-20b258"
+        }
+      },
+      "retired_banks": 60649
+    },
+    "independent_new_bundle_proof": "independent_one_new_live_fully_retired_bundle",
+    "cloud_bundle_banks": 64,
+    "cloud_object_bytes": 145121280,
+    "live_after_proof": {
+      "archived_banks": 60969,
+      "retired_banks": 60969,
+      "max_archive_rowid": 60969,
+      "last_archive_progress_unix_ms": 1792321496016
+    },
+    "flow_after": {
+      "sampled_unix_ms": 1792321587718,
+      "guardian": "HEALTHY",
+      "live_archived_banks": 60969,
+      "live_retired_banks": 60969,
+      "head": "live",
+      "source_lag_ms": 884,
+      "confirmed_slot": 458412131,
+      "rpc": "ok",
+      "free_disk_bytes": 789595852800,
+      "issues": []
+    },
+    "flow_seconds": 121.211,
+    "flow_samples": 13,
+    "flow_faults": 0
+  },
+  "monitor": {
+    "sampled_unix_ms": 1792321620258,
+    "current_issues": [],
+    "active_incidents": [],
+    "pending_alerts": 0,
+    "existing_checks_active": true
+  },
+  "validation": {
+    "transport_host_library_tests_passed": 36,
+    "storage_and_supervisor_local_tests_passed": 51,
+    "storage_and_supervisor_host_tests_passed": 51,
+    "activation_rollback_fixtures_passed": 4,
+    "post_verifier_fixtures_passed": 8
+  },
+  "remaining_limits": {
+    "raw_packet_capture": "FAILED; active recorder service does not establish recording; later validator restart and storage plan needed",
+    "fixed_local_metadata_storage_bound": "NOT_IMPLEMENTED; the complete reader/catalog/expiry change remains scoped",
+    "prior_capture_gaps": "Retained and not rebuilt"
+  },
+  "evidence": {
+    "cleanup_status": {
+      "path": "approved-extra/FINAL-STATUS.json",
+      "sha256": "0b6ce276039c9b7c623c07f0e6c8b56ef3a472560f27aa125ad5366ed2536ba9"
+    },
+    "cleanup_cloud": {
+      "path": "approved-extra/CLOUD-PROOF-FINAL.json",
+      "sha256": "3568ffe1ae71ea9228f82e80d5c6b66c5c74616c9a5f23698a33e948c7aaf8e5"
+    },
+    "cleanup_live": {
+      "path": "approved-extra/LIVE-FINAL.json",
+      "sha256": "10fd19363dbf2344a52f52ba76cd69c63e5104d5db6092ccf0e0ed9bb05e6425"
+    },
+    "cleanup_flow": {
+      "path": "approved-extra/FLOW-POST-TRANSPORT.json",
+      "sha256": "49279aab5f6e8ff12a9d142c5abd89d46b88efd0f27410a53fdcc95df0a1b65c"
+    },
+    "transport_installation": {
+      "path": "connection-idle/INSTALLATION.json",
+      "sha256": "7546453f32a13ebb8fb7962c7e3c6532d67b216e4ec6469bd735d4e2d2348268"
+    },
+    "transport_proof": {
+      "path": "connection-idle/SAME-CONNECTION-630S.json",
+      "sha256": "6d443c4c7edba0c6df77c005b9b74175de6fd857e045c07a29f55d16c5df816f"
+    },
+    "deadline_installation": {
+      "path": "transfer-deadline/INSTALLATION.json",
+      "sha256": "ab318ad9164cfc5fd7d0ad1580294d776a3f5049fb0fab01edff3cf709d72ab3"
+    },
+    "deadline_before": {
+      "path": "transfer-deadline/BEFORE.json",
+      "sha256": "86f67a58fa275ea3bce72fb9e6c342310f0659c00b6869dbf4679a8e66407795"
+    },
+    "deadline_cloud": {
+      "path": "transfer-deadline/POSTVERIFY.json",
+      "sha256": "486a393c1c913231651040a3e5e7834c1d2d73f9a284bbc0b94fcfce609f29be"
+    },
+    "deadline_live": {
+      "path": "transfer-deadline/LIVE-FINAL.json",
+      "sha256": "42fdf2a5b40a1db78abf25799aba2ef456a1f3d4a3970559cbb9aa45ed6ebc95"
+    },
+    "deadline_flow": {
+      "path": "transfer-deadline/FLOW-120S.json",
+      "sha256": "fceaf2276e2da3a371cd35340d9285ad83c018bea58d4834041a46a560032081"
+    },
+    "monitor": {
+      "path": "transfer-deadline/MONITOR-FINAL.json",
+      "sha256": "6ba53ba7ebd5ee6ea2ee62a665f331c9ba88a42af950c63850a4ec2d4e9f3492"
+    },
+    "metadata_next_steps": {
+      "path": "approved-extra/METADATA-NEXT-STEPS.json",
+      "sha256": "471f53effe71e536c8da302f5f1e2ea01dc5158924e2c9b1a6916cce69e46dc8"
+    }
+  }
+}

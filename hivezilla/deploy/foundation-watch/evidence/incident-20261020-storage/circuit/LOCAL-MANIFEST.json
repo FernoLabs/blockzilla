@@ -1,0 +1,126 @@
+{
+  "schema": "blockzilla-storage-recovery-circuit-patch-v1",
+  "state": "READY_FOR_HOST_TESTS",
+  "created_utc": "2026-10-20T06:15:41.449301+00:00",
+  "files": {
+    "hivezilla/deploy/direct-agave/cold_storage.py": {
+      "before": {
+        "sha256": "8a95785f2df4e2f53b414322f0fc42a8d2edd93a02f04cfca6358bb312c19800",
+        "bytes": 48305
+      },
+      "after": {
+        "sha256": "f757f2be29f01378448cbe5bb5b529db2625e6654c065f0f17ebd8ba3cbb6d41",
+        "bytes": 63344
+      }
+    },
+    "hivezilla/deploy/direct-agave/test_cold_storage.py": {
+      "before": {
+        "sha256": "2e2d5f16bcb5a67b6e10e28c8d32a3926b294cb3b2fbcca44075422d897934b6",
+        "bytes": 66992
+      },
+      "after": {
+        "sha256": "3a5fe9b96e7b3503c4d8c2d1a4efb8009f79889f4d92dbaa07420bc215e41cee",
+        "bytes": 90798
+      }
+    }
+  },
+  "patch": {
+    "sha256": "19672bb7058e6e1111d4c3508bc59c9eab4e83552326d1c3a7f63d19d5dc772d",
+    "bytes": 48413
+  },
+  "unchanged_guardian": {
+    "storage_jobs.py": {
+      "sha256": "567c15e41b3f21665a765fbfaa5b2c70d9a565d1280463da959d946472a3c87c",
+      "bytes": 22150
+    },
+    "test_storage_jobs.py": {
+      "sha256": "6eef654a016d1f18be588f28bafd287d69b8aa95d8e9d02695df7cab858d7827",
+      "bytes": 19170
+    }
+  },
+  "tests": {
+    "state": "PASSED",
+    "command": [
+      "python3",
+      "-B",
+      "-m",
+      "unittest",
+      "test_cold_storage",
+      "test_storage_jobs"
+    ],
+    "working_directory": "hivezilla/deploy/direct-agave",
+    "tests": 64,
+    "cold_tests": 53,
+    "guardian_tests": 11,
+    "failures": 0,
+    "elapsed_seconds": 1.452,
+    "runtime_review": "PASS on unchanged runtime f757f2be29f01378448cbe5bb5b529db2625e6654c065f0f17ebd8ba3cbb6d41; final additional test-only durability regression included in64-test run",
+    "host_execution": false
+  },
+  "new_regressions": [
+    "test_recovery_crash_after_verified_index_resumes_partial_retirement_without_upload",
+    "test_recovery_failed_latch_write_is_not_claimed_durable_and_can_be_retried",
+    "test_recovery_latch_write_fault_still_reports_safe_failed_evidence",
+    "test_recovery_lost_put_reply_then_412_requires_full_readback_before_retirement",
+    "test_recovery_nonfollow_restart_keeps_outage_and_waits_for_due_probe",
+    "test_recovery_outage_reservations_and_probe_cadence_survive_restarts",
+    "test_recovery_parallel_failures_share_budget_keep_caps_and_commit_only_proofs",
+    "test_recovery_permanent_fault_is_durably_blocked_across_restart",
+    "test_recovery_rejects_missing_corrupt_foreign_and_permanent_retry_state",
+    "test_recovery_reset_needs_sixty_fresh_seconds_and_later_durable_progress",
+    "test_recovery_restart_allows_only_one_due_probe_group_then_real_progress",
+    "test_recovery_source_gate_fault_outside_transfer_durably_blocks",
+    "test_recovery_successful_old_sibling_does_not_reset_outage"
+  ],
+  "new_test_count": 13,
+  "source_wide_circuit": {
+    "ledger": "cold-storage/archive.sqlite meta id3 JSON",
+    "ledger_schema": "blockzilla-native-cold-recovery-v1",
+    "initialization_anchor": "same database meta id4 JSON",
+    "anchor_schema": "blockzilla-native-cold-recovery-initialized-v1",
+    "binding": [
+      "source",
+      "namespace",
+      "max_archived_banks"
+    ],
+    "states": [
+      "NORMAL",
+      "BACKOFF",
+      "OPEN",
+      "RECOVERING",
+      "BLOCKED"
+    ],
+    "burst_retry_reservations": 3,
+    "burst_backoff_seconds": [
+      30,
+      60,
+      120
+    ],
+    "probe_minimum_seconds": 900,
+    "child_deadline_seconds": 300,
+    "reset": "60 observed fault-free seconds after verified retry/probe success and a later durable archive commit; restart establishes a new healthy baseline",
+    "permanent_failure": "BLOCKED persists before propagation; missing/corrupt/mismatched initialized ledger is a permanent state error",
+    "archive_contract": "Existing full wrapped GET, exact child proof, archive commit and retirement gates unchanged. Pending retry groups retain slot/records/path/cap reservation and original eligible time. No network or service mutation in this local patch preparation.",
+    "stall": "Existing900-second progress threshold unchanged; persisted original outage remains eligible even with an empty queue after restart.",
+    "rollback": "Read meta3/4 strictly and call pure RecoveryCircuit.validate on __new__ object; never call __init__/save/tick. Refuse BLOCKED or uncertain ledger/latch persistence.",
+    "ledger_keys": [
+      "schema",
+      "binding",
+      "state",
+      "burst_retries_used",
+      "outage_since_unix_ms",
+      "next_attempt_unix_ms",
+      "reservation",
+      "last_error",
+      "last_failure_unix_ms",
+      "healthy_since_unix_ms",
+      "healthy_start_archived_banks"
+    ]
+  },
+  "checks": {
+    "syntax": "PASS",
+    "diff_check_exit_code": 0,
+    "exact_baseline_apply_exit_code": 0
+  },
+  "deployment_performed": false
+}

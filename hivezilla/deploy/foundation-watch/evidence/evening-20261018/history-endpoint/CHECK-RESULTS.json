@@ -1,0 +1,62 @@
+[
+  {
+    "command": [
+      "npm",
+      "run",
+      "check"
+    ],
+    "exit_code": 0,
+    "elapsed_seconds": 2.002,
+    "log": "check-before-final-guard.log"
+  },
+  {
+    "command": [
+      "node",
+      "--experimental-strip-types",
+      "--test",
+      "test/model.test.ts",
+      "test/telegram.test.ts",
+      "test/worker.test.mjs"
+    ],
+    "exit_code": 1,
+    "elapsed_seconds": 0.85,
+    "log": "tests-sandbox-listen-blocked.log"
+  },
+  {
+    "command": [
+      "node",
+      "--experimental-strip-types",
+      "--test",
+      "test/model.test.ts",
+      "test/telegram.test.ts",
+      "test/worker.test.mjs"
+    ],
+    "exit_code": 1,
+    "elapsed_seconds": 7.883,
+    "log": "tests-fixture-parameter-limit.log",
+    "sandbox_note": "Local Miniflare requires a loopback listener; first sandbox-only run was blocked by EPERM."
+  },
+  {
+    "command": [
+      "npm",
+      "run",
+      "check"
+    ],
+    "exit_code": 0,
+    "elapsed_seconds": 2.449,
+    "log": "check.log"
+  },
+  {
+    "command": [
+      "node",
+      "--experimental-strip-types",
+      "--test",
+      "test/model.test.ts",
+      "test/telegram.test.ts",
+      "test/worker.test.mjs"
+    ],
+    "exit_code": 0,
+    "elapsed_seconds": 6.815,
+    "log": "tests.log"
+  }
+]

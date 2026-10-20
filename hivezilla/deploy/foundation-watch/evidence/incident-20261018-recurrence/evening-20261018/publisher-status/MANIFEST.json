@@ -1,0 +1,37 @@
+{
+  "binary_sha256": "7fb9e39d75062546cb407586596ca2f5303caaf8dd25725e768025f8266b816a",
+  "files": {
+    "BUILD-PROVENANCE.json": {
+      "bytes": 4218,
+      "sha256": "4ffec5214476e5d4f6faacf8e4d9c7347489a6c57a5236d1a51580d5859f32bf"
+    },
+    "GRAPH.json": {
+      "bytes": 8171,
+      "sha256": "9a709dde160081f66831fbb203a7b4e77b86e5869ba996ab1febe4a6e19b1adb"
+    },
+    "PATCH-MANIFEST.json": {
+      "bytes": 1422,
+      "sha256": "e8dfe7b56cbfe332380217100dab0fa4fae9ce4e2c1ab5ae2e3d7099a4e23c5b"
+    },
+    "SOURCE-BEFORE.json": {
+      "bytes": 121302,
+      "sha256": "58ca93f632098973f8353632e87415a2dc9e01a98bedf786c453ec3178fae41b"
+    },
+    "SOURCE.json": {
+      "bytes": 121305,
+      "sha256": "0a548ab1379e957ed23e627aa522a34933f0919f94ad2de56dc5ee69f32754d4"
+    },
+    "hivezilla-stream": {
+      "bytes": 16287160,
+      "sha256": "7fb9e39d75062546cb407586596ca2f5303caaf8dd25725e768025f8266b816a"
+    },
+    "publisher-status.patch": {
+      "bytes": 18696,
+      "sha256": "92f2376d361a62b4e34f4671e93c1b5f70bcf1b1f95c9c8b653a3c70c94c708e"
+    }
+  },
+  "patch_sha256": "92f2376d361a62b4e34f4671e93c1b5f70bcf1b1f95c9c8b653a3c70c94c708e",
+  "schema": "blockzilla-publisher-status-release-v1",
+  "source_manifest_sha256": "0a548ab1379e957ed23e627aa522a34933f0919f94ad2de56dc5ee69f32754d4",
+  "state": "READY_NOT_ACTIVE"
+}

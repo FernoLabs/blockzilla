@@ -1,0 +1,52 @@
+{
+  "state": "TOOLS_TESTED_NOT_APPLIED",
+  "files": {
+    "activate.py": {
+      "sha256": "56e9d936a679224866aa1d3e8e74f358dc33119094522f1b50a29e1899dc34fd",
+      "bytes": 36713
+    },
+    "test_activate.py": {
+      "sha256": "5f7948e5bea41f02f32a034380617f223e3adf812782f92e9326e7eaf7414ad8",
+      "bytes": 22451
+    },
+    "postverify/verify.py": {
+      "sha256": "3ac2eb2cece213e593cc55d05300079b54b26672bc0a55ea32a96da0431b67dd",
+      "bytes": 29853
+    },
+    "postverify/test_verify.py": {
+      "sha256": "f02f7a18f95c728e77f38255ec2db108d4e79c2b51cde70d87f230fc7be0d110",
+      "bytes": 19670
+    },
+    "postverify/proof-support.py": {
+      "sha256": "30851c6644304d86daebc050da0ab4e63b30f37e8de698b7d5ea25cb68ef3f35",
+      "bytes": 33438
+    },
+    "postverify/cloud-validator.py": {
+      "sha256": "d4fcf1d98da782e9b019c723c620e0be8ffd7e8a2026958cf72311abd96d069b",
+      "bytes": 18951
+    },
+    "postverify/MANIFEST.json": {
+      "sha256": "bb551de8abb825e5a5ee7555260613d4694cbc13fdc7766f603542d7606c92a8",
+      "bytes": 2773
+    }
+  },
+  "tests": [
+    {
+      "command": [
+        "test_activate.py"
+      ],
+      "tests": 14,
+      "state": "PASSED",
+      "log_sha256": "cbe6baaaf0f2f182234005b082b6efa572706a767a8ab858bfbd05360a7d3820"
+    },
+    {
+      "command": [
+        "test_verify.py"
+      ],
+      "tests": 13,
+      "state": "PASSED",
+      "log_sha256": "5273b0f9ddb2a563f0b13e8946fc1e982368526b406d171a2105e1922683ace6"
+    }
+  ],
+  "service_actions": []
+}

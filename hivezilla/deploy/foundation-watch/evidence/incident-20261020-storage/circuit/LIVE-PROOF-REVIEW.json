@@ -1,0 +1,128 @@
+{
+  "blockers": [],
+  "checks": {
+    "bounded_complete_key_scans": true,
+    "build_manifest_chain": true,
+    "complete_new_bundle_rowid_floor": true,
+    "exact_raw_live_only_registry_transition": true,
+    "finite_caps_and_prior_progress_unchanged": true,
+    "finite_index_exact_old_counts_and_timestamps": true,
+    "fixed_source_and_namespace": true,
+    "frozen_build_source_and_tests": true,
+    "full_cloud_object_and_member_proof": true,
+    "host_tool_fixture_receipt": true,
+    "independent_cloud_bounds": true,
+    "live_command_and_guardian_unchanged": true,
+    "new_storage_pids": true,
+    "normal_circuit_before_and_after": true,
+    "owned_backup_and_proposal_hashes": true,
+    "plan_and_before_chain": true,
+    "post_activation_durable_progress": true,
+    "preserved_workspace_hashes": true,
+    "protected_eight_pids": true,
+    "read_only_cloud_execution": true,
+    "registry_chain": true,
+    "source_limits_and_ledger_preserved": true,
+    "source_pin_binding": true,
+    "stopped_and_new_process_floors": true
+  },
+  "cloud_proof": {
+    "bundle_banks": 64,
+    "bundle_sha256": "54fd485fb393215ccadc2a41abdb01e9e5193fbac09182254acc0f3e53be9b82",
+    "full_wrapped_get": true,
+    "local_receipts_checked": 128,
+    "member_files": 1024,
+    "object_bytes": 140861440,
+    "payload_bytes": 139723482
+  },
+  "durable_progress": {
+    "activation_archived_and_retired": 771238,
+    "before_archived_and_retired": 771174,
+    "independent_proof_archived_and_retired": 771430,
+    "new_process_floor": 771174,
+    "selected_rowid_max": 771430,
+    "selected_rowid_min": 771367
+  },
+  "evidence_sha256": {
+    "BEFORE.json": "7410c55f3bf21d276b1e3bd91f3dbfa79684c74f777aef3a26e679b04d3bf078",
+    "BUILD.json": "ee1b8ae9ffcaf8b1eaf91f0a6ef487bf35560c2bdefa2d7ca7b1b328777c1d8e",
+    "INSTALLATION.json": "00cd706d2e456f03ec669dc5332a856b456afb013702137e7738b55834ea3516",
+    "LIVE-FIRST.json": "f9009a8c6475207910781fa4fb13b05c65b207335f1d0d5aa43fd43065a12a27",
+    "MANIFEST.json": "d560fc240d7d7a925917427d9d475c7761c047d0399e3bc9ba84948c1aac975c",
+    "PLAN.json": "07fe964df0303fa396387eef771342de1ed5a8e500dced7338862efc1b3b2da2",
+    "POSTVERIFY.json": "7d3d053ac7d5d49307e73648ca3f5f7c88a467e9dd6f53cc2f6e30e7384dcaa8",
+    "PRESERVED-WORKSPACE.json": "86145aa015f14772d18ccc0a6f028ec8cf6cc7e95ed471bad1de552ac2a957c9",
+    "TOOLS-STAGED.json": "63b3b76d793565b3469e76881f428f433c223be58905792f46d963ea5c6f1e34",
+    "activate.py": "56e9d936a679224866aa1d3e8e74f358dc33119094522f1b50a29e1899dc34fd",
+    "postverify/MANIFEST.json": "bb551de8abb825e5a5ee7555260613d4694cbc13fdc7766f603542d7606c92a8",
+    "postverify/verify.py": "3ac2eb2cece213e593cc55d05300079b54b26672bc0a55ea32a96da0431b67dd"
+  },
+  "finite_caps": {
+    "hivezilla-native-cold-storage-20261016-source-18ddd9a6.service": 308768,
+    "hivezilla-native-cold-storage-20261016-source-18de229d.service": 785546
+  },
+  "guardian_pid": 4054568,
+  "key_scan_measurements": [
+    {
+      "archive_rows_at_scan": 771430,
+      "deadline_seconds": 15,
+      "elapsed_seconds": 4.46677,
+      "output_row_limit": 129,
+      "returned_rows": 64,
+      "selected_rows": 64
+    },
+    {
+      "archive_rows_at_scan": 771430,
+      "deadline_seconds": 15,
+      "elapsed_seconds": 3.795967,
+      "output_row_limit": 129,
+      "returned_rows": 64,
+      "selected_rows": 64
+    }
+  ],
+  "limits": [
+    "The immutable activation receipt retains ACTIVE_PENDING_CLOUD_PROOF as its historical state; the separate hash-bound POSTVERIFY proves completion.",
+    "This independent proof covers one new complete cloud bundle and saved process/identity checks, not an outage induced on production.",
+    "Provider recovery is continuous at a bounded rate: three burst reservations then one 900-second probe for known transient faults; permanent faults remain blocked.",
+    "The 300-second transfer deadline, 900-second progress fault and all age/replay/ACK/full-readback gates remain.",
+    "Capacity warnings can return during snapshot overlap. A durable byte bound for native metadata remains unimplemented."
+  ],
+  "live_pid": 4054548,
+  "namespace": "1a93d01e2c293e1f61c246747319a92fea69ab27060f050b986304c4c4715bcf",
+  "old_evidence_modified": false,
+  "production_data_mutations": [],
+  "protected_pids": {
+    "hivezilla-bank-v2-origin": 2134416,
+    "hivezilla-bank-v2-producer": 917148,
+    "hivezilla-bank-v2-r2-publisher": 4167494,
+    "hivezilla-direct-worker": 916425,
+    "hivezilla-shred-hook-recorder": 2142799,
+    "hivezilla-stream-origin": 2135639,
+    "hivezilla-stream-relay": 2136117,
+    "hivezilla-validator": 2142808
+  },
+  "registry_after_sha256": "48f343929d1c5bce4832e4ab094f72e1f164691c8b089890b16a91c6ebae211b",
+  "registry_before_sha256": "a52115479c26ccff6367b8439cd58dbb2354bb7b61d25691e797a96611655f6f",
+  "reviewed_unix_ms": 1792477508173,
+  "root_reported_verify_live_groups_passed": 9,
+  "schema": "blockzilla-storage-circuit-live-proof-independent-review-v1",
+  "scope": "Read-only review of saved host evidence; no new host or cloud calls.",
+  "service_actions": [],
+  "source": {
+    "agave_revision": "87167f3906bdf5111e99ead64d8f4098b7874e33",
+    "genesis_hash": "5eykt4UsFv8P8NJdTREpY1vzqKqZKvdpKuc147dw2N9d",
+    "node_identity": "J7qpvCEWhdBgPdYRV3s3btWPrRVXa2qnAzgvxWTvtbrQ",
+    "session_id": "000000000000000018df884b2474cf8e-20b258"
+  },
+  "state": "PASSED",
+  "workspace_preservation": {
+    "allowed_existing_file_edits": [
+      "hivezilla/deploy/direct-agave/README.md",
+      "hivezilla/deploy/direct-agave/cold_storage.py",
+      "hivezilla/deploy/direct-agave/test_cold_storage.py",
+      "hivezilla/deploy/foundation-watch/README.md"
+    ],
+    "changed_files": [],
+    "files_checked": 52
+  }
+}

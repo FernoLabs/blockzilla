@@ -1,0 +1,45 @@
+{
+  "binary_sha256": "73506f06cdc646437a1a635ec9186ce6b3dd01146ae5474d8828a1f9f66c1d7d",
+  "files": {
+    "BUILD-ATTEMPT-1.json": {
+      "bytes": 4559,
+      "sha256": "e33828bcf94a9448ecee38589fc9084150324b68fbccbe89ae8cf83b9d453e47"
+    },
+    "BUILD-PROVENANCE.json": {
+      "bytes": 5568,
+      "sha256": "5d8a2c55ff2e5f2781827ae506cc5e8e007fbd85175bca134101dcc765ff4b3d"
+    },
+    "GRAPH.json": {
+      "bytes": 8168,
+      "sha256": "c973ce7a8e2d220b3496d77ca9e0f0c242c1aaa8d51b7a7bf3274437584564d5"
+    },
+    "PATCH-MANIFEST.json": {
+      "bytes": 968,
+      "sha256": "e194f2c8d8c4b2b9ee9c22080a7de8e3f95b3cdb14e2949d64acf680b4a61c24"
+    },
+    "RED-COMPARISON.json": {
+      "bytes": 1564,
+      "sha256": "d3ea6f299456a09b4319b0fb1ce0833ee31830c0f71577de3ceab43ab0162627"
+    },
+    "SOURCE-BEFORE.json": {
+      "bytes": 121534,
+      "sha256": "0099305fcfc27cb0ef00ec684260909636867c43ee436e0863f56772f2044dd4"
+    },
+    "SOURCE.json": {
+      "bytes": 121302,
+      "sha256": "58ca93f632098973f8353632e87415a2dc9e01a98bedf786c453ec3178fae41b"
+    },
+    "hivezilla-stream": {
+      "bytes": 16228680,
+      "sha256": "73506f06cdc646437a1a635ec9186ce6b3dd01146ae5474d8828a1f9f66c1d7d"
+    },
+    "server-idle.patch": {
+      "bytes": 10374,
+      "sha256": "2f3cbe5eb0c7e52180d8a072a5e82a9e1db71b271d46fcfaacadc2110fae6b95"
+    }
+  },
+  "patch_sha256": "2f3cbe5eb0c7e52180d8a072a5e82a9e1db71b271d46fcfaacadc2110fae6b95",
+  "schema": "blockzilla-bank-connection-idle-release-v1",
+  "source_manifest_sha256": "58ca93f632098973f8353632e87415a2dc9e01a98bedf786c453ec3178fae41b",
+  "state": "READY_NOT_ACTIVE"
+}

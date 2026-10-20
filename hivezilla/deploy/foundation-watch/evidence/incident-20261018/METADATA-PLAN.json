@@ -1,0 +1,112 @@
+{
+  "schema": "blockzilla-native-metadata-tier-plan-v1",
+  "state": "DESIGNED_NOT_DEPLOYED",
+  "measured_sample": {
+    "retired_banks": 64,
+    "local_metadata_allocated_bytes_per_bank": 36864,
+    "archive_json_bytes_per_bank": 4770,
+    "lossless_gzip6_pack_bytes_per_bank": 2637,
+    "pack_excludes_indexes_and_manifests": true
+  },
+  "remaining_growth": {
+    "catalog_bytes_per_rooted_bank_measured": 14606,
+    "combined_estimated_local_growth_bytes_per_day": [
+      10000000000,
+      21000000000
+    ],
+    "continuous_rooted_payload_retirement_is_a_total_disk_bound": false
+  },
+  "target": {
+    "shared_metadata_resolver_key": [
+      "source_tuple",
+      "slot",
+      "bank",
+      "relative_path",
+      "expected_sha256"
+    ],
+    "preserve_exact_marker_bytes": true,
+    "reject_conflicting_local_and_catalog_copies": true,
+    "catalog_source_fields": [
+      "genesis_hash",
+      "node_identity",
+      "agave_revision",
+      "session_id"
+    ],
+    "bind_existing_r2_namespace": true,
+    "immutable_shard_max_banks": 4096,
+    "immutable_shard_max_decoded_bytes": 67108864,
+    "immutable_shard_max_compressed_bytes": 16777216,
+    "local_shard_cache_max_bytes": 1073741824,
+    "proposed_limits_are_not_installed": true,
+    "host_budget": {
+      "state": "MEASUREMENT_AND_IMPLEMENTATION_REQUIRED",
+      "local_limits_required_for": [
+        "Hot compact and custody payloads, including the chain boundary and replay dependencies",
+        "Processed and v2 SQLite pages, indexes, WAL and checkpoint working space",
+        "Catalog roots, shard indexes and the decoded shard cache",
+        "Restored payloads held by reader leases",
+        "Validator accounts, account shrink, ledger and snapshot overlap",
+        "Packing and upload staging",
+        "Raw, failed-source and unresolved evidence",
+        "A separate cloud outage buffer sized from measured input"
+      ],
+      "admission_rule": "The sum of enforced local limits and measured maximum concurrent working space must fit below filesystem capacity minus the protected capture reserve. Include the next snapshot and outage buffer; do not count their space twice.",
+      "snapshot_budget_is_a_measured_floor_not_a_maximum": true,
+      "measure_allocated_bytes_and_count_shared_inodes_once": true,
+      "larger_disk_alone_bounds_growth": false,
+      "production_byte_limits_not_yet_selected": true
+    }
+  },
+  "retirement_requirements": [
+    "All deployed readers use the shared resolver before local markers can be removed.",
+    "Full cloud readback and durable source-bound catalog root commit before local retirement.",
+    "Keep current age, replay, publication, native ACK, digest and stable-file checks.",
+    "Define hot-window eviction for processed and v2 SQLite separately.",
+    "Preserve unresolved banks, current chain boundary, competing banks and late callback proof.",
+    "Add reader leases before restored payload cache eviction."
+  ],
+  "readers_requiring_updates": [
+    "hivezilla/deploy/direct-agave/cold_storage.py",
+    "hivezilla/direct-agave/src/processed.rs",
+    "crates/blockzilla-bank-stream-v2/src/artifact.rs",
+    "hivezilla/stream-relay/src/source.rs",
+    "hivezilla/stream-relay/src/bank_source.rs",
+    "hivezilla/direct-agave/src/worker.rs",
+    "hivezilla/direct-agave/src/confirmed.rs"
+  ],
+  "acceptance": [
+    "Restore all 16 original files after both metadata directories are absent; match every original hash.",
+    "Reject wrong source, namespace, marker hash, bundle hash, duplicate path and unsafe path.",
+    "Resume after interruption at every commit and removal boundary.",
+    "Check late duplicate and conflicting callbacks, competing roots and restart lookup.",
+    "Preserve old-cursor expiry behavior and exact current source.",
+    "Measure allocated files, SQLite pages, WAL, indexes and caches over at least two hot-window lengths.",
+    "Observe a full snapshot write and purge cycle, including concurrent account shrink and local staging space.",
+    "Prove the host peak-space budget and outage-buffer behavior before claiming stable total disk use."
+  ],
+  "excluded_deletion_authority": [
+    "Raw shred captures",
+    "Unresolved forks",
+    "Bankless callbacks",
+    "Incomplete capture evidence",
+    "Native retirement job history"
+  ],
+  "server_metadata_migration_started": false,
+  "separate_evidence_tiers": {
+    "raw_shreds": {
+      "state": "DESIGNED_NOT_DEPLOYED",
+      "custody": "Archive exact sealed packet segments with source, sequence and prefix-hash provenance; fully read back before any approved local retirement. Do not claim canonical or complete shred coverage.",
+      "quota": "Use retained allocated bytes after acknowledged retirement, rather than a cumulative process-lifetime byte count.",
+      "transport": "A tested reconnect state machine must open a new capture and record the gap. The current raw hook remains latched until a validator restart."
+    },
+    "unresolved_forks_and_failed_sources": {
+      "state": "DESIGNED_NOT_DEPLOYED",
+      "custody": "Store unresolved evidence in a separate noncanonical tier. Keep source identity, exact bytes, partial-session state and explicit gaps.",
+      "retirement": "Requires an explicit evidence-retention contract. A failed or unrooted bank alone does not authorize deletion."
+    },
+    "cloud_outage": {
+      "state": "DESIGNED_NOT_DEPLOYED",
+      "policy": "Size a separate bounded outage buffer from measured input rate. Pause optional and bulk input first. If the protected buffer is exhausted, keep explicit failure and gap records; do not silently drop data or lower the validator reserve."
+    }
+  }
+}

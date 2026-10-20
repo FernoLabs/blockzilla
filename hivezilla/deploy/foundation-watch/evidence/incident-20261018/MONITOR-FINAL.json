@@ -1,0 +1,108 @@
+{
+  "startedMs": 1791846078202,
+  "armed": true,
+  "sample": {
+    "schema": "blockzilla-foundation-heartbeat-v1",
+    "machine_id": "foundation",
+    "sampled_unix_ms": 1792301585733,
+    "monotonic_ms": 1592731654,
+    "boot_id": "5caa7ddd-4731-4b83-8233-6b3c6a2e203d",
+    "free_disk_bytes": 603601641472,
+    "capture_reserve_bytes": 429496729600,
+    "mem_available_bytes": 1003525648384,
+    "capture": {
+      "session": "000000000000000018df884b2474cf8e-20b258",
+      "state": "CAPTURING",
+      "durable_sequence": 5061057,
+      "latest_rooted_slot": 458319824,
+      "updated_unix_ms": null
+    },
+    "compact": {
+      "state": "RUNNING",
+      "last_compact_slot": 458319855,
+      "event_sequence": 5089,
+      "source_sequence": 5061057,
+      "updated_unix_ms": 1792301585747
+    },
+    "publisher": {
+      "state": "RUNNING",
+      "sequence": 5007,
+      "updated_unix_ms": 1792301584548
+    },
+    "cold_storage": {
+      "state": "RUNNING",
+      "retired_banks": 0,
+      "updated_unix_ms": 1792301585660
+    },
+    "services": {
+      "hivezilla-validator.service": "active",
+      "hivezilla-direct-worker.service": "active",
+      "hivezilla-bank-v2-r2-publisher.service": "active",
+      "hivezilla-native-cold-storage-20261012-live.service": "active",
+      "hivezilla-live-priority-20261012.service": "active",
+      "hivezilla-bank-v2-producer.service": "active"
+    },
+    "rpc": {
+      "healthy": true,
+      "finalized_slot": 458319823
+    },
+    "errors": [],
+    "archive": {
+      "state": "COMPLETE",
+      "epoch": 1054,
+      "updated_unix_ms": 1792301585733,
+      "stage_updated_unix_ms": 1791888439162,
+      "progress_updated_unix_ms": null,
+      "progress_percent": null,
+      "bytes_per_second": null,
+      "eta_seconds": null,
+      "eta_scope": null,
+      "paused": false,
+      "epoch_eta_min_seconds": null,
+      "epoch_eta_max_seconds": null,
+      "queue_eta_min_seconds": null,
+      "queue_eta_max_seconds": null,
+      "last_completed_epoch": 1054,
+      "last_compact_bytes": 122250037731,
+      "completed_epochs": [
+        1048,
+        1049,
+        1050,
+        1051,
+        1052,
+        1053,
+        1054
+      ],
+      "upload_queue_epochs": []
+    }
+  },
+  "lastReceivedMs": 1792301585991,
+  "lastCheckMs": 1792301588186,
+  "counters": {
+    "session": "000000000000000018df884b2474cf8e-20b258",
+    "captureSequence": 5061057,
+    "captureRoot": 458319824,
+    "publisherSequence": 5007,
+    "captureSequenceChangedMs": 1792301585991,
+    "captureRootChangedMs": 1792301585991,
+    "publisherChangedMs": 1792301585991
+  },
+  "incident": {
+    "active": [],
+    "candidate": [],
+    "candidateSinceMs": 1792301588186,
+    "issueSinceMs": {}
+  },
+  "currentIssues": [],
+  "streamIssue": null,
+  "lastDeliveryMs": 1792301168392,
+  "deliveryError": null,
+  "commandDeliveryError": null,
+  "lastCommandDeliveryMs": 1791866629302,
+  "alert_delivery_configured": true,
+  "alert_delivery_channel": "telegram",
+  "telegram_commands_configured": true,
+  "pending_commands": 0,
+  "next_alarm_ms": 1792301595682,
+  "pending_alerts": 0
+}

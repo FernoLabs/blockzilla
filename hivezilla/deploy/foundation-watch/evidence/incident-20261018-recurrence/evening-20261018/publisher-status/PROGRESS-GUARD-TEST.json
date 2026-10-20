@@ -1,0 +1,21 @@
+{
+  "schema": "blockzilla-publisher-progress-guard-check-v1",
+  "state": "PASSED",
+  "completed_unix_ms": 1792348516811,
+  "command": [
+    "node",
+    "--experimental-strip-types",
+    "--test",
+    "test/model.test.ts"
+  ],
+  "cwd": "edgezilla/foundation-watch",
+  "tests": 11,
+  "failed": 0,
+  "critical_test": "upload stalls, disk headroom and source mismatches have separate alerts",
+  "verified_behavior": "A fresh RUNNING publisher timestamp with unchanged cloud sequence still reports cloud_upload_stalled after301 seconds when work is pending.",
+  "threshold_changes": [],
+  "sources": {
+    "edgezilla/foundation-watch/src/model.ts": "54cfa939941d08160524c5c731cacb9edb75a4fcd4206caafad4782abf922f0b",
+    "edgezilla/foundation-watch/test/model.test.ts": "c0bd1ec39458f2b97fe1c915d7a5e37cb4946d74495a3b569935e460b2e835f8"
+  }
+}

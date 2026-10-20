@@ -1,0 +1,77 @@
+diff --git a/hivezilla/stream-relay/src/bank_server.rs b/hivezilla/stream-relay/src/bank_server.rs
+index 87c573b7..e568d204 100644
+--- a/hivezilla/stream-relay/src/bank_server.rs
++++ b/hivezilla/stream-relay/src/bank_server.rs
+@@ -12,6 +12,8 @@ use blockzilla_bank_stream_v2::{self as v2, Notice};
+ use serde::Deserialize;
+ use serde_json::json;
+ use std::{path::PathBuf, sync::Arc, time::Duration};
++// Keep delivery margin inside the unchanged five-second health lifetime.
++pub(crate) const STATUS_INTERVAL: Duration = Duration::from_secs(1);
+ #[derive(Clone)]
+ pub struct BankApi {
+     pub store: Arc<BankStore>,
+@@ -99,7 +101,7 @@ async fn events(
+     let start = after.clone();
+     let stream = async_stream::stream! {
+         yield Ok::<bytes::Bytes,std::io::Error>(format!("event: status\ndata: {}\n\n",serde_json::to_string(&store.head()).unwrap()).into());
+-        let mut next_status=tokio::time::Instant::now()+Duration::from_secs(5);
++        let mut next_status=tokio::time::Instant::now()+STATUS_INTERVAL;
+         loop {
+             let head=store.head();
+             if head.status=="failed" {
+@@ -108,7 +110,7 @@ async fn events(
+             }
+             if tokio::time::Instant::now()>=next_status {
+                 yield Ok(format!("event: status\ndata: {}\n\n",serde_json::to_string(&head).unwrap()).into());
+-                next_status=tokio::time::Instant::now()+Duration::from_secs(5);
++                next_status=tokio::time::Instant::now()+STATUS_INTERVAL;
+             }
+             let ready=store.notify.notified();
+             match store.after(&after) {
+diff --git a/hivezilla/stream-relay/src/bank_store.rs b/hivezilla/stream-relay/src/bank_store.rs
+index ac3fd350..6b91652c 100644
+--- a/hivezilla/stream-relay/src/bank_store.rs
++++ b/hivezilla/stream-relay/src/bank_store.rs
+@@ -155,6 +155,41 @@ mod tests {
+         future.envelope.event.sequence = 6;
+     }
+     #[test]
++    fn status_cadence_leaves_delivery_margin_but_a_real_health_stall_expires() {
++        let t = tempfile::tempdir().unwrap();
++        let s = BankStore::open(
++            source(),
++            v2::cursor(&source().session_id, 0, "-"),
++            v2::MAX_FRAME,
++            t.path().into(),
++        )
++        .unwrap();
++        let root = fresh(block(1, 9, 1, 8, 9));
++        s.admit(root.clone(), None).unwrap();
++        s.admit(control(&root, 2, "root", now_ms()), None).unwrap();
++        s.set_health("live", None);
++        let delivery_delay = Duration::from_millis(100);
++        // The former five-second cadence uses the entire health lifetime.
++        s.state.lock().unwrap().health_at =
++            Instant::now() - Duration::from_secs(5) - delivery_delay;
++        let next = fresh(block(3, 17, 2, 9, 10));
++        s.admit(next.clone(), None).unwrap();
++        s.admit(control(&next, 4, "confirmed", now_ms()), None)
++            .unwrap();
++        let h = s.head();
++        assert!(h.source_lag_ms.unwrap() < v2::DEFAULT_MAX_LAG_MS);
++        assert_eq!(h.latest_confirmed.unwrap().bank, next.envelope.event.bank);
++        assert_eq!(h.status, "stale"); // Fresh frames cannot renew health.
++
++        // Model the longest normal interval plus the same delivery delay.
++        s.state.lock().unwrap().health_at =
++            Instant::now() - crate::bank_server::STATUS_INTERVAL - delivery_delay;
++        assert_eq!(s.head().status, "live");
++        s.state.lock().unwrap().health_at =
++            Instant::now() - Duration::from_millis(v2::DEFAULT_MAX_LAG_MS + 1);
++        assert_eq!(s.head().status, "stale");
++    }
++    #[test]
+     fn batch_commit_is_atomic_bounded_and_restores_all_dependencies() {
+         let t = tempfile::tempdir().unwrap();
+         let base = v2::cursor(&source().session_id, 0, "-");

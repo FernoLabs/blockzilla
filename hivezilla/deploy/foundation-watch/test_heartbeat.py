@@ -94,6 +94,10 @@ class HeartbeatTests(unittest.TestCase):
         return heartbeat.sample(self.root, now_ms=kwargs.pop("now_ms", NOW), proc_root=self.proc,
             service_reader=kwargs.pop("service_reader", self.services),
             rpc_reader=kwargs.pop("rpc_reader", lambda: {"healthy": True, "finalized_slot": 456208201}),
+            bank_reader=kwargs.pop("bank_reader", lambda root, source, now: {
+                'status': 'live', 'confirmed_slot': 456208201,
+                'source_observed_at_unix_ms': now - 1000, 'sampled_at_unix_ms': now,
+                'source_lag_ms': 1000}),
             disk_reader=kwargs.pop("disk_reader", lambda path: SimpleNamespace(free=900 * 1024**3)), **kwargs)
 
     def payload(self):
@@ -105,6 +109,99 @@ class HeartbeatTests(unittest.TestCase):
         body = value if isinstance(value, bytes) else json.dumps(value).encode()
         transport = FakeHTTPS(code, body, headers)
         return urllib.request.build_opener(urllib.request.ProxyHandler({}), transport, heartbeat.NoRedirect()), transport
+
+    def storage_status(self, phase, waiting, committed, **changes):
+        value = {"state": "RUNNING", "retired_banks": 42, "updated_unix_ms": NOW,
+                 "storage_progress": phase, "progress_stall_seconds": 900,
+                 "eligible_wait_since_unix_ms": waiting,
+                 "last_archive_progress_unix_ms": committed, **changes}
+        self.json(self.output / "cold-storage/STATUS.json", value)
+
+    def test_private_v2_head_uses_only_local_key_and_bounded_response(self):
+        key = self.root / 'config/stream-20261004/client-api.key'
+        key.parent.mkdir(parents=True); key.write_text(TOKEN + '\n')
+        source = self.source_pin()
+        head = dict(schema='blockzilla-confirmed-head-v1', profile='native-bank-compact-v2',
+                    source=source, status='live', sampled_at_unix_ms=NOW,
+                    source_observed_at_unix_ms=NOW - 1000, source_lag_ms=1000,
+                    latest_confirmed={'bank': {'slot': 456208201}, 'observed_at_unix_ms': NOW - 1000})
+        requests = []
+        def open_local(request, timeout):
+            requests.append(request)
+            self.assertEqual(request.full_url, 'http://127.0.0.1:8871/v2/banks/head')
+            self.assertEqual(request.get_header('Authorization'), 'Bearer ' + TOKEN)
+            self.assertEqual(timeout, 2)
+            return addinfourl(io.BytesIO(json.dumps(head).encode()), HTTPMessage(), request.full_url, 200)
+        with patch.object(heartbeat, 'direct_opener', return_value=SimpleNamespace(open=open_local)):
+            value = heartbeat.read_bank_head(self.root, source, NOW)
+            self.assertEqual(value['confirmed_slot'], 456208201)
+            self.assertNotIn(TOKEN, json.dumps(value))
+            head['source'] = {**source, 'session_id': OTHER}
+            with self.assertRaises(heartbeat.SafeError): heartbeat.read_bank_head(self.root, source, NOW)
+            head['source'] = source
+            head['source_lag_ms'] = 1
+            with self.assertRaises(heartbeat.SafeError): heartbeat.read_bank_head(self.root, source, NOW)
+        self.assertEqual(len(requests), 3)
+
+    def test_private_v2_failures_do_not_suppress_the_machine_heartbeat(self):
+        def unavailable(*args): raise RuntimeError('do not log private-test-token')
+        value = self.collect(bank_reader=unavailable)
+        self.assertIn('bank_v2_unavailable', value['errors'])
+        self.assertEqual(value['capture']['state'], 'CAPTURING')
+        self.assertNotIn('private-test-token', json.dumps(value))
+        for phase, observed, expected in [('failed', NOW - 1000, 'bank_v2_not_live'),
+                                           ('stale', NOW - 5001, 'bank_v2_stale'),
+                                           ('live', NOW - 5001, 'bank_v2_stale')]:
+            with self.subTest(phase=phase):
+                value = self.collect(bank_reader=lambda *args: {'status': phase,
+                    'confirmed_slot': 456208201, 'source_observed_at_unix_ms': observed})
+                self.assertIn(expected, value['errors'])
+
+    def test_private_v2_reader_rejects_oversize_data_and_key_symlinks(self):
+        key = self.root / 'config/stream-20261004/client-api.key'
+        key.parent.mkdir(parents=True); key.write_text(TOKEN)
+        def oversized(request, timeout):
+            return addinfourl(io.BytesIO(b'x' * 65537), HTTPMessage(), request.full_url, 200)
+        with patch.object(heartbeat, 'direct_opener', return_value=SimpleNamespace(open=oversized)):
+            with self.assertRaises(heartbeat.SafeError):
+                heartbeat.read_bank_head(self.root, self.source_pin(), NOW)
+        original = key.with_name('original.key'); key.rename(original); key.symlink_to(original.name)
+        with self.assertRaises(heartbeat.SafeError):
+            heartbeat.read_bank_head(self.root, self.source_pin(), NOW)
+
+    def test_fresh_storage_status_cannot_hide_no_archive_progress(self):
+        # Fresh helper timestamps and a RUNNING process are not a durable commit.
+        for phase in ("STALLED", "TRANSFERRING", "WAITING"):
+            with self.subTest(phase=phase):
+                self.storage_status(phase, NOW - 900000, None)
+                value = self.collect()
+                self.assertIn("cold_storage_no_archive_progress", value["errors"])
+                self.assertNotIn("cold_storage_stale", value["errors"])
+
+    def test_waiting_gates_and_slow_transfer_do_not_claim_a_stall(self):
+        for phase, waiting, committed in (("WAITING", None, None),
+                                          ("ADVANCING", None, NOW - 1000),
+                                          ("TRANSFERRING", NOW - 899999, None),
+                                          ("TRANSFERRING", NOW - 1800000, NOW - 1000)):
+            with self.subTest(phase=phase, waiting=waiting, committed=committed):
+                self.storage_status(phase, waiting, committed)
+                value = self.collect()
+                self.assertEqual(value["errors"], [])
+                self.assertEqual(value["cold_storage"]["storage_progress"], phase)
+
+    def test_invalid_storage_progress_remains_a_visible_collection_fault(self):
+        for changes in ({"storage_progress": "unexpected"},
+                        {"progress_stall_seconds": True},
+                        {"progress_stall_seconds": 0},
+                        {"eligible_wait_since_unix_ms": NOW + 30001},
+                        {"last_archive_progress_unix_ms": NOW + 30001}):
+            with self.subTest(changes=changes):
+                self.storage_status("TRANSFERRING", NOW - 1000, None, **changes)
+                self.assertIn("cold_storage_unavailable", self.collect()["errors"])
+        self.storage_status("STALLED", NOW - 1000, None)
+        self.assertIn("cold_storage_unavailable", self.collect()["errors"])
+        self.storage_status("STALLED", None, None)
+        self.assertIn("cold_storage_unavailable", self.collect()["errors"])
 
     def test_collector_is_read_only_and_sends_expected_schema(self):
         paths = list(self.root.rglob("*"))
@@ -180,6 +277,302 @@ class HeartbeatTests(unittest.TestCase):
             self.assertIn(code, value["errors"])
         (self.root / "reports/bank-v2-recovery-20261012/RECOVERY.json").write_bytes(b"x" * (heartbeat.MAX_JSON_BYTES + 1))
         self.assertIn("source_invalid", self.collect()["errors"])
+
+    def source_pin(self, session=SESSION):
+        return dict(genesis_hash="genesis", node_identity="identity", agave_revision="revision", session_id=session)
+
+    def raw_fixture(self, phase="ACTIVE", stamp=NOW):
+        source = self.source_pin()
+        self.json(self.root / "config/native-active-source.json", source)
+        output = self.root / heartbeat.RAW_OUTPUT
+        capture_id, pid = "a" * 32, int(SESSION.rsplit("-", 1)[1], 16)
+        capture = output / capture_id
+        self.json(output / "CURRENT.json", dict(capture_id=capture_id, path=str(capture), producer_pid=pid))
+        self.json(capture / "SESSION.json", dict(capture_id=capture_id, producer_pid=pid,
+            genesis_hash=source["genesis_hash"], validator_identity=source["node_identity"]))
+        self.json(capture / "STATUS.json", dict(schema="hivezilla-shred-hook-status-v1", state=phase,
+            updated_unix_ms=stamp, durable_next_sequence=100, journal_bytes=12345, counts=dict(packets=99),
+            reason="private path and secret must not be copied"))
+        return output, capture
+
+    def require_raw(self):
+        self.json(self.root / "config/raw-capture-monitor.json",
+                  dict(schema=heartbeat.RAW_POLICY_SCHEMA, required=True))
+
+    def test_optional_failed_raw_capture_is_separate_from_native_feed_faults(self):
+        self.raw_fixture("FAILED", NOW - 900000)
+        value = self.collect()
+        self.assertEqual(value["errors"], [])
+        self.assertEqual(value["capture"]["state"], "CAPTURING")
+        self.assertEqual(value["raw_capture"]["state"], "FAILED")
+        self.assertEqual(value["raw_capture"]["recorder_state"], "active")
+        self.assertEqual(value["raw_capture"]["faults"], ["raw_capture_failed"])
+        self.assertFalse(value["raw_capture"]["required"])
+        self.assertNotIn("private path", json.dumps(value))
+
+    def test_local_sender_report_keeps_optional_raw_failure_without_native_faults(self):
+        self.raw_fixture("FAILED", NOW - 900000)
+        value = self.collect()
+        sent = []
+        report = self.root / "reports/foundation-watch/STATUS.json"
+        self.assertEqual(heartbeat.run_once(value, report, "https://watch.example", TOKEN,
+            sender=lambda payload, url, token: sent.append(payload)), 0)
+        receipt = json.loads(report.read_text())
+        self.assertEqual(receipt["state"], "SENT")
+        self.assertEqual(receipt["errors"], [])
+        self.assertEqual(receipt["raw_capture"], value["raw_capture"])
+        self.assertEqual(receipt["raw_capture"]["state"], "FAILED")
+        self.assertFalse(receipt["raw_capture"]["required"])
+        self.assertEqual(sent, [value])
+        for secret in (TOKEN, "watch.example", "private path", "secret must not be copied"):
+            self.assertNotIn(secret, report.read_text())
+
+    def test_required_raw_failure_stale_source_and_missing_capture_are_explicit(self):
+        self.require_raw()
+        self.assertIn("raw_capture_unavailable", self.collect()["errors"])
+        output, capture = self.raw_fixture("FAILED")
+        self.assertIn("raw_capture_failed", self.collect()["errors"])
+        self.json(capture / "STATUS.json", dict(schema="hivezilla-shred-hook-status-v1", state="ACTIVE",
+            updated_unix_ms=NOW - 120001, durable_next_sequence=100, journal_bytes=12345, counts=dict(packets=99)))
+        self.assertIn("raw_capture_stale", self.collect()["errors"])
+        self.json(output / "CURRENT.json", dict(capture_id="../outside", path="/private", producer_pid=123))
+        self.assertIn("raw_capture_source_mismatch", self.collect()["errors"])
+
+    def test_raw_capture_never_infers_health_from_service_or_historical_capture(self):
+        output, capture = self.raw_fixture()
+        self.require_raw()
+        self.assertEqual(self.collect()["raw_capture"]["state"], "ACTIVE")
+        self.json(output / ("b" * 32) / "STATUS.json", dict(state="FAILED"))
+        self.assertEqual(self.collect()["errors"], [])
+        (capture / "STATUS.json").unlink()
+        value = self.collect()
+        self.assertEqual(value["raw_capture"]["state"], "UNAVAILABLE")
+        self.assertIn("raw_capture_unavailable", value["errors"])
+        self.json(self.root / "config/raw-capture-monitor.json", dict(required=False))
+        self.assertIn("raw_capture_policy_invalid", self.collect()["errors"])
+
+    def capacity_fixture(self, free=750 * 1024**3, stamp=NOW):
+        source = self.source_pin()
+        self.json(self.root / "config/native-active-source.json", source)
+        reserve, recovery, budget = 400 * 1024**3, 500 * 1024**3, 128 * 1024**3
+        value = dict(schema="blockzilla-native-capacity-v1", state="RUNNING", source=source,
+            updated_unix_ms=stamp, free_disk_bytes=free, capture_reserve_bytes=reserve,
+            recovery_minimum_free_bytes=recovery, next_archive_budget_bytes=budget,
+            snapshot_headroom_bytes=free - reserve - budget, recovery_headroom_bytes=free - recovery - budget,
+            snapshot_capture_reserve_at_risk=free < reserve + budget,
+            snapshot_headroom_low=free < recovery + budget)
+        path = self.root / "reports/native-capacity/STATUS.json"
+        self.json(path, value)
+        return path, value
+
+    def test_snapshot_capacity_warns_before_capture_reserve_is_at_risk(self):
+        self.assertEqual(self.collect()["errors"], [])  # Legacy host has no installed collector.
+        self.capacity_fixture()
+        self.assertEqual(self.collect()["errors"], [])
+        self.capacity_fixture(free=600 * 1024**3)
+        value = self.collect()
+        self.assertIn("snapshot_capacity_headroom_low", value["errors"])
+        self.assertNotIn("snapshot_capacity_reserve_at_risk", value["errors"])
+        self.capacity_fixture(free=520 * 1024**3)
+        value = self.collect()
+        self.assertIn("snapshot_capacity_reserve_at_risk", value["errors"])
+        self.assertLess(value["capacity"]["snapshot_headroom_bytes"], 0)
+
+    def test_installed_capacity_telemetry_fails_closed_on_stale_missing_wrong_source_or_math(self):
+        path, value = self.capacity_fixture(stamp=NOW - 90001)
+        self.assertIn("snapshot_capacity_stale", self.collect()["errors"])
+        path.unlink()
+        self.assertIn("snapshot_capacity_unavailable", self.collect()["errors"])
+        path, value = self.capacity_fixture()
+        self.json(path, dict(value, source=self.source_pin(OTHER)))
+        self.assertIn("snapshot_capacity_source_mismatch", self.collect()["errors"])
+        self.json(path, dict(value, snapshot_headroom_bytes=0))
+        self.assertIn("snapshot_capacity_invalid", self.collect()["errors"])
+        self.json(path, dict(value, state="FAILED", error="private details"))
+        sample = self.collect()
+        self.assertIn("snapshot_capacity_failed", sample["errors"])
+        self.assertNotIn("private details", json.dumps(sample))
+
+    def test_terminal_cold_storage_failure_keeps_safe_state_without_progress_unavailable(self):
+        self.json(self.output / "cold-storage/STATUS.json", dict(state="FAILED", storage_progress="FAILED",
+            updated_unix_ms=NOW, error="private details"))
+        value = self.collect()
+        self.assertEqual(value["cold_storage"]["state"], "FAILED")
+        self.assertIsNone(value["cold_storage"]["retired_banks"])
+        self.assertEqual(value["cold_storage"]["storage_progress"], "FAILED")
+        self.assertIn("cold_storage_failed", value["errors"])
+        self.assertNotIn("cold_storage_unavailable", value["errors"])
+        self.assertNotIn("private details", json.dumps(value))
+
+    def storage_jobs_fixture(self, *, failed=False, stamp=NOW):
+        source = dict(self.source_pin(), agave_revision="a" * 40)
+        self.json(self.root / "config/native-active-source.json", source)
+        old = dict(source, session_id=OTHER)
+        unit = "hivezilla-native-cold-storage-20261016-source-18de229d.service"
+        approved = dict(unit=unit, source=old, max_archived_banks=785546)
+        registry = self.root / "config/storage-jobs.json"
+        self.json(registry, dict(schema="blockzilla-storage-jobs-registry-v1", root=str(self.root), jobs=[approved]))
+        registry.chmod(0o600)
+        faults = ["storage_job_failed"] if failed else []
+        value = dict(schema="blockzilla-storage-jobs-status-v1", state="DEGRADED" if faults else "HEALTHY",
+            active_source=source, registry_sha256=hashlib.sha256(registry.read_bytes()).hexdigest(),
+            updated_unix_ms=stamp, issues=faults,
+            jobs=[dict(approved, state="FAILED" if failed else "RUNNING", issues=faults,
+                       archived_banks=756106, retired_banks=756106, remaining_banks=29440)])
+        path = self.root / "reports/storage-jobs/STATUS.json"
+        self.json(path, value)
+        return registry, path, value
+
+    def test_registered_old_storage_failure_is_visible_separate_from_active_live_storage(self):
+        _, _, _ = self.storage_jobs_fixture(failed=True)
+        value = self.collect()
+        self.assertEqual(value["errors"], ["storage_jobs_degraded"])
+        self.assertEqual(value["cold_storage"]["state"], "RUNNING")
+        self.assertEqual(value["storage_jobs"]["jobs"][0]["remaining_banks"], 29440)
+        self.assertEqual(value["storage_jobs"]["jobs"][0]["source"]["session_id"], OTHER)
+
+    def test_local_sender_keeps_capacity_and_storage_details_after_success_and_failure(self):
+        capacity_path, capacity = self.capacity_fixture(free=600 * 1024**3)
+        _, jobs_path, jobs = self.storage_jobs_fixture(failed=True)
+        private_url = "https://private.example/diagnostics?key=secret"
+        capacity.update(source=jobs["active_source"], error=TOKEN, url=private_url)
+        self.json(capacity_path, capacity)
+        jobs["jobs"][0]["private_details"] = "private storage exception body"
+        self.json(jobs_path, jobs)
+        with patch.dict(os.environ, {"PRIVATE_TEST_SETTING": "private environment value"}):
+            value = self.collect()
+            before = json.dumps(value, sort_keys=True)
+            for code in (202, 500):
+                with self.subTest(http_status=code):
+                    opener, transport = self.opener(code, b"private response body" if code == 500 else None)
+                    def sender(payload, url, token):
+                        heartbeat.send(payload, url, token, opener=opener)
+                    report = self.root / "reports/foundation-watch/STATUS.json"
+                    self.assertEqual(heartbeat.run_once(value, report, "https://watch.example", TOKEN,
+                        sender=sender), 0 if code == 202 else 1)
+                    receipt = json.loads(report.read_text())
+                    self.assertEqual(receipt["state"], "SENT" if code == 202 else "FAILED")
+                    self.assertEqual(receipt["capacity"], value["capacity"])
+                    self.assertEqual(receipt["storage_jobs"], value["storage_jobs"])
+                    self.assertEqual(receipt["storage_jobs"]["jobs"][0]["remaining_banks"], 29440)
+                    self.assertTrue(receipt["capacity"]["snapshot_headroom_low"])
+                    self.assertEqual(receipt["errors"], value["errors"])
+                    self.assertEqual(json.loads(transport.requests[0].data), value)
+                    self.assertEqual(json.dumps(value, sort_keys=True), before)
+                    self.assertEqual(report.stat().st_mode & 0o777, 0o600)
+                    for secret in (TOKEN, private_url, "watch.example", "private environment value",
+                                   "private storage exception body", "private response body"):
+                        self.assertNotIn(secret, report.read_text())
+
+    def test_storage_registry_enables_strict_fresh_source_cap_and_registry_checks(self):
+        registry, path, data = self.storage_jobs_fixture()
+        self.assertEqual(self.collect()["errors"], [])
+        self.json(path, dict(data, updated_unix_ms=NOW - 90001))
+        self.assertIn("storage_jobs_stale", self.collect()["errors"])
+        path.unlink()
+        self.assertIn("storage_jobs_unavailable", self.collect()["errors"])
+        for mutation in ("active_source", "registry", "job_source", "cap", "unit", "duplicate", "false_healthy", "unsafe_issue"):
+            changed = json.loads(json.dumps(data))
+            if mutation == "active_source": changed["active_source"]["session_id"] = OTHER
+            elif mutation == "registry": changed["registry_sha256"] = "0" * 64
+            elif mutation == "job_source": changed["jobs"][0]["source"]["session_id"] = SESSION
+            elif mutation == "cap": changed["jobs"][0]["max_archived_banks"] += 1
+            elif mutation == "unit": changed["jobs"][0]["unit"] = "unapproved.service"
+            elif mutation == "duplicate": changed["jobs"].append(changed["jobs"][0])
+            elif mutation == "false_healthy": changed["jobs"][0]["state"] = "FAILED"
+            else: changed["issues"] = ["private credential/?token=secret"]
+            with self.subTest(mutation=mutation):
+                self.json(path, changed)
+                value = self.collect()
+                self.assertIn("storage_jobs_unavailable", value["errors"])
+                self.assertNotIn("token=secret", json.dumps(value))
+        registry.unlink()  # Reports cannot authorize jobs without registration.
+        self.assertNotIn("storage_jobs", self.collect())
+        self.assertEqual(self.collect()["errors"], [])
+
+    def test_only_current_live_storage_registration_may_omit_absolute_cap(self):
+        registry, path, data = self.storage_jobs_fixture()
+        registered = json.loads(registry.read_text())
+        registered["jobs"][0]["max_archived_banks"] = None
+        self.json(registry, registered)
+        data["registry_sha256"] = hashlib.sha256(registry.read_bytes()).hexdigest()
+        data["jobs"][0]["max_archived_banks"] = None
+        self.json(path, data)
+        self.assertIn("storage_jobs_unavailable", self.collect()["errors"])
+        registered["jobs"][0].update(unit="hivezilla-native-cold-storage-20261012-live.service",
+                                     source=data["active_source"])
+        self.json(registry, registered)
+        data["registry_sha256"] = hashlib.sha256(registry.read_bytes()).hexdigest()
+        data["jobs"][0].update(registered["jobs"][0])
+        self.json(path, data)
+        self.assertEqual(self.collect()["errors"], [])
+
+    def test_storage_registry_permissions_are_explicit_and_group_writable_input_is_rejected(self):
+        previous = os.umask(0o002)
+        try:
+            registry, _, _ = self.storage_jobs_fixture()
+        finally:
+            os.umask(previous)
+        self.assertEqual(registry.stat().st_mode & 0o777, 0o600)
+        self.assertEqual(self.collect()["errors"], [])
+        registry.chmod(0o660)
+        self.assertIn("storage_jobs_unavailable", self.collect()["errors"])
+        registry.chmod(0o600)
+        self.assertEqual(self.collect()["errors"], [])
+
+    def test_explicit_current_pin_wins_without_changing_historical_recovery(self):
+        historical = self.root / "reports/bank-v2-recovery-20261012/RECOVERY.json"
+        self.json(historical, {"source": {"session_id": OTHER}})
+        before = historical.read_bytes()
+        pin = self.root / "config/native-active-source.json"
+        self.json(pin, self.source_pin())
+        value = self.collect()
+        self.assertEqual(value["capture"]["session"], SESSION)
+        self.assertEqual(value["capture"]["state"], "CAPTURING")
+        self.assertEqual(value["errors"], [])
+        self.assertEqual(historical.read_bytes(), before)
+
+    def test_absent_pin_keeps_legacy_source_and_existing_invalid_pin_fails_closed(self):
+        self.assertEqual(heartbeat.select_source(self.root)["session_id"], SESSION)
+        pin = self.root / "config/native-active-source.json"
+        for invalid in ({}, {"source": self.source_pin()}, self.source_pin("../../outside"),
+                        {**self.source_pin(), "node_identity": None},
+                        {**self.source_pin(), "extra": "ignored"}):
+            with self.subTest(value=invalid):
+                self.json(pin, invalid)
+                value = self.collect()
+                self.assertIn("source_invalid", value["errors"])
+                self.assertIsNone(value["capture"]["session"])
+        pin.write_text("invalid JSON")
+        self.assertIn("source_invalid", self.collect()["errors"])
+        pin.unlink()
+        pin.symlink_to(pin.with_name("missing.json"))
+        self.assertIn("source_invalid", self.collect()["errors"])
+
+    def test_pin_change_is_observed_without_selecting_newest_capture(self):
+        pin = self.root / "config/native-active-source.json"
+        self.json(pin, self.source_pin())
+        self.create_capture(NEWER)
+        self.assertEqual(heartbeat.select_source(self.root)["session_id"], SESSION)
+        self.json(pin, self.source_pin(NEWER))
+        self.assertEqual(heartbeat.select_source(self.root)["session_id"], NEWER)
+
+    def test_terminal_compact_failure_retains_state_and_nullable_counters(self):
+        raw_error = "https://private.example/?token=do-not-copy"
+        self.json(self.output / "STATUS.json", {"state": "FAILED", "profile": "native-processed-compact-v1",
+            "error": raw_error, "source_preserved": True})
+        value = self.collect()
+        self.assertEqual(value["compact"], dict(state="FAILED", last_compact_slot=None,
+            event_sequence=None, source_sequence=None, updated_unix_ms=None))
+        self.assertIn("compact_failed", value["errors"])
+        self.assertIn("compact_stale", value["errors"])
+        self.assertNotIn("compact_unavailable", value["errors"])
+        self.assertNotIn(raw_error, json.dumps(value))
+
+    def test_running_compact_status_still_requires_counters(self):
+        self.json(self.output / "STATUS.json", {"state": "RUNNING"})
+        value = self.collect()
+        self.assertIn("compact_unavailable", value["errors"])
 
     def test_read_capture_uses_new_timestamp_if_schema_supports_it(self):
         with closing(sqlite3.connect(self.capture / "events.sqlite")) as db:
@@ -273,6 +666,43 @@ class HeartbeatTests(unittest.TestCase):
                    valid.replace("--processed", "--processed --processed")]
         for command in invalid:
             with self.subTest(command_type=command[:40]):
+                self.assertFalse(heartbeat.recognized_worker_launcher(command, self.root))
+                value = self.collect(service_reader=lambda unit: ("active", command))
+                self.assertIn("service_worker_source_mismatch", value["errors"])
+
+    def test_versioned_agave_release_worker_launcher_is_recognized(self):
+        release = "agave-4.3.2-20261016-87167f3906bdf511"
+        command = self.worker_launcher().replace(
+            "native-cloud-retention-fast-r3-20261012", release).replace(
+            "bank-stream-v2-20261010/blockzilla", release + "/blockzilla")
+        self.assertTrue(heartbeat.recognized_worker_launcher(command, self.root))
+        value = self.collect(service_reader=lambda unit: (
+            "active", command if unit == "hivezilla-direct-worker.service" else "binary --source " + SESSION))
+        self.assertEqual(value["errors"], [])
+
+    def test_versioned_release_paths_and_malformed_launchers_remain_rejected(self):
+        release = "agave-4.3.2-20261016-87167f3906bdf511"
+        valid = self.worker_launcher().replace(
+            "native-cloud-retention-fast-r3-20261012", release).replace(
+            "bank-stream-v2-20261010/blockzilla", release + "/blockzilla")
+        invalid = []
+        for binary in ("hivezilla-direct-agave", "blockzilla"):
+            for directory in (".", "..", "../" + release, release + "/../outside",
+                              release + "/nested", "." + release, "_" + release,
+                              release + "_other", "a" * 97):
+                invalid.append(valid.replace(
+                    "/releases/" + release + "/" + binary,
+                    "/releases/" + directory + "/" + binary))
+        invalid.extend((
+            valid.replace("argv[]=", "argv[]=ignored argv[]="),
+            valid.replace(" --processed ", " --processed unexpected "),
+            valid.replace(" --processed ", " --processed --processed "),
+            valid.replace("--engine ", '--engine "'),
+            valid.replace("--engine ", "--unknown "),
+            valid.replace(" --processed ", " --output-root /wrong "),
+        ))
+        for command in invalid:
+            with self.subTest(command=command):
                 self.assertFalse(heartbeat.recognized_worker_launcher(command, self.root))
                 value = self.collect(service_reader=lambda unit: ("active", command))
                 self.assertIn("service_worker_source_mismatch", value["errors"])

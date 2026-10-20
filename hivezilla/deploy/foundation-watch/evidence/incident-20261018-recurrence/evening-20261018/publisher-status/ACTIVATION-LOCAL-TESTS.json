@@ -1,0 +1,17 @@
+{
+  "files": {
+    "activate.py": "ceeea38c212d8dbc0c83b62a0b26a20c56c6d0bf033e4404249af5b04ade49fb",
+    "test_activate.py": "81ac7d8959363ecc897f9eaff5abcbda0c564d8d826f2ccb66ef908350126aeb"
+  },
+  "fixtures_only": true,
+  "host_configuration_changes": [],
+  "host_service_actions": [],
+  "independent_review": "PASS from upgrade_review for these exact bytes",
+  "python_version": "3.15.0",
+  "recorded_unix_ms": 1792348848589,
+  "schema": "blockzilla-publisher-activation-local-tests-v1",
+  "scope": "publisher-only argv0 replacement, exact approved patch/source graph, immutable build/provenance, source/registry/seven protected PIDs, post-new-process progress floor, bounded GET proof, partial-mutation rollback and concurrent source/configuration guards",
+  "state": "PASSED",
+  "tests_count": 11,
+  "tests_failed": 0
+}

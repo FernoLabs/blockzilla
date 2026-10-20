@@ -1,0 +1,12 @@
+{
+  "edgezilla/foundation-watch/src/index.ts": {
+    "sha256": "5dde869ae3db64a590e238d1b212e6d27350c06762592178ef3fbbb53c770bec",
+    "bytes": 23863,
+    "snapshot": "index.ts.before"
+  },
+  "edgezilla/foundation-watch/test/worker.test.mjs": {
+    "sha256": "f3ea38b7c4ee129714ce361823c6b73714e54c7bc3ddaf4e3972e722befada50",
+    "bytes": 25279,
+    "snapshot": "worker.test.mjs.before"
+  }
+}

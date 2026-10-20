@@ -1,0 +1,10 @@
+{
+  "PATCH-MANIFEST.json": "d9f09c18aaef0bd2022595923dd6a20c9cc5aa8e4c6e9b9470ed119894e5e3da",
+  "SDK-SMOKE.json": "d9f2891f59ac968a8164593ed09804d7cb94c29780989e47375dc242b8b8a1a1",
+  "STAGE-PROVENANCE.json": "67156032a06f4783c2849e6746f3c7a80ceecdde60af95f0e00b503da85dfdf5",
+  "cold_storage.py": "8a95785f2df4e2f53b414322f0fc42a8d2edd93a02f04cfca6358bb312c19800",
+  "storage_jobs.py": "567c15e41b3f21665a765fbfaa5b2c70d9a565d1280463da959d946472a3c87c",
+  "test_cold_storage.py": "2e2d5f16bcb5a67b6e10e28c8d32a3926b294cb3b2fbcca44075422d897934b6",
+  "test_storage_jobs.py": "6eef654a016d1f18be588f28bafd287d69b8aa95d8e9d02695df7cab858d7827",
+  "transfer-deadline.patch": "498831996a2dc34c3eccc73df94b901219d81e3707038790b77c3531ae24731e"
+}

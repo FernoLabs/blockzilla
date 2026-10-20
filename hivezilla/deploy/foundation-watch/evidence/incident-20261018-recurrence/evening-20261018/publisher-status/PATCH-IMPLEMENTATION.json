@@ -1,0 +1,79 @@
+{
+  "schema": "blockzilla-publisher-liveness-patch-v1",
+  "state": "READY_FOR_HOST_TESTS",
+  "created_utc": "2026-10-18T18:33:57.918742+00:00",
+  "source": "hivezilla/stream-relay/src/publisher.rs",
+  "before": {
+    "sha256": "4b2a92f90cfe282614cea8a599e6212e55da353cd2fd2484e67f5941fed25ce6",
+    "bytes": 28709
+  },
+  "after": {
+    "sha256": "b31fba2acf86a93dd1506cfdd0d6d0a1cea174d91fba461dc7689561943f75dd",
+    "bytes": 43426
+  },
+  "patch": {
+    "sha256": "92f2376d361a62b4e34f4671e93c1b5f70bcf1b1f95c9c8b653a3c70c94c708e",
+    "bytes": 18696
+  },
+  "scope": "publisher.rs only; existing S3Client, intent, object, manifest, HEAD/readback and checkpoint contracts unchanged. No monitoring threshold changes.",
+  "liveness": {
+    "cadence_seconds": 5,
+    "phase": "upload_commit",
+    "in_flight": true,
+    "checkpoint": "old durable checkpoint until the coordinator joins successful remote work and completes a final successful status write",
+    "failure": "All workers joined before returning. Reporting errors block local commit and request cancellation before later remote steps where possible. Requests already in flight are not cancelled. A remote HEAD may finish first; retained exact intent reconciles replay.",
+    "completion": "Immediate phase=waiting,in_flight=false status after each completed batch.",
+    "last_durable_progress_unix_ms": "null after startup until this process completes a durable batch; timer reports never change it.",
+    "slow_batch_log": "One fixed JSON event on successful completion only when upload_commit_ms>=60000; numeric timing/counts/sequences only."
+  },
+  "known_timeout_limits": {
+    "s3_connect_seconds": 10,
+    "blocking_send_headers_seconds": 300,
+    "blocking_body_read_seconds_per_read": 300,
+    "explicit_retries": 3,
+    "explicit_attempts": 4,
+    "retry_backoff_seconds": [
+      1,
+      2,
+      4
+    ],
+    "whole_batch_deadline": null,
+    "progress_stall_threshold_unchanged_seconds": 300
+  },
+  "tests": {
+    "new_regressions": [
+      "cancelled_object_upload_joins_without_starting_manifest_or_head",
+      "final_status_write_failure_after_remote_head_does_not_commit",
+      "initial_status_write_failure_starts_no_remote_work",
+      "remote_failure_joins_before_failed_status_and_keeps_intent",
+      "slow_batch_log_is_bounded_and_only_reports_completed_slow_batches",
+      "status_write_failure_during_head_readback_does_not_commit",
+      "upload_status_is_live_during_blocked_objects_without_advancing_checkpoint",
+      "upload_status_is_live_during_head_readback_without_advancing_checkpoint"
+    ],
+    "new_test_count": 8,
+    "expected_library_tests": 44,
+    "host_command": [
+      "cargo",
+      "test",
+      "--locked",
+      "--offline",
+      "--manifest-path",
+      "hivezilla/stream-relay/Cargo.toml"
+    ],
+    "host_execution": "Parent will run on exact clean donor; no local Cargo build due disk limit.",
+    "local_rustfmt_parse_exit": 0,
+    "local_diff_check_exit": 0,
+    "exact_donor_patch_apply_exit": 0
+  },
+  "unchanged_inputs": {
+    "hivezilla/object-store/src/uploader/s3.rs": {
+      "sha256": "a2f76422303e2e1d83db6409a98921977486582ba65928289e4efd6baa7b5b9b",
+      "bytes": 38357
+    },
+    "hivezilla/stream-relay/Cargo.lock": {
+      "sha256": "0fb45f7961e908058a07a36a3db782388ec3eef4feb7cc27682c5fea690d495b",
+      "bytes": 58072
+    }
+  }
+}

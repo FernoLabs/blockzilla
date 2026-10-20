@@ -1,0 +1,13 @@
+{
+  "files": {
+    "cloud-validator.py": "d4fcf1d98da782e9b019c723c620e0be8ffd7e8a2026958cf72311abd96d069b",
+    "test_verify.py": "73b69c49117df3191dc5614f48da52e0a06c36b4a20d0dae11f77e9404e2a8c3",
+    "verify.py": "30851c6644304d86daebc050da0ab4e63b30f37e8de698b7d5ea25cb68ef3f35"
+  },
+  "original_verify_live": "/home/ubuntu/live/hivezilla-validator-20260930/releases/incident-recovery-20261018-a6b89ac28c538eaa/verify_live.py",
+  "original_verify_live_sha256": "8d12ef74ca8047c58c8774625337995693806a17388f4fb561424a2c03b612d4",
+  "schema": "blockzilla-transfer-postverify-package-v1",
+  "test_log_sha256": "69f1edde4b1c0d648c298cbe6c75e877335cfc9f872a3ff1917012a4363637a0",
+  "tests_count": 8,
+  "tests_passed": true
+}

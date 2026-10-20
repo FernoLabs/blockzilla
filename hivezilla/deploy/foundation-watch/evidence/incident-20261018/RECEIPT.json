@@ -1,0 +1,111 @@
+{
+  "schema": "blockzilla-megaloadon-storage-protection-receipt-v1",
+  "state": "PROTECTION_ACTIVE_CAP_COMPLETE_METADATA_MIGRATION_REQUIRED",
+  "completed_at_utc": "2026-10-18T06:17:41.056408+00:00",
+  "sampled_unix_ms": 1792304252760,
+  "host": "ubuntu@213.239.141.61",
+  "source": {
+    "agave_revision": "87167f3906bdf5111e99ead64d8f4098b7874e33",
+    "genesis_hash": "5eykt4UsFv8P8NJdTREpY1vzqKqZKvdpKuc147dw2N9d",
+    "node_identity": "J7qpvCEWhdBgPdYRV3s3btWPrRVXa2qnAzgvxWTvtbrQ",
+    "session_id": "000000000000000018df884b2474cf8e-20b258"
+  },
+  "validator": {
+    "version": "4.3.2",
+    "pid": 2142808,
+    "no_voting": true,
+    "restarted": false
+  },
+  "approved_retirement": {
+    "source": {
+      "node_identity": "J7qpvCEWhdBgPdYRV3s3btWPrRVXa2qnAzgvxWTvtbrQ",
+      "genesis_hash": "5eykt4UsFv8P8NJdTREpY1vzqKqZKvdpKuc147dw2N9d",
+      "agave_revision": "d688dd0e3a576b048a848e5faf2e8d277f8feb6e",
+      "session_id": "000000000000000018de229d3fc8a9d9-275b05"
+    },
+    "initial_archived_banks": 756106,
+    "initial_retired_banks": 756106,
+    "final_archived_banks": 785546,
+    "final_retired_banks": 785546,
+    "additional_banks": 29440,
+    "absolute_total_cap": 785546,
+    "cap_expanded": false,
+    "full_cloud_readback_required": true,
+    "minimum_keep_seconds": 7200
+  },
+  "disk": {
+    "free_bytes_before": 598266478592,
+    "free_bytes_after": 679283412992,
+    "net_free_change_bytes": 81016934400,
+    "net_change_includes_build_cache_cleanup_and_concurrent_live_writes": true,
+    "rebuildable_cache_unique_file_allocated_bytes": 22186106880,
+    "capacity_state": "OK",
+    "snapshot_headroom_bytes": 113173188608,
+    "recovery_headroom_bytes": 5799006208
+  },
+  "installed_controls": {
+    "capacity_sampling_seconds": 30,
+    "next_snapshot_budget_floor_bytes": 137438953472,
+    "early_warning_free_bytes": 674309865472,
+    "car_resume_hysteresis_bytes": 34359738368,
+    "registered_storage_jobs": 2,
+    "maximum_consecutive_network_retries": 3,
+    "exact_source_command_helper_namespace_and_cap_required": true,
+    "permanent_proof_failures_do_not_auto_retry": true,
+    "recovery_requires_fresh_capacity": true,
+    "protection_release": "storage-protection-20261018-94c2aaca04758c49",
+    "sender_release": "storage-watch-20261018-beafd5034d4b6346",
+    "recovery_release": "capacity-recovery-20261018-94d35122f4f4af22"
+  },
+  "verification": {
+    "flow_state": "PASSED",
+    "flow_seconds": 702.522,
+    "flow_samples": 71,
+    "flow_faults": [],
+    "protected_pids_unchanged": true,
+    "controlled_live_storage_restart": "PASSED",
+    "final_live_check": "PASSED",
+    "rooted_compact_lag_slots": 0,
+    "private_frame_hash_and_rpc_bank_match": true,
+    "public_sse_advances": true,
+    "publisher_sequence": 29011,
+    "current_monitor_issues": [],
+    "active_monitor_incident": [],
+    "pending_alerts": 0
+  },
+  "tests": {
+    "protection_bundle_on_host": 132,
+    "final_sender_and_archive_on_host": 53,
+    "final_recovery_on_host": 40,
+    "counts_overlap_and_are_not_additive": true
+  },
+  "raw_capture": {
+    "state": "FAILED",
+    "required": false,
+    "service_active_does_not_prove_recording": true,
+    "requires_validator_restart_to_resume": true
+  },
+  "remaining": {
+    "total_local_disk_use_bounded": false,
+    "metadata_migration": "DESIGNED_NOT_DEPLOYED",
+    "metadata_growth_estimate_bytes_per_day": [
+      10000000000,
+      21000000000
+    ],
+    "native_capture_gap_rebuilt": false,
+    "source_handoff_is_explicit": true,
+    "retention_contracts_required": [
+      "Raw shreds",
+      "Unresolved forks",
+      "Failed sources",
+      "Incomplete capture evidence"
+    ]
+  },
+  "evidence": {
+    "PROTECTION-EVIDENCE.json": "0778f84c294d5c1891063a07e67959e55d8d0d0913eb1d9cd23dda4cb5dc37ef",
+    "PROTECTION-LIVE-1.json": "dc676e32e964dc14e857595ebd5d835d888eb05f38c36dd3d72193fc489402f2",
+    "PROTECTION-LIVE-2.json": "6d61793bc59b1287d15b31e057db352dc3ad300bc6263e2810ed3fecc5d20d7d",
+    "MONITOR-PROTECTION-FINAL.json": "01cebe2e496e4c5fbdc64ee89fb2e243def55d9572ba46825140502aca1a42bf",
+    "METADATA-PLAN.json": "13df6ceb1a6a86d2979c3d73d7147abd7abdc4dc7f1d066bf76c776315ec2a78"
+  }
+}

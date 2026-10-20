@@ -1,0 +1,224 @@
+{
+  "capacity": {
+    "active_temporary_archive_count": 0,
+    "capacity_state": "WARNING",
+    "capture_reserve_bytes": 429496729600,
+    "deleted_files": [],
+    "estimated_seconds_to_capture_reserve": null,
+    "estimated_seconds_to_snapshot_headroom_exhaustion": null,
+    "forecast_is_guarantee": false,
+    "forecast_min_observation_seconds": 60,
+    "forecast_observed_seconds": 570.042,
+    "forecast_ready": true,
+    "forecast_samples": 20,
+    "forecast_window_seconds": 600,
+    "free_disk_bytes": 644394315776,
+    "limits": [
+      "Archive allocation is a write-budget observation, not a size bound.",
+      "Forecasts use recent measured growth; future writes and retirement can change it.",
+      "Non-archive growth excludes immediate completed and temporary snapshot archives only.",
+      "This collector cannot stop disk growth or prevent a capture failure."
+    ],
+    "net_disk_growth_bytes_per_second": -95878342.58,
+    "next_archive_budget_bytes": 137438953472,
+    "non_archive_growth_bytes_per_second": -5657029.289,
+    "read_only_inputs": true,
+    "recovery_headroom_bytes": -29915549696,
+    "recovery_minimum_free_bytes": 536870912000,
+    "runtime_health": {
+      "age_ms": 1223,
+      "configured": true,
+      "healthy": true,
+      "state": "HEALTHY"
+    },
+    "sample_interval_seconds": 30,
+    "schema": "blockzilla-native-capacity-v1",
+    "service_operations": [],
+    "snapshot_archive_allocated_bytes": 124354052096,
+    "snapshot_capture_reserve_at_risk": false,
+    "snapshot_headroom_bytes": 77458632704,
+    "snapshot_headroom_low": true,
+    "snapshot_helper_sha256": "fb46e8260000313c22d413e57bc6f443f0702727ef6590f975e3e41db47d9f23",
+    "source": {
+      "agave_revision": "87167f3906bdf5111e99ead64d8f4098b7874e33",
+      "genesis_hash": "5eykt4UsFv8P8NJdTREpY1vzqKqZKvdpKuc147dw2N9d",
+      "node_identity": "J7qpvCEWhdBgPdYRV3s3btWPrRVXa2qnAzgvxWTvtbrQ",
+      "session_id": "000000000000000018df884b2474cf8e-20b258"
+    },
+    "stale_after_seconds": 90,
+    "state": "RUNNING",
+    "total_disk_bytes": 7450013548544,
+    "updated_unix_ms": 1792312100783
+  },
+  "jobs": {
+    "schema": "blockzilla-storage-jobs-status-v1",
+    "updated_unix_ms": 1792312095108,
+    "active_source": {
+      "genesis_hash": "5eykt4UsFv8P8NJdTREpY1vzqKqZKvdpKuc147dw2N9d",
+      "node_identity": "J7qpvCEWhdBgPdYRV3s3btWPrRVXa2qnAzgvxWTvtbrQ",
+      "agave_revision": "87167f3906bdf5111e99ead64d8f4098b7874e33",
+      "session_id": "000000000000000018df884b2474cf8e-20b258"
+    },
+    "registry_sha256": "261060a7c4e73b4b4747d062f032d41412d59fa31d979bf936e162c06dcfd11f",
+    "state": "DEGRADED",
+    "issues": [
+      "storage_job_failed"
+    ],
+    "jobs": [
+      {
+        "unit": "hivezilla-native-cold-storage-20261012-live.service",
+        "source": {
+          "node_identity": "J7qpvCEWhdBgPdYRV3s3btWPrRVXa2qnAzgvxWTvtbrQ",
+          "genesis_hash": "5eykt4UsFv8P8NJdTREpY1vzqKqZKvdpKuc147dw2N9d",
+          "agave_revision": "87167f3906bdf5111e99ead64d8f4098b7874e33",
+          "session_id": "000000000000000018df884b2474cf8e-20b258"
+        },
+        "state": "RUNNING",
+        "issues": [
+          "storage_job_failed"
+        ],
+        "max_archived_banks": null,
+        "retryable": false,
+        "active_state": "active",
+        "invocation_id": "8141f572ef264424bcfd7dd50e2e5ad8",
+        "frozen": false,
+        "archived_banks": 15815,
+        "retired_banks": 15815,
+        "remaining_banks": null,
+        "status_age_ms": 36346,
+        "storage_progress": "FAILED",
+        "last_archive_progress_unix_ms": 1792311920122
+      },
+      {
+        "unit": "hivezilla-native-cold-storage-20261016-source-18de229d.service",
+        "source": {
+          "node_identity": "J7qpvCEWhdBgPdYRV3s3btWPrRVXa2qnAzgvxWTvtbrQ",
+          "genesis_hash": "5eykt4UsFv8P8NJdTREpY1vzqKqZKvdpKuc147dw2N9d",
+          "agave_revision": "d688dd0e3a576b048a848e5faf2e8d277f8feb6e",
+          "session_id": "000000000000000018de229d3fc8a9d9-275b05"
+        },
+        "state": "COMPLETE",
+        "issues": [],
+        "max_archived_banks": 785546,
+        "retryable": false,
+        "active_state": "inactive",
+        "invocation_id": "6a90e6a6a71e4342bc283a59b7b690b1",
+        "frozen": false,
+        "archived_banks": 785546,
+        "retired_banks": 785546,
+        "remaining_banks": 0
+      }
+    ]
+  },
+  "sender": {
+    "schema": "blockzilla-foundation-heartbeat-sender-v1",
+    "state": "SENT",
+    "sampled_unix_ms": 1792312095312,
+    "errors": [
+      "cold_storage_failed",
+      "snapshot_capacity_headroom_low",
+      "storage_jobs_degraded"
+    ],
+    "send_error": null,
+    "raw_capture": {
+      "required": false,
+      "state": "FAILED",
+      "recorder_state": "active",
+      "capture_id": "d90d7aea9cda2212fc9d0a1c275fff88",
+      "producer_pid": 2142808,
+      "durable_next_sequence": 701158357,
+      "packets": 701158357,
+      "journal_bytes": 919340095977,
+      "updated_unix_ms": 1792286156412,
+      "source_verified": true,
+      "faults": [
+        "raw_capture_failed"
+      ]
+    },
+    "capacity": {
+      "free_disk_bytes": 643139215360,
+      "capture_reserve_bytes": 429496729600,
+      "recovery_minimum_free_bytes": 536870912000,
+      "next_archive_budget_bytes": 137438953472,
+      "updated_unix_ms": 1792312070782,
+      "snapshot_headroom_bytes": 76203532288,
+      "recovery_headroom_bytes": -31170650112,
+      "snapshot_capture_reserve_at_risk": false,
+      "snapshot_headroom_low": true
+    },
+    "storage_jobs": {
+      "state": "DEGRADED",
+      "updated_unix_ms": 1792312095108,
+      "registry_sha256": "261060a7c4e73b4b4747d062f032d41412d59fa31d979bf936e162c06dcfd11f",
+      "issues": [
+        "storage_job_failed"
+      ],
+      "jobs": [
+        {
+          "unit": "hivezilla-native-cold-storage-20261012-live.service",
+          "source": {
+            "node_identity": "J7qpvCEWhdBgPdYRV3s3btWPrRVXa2qnAzgvxWTvtbrQ",
+            "genesis_hash": "5eykt4UsFv8P8NJdTREpY1vzqKqZKvdpKuc147dw2N9d",
+            "agave_revision": "87167f3906bdf5111e99ead64d8f4098b7874e33",
+            "session_id": "000000000000000018df884b2474cf8e-20b258"
+          },
+          "max_archived_banks": null,
+          "state": "RUNNING",
+          "issues": [
+            "storage_job_failed"
+          ],
+          "archived_banks": 15815,
+          "retired_banks": 15815,
+          "remaining_banks": null
+        },
+        {
+          "unit": "hivezilla-native-cold-storage-20261016-source-18de229d.service",
+          "source": {
+            "node_identity": "J7qpvCEWhdBgPdYRV3s3btWPrRVXa2qnAzgvxWTvtbrQ",
+            "genesis_hash": "5eykt4UsFv8P8NJdTREpY1vzqKqZKvdpKuc147dw2N9d",
+            "agave_revision": "d688dd0e3a576b048a848e5faf2e8d277f8feb6e",
+            "session_id": "000000000000000018de229d3fc8a9d9-275b05"
+          },
+          "max_archived_banks": 785546,
+          "state": "COMPLETE",
+          "issues": [],
+          "archived_banks": 785546,
+          "retired_banks": 785546,
+          "remaining_banks": 0
+        }
+      ]
+    }
+  },
+  "priority": {
+    "state": "BACKGROUND_PAUSED",
+    "updated_unix_ms": 1792312114692,
+    "capacity": {
+      "installed": true,
+      "valid": true,
+      "recovery_headroom_bytes": -29915549696
+    },
+    "capacity_paused": true,
+    "disk_consumers_paused": true,
+    "native_reclaimers_paused": false,
+    "background_roles": {
+      "hivezilla-foundation-car-backfill-20261012.service": "disk_consumer",
+      "hivezilla-native-cold-storage-20261012-old.service": "native_reclaimer",
+      "hivezilla-native-cold-storage-20261016-source-18ddd9a6.service": "native_reclaimer",
+      "hivezilla-native-cold-storage-20261016-source-18de229d.service": "native_reclaimer"
+    },
+    "source": "000000000000000018df884b2474cf8e-20b258",
+    "slot_lag": 0,
+    "event_lag": 152,
+    "capture_sequence": 99999484,
+    "capture_rooted_slot": 458368334,
+    "healthy": true,
+    "capture_progress_observed": true,
+    "capture_progress_healthy": true,
+    "capture_sequence_age_seconds": 0.0,
+    "capture_root_age_seconds": 0.0,
+    "capture_progress_timeout_seconds": 60
+  },
+  "schema": "blockzilla-capacity-recurrence-evidence-v1",
+  "sampled_unix_ms": 1792312114828,
+  "free_disk_bytes": 644223123456
+}

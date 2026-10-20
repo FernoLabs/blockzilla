@@ -1,0 +1,66 @@
+{
+  "schema": "blockzilla-native-session-recovery-v1",
+  "state": "RECOVERED",
+  "old_source": {
+    "genesis_hash": "5eykt4UsFv8P8NJdTREpY1vzqKqZKvdpKuc147dw2N9d",
+    "node_identity": "J7qpvCEWhdBgPdYRV3s3btWPrRVXa2qnAzgvxWTvtbrQ",
+    "agave_revision": "d688dd0e3a576b048a848e5faf2e8d277f8feb6e",
+    "session_id": "000000000000000018deede1d641da13-275b05"
+  },
+  "validator_pid": 2142808,
+  "artifacts": {
+    "/home/ubuntu/live/hivezilla-validator-20260930/releases/agave-4.3.2-20261016-87167f3906bdf511/agave-validator": "d8371d630a8ca6dc4c7d38aea35c9ebac2308fa36fb63b4d8a30702dbb94a15b",
+    "/home/ubuntu/live/hivezilla-validator-20260930/releases/agave-4.3.2-20261016-87167f3906bdf511/libhivezilla_direct_agave.so": "56dc96e0bdff0b1be906687c0460d995025f4e761c12d49003236a823e66f337",
+    "/home/ubuntu/live/hivezilla-validator-20260930/releases/agave-4.3.2-20261016-87167f3906bdf511/hivezilla-direct-agave": "79b459267cbbfaea9de9db4495b5ec5eb957b089658c57bbf5dca632d972da5c",
+    "/home/ubuntu/live/hivezilla-validator-20260930/releases/agave-4.3.2-20261016-87167f3906bdf511/blockzilla": "14c2622f8a0e073916a17613fb299cddfcc3f1204b0793f6b57d18593d431bbe"
+  },
+  "old_capture_preserved": true,
+  "gap_rebuilt": false,
+  "adopt_existing_capture": true,
+  "started_unix_ms": 1792181887147,
+  "root": "/home/ubuntu/live/hivezilla-validator-20260930",
+  "revision_upgrade": {
+    "old_revision": "d688dd0e3a576b048a848e5faf2e8d277f8feb6e",
+    "new_revision": "87167f3906bdf5111e99ead64d8f4098b7874e33",
+    "worker_binary": "/home/ubuntu/live/hivezilla-validator-20260930/releases/agave-4.3.2-20261016-87167f3906bdf511/hivezilla-direct-agave",
+    "worker_sha256": "79b459267cbbfaea9de9db4495b5ec5eb957b089658c57bbf5dca632d972da5c",
+    "builder_binary": "/home/ubuntu/live/hivezilla-validator-20260930/releases/agave-4.3.2-20261016-87167f3906bdf511/blockzilla",
+    "builder_sha256": "14c2622f8a0e073916a17613fb299cddfcc3f1204b0793f6b57d18593d431bbe"
+  },
+  "old_capture_state": "CLOSED",
+  "session_id": "000000000000000018df1be3bad56d9c-20b258",
+  "old_publisher_tail": {
+    "events": 0,
+    "checkpoint_sequence": 462109,
+    "expected_sequence": 462109,
+    "last_position": 462109
+  },
+  "switch_paths": [
+    "/home/ubuntu/live/hivezilla-validator-20260930/compact/bank-v2-live/000000000000000018df1be3bad56d9c-20b258",
+    "/home/ubuntu/live/hivezilla-validator-20260930/bank-v2-origin-spool/000000000000000018df1be3bad56d9c-20b258",
+    "/home/ubuntu/live/hivezilla-validator-20260930/stream-relay-spool-bank-v2/000000000000000018df1be3bad56d9c-20b258",
+    "/home/ubuntu/live/hivezilla-validator-20260930/bank-v2-relay-spool/000000000000000018df1be3bad56d9c-20b258",
+    "/home/ubuntu/live/hivezilla-validator-20260930/reports/native-processed-r2-bank-v2/000000000000000018df1be3bad56d9c-20b258"
+  ],
+  "source": {
+    "genesis_hash": "5eykt4UsFv8P8NJdTREpY1vzqKqZKvdpKuc147dw2N9d",
+    "node_identity": "J7qpvCEWhdBgPdYRV3s3btWPrRVXa2qnAzgvxWTvtbrQ",
+    "agave_revision": "87167f3906bdf5111e99ead64d8f4098b7874e33",
+    "session_id": "000000000000000018df1be3bad56d9c-20b258"
+  },
+  "processed_output": "/home/ubuntu/live/hivezilla-validator-20260930/compact/direct-agave-processed-live/000000000000000018df1be3bad56d9c-20b258",
+  "bank_output": "/home/ubuntu/live/hivezilla-validator-20260930/compact/bank-v2-live/000000000000000018df1be3bad56d9c-20b258",
+  "origin_spool": "/home/ubuntu/live/hivezilla-validator-20260930/bank-v2-origin-spool/000000000000000018df1be3bad56d9c-20b258",
+  "relay_spool": "/home/ubuntu/live/hivezilla-validator-20260930/bank-v2-relay-spool/000000000000000018df1be3bad56d9c-20b258",
+  "source_file": "/home/ubuntu/live/hivezilla-validator-20260930/reports/agave-upgrade-4.3.2-20261016/handoff/expected-source.json",
+  "old_source_drain_unit": null,
+  "old_cold_storage_resume_required": true,
+  "active_source_file": "/home/ubuntu/live/hivezilla-validator-20260930/config/native-active-source.json",
+  "validator_pid_unchanged": true,
+  "free_disk_bytes": 1322060259328,
+  "updated_unix_ms": 1792182011285,
+  "public_check_state": "PASSED",
+  "public_check_report": "/home/ubuntu/live/hivezilla-validator-20260930/reports/agave-upgrade-4.3.2-20261016/LIVE-3.json",
+  "monitor_recovered": true,
+  "completed_unix_ms": 1792182751439
+}

@@ -1,0 +1,35 @@
+{
+  "binary_to_original_source_binding_proved": false,
+  "host_service_or_configuration_changes": [],
+  "matching_donor_source": {
+    "publisher_rs_sha256": "4b2a92f90cfe282614cea8a599e6212e55da353cd2fd2484e67f5941fed25ce6",
+    "s3_rs_sha256": "a2f76422303e2e1d83db6409a98921977486582ba65928289e4efd6baa7b5b9b",
+    "trees": [
+      "agave-upgrade-4.3.2-20261016/provider",
+      "bank-head-health-20261018-c319ba5d/provider",
+      "bank-connection-idle-20261018-2f3cbe5e/provider"
+    ]
+  },
+  "metadata_error": "The expected comparison value was the SHA256 of publisher.rs. It was compared with an executable SHA256. The false result is not evidence of runtime drift.",
+  "new_build_basis": "The separately frozen connection-idle donor source and full tests bind the proposed new build. They do not prove the original 12 October binary build source.",
+  "original_12_october_build_receipt_located": false,
+  "original_evidence_preserved": true,
+  "production_executable": {
+    "bytes": 16228344,
+    "path": "/home/ubuntu/live/hivezilla-validator-20260930/releases/processed-publisher-batch-20261012/hivezilla-stream",
+    "pid": 917318,
+    "sha256": "02a93aa83202d688bc42fdb9581b135a65f1e1903d179915f0b850638a7ddc48"
+  },
+  "recorded_unix_ms": 1792348802773,
+  "schema": "blockzilla-publisher-provenance-correction-v1",
+  "search_scope": [
+    "production release immediate entries: hivezilla-stream and target only; no manifest",
+    "local stream-relay/deploy evidence text search for deployed binary hash and release name",
+    "ROOT/reports immediate directory names and benchmarks immediate names"
+  ],
+  "supersedes_interpretation_of": {
+    "field": "executable.expected_hash_matches",
+    "file": "PUBLISHER-PROVENANCE.json",
+    "sha256": "e86b5b682ccaae1ad809db7a0fd06e103aaa58bafcb10ffab22f17f5e414b411"
+  }
+}

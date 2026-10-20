@@ -1,0 +1,95 @@
+{
+  "active_temporary_archive_count": 0,
+  "admission_free_disk_bytes": 643379019776,
+  "admission_minimum_free_bytes": 601295421440,
+  "binary": "/home/ubuntu/live/hivezilla-validator-20260930/releases/bank-head-health-20261018-c319ba5d-e769871d5197/hivezilla-stream",
+  "binary_sha256": "e769871d519750a187814a82e1a1f3e48cfc9bde0948410674a70dca7c97d1b7",
+  "build_flags": "-C target-cpu=x86-64 -C target-feature=+aes,+sse2",
+  "commands": [
+    {
+      "argv": [
+        "ionice",
+        "-c3",
+        "nice",
+        "-n",
+        "19",
+        "/home/ubuntu/.rustup/toolchains/1.98.0-x86_64-unknown-linux-gnu/bin/cargo",
+        "test",
+        "--lib",
+        "--locked",
+        "--offline",
+        "-j",
+        "4"
+      ],
+      "completed_unix_ms": 1792313907820,
+      "cwd": "/home/ubuntu/benchmarks/bank-head-health-20261018-c319ba5d/provider/hivezilla/stream-relay",
+      "log": "/home/ubuntu/live/hivezilla-validator-20260930/reports/native-recovery-20261018/recurrence/head-health/lib-tests.log",
+      "log_sha256": "c70619538ef57cb7e60de84cfad3374f40ffeefdb83ada2c19f11fafcc83d5ca",
+      "phase": "TESTING",
+      "returncode": 0,
+      "started_unix_ms": 1792313882770
+    },
+    {
+      "argv": [
+        "ionice",
+        "-c3",
+        "nice",
+        "-n",
+        "19",
+        "/home/ubuntu/.rustup/toolchains/1.98.0-x86_64-unknown-linux-gnu/bin/cargo",
+        "build",
+        "--release",
+        "--bin",
+        "hivezilla-stream",
+        "--locked",
+        "--offline",
+        "-j",
+        "4"
+      ],
+      "completed_unix_ms": 1792313988119,
+      "cwd": "/home/ubuntu/benchmarks/bank-head-health-20261018-c319ba5d/provider/hivezilla/stream-relay",
+      "log": "/home/ubuntu/live/hivezilla-validator-20260930/reports/native-recovery-20261018/recurrence/head-health/release-build.log",
+      "log_sha256": "78d71a224f2b789a921ac2953fab8e0f136eae655a2e58bc9fc693f44b1cbfa3",
+      "phase": "BUILDING",
+      "returncode": 0,
+      "started_unix_ms": 1792313907847
+    }
+  ],
+  "completed_unix_ms": 1792313988261,
+  "donor_manifest_sha256": "d5279e48e1073e62e6df3a58e7a9354bf8f72a71f134d0d91f853af632d5063b",
+  "free_disk_bytes": 644366856192,
+  "patch_manifest_sha256": "97e4717c449c2ac6c07070183ee6d9378f66975736f031965a3274587c619be2",
+  "patch_sha256": "c319ba5d6243b0526527371a1bdfcc54ed14bc477378fd7d5b2d94c72c5a6539",
+  "previous_attempts": [
+    {
+      "reason": "Additional runtime snapshot-overlap check stopped the compiler. Admission had passed. Resume retains the required disk guards; regular later incremental snapshots do not stop an admitted build.",
+      "receipt": "/home/ubuntu/live/hivezilla-validator-20260930/reports/native-recovery-20261018/recurrence/head-health/attempt-1/BUILD.json",
+      "test_log": "/home/ubuntu/live/hivezilla-validator-20260930/reports/native-recovery-20261018/recurrence/head-health/attempt-1/lib-tests.log"
+    }
+  ],
+  "release": "/home/ubuntu/live/hivezilla-validator-20260930/releases/bank-head-health-20261018-c319ba5d-e769871d5197",
+  "release_manifest_sha256": "a2bc63ef0b9cd1deca32acc98d6b5080d20272a35f06b32f0a9f14ae503a0944",
+  "report": "/home/ubuntu/live/hivezilla-validator-20260930/reports/native-recovery-20261018/recurrence/head-health",
+  "resumed_unix_ms": 1792313882770,
+  "retirement_cap_changes": [],
+  "schema": "blockzilla-bank-head-health-build-v1",
+  "service_operations": [],
+  "source_files": 963,
+  "source_manifest_sha256": "0099305fcfc27cb0ef00ec684260909636867c43ee436e0863f56772f2044dd4",
+  "stage": "/home/ubuntu/benchmarks/bank-head-health-20261018-c319ba5d",
+  "started_unix_ms": 1792313784954,
+  "state": "READY_NOT_ACTIVE",
+  "target_allocated_bytes": 1653977088,
+  "target_budget_bytes": 34359738368,
+  "tests_count": 33,
+  "tests_failed": 0,
+  "tests_log_sha256": "c70619538ef57cb7e60de84cfad3374f40ffeefdb83ada2c19f11fafcc83d5ca",
+  "tests_passed": true,
+  "toolchain": {
+    "cargo": "cargo 1.98.0 (797e8a9bc 2026-08-05)",
+    "rustc": "rustc 1.98.0 (88d9e12ae 2026-08-18)"
+  },
+  "transport_lib_tests": 33,
+  "updated_unix_ms": 1792313988287,
+  "verified_unix_ms": 1792314024211
+}

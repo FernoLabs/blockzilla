@@ -155,6 +155,41 @@ mod tests {
         future.envelope.event.sequence = 6;
     }
     #[test]
+    fn status_cadence_leaves_delivery_margin_but_a_real_health_stall_expires() {
+        let t = tempfile::tempdir().unwrap();
+        let s = BankStore::open(
+            source(),
+            v2::cursor(&source().session_id, 0, "-"),
+            v2::MAX_FRAME,
+            t.path().into(),
+        )
+        .unwrap();
+        let root = fresh(block(1, 9, 1, 8, 9));
+        s.admit(root.clone(), None).unwrap();
+        s.admit(control(&root, 2, "root", now_ms()), None).unwrap();
+        s.set_health("live", None);
+        let delivery_delay = Duration::from_millis(100);
+        // The former five-second cadence uses the entire health lifetime.
+        s.state.lock().unwrap().health_at =
+            Instant::now() - Duration::from_secs(5) - delivery_delay;
+        let next = fresh(block(3, 17, 2, 9, 10));
+        s.admit(next.clone(), None).unwrap();
+        s.admit(control(&next, 4, "confirmed", now_ms()), None)
+            .unwrap();
+        let h = s.head();
+        assert!(h.source_lag_ms.unwrap() < v2::DEFAULT_MAX_LAG_MS);
+        assert_eq!(h.latest_confirmed.unwrap().bank, next.envelope.event.bank);
+        assert_eq!(h.status, "stale"); // Fresh frames cannot renew health.
+
+        // Model the longest normal interval plus the same delivery delay.
+        s.state.lock().unwrap().health_at =
+            Instant::now() - crate::bank_server::STATUS_INTERVAL - delivery_delay;
+        assert_eq!(s.head().status, "live");
+        s.state.lock().unwrap().health_at =
+            Instant::now() - Duration::from_millis(v2::DEFAULT_MAX_LAG_MS + 1);
+        assert_eq!(s.head().status, "stale");
+    }
+    #[test]
     fn batch_commit_is_atomic_bounded_and_restores_all_dependencies() {
         let t = tempfile::tempdir().unwrap();
         let base = v2::cursor(&source().session_id, 0, "-");

@@ -43,6 +43,7 @@ fn database(output: &Path, source_start: u64) -> Result<Connection> {
         CREATE INDEX IF NOT EXISTS feed_bank_events ON feed_events(slot,bank,sequence);
         CREATE TABLE IF NOT EXISTS bank_observations(slot INTEGER NOT NULL,bank INTEGER NOT NULL,frozen_json TEXT,frozen_sequence INTEGER NOT NULL DEFAULT 0,confirmed_json TEXT,confirmed_sequence INTEGER NOT NULL DEFAULT 0,root_observed_ms INTEGER NOT NULL DEFAULT 0,invalid_observed_ms INTEGER NOT NULL DEFAULT 0,PRIMARY KEY(slot,bank));
         CREATE TABLE IF NOT EXISTS bank_controls(source_sequence INTEGER PRIMARY KEY,slot INTEGER NOT NULL,bank INTEGER,kind TEXT NOT NULL,observed_at_unix_ms INTEGER NOT NULL);
+        CREATE TABLE IF NOT EXISTS bank_parent_resolutions(source_sequence INTEGER PRIMARY KEY,slot INTEGER NOT NULL,bank INTEGER NOT NULL,original_json TEXT NOT NULL,parent_blockhash BLOB NOT NULL,proof_kind TEXT NOT NULL,proof_sequence INTEGER NOT NULL,proof_sha256 TEXT);
         CREATE TABLE IF NOT EXISTS archive_catalog(slot INTEGER PRIMARY KEY,bank INTEGER NOT NULL,artifact TEXT NOT NULL,marker_sha TEXT NOT NULL,root_sequence INTEGER NOT NULL,custody_path TEXT NOT NULL,custody_sha TEXT NOT NULL,retirement_enqueued INTEGER NOT NULL DEFAULT 0);")?;
     db.execute_batch("CREATE INDEX IF NOT EXISTS archive_pending_retirement ON archive_catalog(retirement_enqueued,slot);")?;
     db.execute(
@@ -148,7 +149,7 @@ fn discover(source: &Connection, db: &mut Connection, through: u64) -> Result<()
                 digest(&raw) == *sha,
                 "bank observation source digest changed"
             );
-            persist_observation(&tx, *sequence, serde_json::from_slice(&raw)?)?;
+            persist_observation(source, &tx, *sequence, through, serde_json::from_slice(&raw)?)?;
         }
     }
     // Preserve the same sequence extrema once per bank, instead of writing its
@@ -174,20 +175,153 @@ fn discover(source: &Connection, db: &mut Connection, through: u64) -> Result<()
     );
     Ok(())
 }
-fn persist_observation(db: &Connection, sequence: u64, event: crate::event::Event) -> Result<()> {
+#[derive(Debug)]
+struct ParentProof {
+    parent_blockhash: [u8; 32],
+    kind: &'static str,
+    sequence: u64,
+    sha256: Option<String>,
+}
+
+fn same_native_queue(a: &crate::event::NativeBankState, b: &crate::event::NativeBankState) -> bool {
+    a.slot == b.slot
+        && a.bank_id == b.bank_id
+        && a.parent_slot == b.parent_slot
+        && a.blockhash == b.blockhash
+        && a.block_height == b.block_height
+        && a.last_valid_block_height == b.last_valid_block_height
+}
+
+fn footer_parent_proof(
+    source: &Connection,
+    state: &crate::event::NativeBankState,
+    through: u64,
+) -> Result<Option<ParentProof>> {
+    // bank_events(slot,bank,sequence) bounds this lookup to one exact bank.
+    // One footer and one exact duplicate are allowed; larger sets fail closed.
+    // Do not load an oversized stored BLOB before checking its size.
+    let rows = {
+        let mut query = source.prepare("SELECT sequence,sha256,CASE WHEN length(payload)<=33554432 THEN payload END FROM events WHERE slot=?1 AND bank=?2 AND kind='block' AND sequence<=?3 ORDER BY sequence LIMIT 3")?;
+        query.query_map(params![state.slot, state.bank_id, through], |r| {
+            Ok((r.get::<_, u64>(0)?, r.get::<_, String>(1)?, r.get::<_, Option<Vec<u8>>>(2)?))
+        })?.collect::<std::result::Result<Vec<_>, _>>()?
+    };
+    ensure!(rows.len() <= 2, "too many native parent footer proofs");
+    let mut proof: Option<ParentProof> = None;
+    for (sequence, sha256, stored) in rows {
+        let stored = stored.context("native parent footer exceeds bound")?;
+        let codec = if stored.starts_with(b"{") { "json-v1" } else { "json-zstd-v1" };
+        let raw = crate::journal::decode_payload(&stored, codec, 16 * 1024 * 1024)?;
+        ensure!(digest(&raw) == sha256, "native parent footer digest changed");
+        let crate::event::Event::Block {
+            slot, bank_id, parent_slot, parent_blockhash, blockhash, block_height, ..
+        } = serde_json::from_slice(&raw)? else {
+            anyhow::bail!("native parent proof is not a block footer");
+        };
+        ensure!(
+            sequence <= through && slot == state.slot && bank_id == state.bank_id
+                && parent_slot == state.parent_slot && blockhash == state.blockhash
+                && block_height == Some(state.block_height) && parent_blockhash != [0; 32],
+            "native parent footer identity differs"
+        );
+        if let Some(old) = &proof {
+            ensure!(old.parent_blockhash == parent_blockhash && old.sha256.as_ref() == Some(&sha256),
+                    "contradictory native parent footers");
+        } else {
+            proof = Some(ParentProof { parent_blockhash, kind: "native-block-footer", sequence,
+                                       sha256: Some(sha256) });
+        }
+    }
+    Ok(proof)
+}
+
+fn record_parent_resolution(
+    db: &Connection,
+    sequence: u64,
+    original: &crate::event::NativeBankState,
+    proof: &ParentProof,
+) -> Result<()> {
+    let raw = serde_json::to_string(original)?;
+    db.execute("INSERT OR IGNORE INTO bank_parent_resolutions(source_sequence,slot,bank,original_json,parent_blockhash,proof_kind,proof_sequence,proof_sha256) VALUES(?1,?2,?3,?4,?5,?6,?7,?8)",
+        params![sequence, original.slot, original.bank_id, raw, proof.parent_blockhash.as_slice(),
+                proof.kind, proof.sequence, proof.sha256])?;
+    let (previous, parent): (String, Vec<u8>) = db.query_row(
+        "SELECT original_json,parent_blockhash FROM bank_parent_resolutions WHERE source_sequence=?1",
+        [sequence], |r| Ok((r.get(0)?, r.get(1)?)))?;
+    ensure!(previous == raw && parent == proof.parent_blockhash,
+            "native parent resolution evidence changed");
+    Ok(())
+}
+
+fn persist_observation(
+    source: &Connection,
+    db: &Connection,
+    sequence: u64,
+    through: u64,
+    event: crate::event::Event,
+) -> Result<()> {
     use crate::event::Event;
     match event {
-        Event::BankStateV2(state) => {
+        Event::BankStateV2(mut state) => {
             state.validate()?;
-            let old:Option<String> = db.query_row("SELECT coalesce(frozen_json,confirmed_json) FROM bank_observations WHERE slot=?1 AND bank=?2",params![state.slot,state.bank_id],|r|r.get(0)).optional()?.flatten();
-            if let Some(old) = old {
-                let old: crate::event::NativeBankState = serde_json::from_str(&old)?;
-                ensure!(
-                    old.bank() == state.bank()
-                        && old.block_height == state.block_height
-                        && old.last_valid_block_height == state.last_valid_block_height,
-                    "contradictory native bank queue tuple"
-                );
+            let row: Option<(Option<String>, u64, Option<String>, u64)> = db.query_row(
+                "SELECT frozen_json,frozen_sequence,confirmed_json,confirmed_sequence FROM bank_observations WHERE slot=?1 AND bank=?2",
+                params![state.slot, state.bank_id], |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?))).optional()?;
+            let mut previous = Vec::new();
+            if let Some((frozen, frozen_sequence, confirmed, confirmed_sequence)) = row {
+                for (column, raw, old_sequence, confirmed) in [
+                    ("frozen", frozen, frozen_sequence, false),
+                    ("confirmed", confirmed, confirmed_sequence, true),
+                ] {
+                    if let Some(raw) = raw {
+                        let old: crate::event::NativeBankState = serde_json::from_str(&raw)?;
+                        old.validate()?;
+                        ensure!(old_sequence > 0 && old_sequence <= through && old.confirmed == confirmed
+                                && same_native_queue(&old, &state),
+                                "contradictory native bank queue tuple");
+                        previous.push((column, old_sequence, old));
+                    }
+                }
+            }
+            let mut proof = (state.parent_blockhash != [0; 32]).then(|| ParentProof {
+                parent_blockhash: state.parent_blockhash, kind: "native-bank-observation",
+                sequence, sha256: None,
+            });
+            for (_, old_sequence, old) in &previous {
+                if old.parent_blockhash != [0; 32] {
+                    if let Some(proof) = &proof {
+                        ensure!(proof.parent_blockhash == old.parent_blockhash,
+                                "contradictory native bank queue tuple");
+                    } else {
+                        proof = Some(ParentProof { parent_blockhash: old.parent_blockhash,
+                            kind: "native-bank-observation", sequence: *old_sequence, sha256: None });
+                    }
+                }
+            }
+            if state.parent_blockhash == [0; 32]
+                || previous.iter().any(|(_, _, old)| old.parent_blockhash == [0; 32])
+            {
+                if let Some(footer) = footer_parent_proof(source, &state, through)? {
+                    if let Some(old) = &proof {
+                        ensure!(old.parent_blockhash == footer.parent_blockhash,
+                                "contradictory native bank queue tuple");
+                    }
+                    proof = Some(footer);
+                }
+                let proof = proof.context("zero native parent hash has no exact retained proof")?;
+                if state.parent_blockhash == [0; 32] {
+                    record_parent_resolution(db, sequence, &state, &proof)?;
+                    state.parent_blockhash = proof.parent_blockhash;
+                }
+                for (column, old_sequence, mut old) in previous {
+                    if old.parent_blockhash == [0; 32] {
+                        record_parent_resolution(db, old_sequence, &old, &proof)?;
+                        old.parent_blockhash = proof.parent_blockhash;
+                        db.execute(&format!("UPDATE bank_observations SET {column}_json=?3 WHERE slot=?1 AND bank=?2"),
+                            params![old.slot, old.bank_id, serde_json::to_string(&old)?])?;
+                    }
+                }
+                state.validate()?;
             }
             let raw = serde_json::to_string(&state)?;
             db.execute(
@@ -1006,6 +1140,208 @@ mod tests {
         .unwrap();
         db.execute("UPDATE status SET durable_sequence=?1", [sequence])
             .unwrap();
+    }
+    fn parent_fixture() -> (tempfile::TempDir, Connection, Connection) {
+        let temp = tempfile::tempdir().unwrap();
+        let source = Connection::open_in_memory().unwrap();
+        source.execute_batch("CREATE TABLE events(sequence INTEGER PRIMARY KEY,slot INTEGER,bank INTEGER,kind TEXT,sha256 TEXT,payload BLOB);CREATE INDEX bank_events ON events(slot,bank,sequence);CREATE TABLE status(id INTEGER,durable_sequence INTEGER);INSERT INTO status VALUES(1,0);").unwrap();
+        let db = database(temp.path(), 0).unwrap();
+        (temp, source, db)
+    }
+    fn native_parent_fixture() -> Value {
+        serde_json::from_str(include_str!("../../deploy/foundation-watch/evidence/incident-20261016-a3cdcf23-native-conflict.json")).unwrap()
+    }
+    fn native_parent_state(confirmed: bool, zero: bool) -> crate::event::NativeBankState {
+        let fixture = native_parent_fixture();
+        let index = if confirmed { 1 } else { 2 };
+        let crate::event::Event::BankStateV2(mut state) =
+            serde_json::from_value(fixture["events"][index]["decoded"].clone()).unwrap()
+        else { unreachable!() };
+        state.parent_blockhash = if zero { [0; 32] } else {
+            serde_json::from_value(fixture["events"][0]["decoded"]["parent_blockhash"].clone()).unwrap()
+        };
+        state
+    }
+    fn native_parent_footer() -> crate::event::Event {
+        serde_json::from_value(native_parent_fixture()["events"][0]["decoded"].clone()).unwrap()
+    }
+    fn observation_pair(db: &Connection) -> (crate::event::NativeBankState, u64, crate::event::NativeBankState, u64) {
+        db.query_row("SELECT frozen_json,frozen_sequence,confirmed_json,confirmed_sequence FROM bank_observations WHERE slot=457459658 AND bank=958752", [], |r| {
+            Ok((serde_json::from_str(&r.get::<_, String>(0)?).unwrap(), r.get(1)?,
+                serde_json::from_str(&r.get::<_, String>(2)?).unwrap(), r.get(3)?))
+        }).unwrap()
+    }
+    fn assert_parent_rollback(db: &Connection, cursor: u64, observations: u64) {
+        assert_eq!(db.query_row("SELECT source_sequence FROM feed_state", [], |r| r.get::<_, u64>(0)).unwrap(), cursor);
+        assert_eq!(db.query_row("SELECT count(*) FROM bank_parent_resolutions", [], |r| r.get::<_, u64>(0)).unwrap(), 0);
+        assert_eq!(db.query_row("SELECT count(*) FROM bank_observations", [], |r| r.get::<_, u64>(0)).unwrap(), observations);
+    }
+    #[test]
+    fn native_parent_actual_confirmed_then_zero_frozen_preserves_source_and_restart() {
+        let fixture = native_parent_fixture();
+        let (temp, source, mut db) = parent_fixture();
+        for row in fixture["events"].as_array().unwrap() {
+            let event: crate::event::Event = serde_json::from_value(row["decoded"].clone()).unwrap();
+            assert_eq!(digest(&serde_json::to_vec(&event).unwrap()), row["sha256"].as_str().unwrap());
+            insert_source(&source, row["sequence"].as_u64().unwrap(), event);
+        }
+        let original = source.prepare("SELECT sequence,sha256,payload FROM events ORDER BY sequence").unwrap()
+            .query_map([], |r| Ok((r.get::<_, u64>(0)?, r.get::<_, String>(1)?, r.get::<_, Vec<u8>>(2)?)))
+            .unwrap().collect::<std::result::Result<Vec<_>, _>>().unwrap();
+        let after = fixture["worker_source_after"].as_u64().unwrap();
+        db.execute("UPDATE feed_state SET source_sequence=?1", [after]).unwrap();
+        let through = fixture["events"][2]["sequence"].as_u64().unwrap();
+        discover(&source, &mut db, through).unwrap();
+        let (frozen, frozen_sequence, confirmed, confirmed_sequence) = observation_pair(&db);
+        assert_eq!(frozen, native_parent_state(false, false));
+        assert_eq!(confirmed, native_parent_state(true, false));
+        assert_eq!(frozen_sequence, through);
+        assert_eq!(confirmed_sequence, 2149114053);
+        let proof: (String, u64, String) = db.query_row("SELECT proof_kind,proof_sequence,proof_sha256 FROM bank_parent_resolutions WHERE source_sequence=?1", [through],
+            |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?))).unwrap();
+        assert_eq!(proof, ("native-block-footer".into(), 2149060399, fixture["events"][0]["sha256"].as_str().unwrap().into()));
+        let unchanged = source.prepare("SELECT sequence,sha256,payload FROM events ORDER BY sequence").unwrap()
+            .query_map([], |r| Ok((r.get::<_, u64>(0)?, r.get::<_, String>(1)?, r.get::<_, Vec<u8>>(2)?)))
+            .unwrap().collect::<std::result::Result<Vec<_>, _>>().unwrap();
+        assert_eq!(original, unchanged);
+        drop(db);
+        let mut db = database(temp.path(), 0).unwrap();
+        discover(&source, &mut db, through).unwrap();
+        assert_eq!(observation_pair(&db), (frozen, frozen_sequence, confirmed, confirmed_sequence));
+        assert_eq!(db.query_row("SELECT count(*) FROM bank_parent_resolutions", [], |r| r.get::<_, u64>(0)).unwrap(), 1);
+    }
+    #[test]
+    fn native_parent_zero_frozen_before_confirmation_uses_compressed_footer() {
+        use crate::event::Event;
+        let (_temp, source, mut db) = parent_fixture();
+        insert_source(&source, 1, native_parent_footer());
+        let raw: Vec<u8> = source.query_row("SELECT payload FROM events WHERE sequence=1", [], |r| r.get(0)).unwrap();
+        source.execute("UPDATE events SET payload=?1 WHERE sequence=1", [zstd::bulk::compress(&raw, 1).unwrap()]).unwrap();
+        insert_source(&source, 2, Event::BankStateV2(native_parent_state(false, true)));
+        insert_source(&source, 3, Event::BankStateV2(native_parent_state(true, false)));
+        discover(&source, &mut db, 3).unwrap();
+        let (frozen, fs, confirmed, cs) = observation_pair(&db);
+        assert_eq!(frozen, native_parent_state(false, false));
+        assert_eq!(confirmed, native_parent_state(true, false));
+        assert_eq!((fs, cs), (2, 3));
+    }
+    #[test]
+    fn native_parent_existing_observation_is_exact_proof_without_footer() {
+        use crate::event::Event;
+        let (_temp, source, mut db) = parent_fixture();
+        insert_source(&source, 1, Event::BankStateV2(native_parent_state(true, false)));
+        insert_source(&source, 2, Event::BankStateV2(native_parent_state(false, true)));
+        discover(&source, &mut db, 2).unwrap();
+        let kind: String = db.query_row("SELECT proof_kind FROM bank_parent_resolutions", [], |r| r.get(0)).unwrap();
+        assert_eq!(kind, "native-bank-observation");
+        assert_eq!(observation_pair(&db).0, native_parent_state(false, false));
+    }
+    #[test]
+    fn native_parent_legacy_zero_row_is_repaired_without_renewing_observation() {
+        use crate::event::Event;
+        let (_temp, source, mut db) = parent_fixture();
+        let old = native_parent_state(false, true);
+        db.execute("INSERT INTO bank_observations(slot,bank,frozen_json,frozen_sequence) VALUES(?1,?2,?3,1)",
+            params![old.slot, old.bank_id, serde_json::to_string(&old).unwrap()]).unwrap();
+        db.execute("UPDATE feed_state SET source_sequence=1", []).unwrap();
+        insert_source(&source, 2, Event::BankStateV2(native_parent_state(true, false)));
+        discover(&source, &mut db, 2).unwrap();
+        let (frozen, fs, confirmed, cs) = observation_pair(&db);
+        assert_eq!(frozen, native_parent_state(false, false));
+        assert_eq!(confirmed, native_parent_state(true, false));
+        assert_eq!((fs, cs), (1, 2));
+    }
+    #[test]
+    fn native_parent_tuple_mismatches_remain_fatal_without_cursor_advance() {
+        use crate::event::Event;
+        for field in ["slot", "bank", "parent_slot", "blockhash", "height", "expiry", "parent_hash"] {
+            let (_temp, source, mut db) = parent_fixture();
+            insert_source(&source, 1, Event::BankStateV2(native_parent_state(true, false)));
+            discover(&source, &mut db, 1).unwrap();
+            let mut changed = native_parent_state(false, true);
+            match field {
+                "slot" => changed.slot += 1,
+                "bank" => changed.bank_id += 1,
+                "parent_slot" => changed.parent_slot -= 1,
+                "blockhash" => changed.blockhash[0] ^= 1,
+                "height" => changed.block_height += 1,
+                "expiry" => changed.last_valid_block_height += 1,
+                "parent_hash" => changed.parent_blockhash = [1; 32],
+                _ => unreachable!(),
+            }
+            insert_source(&source, 2, Event::BankStateV2(changed));
+            assert!(discover(&source, &mut db, 2).is_err(), "{field}");
+            assert_parent_rollback(&db, 1, 1);
+        }
+    }
+    #[test]
+    fn native_parent_missing_or_uncommitted_footer_is_not_proof() {
+        use crate::event::Event;
+        for future in [false, true] {
+            let (_temp, source, mut db) = parent_fixture();
+            insert_source(&source, 1, Event::BankStateV2(native_parent_state(false, true)));
+            if future { insert_source(&source, 2, native_parent_footer()); }
+            assert!(discover(&source, &mut db, 1).is_err());
+            assert_parent_rollback(&db, 0, 0);
+        }
+    }
+    #[test]
+    fn native_parent_footer_rejects_bad_digest_key_height_and_conflicting_parents() {
+        use crate::event::Event;
+        for field in ["digest", "sql_key", "height", "parent_slot", "blockhash", "zero", "conflict", "bound"] {
+            let (_temp, source, mut db) = parent_fixture();
+            let mut footer = native_parent_footer();
+            if let Event::Block { bank_id, block_height, parent_slot, blockhash, parent_blockhash, .. } = &mut footer {
+                match field {
+                    "sql_key" => *bank_id += 1,
+                    "height" => *block_height = block_height.map(|h| h + 1),
+                    "parent_slot" => *parent_slot -= 1,
+                    "blockhash" => blockhash[0] ^= 1,
+                    "zero" => *parent_blockhash = [0; 32],
+                    _ => {},
+                }
+            }
+            insert_source(&source, 1, footer);
+            if field == "digest" { source.execute("UPDATE events SET sha256='bad' WHERE sequence=1", []).unwrap(); }
+            if field == "sql_key" { source.execute("UPDATE events SET bank=958752 WHERE sequence=1", []).unwrap(); }
+            if matches!(field, "conflict" | "bound") {
+                let mut other = native_parent_footer();
+                if field == "conflict" {
+                    if let Event::Block { parent_blockhash, .. } = &mut other { *parent_blockhash = [1; 32]; }
+                }
+                insert_source(&source, 2, other);
+                if field == "bound" { insert_source(&source, 3, native_parent_footer()); }
+            }
+            insert_source(&source, 4, Event::BankStateV2(native_parent_state(false, true)));
+            assert!(discover(&source, &mut db, 4).is_err(), "{field}");
+            assert_parent_rollback(&db, 0, 0);
+        }
+    }
+    #[test]
+    fn native_parent_hidden_confirmed_conflict_is_not_masked_by_frozen_row() {
+        use crate::event::Event;
+        let (_temp, source, mut db) = parent_fixture();
+        let frozen = native_parent_state(false, false);
+        let mut confirmed = native_parent_state(true, false);
+        confirmed.parent_blockhash = [1; 32];
+        db.execute("INSERT INTO bank_observations(slot,bank,frozen_json,frozen_sequence,confirmed_json,confirmed_sequence) VALUES(?1,?2,?3,1,?4,2)",
+            params![frozen.slot, frozen.bank_id, serde_json::to_string(&frozen).unwrap(), serde_json::to_string(&confirmed).unwrap()]).unwrap();
+        db.execute("UPDATE feed_state SET source_sequence=2", []).unwrap();
+        insert_source(&source, 3, Event::BankStateV2(native_parent_state(false, true)));
+        assert!(discover(&source, &mut db, 3).is_err());
+        assert_parent_rollback(&db, 2, 1);
+    }
+    #[test]
+    fn native_parent_later_conflict_rolls_back_resolution_evidence_and_cursor() {
+        use crate::event::Event;
+        let (_temp, source, mut db) = parent_fixture();
+        insert_source(&source, 1, native_parent_footer());
+        insert_source(&source, 2, Event::BankStateV2(native_parent_state(false, true)));
+        let mut changed = native_parent_state(true, false);
+        changed.last_valid_block_height += 1;
+        insert_source(&source, 3, Event::BankStateV2(changed));
+        assert!(discover(&source, &mut db, 3).is_err());
+        assert_parent_rollback(&db, 0, 0);
     }
     #[test]
     #[ignore = "requires BLOCKZILLA_BUILDER; run on the remote build host"]

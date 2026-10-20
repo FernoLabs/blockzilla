@@ -1,0 +1,391 @@
+{
+  "schema": "blockzilla-native-parent-proof-recovery-v1",
+  "event_id": "a3cdcf23-2192-4f5d-881c-a362b67dfa2e",
+  "incident_reported_at_utc": "2026-10-16T05:34:47.137Z",
+  "recorded_at_utc": "2026-10-16T06:51:50.900530+00:00",
+  "state": "RECOVERED_FINITE_FLOW_CHECKS",
+  "host": "ubuntu@213.239.141.61",
+  "server_root": "/home/ubuntu/live/hivezilla-validator-20260930",
+  "repository_base": "c03e07f772aba1c8fb7265465574e65e6320141a",
+  "cause": {
+    "compact_failed_at_utc": "2026-10-16T02:00:52Z",
+    "compact_error": "contradictory native bank queue tuple",
+    "capture_failed_at_utc": "2026-10-16T02:06:24Z",
+    "capture_error": "disk reserve reached; capture stopped with explicit gap",
+    "bank": {
+      "slot": 457459658,
+      "bank_id": 958752,
+      "parent_slot": 457459657,
+      "block_height": 435495492,
+      "last_valid_block_height": 435495642
+    },
+    "native_records": {
+      "footer_sequence": 2149060399,
+      "confirmed_sequence": 2149114053,
+      "later_zero_frozen_sequence": 2149116409
+    },
+    "observed_difference": "The later frozen observation has a zero parent blockhash. The bank identity, blockhash, parent slot, height and expiry match the earlier confirmed observation and native footer.",
+    "mechanism": "The pinned native hook reads bank.parent(). After squash detaches the parent, the hook can emit a zero parent blockhash.",
+    "native_retirement_failure_record_present": false
+  },
+  "worker_patch": {
+    "source": "hivezilla/direct-agave/src/processed.rs",
+    "source_sha256": "544e7dddeeb1f5cc3c31fb0287ab0c050abc2039bc55b5ce608cf129e799dfe4",
+    "release": "releases/native-parent-proof-20261016-7c6f488fe28b757a",
+    "binary_sha256": "7c6f488fe28b757abfaa57e71b6fa3357ad95f8f6a250e571f4f0d82509b2818",
+    "running_engine_pid_checked": 2995169,
+    "running_engine_hash_checked_at_unix_ms": 1792132422269,
+    "rust_version": "1.98.0",
+    "agave_revision": "d688dd0e3a576b048a848e5faf2e8d277f8feb6e",
+    "isolated_installed_source_baseline_used": true,
+    "unrelated_user_chain_edits_excluded": true,
+    "behavior": "Resolve only a zero parent blockhash with exact retained native evidence. Keep nonzero conflicts and all identity, parent slot, height and expiry mismatches fatal.",
+    "proof_bounds": {
+      "max_footer_rows": 2,
+      "max_stored_footer_bytes": 33554432,
+      "max_decoded_footer_bytes": 16777216,
+      "maximum_source_sequence": "durable through"
+    },
+    "audit_table": "bank_parent_resolutions",
+    "source_rows_and_digests_changed": false,
+    "native_confirmation_timestamps_height_expiry_preserved": true,
+    "live_resolution_sample": {
+      "checked_unix_ms": 1792132543007,
+      "query_limit": 5,
+      "rows": 0,
+      "note": "The new source had no resolution row in this bounded sample. The exact failure is covered by the captured-record regression test."
+    }
+  },
+  "source_recovery": {
+    "helper_release": "releases/source-handoff-20261013-679547f433f4",
+    "helper_sha256": "679547f433f4c0c61a45877115988adbf33f32571f29341ed5a4e03dea616614",
+    "old_session": "000000000000000018de229d3fc8a9d9-275b05",
+    "new_session": "000000000000000018deede1d641da13-275b05",
+    "active_source_pin": "config/native-active-source.json",
+    "validator_pid_before": 2579205,
+    "validator_pid_after": 2579205,
+    "validator_restarted": false,
+    "validator_or_plugin_rebuilt": false,
+    "feed_services_restarted_for_explicit_source_switch": true,
+    "old_capture_failure_and_unprocessed_evidence_preserved": true,
+    "old_publisher_tail": {
+      "events": 24,
+      "checkpoint_before": 1913192,
+      "checkpoint_after": 1913216,
+      "tail_position": 1913216,
+      "state": "COMPLETE",
+      "pending_intent": false,
+      "remote_head_checked_by_publisher": true
+    },
+    "compact_source_boundaries": {
+      "checked_at_utc": "2026-10-16T06:31:31.570728+00:00",
+      "coverage_interpretation": "Source separation only; no produced/skipped-slot or finalized coverage audit was performed.",
+      "new": {
+        "bank_id": 1032430,
+        "boundary": "minimum_published_block_slot",
+        "event_sequence": 1,
+        "indexed_rows_read": 4096,
+        "parent_slot": 457533343,
+        "slot": 457533344,
+        "source_session": "000000000000000018deede1d641da13-275b05"
+      },
+      "old": {
+        "bank_id": 958751,
+        "boundary": "maximum_published_block_slot",
+        "event_sequence": 1913215,
+        "indexed_rows_read": 4096,
+        "parent_slot": 457459656,
+        "slot": 457459657,
+        "source_session": "000000000000000018de229d3fc8a9d9-275b05"
+      },
+      "slot_numbers_strictly_between": 73686,
+      "numeric_slot_interval_strictly_between": {
+        "first_slot": 457459658,
+        "last_slot": 457533343,
+        "slot_number_count": 73686
+      },
+      "query_contract": {
+        "database_pattern": "ROOT/compact/direct-agave-processed-live/SESSION/feed.sqlite",
+        "table": "feed_events",
+        "index": "feed_bank_events",
+        "columns": "sequence,kind,slot,bank,event_json",
+        "ordering": "old descending and new ascending by slot, bank and sequence",
+        "maximum_indexed_rows_per_source": 4096,
+        "connection": "SQLite mode=ro with PRAGMA query_only=ON",
+        "query_time_limit_seconds": 2
+      },
+      "interpretation": "The last compact block slot in the old source and first compact block slot in the new source are separated by 73686 slot numbers. This is not a count of produced or finalized blocks lost. No produced/skipped-slot, fork, retained native-source recovery or other archive-source coverage audit was performed."
+    },
+    "gap_rebuilt": false,
+    "server_initial_receipts": "reports/bank-v2-recovery-20261016-a3cdcf23/RECOVERY.json and reports/native-parent-proof-20261016/INSTALLATION.json retain their installation-time pending states. VERIFICATION.json is the later measured result."
+  },
+  "validation": {
+    "native_unit_tests_passed": 23,
+    "real_builder_tests_passed": 2,
+    "recovery_tests_passed": 16,
+    "priority_tests_passed": 11,
+    "cold_storage_tests_passed": 15,
+    "test_scope": "Native failure fixture, both observation orders, conflicting proof, digest/key/height/expiry checks, transaction rollback, restart, real builder payload reuse; deployment source switch, storage byte gates, restore reserve and background priority checks.",
+    "historical_13_october_deployment_tests_passed": 152,
+    "historical_suite_note": "The 152-test result belongs to the earlier patch. This receipt records the focused suites run on 16 October separately.",
+    "build_logs": "Foundation benchmarks/blockzilla-bank-parent-recovery-20261016/{patched-tests.log,integration-tests.log,release-build.log}"
+  },
+  "monitoring": {
+    "all_clear_at_two_post_guard_samples": true,
+    "latest_initial_post_guard_check_utc": "2026-10-16T06:34:10.737000+00:00",
+    "source_matches": true,
+    "rooted_compact_lag_slots": 0,
+    "public_sse_advancing": true,
+    "final_flow_evidence": "incident-20261016-a3cdcf23-final-flow.json",
+    "private_v2_http": {
+      "state": "BLOCKED_NOT_RUN",
+      "head_progress_verified": false,
+      "confirmed_live_verified": false,
+      "payload_hash_verified": false,
+      "credentials_accessed_in_final_checks": false,
+      "reason": "Earlier automatic approval review rejected the proposed authenticated stream check because exact trusted user authorization for the Foundation stream-key use and external destination was not present. That check was not retried; these final checks use only the permitted monitor and free public feed."
+    },
+    "post_index_check": {
+      "completed_at_utc": "2026-10-16T06:50:11.988689+00:00",
+      "reported_storage_pilot_completed_at_utc": "2026-10-16T06:49:48Z",
+      "requested_earliest_check_utc": "2026-10-16T06:49:29Z",
+      "reported_index_changes": [
+        {
+          "source_session": "000000000000000018de229d3fc8a9d9-275b05",
+          "completed_at_utc": "2026-10-16T06:45:27Z",
+          "service_restart": false
+        },
+        {
+          "source_session": "000000000000000018deede1d641da13-275b05",
+          "completed_at_utc": "2026-10-16T06:46:48Z",
+          "write_transaction_ms": 28,
+          "reported_unchanged_producer_pid": 2995833
+        }
+      ],
+      "watcher_check": {
+        "checked_at_unix_ms": 1792133397736,
+        "checked_at_utc": "2026-10-16T06:49:57.736000+00:00",
+        "cloud_event_queue": 166,
+        "compact_slot_lag": 0,
+        "rooted_minus_compact_slots": -29,
+        "sample": {
+          "capture": {
+            "durable_sequence": 19548237,
+            "latest_rooted_slot": 457543162,
+            "session": "000000000000000018deede1d641da13-275b05",
+            "state": "CAPTURING",
+            "updated_unix_ms": null
+          },
+          "capture_reserve_bytes": 429496729600,
+          "cold_storage": {
+            "retired_banks": 0,
+            "state": "RUNNING",
+            "updated_unix_ms": 1792133371798
+          },
+          "compact": {
+            "event_sequence": 19665,
+            "last_compact_slot": 457543191,
+            "source_sequence": 19545128,
+            "state": "RUNNING",
+            "updated_unix_ms": 1792133373301
+          },
+          "errors": [],
+          "free_disk_bytes": 566904463360,
+          "mem_available_bytes": 992071979008,
+          "publisher": {
+            "sequence": 19499,
+            "state": "RUNNING",
+            "updated_unix_ms": 1792133368797
+          },
+          "rpc": {
+            "finalized_slot": 457543161,
+            "healthy": true
+          },
+          "sampled_unix_ms": 1792133373401,
+          "services": {
+            "hivezilla-bank-v2-producer.service": "active",
+            "hivezilla-bank-v2-r2-publisher.service": "active",
+            "hivezilla-direct-worker.service": "active",
+            "hivezilla-live-priority-20261012.service": "active",
+            "hivezilla-native-cold-storage-20261012-live.service": "active",
+            "hivezilla-validator.service": "active"
+          }
+        },
+        "source_matches_expected": true,
+        "watcher": {
+          "active_incident_issues": [],
+          "armed": true,
+          "currentIssues": [],
+          "lastCheckMs": 1792133388988,
+          "lastReceivedMs": 1792133373644,
+          "streamIssue": null
+        }
+      },
+      "public_free_sse_check": {
+        "block_slots": [
+          457543372,
+          457543373
+        ],
+        "bytes_read": 1095,
+        "checked_at_utc": "2026-10-16T06:50:11.988689+00:00",
+        "elapsed_ms": 390,
+        "event_types": [
+          "status",
+          "root",
+          "status",
+          "block",
+          "status",
+          "block"
+        ],
+        "result": "two_advancing_slots"
+      },
+      "all_clear": true,
+      "public_progress_verified": true,
+      "authenticated_private_v2_http_check": "NOT_RUN",
+      "scope": "Finite watcher and free public SSE observation after the reported index changes and the requested storage-pilot end time. Earlier flow checks are preserved."
+    }
+  },
+  "storage": {
+    "approval_evidence": "native-storage-authorization-20261012.json",
+    "policy": "Continuing owner-approved native cloud storage with at least two hours locally, publication/replay/native acknowledgement gates, exact full remote bundle byte checks, durable receipts, then exact local retirement.",
+    "earlier_approval_review_rejection": "Resolved with the direct human 12 October approval record. The subsequent reviewed storage starts were accepted. The separate 16 October question was redundant and was not treated as approval.",
+    "old13_completed": {
+      "new_banks": 4096,
+      "freed_bytes": 9922818048,
+      "completed_at_utc": "2026-10-16T06:32:07Z"
+    },
+    "old16_original_bank_cap": 65536,
+    "old16_tuning": {
+      "parallel_bundles": 4,
+      "cpu_quota": "200%",
+      "memory_max": "4G",
+      "batch_banks": 64,
+      "restart": "no",
+      "already_indexed_new_banks_at_restart": 1472,
+      "remaining_batch_limit": 1001,
+      "original_bank_cap_preserved": true
+    },
+    "current_old16_unit_sha256": "ae6bcd5d923192eb981ecdb0df04228d4d17469b3d5d63e0a9d7a11ce8f264e4",
+    "priority_release": "releases/native-priority-20261016-e148f16ca59d95de",
+    "priority_source_sha256": "e148f16ca59d95debc5608a08dcddc33c2c2959c678209f0e72fb9e1d0d13e1b",
+    "extra_background_units": [
+      "hivezilla-native-cold-storage-20261016-source-18ddd9a6.service",
+      "hivezilla-native-cold-storage-20261016-source-18de229d.service"
+    ],
+    "live_storage_excluded_from_background_freeze": true,
+    "initial_pilot_free_delta_bytes": -1368027136,
+    "missing_artifact_index_migration": {
+      "schema": "blockzilla-bank-artifact-index-migration-v1",
+      "session": "000000000000000018de229d3fc8a9d9-275b05",
+      "started_unix_ms": 1792133064875,
+      "completed_unix_ms": 1792133127311,
+      "database": "/home/ubuntu/live/hivezilla-validator-20260930/compact/bank-v2-live/000000000000000018de229d3fc8a9d9-275b05/feed.sqlite",
+      "sql": "CREATE INDEX IF NOT EXISTS event_artifact ON feed_events(artifact,sequence)",
+      "existing_source_definition": "hivezilla/direct-agave/src/confirmed.rs:48",
+      "old_source_producer_lock": "WORKER.lock held exclusively throughout migration",
+      "active_source_changed": false,
+      "services_restarted": false,
+      "event_rows_modified": 0,
+      "event_counts_and_bounds_before": [
+        2869813,
+        1,
+        2869813
+      ],
+      "event_counts_and_bounds_after": [
+        2869813,
+        1,
+        2869813
+      ],
+      "first_16_event_rows_unchanged": true,
+      "sample_artifact": "/home/ubuntu/live/hivezilla-validator-20260930/compact/direct-agave-processed-live/000000000000000018de229d3fc8a9d9-275b05/epoch-1056/456502438-2094.compact",
+      "sample_max_sequence_before": 33,
+      "sample_max_sequence_after": 33,
+      "query_plan_before": [
+        [
+          3,
+          0,
+          0,
+          "SEARCH feed_events"
+        ]
+      ],
+      "query_plan_after": [
+        [
+          3,
+          0,
+          0,
+          "SEARCH feed_events USING COVERING INDEX event_artifact (artifact=?)"
+        ]
+      ],
+      "sample_query_seconds_before": 39.7215087399818,
+      "sample_query_seconds_after": 3.192806616425514e-05,
+      "gate_query_changed": false,
+      "storage_gates_changed": false,
+      "free_disk_bytes_after": 563537043456,
+      "limits": [
+        "The timings are one query sample; cache state was not controlled. A storage pilot must measure end-to-end throughput."
+      ],
+      "active_source_migration": {
+        "schema": "blockzilla-live-bank-artifact-index-migration-v1",
+        "session": "000000000000000018deede1d641da13-275b05",
+        "started_unix_ms": 1792133208463,
+        "completed_unix_ms": 1792133208498,
+        "sql": "CREATE INDEX IF NOT EXISTS event_artifact ON feed_events(artifact,sequence)",
+        "existing_source_definition": "hivezilla/direct-agave/src/confirmed.rs:48",
+        "event_rows_before": 27214,
+        "index_transaction_seconds": 0.028235235949978232,
+        "first_16_event_rows_unchanged": true,
+        "event_rows_modified": 0,
+        "producer_pid_unchanged": 2995833,
+        "services_restarted": false,
+        "write_admission_timeout_seconds": 0.5,
+        "statement_progress_deadline_seconds": 2,
+        "query_plan_after": [
+          [
+            3,
+            0,
+            0,
+            "SEARCH feed_events USING COVERING INDEX event_artifact (artifact=?)"
+          ]
+        ],
+        "storage_gates_changed": false
+      }
+    },
+    "followup_pilot_evidence": "incident-20261016-a3cdcf23-storage-tuning.json",
+    "post_index_pilot_summary": {
+      "elapsed_seconds": 199.385,
+      "newly_retired_banks": 2944,
+      "freed_bytes": 7175372800,
+      "retirement_megabytes_per_second": 35.99,
+      "filesystem_available_bytes_delta": 3988017152,
+      "filesystem_available_bytes_at_end": 567368585216,
+      "sustained_capacity_proved": false
+    },
+    "snapshot_budget_evidence": "incident-20261016-a3cdcf23-snapshot-budget.json",
+    "current_validator_retention": "Previous defaults: two full and four incremental archives. No retention flags in running argv.",
+    "next_start_retention": "Installed one full and one matching incremental archive; startup gate 500 GiB plus at least 128 GiB next-archive write budget.",
+    "next_start_minimum_free_bytes": 674309865472,
+    "manual_snapshot_deletions": 0,
+    "compiler_cache_deletions_this_repair": 0
+  },
+  "limits": [
+    "No native gap was rebuilt. The numeric source interval is not a count of lost produced or finalized blocks.",
+    "The authenticated private v2 HTTP/head/payload hash check was not run after automatic approval review rejected the credential use. Public SSE is a separate checked contract.",
+    "Finite throughput and free-space samples do not prove sustained capacity or safe operation through the next full snapshot.",
+    "The running validator keeps its previous snapshot retention settings. The stricter startup gate does not prevent later disk growth.",
+    "Old-source storage has a bounded work cap and can wait under --follow. It does not automatically resume all eligible history after that cap.",
+    "Restored-file cache retirement, automatic source handoff, full native gap recovery and complete archive query integration remain unfinished."
+  ],
+  "evidence_sha256": {
+    "incident-20261016-a3cdcf23-telemetry.json": "4944560d7bc3d0cc7b4f494010aa2fe3d78a01a4004d8825d2bf863d7045138e",
+    "incident-20261016-a3cdcf23-host-before.json": "f0306d899195425a6480af060c6e79113f348cfb1436067981c68541f9cf0d1b",
+    "incident-20261016-a3cdcf23-native-conflict.json": "cd6642724993a98870e7f34493855c0fcdc1613c29f12cc40c63cc6e5af38b1c",
+    "incident-20261016-a3cdcf23-flow.json": "363b75b88081f7e5f5a638c075863efef791e9fc2214d548277c7e8d18b7b2e7",
+    "incident-20261016-a3cdcf23-final-flow.json": "eda35664cf174cd165c58b0b79c0eee30ddfa1f6310b59143629be175205fc6b",
+    "incident-20261016-a3cdcf23-storage.json": "a09c12f5889a6ac7f1b59fed80e2e0eeb6336e0edc08c57640d197283ff595aa",
+    "incident-20261016-a3cdcf23-storage-tuning.json": "e98f4702fb50b537ff1395490f369527da3e3f6857a16c6bb5b7e4902a4709ca",
+    "incident-20261016-a3cdcf23-snapshot-budget.json": "3b6e811b7cdf0d1e604128d9c4cf8179ecbbca7c6e6cad2bc5b6ae21750f6ce8",
+    "incident-20261016-a3cdcf23-bank-artifact-index.json": "747cc61b28cf04eafec9e5dcadbb1842dd81309284f3324c9fedddf0e69a7872",
+    "native-storage-authorization-20261012.json": "db4f94d1685a810a34748c6679692acb76bf00d50770a287ef510655148cb9e9"
+  },
+  "patch_scope": "Cumulative 13 and 16 October repair files only. Unrelated user changes are excluded. No commit or push was made."
+}

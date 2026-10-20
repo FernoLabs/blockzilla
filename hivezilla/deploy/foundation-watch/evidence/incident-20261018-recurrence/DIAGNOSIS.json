@@ -1,0 +1,147 @@
+{
+  "schema": "blockzilla-private-head-stale-diagnosis-v1",
+  "state": "CAUSE_IDENTIFIED_SOURCE_AND_TIMING",
+  "source": {
+    "genesis_hash": "5eykt4UsFv8P8NJdTREpY1vzqKqZKvdpKuc147dw2N9d",
+    "node_identity": "J7qpvCEWhdBgPdYRV3s3btWPrRVXa2qnAzgvxWTvtbrQ",
+    "agave_revision": "87167f3906bdf5111e99ead64d8f4098b7874e33",
+    "session_id": "000000000000000018df884b2474cf8e-20b258"
+  },
+  "service_actions": [],
+  "production_code_changed": false,
+  "cause": {
+    "kind": "absolute_http_connection_lifetime",
+    "limit_seconds": 300,
+    "detail": "Both TLS and plain HTTP serve_connection futures are wrapped in a fixed 300-second timeout. An active SSE stream is dropped at this total age. The relay marks health stale and reconnects, even while origin and confirmed bank data remain fresh.",
+    "retry_path": "bank_upstream.rs sets stale on retryable transport loss, then sleeps before reconnect; fresh confirmed frames do not reset explicit health."
+  },
+  "ten_minute_observation": {
+    "sample_count": 601,
+    "elapsed_seconds": 600.024,
+    "fault_count": 2,
+    "worst_consecutive_faults": 1,
+    "faults": [
+      {
+        "sampled_unix_ms": 1792316812581,
+        "elapsed_seconds": 295.0,
+        "source_lag_ms": 1075
+      },
+      {
+        "sampled_unix_ms": 1792317114581,
+        "elapsed_seconds": 597.0,
+        "source_lag_ms": 1763
+      }
+    ],
+    "protected_pids_unchanged": true,
+    "active_source_pin_unchanged": true,
+    "source_lag_live_samples_ms": {
+      "min": 418,
+      "median": 807,
+      "p95": 1252,
+      "max": 2021
+    }
+  },
+  "joint_timing": {
+    "state": "STOPPED_AFTER_CAUSE_VERIFICATION",
+    "planned20_minute_window_completed": false,
+    "summary": {
+      "sampled_unix_ms": 1792317517696,
+      "elapsed_seconds": 270.0,
+      "input_samples": 2701,
+      "head_samples": 540,
+      "head_faults": 2,
+      "origin_statuses": 246,
+      "origin_status_faults": 0,
+      "max_status_age_ms": {
+        "worker": 813,
+        "producer": 471
+      },
+      "status_age_over5s_samples": {
+        "worker": 0,
+        "producer": 0
+      },
+      "max_input_sample_gap_ms": 100
+    },
+    "first_stale_unix_ms": 1792317415197,
+    "second_stale_unix_ms": 1792317415697,
+    "origin_last": {
+      "received_unix_ms": 1792317415013,
+      "status": "live",
+      "sampled_at_unix_ms": 1792317415010,
+      "source_lag_ms": 549,
+      "cursor": "000000000000000018df884b2474cf8e-20b258:p226808:0ef53dc536724e84cbdb39aa22f4964b6ce809b36e8239c1d226ed68dee1f63b",
+      "source_matches": true,
+      "delivery_age_ms": 3,
+      "arrival_interval_ms": 1160
+    },
+    "origin_live_status_age_at_first_fault_ms": 184,
+    "preceding_input_samples": 300,
+    "following_input_samples": 21,
+    "ring_and_following_max_input_age_ms": {
+      "worker": 256,
+      "producer": 75
+    },
+    "conclusion": "The observed joint fault is not caused by input STATUS age: all sampled worker/producer ages are below 5 seconds, and independent origin SSE status is live 184 ms before the first relay-stale sample."
+  },
+  "interval_signature": {
+    "stale_cycle_first_observed_unix_ms": [
+      1792316812581,
+      1792317114581,
+      1792317415197
+    ],
+    "interval_ms": [
+      302000,
+      300616
+    ],
+    "interpretation": "One-second and half-second sampling quantize the fixed 300-second cutoff plus reconnect delay."
+  },
+  "source_proof": {
+    "active_origin_pid": 1834760,
+    "active_origin_binary_sha256": "e769871d519750a187814a82e1a1f3e48cfc9bde0948410674a70dca7c97d1b7",
+    "active_origin_binary": "/home/ubuntu/live/hivezilla-validator-20260930/releases/bank-head-health-20261018-c319ba5d-e769871d5197/hivezilla-stream",
+    "source_manifest_sha256": "0099305fcfc27cb0ef00ec684260909636867c43ee436e0863f56772f2044dd4",
+    "verified_server_sha256": "4bec1805c02212249f2761e842046f7e23e23ed9e8a0d0917b08decdaf930f2a",
+    "verified_host_server": "/home/ubuntu/benchmarks/bank-head-health-20261018-c319ba5d/provider/hivezilla/stream-relay/src/server.rs",
+    "verified_donor_server": "/home/ubuntu/benchmarks/agave-upgrade-4.3.2-20261016/provider/hivezilla/stream-relay/src/server.rs",
+    "tls_wrapper_host_line": 502,
+    "plain_wrapper_host_line": 509,
+    "server_changed_by_cadence_patch": false,
+    "cadence_changed_files": [
+      "hivezilla/stream-relay/src/bank_server.rs",
+      "hivezilla/stream-relay/src/bank_store.rs"
+    ],
+    "active_relay_pid": 917317,
+    "active_relay_binary_sha256": "1bfc4577e5090d2a073a7114a0dd086f6397f4205e0909fcd20cc701d79846ae",
+    "historical_relay_source_commit": "6d1f738af15d301f69b4ffe1e458bdf0beffe1f5",
+    "historical_relay_receipt": "hivezilla/stream-relay/evidence/bank-stream-v2-20261010/RUNTIME-ARTIFACTS.json",
+    "original_relay_checkout_available": false,
+    "original_relay_source_bytes_reconstructed": false,
+    "provenance_limit": "The active origin source is directly hash-verified. The old relay binary matches its historical receipt; the original r10 checkout is absent."
+  },
+  "repair": {
+    "state": "UNDER_REVIEW_NOT_DEPLOYED",
+    "strategy": "Replace the total connection lifetime with an idle timeout renewed only by actual positive read/write progress.",
+    "preserve": [
+      "Five-second TLS handshake timeout",
+      "Five-second HTTP header timeout",
+      "64 connection semaphore",
+      "32 HTTP/2 concurrent streams",
+      "64 KiB HTTP buffers",
+      "Request caps, authentication and backpressure",
+      "Five-second head health lifetime",
+      "Exact source, bank selection and durable replay behavior"
+    ]
+  },
+  "temporary_observer_stopped": true,
+  "temporary_observer_pid": 2055108,
+  "root_cleanup_observer_touched": false,
+  "evidence_sha256": {
+    "HEAD-STRESS-FLOW.json": "681ce4cb326d2a3bfb5ad86faa9144917e61d8a51c37d589ddb8b67613aa7140",
+    "HEAD-STRESS-FAULT-001.json": "d76aa73cc365d392befa42ed6c81ce50d8425c794de7b3522a6fc7054da95deb",
+    "HEAD-STRESS-FAULT-002.json": "b139d4658b54e73aafee008b1e4590cbe14c1b5bc0a3b45f5667bfb2e82e9662",
+    "HEAD-STRESS-ORIGIN-STATUS.json": "3874ddca92a3058c02835ae2bf612b145e29f191c1f94f445a5515b25d7ae4ce",
+    "HEAD-STATUS-TIMING.json": "c49ad042a6e1445f65fc4085fb767624b825c96fd28366433412d0ab31aa7cad",
+    "HEAD-STATUS-TIMING-FAULT-001.json": "f04b659c8f6dec8fe11590c801256b183881fcfe76c0fd20c9bec5690c4b172b",
+    "HEAD-STATUS-TIMING-FAULT-002.json": "d08315903cb36f62e731ed819f0f5a76778761c94c833f44ca0111b99a0b0c93"
+  }
+}

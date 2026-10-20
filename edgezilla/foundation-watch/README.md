@@ -52,6 +52,28 @@ check `GET /status`: `alert_delivery_channel` must be `telegram`,
 `lastDeliveryMs` must advance. Confirm the test in the recipient's Telegram chat
 before reporting that notifications are active.
 
+## Private alert history
+
+`GET /history` uses the same operator Bearer token as `GET /status`. It reads
+stored alerts without running checks, changing alarms or state, or sending a
+message. Other methods return 405 after authentication; missing or wrong
+credentials return 401.
+
+The response uses schema `blockzilla-foundation-alert-history-v1`. It contains
+up to 100 retained alerts, newest insertion first. Each alert contains only
+`id`, `kind`, `issues`, `createdMs`, `status`, and `attempts`. The fixed query
+reads at most 101 rows; `truncated` is true when a 101st row exists. Query
+parameters cannot change this limit or order.
+
+Existing retention keeps the newest 100 delivered alerts and all pending or
+sending alerts. This endpoint is not a complete lifetime history. Corrupt
+visible records produce a fixed `alert_history_unavailable` response with HTTP
+500 and no partial history. Responses use `Cache-Control: no-store`.
+
+The [18 October deployment check](../../hivezilla/deploy/foundation-watch/evidence/incident-20261018-recurrence/evening-20261018/HISTORY-DEPLOY-VALIDATION.json)
+verified the deployed bundle, preserved monitor state, and both authentication
+paths with GET requests only.
+
 ## Private Telegram commands
 
 The owner can send `/status` or `/help` to `@megaloadon_alerts_bot`. Commands

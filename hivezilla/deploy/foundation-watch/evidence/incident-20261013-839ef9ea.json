@@ -1,0 +1,79 @@
+{
+  "schema": "blockzilla-foundation-incident-v1",
+  "event_id": "839ef9ea-1d2f-4d33-8065-35d90eac205c",
+  "alert_at_utc": "2026-10-13T15:18:54.911Z",
+  "checked_at_utc": "2026-10-13T15:37:03Z",
+  "host": "ubuntu@213.239.141.61",
+  "root": "/home/ubuntu/live/hivezilla-validator-20260930",
+  "state": "CAPTURE_FAILED_STORAGE_RECOVERY_REQUIRES_SNAPSHOT_DECISION",
+  "machine_reachable": true,
+  "machine_heartbeat_missing": false,
+  "validator_pid": 2630745,
+  "validator_active": true,
+  "validator_rpc_healthy": false,
+  "failed_session": "000000000000000018ddd9a6bb6fc50e-282459",
+  "capture_failure": "disk reserve reached; capture stopped with explicit gap",
+  "worker_failure_logged_at_utc": "2026-10-13T13:07:29Z",
+  "capture_durable_sequence": 700700705,
+  "capture_latest_rooted_slot": 456452807,
+  "publisher_sequence": 634141,
+  "capture_reserve_bytes": 429496729600,
+  "recovery_minimum_free_bytes": 536870912000,
+  "first_free_disk_bytes": 10937024512,
+  "latest_monitor_free_disk_bytes": 59966951424,
+  "completed_action": {
+    "action": "remove_unused_rebuildable_compiler_debug_cache",
+    "path": "/home/ubuntu/benchmarks/hivezilla-stream-20261004/target/debug",
+    "checked_no_active_build_or_observed_open_or_mapped_cache_file": true,
+    "free_before_bytes": 9168326656,
+    "free_after_bytes": 54712709120,
+    "net_free_change_bytes": 45544382464,
+    "completed_unix_ms": 1791905719545,
+    "source_and_deployed_binaries_preserved": true
+  },
+  "retention_sample": {
+    "already_retired_banks_sampled": 260,
+    "sampled_remaining_non_marker_files": 0,
+    "restored_file_cache_growth_proved": false,
+    "live_storage_running": true,
+    "retired_banks_latest_monitor": 234954,
+    "remote_full_byte_check_required": true
+  },
+  "snapshot_cleanup_proposal": {
+    "executed": false,
+    "approval_required_reason": "Removal permanently discards these local recovery snapshots, including the latest completed incremental snapshot. The incident alert did not explicitly authorize this deletion.",
+    "checked_unix_ms": 1791905808505,
+    "observed_open_proposal_files": [],
+    "proposed_release_allocated_bytes": 566582845440,
+    "directory": "/home/ubuntu/live/hivezilla-validator-20260930/snapshots",
+    "files": [
+      {"name": "snapshot-456263292-HNhAUoThyJ7ooHg3az5M9z6uj1WPtFu5heaWR3BvjMm2.tar.zst", "bytes": 123806707764, "allocated_bytes": 123807854592, "inode": 246501078, "mtime_ns": 1791856093149961601},
+      {"name": "incremental-snapshot-456263292-456363184-G7j3jB7iQ4DWHqex3c1Ga3geisbxTA54dbrHWAhiuMGt.tar.zst", "bytes": 572625699, "allocated_bytes": 572633088, "inode": 246500417, "mtime_ns": 1791877289424645081},
+      {"name": "incremental-snapshot-456363384-456450272-DxCAsVKjd1DqzurhR3PziGeDVBRxAvLzQ5rAYYmBDwpz.tar.zst", "bytes": 99973999092, "allocated_bytes": 99977834496, "inode": 246369554, "mtime_ns": 1791897132993933468},
+      {"name": "incremental-snapshot-456363384-456454087-8Tt4xaq45puaomMBJGcdvhXL8i4iKUjhMy5b29bHuNVz.tar.zst", "bytes": 106219128678, "allocated_bytes": 106223312896, "inode": 246498527, "mtime_ns": 1791898159357112072},
+      {"name": "incremental-snapshot-456363384-456458691-Eb7kg4VU5ymjzYRdjxnRCRUtHdsVZ1uXx17uVUEJaD72.tar.zst", "bytes": 114083584312, "allocated_bytes": 114085154816, "inode": 246364321, "mtime_ns": 1791898988733945933},
+      {"name": "incremental-snapshot-456363384-456462499-41c1gibmWVaHW4BM85zm1kQb9yWhFbDa5oVAoZTrHQLc.tar.zst", "bytes": 121910233111, "allocated_bytes": 121916055552, "inode": 246500997, "mtime_ns": 1791900357321996603}
+    ],
+    "retained_completed_full_snapshot": "snapshot-456363384-9dKq2RDF7qkN2c5GQHM3AU2Hzw6huhvJJFqxUC2iUMJw.tar.zst",
+    "retained_active_snapshot": "tmp-snapshot-archive-456463503.tar.zst",
+    "pre_execution_checks": [
+      "Recheck exact file identity, closed file status, current snapshot inventory, and the retained completed full snapshot.",
+      "Delete only approved closed regular files, with no symlink path or recursive snapshot directory removal.",
+      "Record exact removed files and free disk after removal. Keep source capture, compact files, custody evidence, ledger, accounts, and failed-session records."
+    ]
+  },
+  "recovery_followup": [
+    "Require at least 500 GiB free before capture recovery.",
+    "Reload the existing native plugin in the current validator; create an explicit new source and retain the failed source and gap.",
+    "Switch producer, origins, relay, publisher, live storage, priority guard and heartbeat source binding together.",
+    "Use a finite old-source publisher tail drain and verify the remote checkpoint.",
+    "Check advancing capture, compact output, both public heads, a payload hash, cloud publication, and 60 seconds of external all-clear.",
+    "Investigate snapshot growth and retention before claiming sustained storage capacity."
+  ],
+  "services_restarted_by_this_check": [],
+  "snapshot_files_deleted_by_this_check": [],
+  "native_gap_rebuilt": false,
+  "full_coverage_claimed": false,
+  "sustained_capacity_claimed": false,
+  "monitor_status_read": {"verified_fixed_endpoint": true, "redirects_blocked": true, "successful": true, "current_faults_present": true, "pending_alerts": 0}
+}

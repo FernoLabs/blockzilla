@@ -1,0 +1,36 @@
+{
+  "deployment_performed": false,
+  "files": {
+    "activate.py": "56e9d936a679224866aa1d3e8e74f358dc33119094522f1b50a29e1899dc34fd",
+    "test_activate.py": "5f7948e5bea41f02f32a034380617f223e3adf812782f92e9326e7eaf7414ad8"
+  },
+  "guards": [
+    "source ddfe and registry a521 before transition",
+    "all eight protected native and transport PIDs including publisher4167494",
+    "only four live row fields change; both finite rows retain exact bytes and caps",
+    "unchanged guardian source and command",
+    "guardian stopped before live/config transition",
+    "new executed helper process baseline and later strict archive/retirement progress",
+    "exact runtime PID and invocation guards before and after evidence reads",
+    "rollback never changes meta3/meta4 and permits only validated NORMAL or safely uninitialized state",
+    "fresh permanent failure or uncertain latch persistence blocks old helper start",
+    "unknown source/registry/unit changes prevent rollback restoration"
+  ],
+  "host_changes": [],
+  "independent_review": {
+    "agent": "upgrade_review",
+    "source_and_tests_exact": true,
+    "state": "PASSED",
+    "tests": 14
+  },
+  "local_tests": {
+    "failed": 0,
+    "host_execution": false,
+    "python": "3.15.0",
+    "tests": 14
+  },
+  "post_activation_required": "Separate independent full new-bundle cloud verification; activation ends ACTIVE_PENDING_CLOUD_PROOF.",
+  "recorded_unix_ms": 1792477241142,
+  "schema": "blockzilla-storage-recovery-activation-review-v1",
+  "state": "PASSED"
+}

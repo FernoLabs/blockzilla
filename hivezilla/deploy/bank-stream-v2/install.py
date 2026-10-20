@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """Install only tested immutable artifacts. Save all replaced units and config."""
-import argparse,hashlib,json,shutil,subprocess,time,shlex
+import argparse,hashlib,importlib.util,json,shutil,subprocess,sys,time,shlex
 from pathlib import Path
 
 def run(*args):return subprocess.check_output(args,text=True).strip()
@@ -10,6 +10,28 @@ def json_write(path,data):write(path,json.dumps(data,indent=2)+'\n')
 def active(name):return run('systemctl','show',name,'-p','ActiveState','--value')=='active'
 def exec_line(name):
  lines=run('systemctl','cat',name+'.service').splitlines();return [s.removeprefix('ExecStart=') for s in lines if s.startswith('ExecStart=') and s!='ExecStart='][-1]
+def prepare_validator_command(previous_command,binary,config_path,helper_path=None):
+ """Check the immutable binary and prepare bounded retention before any stop.
+
+ Package deploy/direct-agave/snapshot_budget.py beside deploy/bank-stream-v2.
+ Missing helper files or unsupported flags leave the running services in place.
+ """
+ helper_path=helper_path or Path(__file__).resolve().parent.parent/'direct-agave/snapshot_budget.py'
+ spec=importlib.util.spec_from_file_location('_blockzilla_snapshot_budget',helper_path)
+ if spec is None or spec.loader is None:raise RuntimeError('snapshot retention helper unavailable')
+ helper=importlib.util.module_from_spec(spec);sys.modules[spec.name]=helper;spec.loader.exec_module(helper)
+ args=shlex.split(previous_command)
+ if not args:raise ValueError('empty previous validator command')
+ args[0]=str(binary)
+ args=helper.bounded_snapshot_args(args,run(str(binary),'--help'))
+ while '--geyser-plugin-config' in args:
+  i=args.index('--geyser-plugin-config')
+  if i+1>=len(args) or args[i+1]!=str(config_path):raise ValueError('unknown plugin configuration')
+  del args[i:i+2]
+ if '--geyser-plugin-always-enabled' not in args:args.append('--geyser-plugin-always-enabled')
+ return ' '.join(json.dumps(value) for value in args)
+def validator_startup_command(helper_path,snapshot_directory):
+ return ['/usr/bin/python3',str(helper_path),'--check-start','--snapshots',str(snapshot_directory)]
 def install(path,text,report):
  backup=report/'saved'/str(path).lstrip('/');backup.parent.mkdir(parents=True,exist_ok=True)
  change=report/'changes'/str(path).lstrip('/')
@@ -50,25 +72,27 @@ def main(a):
    'libhivezilla_direct_agave.so':Path('/home/ubuntu/benchmarks/blockzilla-processed-stream-20261010/target-native-abi/release/libhivezilla_direct_agave.so'),
    'hivezilla-stream':Path('/home/ubuntu/benchmarks/hivezilla-stream-20261004/target/release/hivezilla-stream'),
    'bank-consumer':Path('/home/ubuntu/benchmarks/hivezilla-stream-20261004/target/release/bank-consumer'),
-   'blockzilla':b/'blockzilla'}
+   'blockzilla':b/'blockzilla',
+   'snapshot_budget.py':Path(__file__).resolve().parent.parent/'direct-agave/snapshot_budget.py'}
   for name,path in paths.items():shutil.copy2(path,release/name)
   hashes={name:hashlib.sha256((release/name).read_bytes()).hexdigest() for name in paths}
   report=r/'reports/bank-stream-v2-20261010';report.mkdir(exist_ok=False)
   names=['hivezilla-validator','hivezilla-direct-worker','hivezilla-stream-origin','hivezilla-stream-relay','hivezilla-processed-stream-publisher'];old={n:exec_line(n) for n in names}
+  config_path=r/'config/direct-agave.json'
+  validator=prepare_validator_command(old['hivezilla-validator'],release/'agave-validator',config_path,release/'snapshot_budget.py')
+  startup_command=validator_startup_command(release/'snapshot_budget.py',r/'snapshots')
+  run(*startup_command)
   for n in names:write(report/(n+'.previous-unit'),run('systemctl','cat',n+'.service')+'\n')
-  config_path=r/'config/direct-agave.json';config=json.loads(config_path.read_text());write(report/'previous-plugin-config.json',json.dumps(config,indent=2)+'\n')
+  config=json.loads(config_path.read_text());write(report/'previous-plugin-config.json',json.dumps(config,indent=2)+'\n')
   before={p.name for p in (r/'captures/direct-agave-live').iterdir() if p.is_dir()};old_pid=run('systemctl','show','hivezilla-validator','-p','MainPID','--value')
-  receipt={'state':'PREPARED','agave_revision':rev,'artifacts':hashes,'release':str(release),'old_validator_pid':old_pid,'v1_contracts_preserved':True,'full_epoch_coverage':False}
+  receipt={'state':'PREPARED','agave_revision':rev,'artifacts':hashes,'release':str(release),'old_validator_pid':old_pid,'v1_contracts_preserved':True,'full_epoch_coverage':False,'snapshot_retention_args':['--maximum-full-snapshots-to-retain','1','--maximum-incremental-snapshots-to-retain','1']}
   json_write(report/'DEPLOYMENT.json',receipt)
   if a.prepare_only:print(json.dumps(receipt));return
   # Stop the ordered writer first; a new source session is explicit after restart.
-  subprocess.run(['sudo','systemctl','stop','hivezilla-direct-worker.service'],check=True)
   loader=release/'load_when_ready.py';shutil.copy2(Path(__file__).with_name('load_when_ready.py'),loader)
-  args=shlex.split(old['hivezilla-validator']);args[0]=str(release/'agave-validator')
-  while '--geyser-plugin-config' in args:
-   i=args.index('--geyser-plugin-config');assert args[i+1]==str(config_path),'unknown plugin configuration';del args[i:i+2]
-  args.append('--geyser-plugin-always-enabled');validator=' '.join(json.dumps(v) for v in args)
-  override('hivezilla-validator',validator,report,f'ExecStartPost=\nExecStartPost=/usr/bin/python3 {loader} --root {r} --binary {release}/agave-validator --config {config_path}\nTimeoutStartSec=1800\nReadWritePaths={r}/reports\n')
+  subprocess.run(['sudo','systemctl','stop','hivezilla-direct-worker.service'],check=True)
+  startup_line=' '.join(json.dumps(value) for value in startup_command)
+  override('hivezilla-validator',validator,report,f'ExecStartPre=\nExecStartPre={startup_line}\nExecStartPost=\nExecStartPost=/usr/bin/python3 {loader} --root {r} --binary {release}/agave-validator --config {config_path}\nTimeoutStartSec=1800\nReadWritePaths={r}/reports\n')
   override('hivezilla-direct-worker',old['hivezilla-direct-worker'].replace('/releases/processed-worker-v4-20261010/hivezilla-direct-agave','/releases/bank-stream-v2-20261010/hivezilla-direct-agave').replace('/releases/processed-stream-v1-20261010/blockzilla','/releases/bank-stream-v2-20261010/blockzilla'),report)
   config['bank_v2']=True;config['libpath']=str(release/'libhivezilla_direct_agave.so');write(config_path,json.dumps(config,indent=2)+'\n')
   subprocess.run(['sudo','systemctl','daemon-reload'],check=True);subprocess.run(['sudo','systemctl','restart','hivezilla-validator.service'],check=True)

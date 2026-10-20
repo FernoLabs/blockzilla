@@ -1,0 +1,14 @@
+{
+  "approval_text": "Approve this bounded cleanup",
+  "authority": "Direct human approval in the current chat.",
+  "plan_sha256": "de5dde9c63f48ef17bcfedc8301764614608d7a6881d9c22a5934ec3f067ee3b",
+  "source": {
+    "agave_revision": "d688dd0e3a576b048a848e5faf2e8d277f8feb6e",
+    "genesis_hash": "5eykt4UsFv8P8NJdTREpY1vzqKqZKvdpKuc147dw2N9d",
+    "node_identity": "J7qpvCEWhdBgPdYRV3s3btWPrRVXa2qnAzgvxWTvtbrQ",
+    "session_id": "000000000000000018ddd9a6bb6fc50e-282459"
+  },
+  "absolute_bank_limit": 308768,
+  "maximum_additional_banks": 51606,
+  "recorded_unix_ms": 1792316077444
+}

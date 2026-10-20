@@ -1,0 +1,452 @@
+{
+  "schema": "blockzilla-evening-repair-receipt-v1",
+  "state": "ACTIVE_VERIFIED",
+  "completed_unix_ms": 1792349197687,
+  "completed_paris": "2026-10-18T20:46:37+02:00",
+  "source": {
+    "agave_revision": "87167f3906bdf5111e99ead64d8f4098b7874e33",
+    "genesis_hash": "5eykt4UsFv8P8NJdTREpY1vzqKqZKvdpKuc147dw2N9d",
+    "node_identity": "J7qpvCEWhdBgPdYRV3s3btWPrRVXa2qnAzgvxWTvtbrQ",
+    "session_id": "000000000000000018df884b2474cf8e-20b258"
+  },
+  "alerts": [
+    {
+      "id": "f948eff8-a7f1-4657-ba4a-9331b3de7cd0",
+      "kind": "failure",
+      "issues": [
+        "telemetry:storage_jobs_degraded"
+      ],
+      "createdMs": 1792341008535,
+      "status": "delivered",
+      "attempts": 1,
+      "paris_time": "2026-10-18T18:30:08.535000+02:00"
+    },
+    {
+      "id": "f5014c43-a74c-4386-8f38-039df5799704",
+      "kind": "recovery",
+      "issues": [],
+      "createdMs": 1792341116404,
+      "status": "delivered",
+      "attempts": 1,
+      "paris_time": "2026-10-18T18:31:56.404000+02:00"
+    },
+    {
+      "id": "004792f6-c4af-40b6-960c-7bb62e6cdacf",
+      "kind": "failure",
+      "issues": [
+        "publisher_status_stale"
+      ],
+      "createdMs": 1792346818432,
+      "status": "delivered",
+      "attempts": 1,
+      "paris_time": "2026-10-18T20:06:58.432000+02:00"
+    },
+    {
+      "id": "e1507f2a-57e3-4656-8932-9ae1051d3d17",
+      "kind": "recovery",
+      "issues": [],
+      "createdMs": 1792346908362,
+      "status": "delivered",
+      "attempts": 1,
+      "paris_time": "2026-10-18T20:08:28.362000+02:00"
+    }
+  ],
+  "diagnosis": {
+    "storage": "A BundleTransferTimeout triggered a bounded supervisor retry. Progress resumed; the supervisor is healthy and retry attempts are zero.",
+    "publisher": "The alert contained only publisher_status_stale. An HTTP 500 commit GET retry was logged at 20:06:36 Paris. The process did not restart. STATUS was written only after the whole remote batch returned.",
+    "historical_limit": "The exact batch start/completion times were overwritten. The HTTP 500 entry does not prove which request occupied the entire stale interval."
+  },
+  "active_changes": {
+    "publisher": {
+      "service": "hivezilla-bank-v2-r2-publisher.service",
+      "release": "/home/ubuntu/live/hivezilla-validator-20260930/releases/publisher-status-20261018-92f2376d-7fb9e39d7506",
+      "binary_sha256": "7fb9e39d75062546cb407586596ca2f5303caaf8dd25725e768025f8266b816a",
+      "patch_sha256": "92f2376d361a62b4e34f4671e93c1b5f70bcf1b1f95c9c8b653a3c70c94c708e",
+      "old_pid": 917318,
+      "new_pid": 4167494,
+      "behavior": "Coordinator reports upload_commit status every 5 seconds with the old durable checkpoint. Only successful joined remote work and status proof permit the local commit. Completed slow batches have a fixed numeric timing log.",
+      "monitoring_threshold_changes": [],
+      "total_batch_deadline_added": false
+    },
+    "monitor_history": {
+      "version": "c19ed9e6-86df-4c98-a15d-2936e5daf6db",
+      "previous_version": "670ba00d-a5c3-4608-a553-c305656f143f",
+      "behavior": "Add admin-authenticated read-only GET/history over the retained 100 alert rows. Keep delivery, counters, schedules and configuration.",
+      "bundle_sha256": "a376cfd61cfd66c1d0d80d34d69f90d04b80b8f7f1beb01dec02a38523109fc9"
+    }
+  },
+  "validation": {
+    "host_rust_tests": 44,
+    "host_rust_failed": 0,
+    "monitor_tests": 49,
+    "activation_fixtures_local": 11,
+    "activation_fixtures_linux": 11,
+    "observer_fixture_tests": 18,
+    "existing_progress_guard_tests": 11,
+    "live_check_groups": 9,
+    "live_check_state": "PASSED",
+    "private_confirmed_source_lag_ms": 873,
+    "cloud_proof": {
+      "commit_bytes": 1893,
+      "commit_key_sha256": "258bb8ab7740d8ceb267c04fd59ba9dd513a5f4abcee5f73aa68bf452992cb2c",
+      "commit_sha256": "5941c776d3ef733811c9cb12393a9f9c19aea78e50c9d2ba444075d5ccec50c9",
+      "cursor": "000000000000000018df884b2474cf8e-20b258:p441787:66edeab56fdeea0347d12d6b1f99fc4c11b3419201841faf1c75d020642f2f9c",
+      "full_gets": 2,
+      "head_bytes": 1336,
+      "head_key_sha256": "de16344ef0dc0276b785bd369b2161ea7056ba99e9a28a50f9c49ecabd5ae9dc",
+      "head_sha256": "4c35fbbf9f369d795f668424e9ace7b51b206b87a2c7b51feb2cee5b16a370b1",
+      "namespace": "57f6beef58f71b68ac430120437e79363e65aba88ccb6536e805e1351d10f135",
+      "sampled_unix_ms": 1792348931262,
+      "schema": "blockzilla-publisher-cloud-proof-v1",
+      "sequence": 441787,
+      "session": "000000000000000018df884b2474cf8e-20b258",
+      "source_verified": true,
+      "state": "VERIFIED"
+    },
+    "new_process_baseline_sequence": 441679,
+    "new_process_verified_sequence": 441787,
+    "flow": {
+      "state": "PASSED",
+      "sample_count": 121,
+      "elapsed_seconds": 120.139,
+      "start_sequence": 441913,
+      "end_sequence": 443019,
+      "sequence_advance": 1106,
+      "max_status_age_ms": 4995,
+      "in_flight_samples": 120,
+      "errors": []
+    }
+  },
+  "final_monitor": {
+    "sampled_unix_ms": 1792349120935,
+    "publisher_sequence": 443465,
+    "current_issues": [],
+    "active_incidents": [],
+    "sample_errors": [],
+    "pending_alerts": 0,
+    "retained_history_unchanged_during_repair": true
+  },
+  "final_storage_sample": {
+    "sampled_unix_ms": 1792348993219,
+    "capacity": "OK",
+    "free_disk_bytes": 739798163456,
+    "recovery_headroom_bytes": 65488297984,
+    "live_archived_banks": 184415,
+    "live_retired_banks": 184415,
+    "supervisor": "HEALTHY",
+    "retry_attempts": 0
+  },
+  "preserved": {
+    "source_pin_sha256": "ddfe097a2915a946c0917adcc135a2c7d997b1517d578044bfea80aadd7ea315",
+    "storage_registry_sha256": "a52115479c26ccff6367b8439cd58dbb2354bb7b61d25691e797a96611655f6f",
+    "protected_processes": {
+      "hivezilla-bank-v2-origin": 2134416,
+      "hivezilla-bank-v2-producer": 917148,
+      "hivezilla-direct-worker": 916425,
+      "hivezilla-shred-hook-recorder": 2142799,
+      "hivezilla-stream-origin": 2135639,
+      "hivezilla-stream-relay": 2136117,
+      "hivezilla-validator": 2142808
+    },
+    "finite_caps": [
+      308768,
+      785546
+    ],
+    "finite_jobs": "COMPLETE and inactive at exact caps",
+    "validator_pid": 2142808,
+    "manual_external_messages": 0,
+    "manual_production_alert_checks": 0,
+    "additional_bank_retirement_allowance": 0
+  },
+  "limits": [
+    "No whole publisher batch deadline was added. Existing cloud progress stall at 300 seconds and backlog at 8192 events gates remain active.",
+    "The finite observation does not guarantee that future provider errors or valid alerts cannot occur.",
+    "Raw capture remains FAILED; its active recorder service is not proof of raw recording. Recovery needs a later validator restart and a storage plan.",
+    "Earlier native gaps and the unimplemented metadata byte bound remain explicit. No new data deletion or cleanup cap expansion occurred.",
+    "The original 12 October publisher binary-to-source binding was not proved. The old executable and source hashes are distinct; the new build has a complete frozen source/graph manifest."
+  ],
+  "evidence": {
+    "ALERT-HISTORY-FINAL-SUMMARY.json": {
+      "sha256": "35d6265aec9f955b12c40ad5e807c9ecd97856621eca7824c38a9b07429a1688",
+      "bytes": 1359
+    },
+    "ALERT-HISTORY-FINAL.json": {
+      "sha256": "a5ba21a62c0ddeb3c983ef9a50e9e2c51485384447133ec51f2a2f7101747df9",
+      "bytes": 49159
+    },
+    "ALERT-HISTORY-SUMMARY.json": {
+      "sha256": "fe945591e42f86a7de16199fdeb5d3a3ba4fb29e28b9061ce525c76fbef925d7",
+      "bytes": 1359
+    },
+    "ALERT-HISTORY.json": {
+      "sha256": "a5ba21a62c0ddeb3c983ef9a50e9e2c51485384447133ec51f2a2f7101747df9",
+      "bytes": 49159
+    },
+    "ALLOCATION-COMPARISON.json": {
+      "sha256": "fbf04870db4c0e61a9f9076ebd54d11d5f0d51aabbc46829da550fd7fe1fcd15",
+      "bytes": 4841
+    },
+    "ALLOCATIONS-SNAPSHOTS.json": {
+      "sha256": "13e627ee53285a2a6dafeb5b902814cfaa00cc0bfbf20ec11d3f5058ceed7aaf",
+      "bytes": 18825
+    },
+    "DIAGNOSIS-BEFORE.json": {
+      "sha256": "7487f09b73969c811ac191c78ddb209a99da6dd76e13d5328d218099ac34c3a2",
+      "bytes": 4706
+    },
+    "DIAGNOSIS-MANIFEST.json": {
+      "sha256": "6a6ae0067be2f549eaae4e5b7ca9a35ae35f3b03f357e5f63325567decfaea6a",
+      "bytes": 2125
+    },
+    "FINDINGS.json": {
+      "sha256": "58236fc60886c33e7499a117455cd9768621607c3d118bc25bea91fc26638fd5",
+      "bytes": 7094
+    },
+    "FLAT-ALLOCATIONS.json": {
+      "sha256": "e1410e7d76d6be407f1f8bc2975495b5b225eff265a152b9df3dba7f4a8c1767",
+      "bytes": 3074060
+    },
+    "HISTORY-DEPLOY-AFTER.json": {
+      "sha256": "a5ba21a62c0ddeb3c983ef9a50e9e2c51485384447133ec51f2a2f7101747df9",
+      "bytes": 49159
+    },
+    "HISTORY-DEPLOY-EVIDENCE.json": {
+      "sha256": "0503f31fdff0ee7fc17101b59026b2d8b83a7b14943127dee46cf4d1313d180d",
+      "bytes": 1512
+    },
+    "HISTORY-DEPLOY-VALIDATION.json": {
+      "sha256": "293df992acf1f577b9322e9e9335e68d0b8c57a897120e90cd9dc63e97221b2f",
+      "bytes": 2136
+    },
+    "HOST-FINAL.json": {
+      "sha256": "c008b0d66e1c76e6c7e0a277393284fde57e2f4731efc9a2bc1fbe938dc0f97b",
+      "bytes": 6149
+    },
+    "HOST-SAMPLE-1.json": {
+      "sha256": "49bfa5b8092074ff8f026a490a296ec598ac9056f9956aebb1feabc5f472d8b9",
+      "bytes": 89303
+    },
+    "HOST-SAMPLE-2.json": {
+      "sha256": "7c2c6104fea18bd04a67ec3569e686523ef2cceb930ed0995a4c6da9d283baf3",
+      "bytes": 7475
+    },
+    "JOURNAL-HISTORY-BOUNDS.json": {
+      "sha256": "e171e0e162a4eec0cf9c3c093dcaac8e84ec158a148104f6ef3767c294a5b81f",
+      "bytes": 387
+    },
+    "LATEST-STATUS.json": {
+      "sha256": "0bf1f69f3e4ec63dda5636649beaaee61b02f6af64f08515807cb4d63497cd1f",
+      "bytes": 6154
+    },
+    "LIVE-FINAL.json": {
+      "sha256": "e220c321dec25d5d33a4c77ff125c937400ff0053679eb75c1a026d1e67a0a91",
+      "bytes": 3510
+    },
+    "LIVE-INITIAL.json": {
+      "sha256": "629dd1ea61664c9a27a09c081d6799fe0c194c9ea86742d29f550bd05cdd2f2a",
+      "bytes": 3507
+    },
+    "MONITOR-BEFORE-BUNDLE-MATCH.json": {
+      "sha256": "f6e7d75229d569a35629c07222909dde28ee179254c525cdc7b448846bf6a2ed",
+      "bytes": 584
+    },
+    "MONITOR-DEPLOY-AFTER.json": {
+      "sha256": "bd0fd9c82edbcd1274b62af25040276c5486df3f0bfc4dab8a9104ce752f7aaf",
+      "bytes": 2426
+    },
+    "MONITOR-DEPLOY-BEFORE.json": {
+      "sha256": "8e22f8523770d569f6c598a6e5589da4580bccf9e403d7ebcbfccebc25294622",
+      "bytes": 3116
+    },
+    "MONITOR-DEPLOYMENT-AFTER.json": {
+      "sha256": "e18b463bbf99dccbb8010176f9261b4d02d558dedfcbc222b1085f7878dcf63b",
+      "bytes": 545
+    },
+    "MONITOR-DEPLOYMENT-BEFORE.json": {
+      "sha256": "9e9dff161daba02711320cf84feda86d765212e1248696fe518a138f3c44bcc1",
+      "bytes": 566
+    },
+    "MONITOR-FINAL.json": {
+      "sha256": "6775734ca5f724f06ddfe44debef6c785786864e65214e175b3c1eea9eb1905a",
+      "bytes": 3116
+    },
+    "MONITOR-PRE-PUBLISHER.json": {
+      "sha256": "34c46faf741bd83d61120621a31b6e8bf1b1c94a6d5dc4a9b8cefe1374cfd2ff",
+      "bytes": 3116
+    },
+    "OBSERVABILITY-READ.json": {
+      "sha256": "66141fd91de9585ee43f379765f80323a57336ebbb0616797186725806a2b2f1",
+      "bytes": 500
+    },
+    "PUBLISHER-PROVENANCE-FINAL.json": {
+      "sha256": "78496614233007b8fbb9a5c63a627105be5e357a5c986d4b99c7d5b12b8332c8",
+      "bytes": 1829
+    },
+    "PUBLISHER-PROVENANCE.json": {
+      "sha256": "e86b5b682ccaae1ad809db7a0fd06e103aaa58bafcb10ffab22f17f5e414b411",
+      "bytes": 6577
+    },
+    "PUBLISHER-RETRY-180636.json": {
+      "sha256": "9588ab80dcd8a88b8ff76b3a716b11a5e39c7b15e2f0aacf6503c4a4922810e5",
+      "bytes": 463
+    },
+    "PUBLISHER-RETRY-TYPE.json": {
+      "sha256": "1188cac9e782e1a3cea24c019c0078b07f782b42a546d331a26c5255101b8e71",
+      "bytes": 490
+    },
+    "PUBLISHERS-1800-1812.json": {
+      "sha256": "3611df15f118e4d43c191682e1b2c8b05934423eb1a49df7892b04ccce5e2196",
+      "bytes": 13700
+    },
+    "RPC-ERROR-JOURNAL.json": {
+      "sha256": "afad0a81776e6d18b3c19009487d59ea9438671d36c21a5f58c37a36d97b4168",
+      "bytes": 281
+    },
+    "publisher-status/ACTIVATION-HOST-TESTS.json": {
+      "sha256": "0e048a3cf81610877b475f0f0bcd03ed755f1e161f4360c4e9065a7e2851547d",
+      "bytes": 683
+    },
+    "publisher-status/ACTIVATION-LOCAL-TESTS.json": {
+      "sha256": "e688044aa9638cd12b0c004f792b874cadefbc00be09b8c6a5265489cb98248f",
+      "bytes": 826
+    },
+    "publisher-status/BEFORE.json": {
+      "sha256": "c63a3cc4fa97bfe9710799f9ba0ed12edec465e21f4d1d533fdff10432d36198",
+      "bytes": 5237
+    },
+    "publisher-status/BUILD-PROVENANCE.json": {
+      "sha256": "4ffec5214476e5d4f6faacf8e4d9c7347489a6c57a5236d1a51580d5859f32bf",
+      "bytes": 4218
+    },
+    "publisher-status/BUILD.json": {
+      "sha256": "a001df9c1496cf6722a26b4cbfbe6298a3eb95843fcd516c1aecd56d2ae9515f",
+      "bytes": 4315
+    },
+    "publisher-status/FLOW-120S.json": {
+      "sha256": "5865b84733e5b4d26845f75663d46acaa970ed1dc6fdd8bc28eb9ad5c3ded0f7",
+      "bytes": 100120
+    },
+    "publisher-status/GRAPH.json": {
+      "sha256": "9a709dde160081f66831fbb203a7b4e77b86e5869ba996ab1febe4a6e19b1adb",
+      "bytes": 8171
+    },
+    "publisher-status/INSTALLATION.json": {
+      "sha256": "004c3b7d94f0840c93b7054c01c8d4ee602615474bc0b0f491cdad96801740fb",
+      "bytes": 5586
+    },
+    "publisher-status/MANIFEST.json": {
+      "sha256": "0287f7fc4d82207687a91cb71c6cb6bb5a785c42ba7ad5f9746e43a1be6ccfbb",
+      "bytes": 1347
+    },
+    "publisher-status/OBSERVER-CHECKS.json": {
+      "sha256": "975a55ddf146a37b53ac93cab3c5ef0d937d85f53849aea58ee7f21f10410e62",
+      "bytes": 639
+    },
+    "publisher-status/PATCH-IMPLEMENTATION.json": {
+      "sha256": "1fd23a9c4589d5bd5e86c8dca78f4c4d9d4c262a097d35b929cd592294428a6b",
+      "bytes": 3370
+    },
+    "publisher-status/PATCH-MANIFEST.json": {
+      "sha256": "e8dfe7b56cbfe332380217100dab0fa4fae9ce4e2c1ab5ae2e3d7099a4e23c5b",
+      "bytes": 1422
+    },
+    "publisher-status/PROGRESS-GUARD-TEST.json": {
+      "sha256": "e50b6c401533bb8932759f669eb265594d4da01e73b5f136410ee2f3341fcb09",
+      "bytes": 838
+    },
+    "publisher-status/REVIEW.json": {
+      "sha256": "52bdc73ffc8ed42a2a4e829320653490cc51db7478c63b7761915a29e0a4d47f",
+      "bytes": 2193
+    },
+    "publisher-status/SOURCE-BEFORE.json": {
+      "sha256": "58ca93f632098973f8353632e87415a2dc9e01a98bedf786c453ec3178fae41b",
+      "bytes": 121302
+    },
+    "publisher-status/SOURCE.json": {
+      "sha256": "0a548ab1379e957ed23e627aa522a34933f0919f94ad2de56dc5ee69f32754d4",
+      "bytes": 121305
+    },
+    "publisher-status/activate.py": {
+      "sha256": "ceeea38c212d8dbc0c83b62a0b26a20c56c6d0bf033e4404249af5b04ade49fb",
+      "bytes": 31814
+    },
+    "publisher-status/build.py": {
+      "sha256": "2bd6a3689b4cfa27d965446618381ff6283ccfdcc5fd36fe608b819e45fce898",
+      "bytes": 40219
+    },
+    "publisher-status/lib-tests.log": {
+      "sha256": "3bcd916340a625c417e7b8e118277bc6f3fd7944f96fab3497bf99173ed65f52",
+      "bytes": 9963
+    },
+    "publisher-status/observe.py": {
+      "sha256": "a534ec7525a29d320e851d9332f17a8ba71add67107087ab111e700257af6f3f",
+      "bytes": 15030
+    },
+    "publisher-status/publisher-status.patch": {
+      "sha256": "92f2376d361a62b4e34f4671e93c1b5f70bcf1b1f95c9c8b653a3c70c94c708e",
+      "bytes": 18696
+    },
+    "publisher-status/release-build.log": {
+      "sha256": "99de4983c957e3d3805bf686e91cbfda8551231a32d477ae5e7a4b7b0d1d2608",
+      "bytes": 5502
+    },
+    "publisher-status/test_activate.py": {
+      "sha256": "81ac7d8959363ecc897f9eaff5abcbda0c564d8d826f2ccb66ef908350126aeb",
+      "bytes": 16791
+    },
+    "read-worker-after.py": {
+      "sha256": "db34e490e7bfa8639eecee43d0ba7e78bcc8b5814aaa5a88666c69fb9067800d",
+      "bytes": 1936
+    },
+    "validate-history-deployment.py": {
+      "sha256": "94826146aeb1f516162acb8f669c332e5f03731566503b1916fe8d0adbbf8f36",
+      "bytes": 10345
+    },
+    "worker-after/MANIFEST.json": {
+      "sha256": "45ca1812a16b3bf3001f32da579f1d5e7153cb88676f25e2ecee89ed81999224",
+      "bytes": 352
+    },
+    "worker-after/index.js": {
+      "sha256": "a376cfd61cfd66c1d0d80d34d69f90d04b80b8f7f1beb01dec02a38523109fc9",
+      "bytes": 44949
+    },
+    "worker-before/MANIFEST.json": {
+      "sha256": "4839bfe5b00a8cf5ba9aafce9e56568d3d1829df1663021777f3c43fe5a25a48",
+      "bytes": 352
+    },
+    "worker-before/index.js": {
+      "sha256": "d1c0833666833261bdf2728199d8bfa88244df1013f91b44ffe5ff49068d1565",
+      "bytes": 42151
+    }
+  },
+  "workspace_files": {
+    "hivezilla/deploy/foundation-watch/evidence/evening-20261018/history-endpoint/MANIFEST.json": {
+      "sha256": "0c2c85939a3ee17fdfaab51c650042cc8577ae6d6387f5bf1a56fa2f321a5b0c",
+      "bytes": 5268
+    },
+    "hivezilla/stream-relay/src/publisher.rs": {
+      "sha256": "b31fba2acf86a93dd1506cfdd0d6d0a1cea174d91fba461dc7689561943f75dd",
+      "bytes": 43426
+    },
+    "edgezilla/foundation-watch/src/index.ts": {
+      "sha256": "01bab8167f53b1015326b5c26607e7f7e1d4f5942b36784938239a2bcb276929",
+      "bytes": 27470
+    },
+    "edgezilla/foundation-watch/test/worker.test.mjs": {
+      "sha256": "f9cdb33f34cbaa25d81f30e7c93d2960c3f17b9512709e6f84dbd715b0745902",
+      "bytes": 36457
+    },
+    "edgezilla/foundation-watch/README.md": {
+      "sha256": "0b2c8e906aee0bd2a35f5b39425efb88e0df701e59e5097993e35fd27cfc705b",
+      "bytes": 8133
+    },
+    "hivezilla/deploy/foundation-watch/README.md": {
+      "sha256": "27f3df4317b5b0e50a6f67b1dbacea27ddc78d48b16e6582b1e3ad41f66e9ee3",
+      "bytes": 30737
+    },
+    "hivezilla/deploy/direct-agave/README.md": {
+      "sha256": "1094ebd83ffdde158236e948d46968af9fcccbc0ee7d297cb0828a32feeb9a49",
+      "bytes": 98749
+    }
+  }
+}

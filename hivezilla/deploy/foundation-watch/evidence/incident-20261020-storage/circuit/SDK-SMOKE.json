@@ -1,0 +1,15 @@
+{
+  "accepted_put_412_then_full_get": true,
+  "boto3": "1.40.72",
+  "botocore": "1.40.72",
+  "forbidden_put_does_not_get_or_retry": true,
+  "generic_wrapper_rejected": true,
+  "network_used": false,
+  "real_streaming_body": true,
+  "real_typed_protocol_wrapper": true,
+  "schema": "blockzilla-storage-recovery-sdk-smoke-v1",
+  "sha256": "f757f2be29f01378448cbe5bb5b529db2625e6654c065f0f17ebd8ba3cbb6d41",
+  "state": "PASSED",
+  "urllib3": "2.6.3",
+  "wrapped_stream_closed_before_retry": true
+}
