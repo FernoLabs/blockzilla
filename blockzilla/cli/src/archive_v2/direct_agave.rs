@@ -94,6 +94,7 @@ fn validate(r: &Receipt) -> Result<()> {
     );
     ensure!(
         r.agave_revision == "825efd18292aff6ffcf9daa0f7612f21b3531a72"
+            || r.agave_revision == "a203300045b405f86c9c84308b2eae76af69ac3b"
             || option_env!("HIVEZILLA_AGAVE_REVISION")
                 .is_some_and(|revision| r.agave_revision == revision),
         "unsupported Agave source revision"
