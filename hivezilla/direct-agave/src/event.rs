@@ -5,8 +5,9 @@ use serde::{Deserialize, Serialize};
 
 pub const REVISION: &str = match option_env!("HIVEZILLA_AGAVE_REVISION") {
     Some(revision) => revision,
-    None => "825efd18292aff6ffcf9daa0f7612f21b3531a72",
+    None => "a203300045b405f86c9c84308b2eae76af69ac3b",
 };
+pub const INTERFACE_VERSION: &str = "4.3.2";
 pub const SCHEMA: &str = "hivezilla-agave-callback-event-v1";
 pub const BANK_V2: &str = "hivezilla-agave-bank-observation-v2";
 

@@ -16,7 +16,7 @@ It does not execute transactions a second time.
   archive catalog. Later root and footer evidence stays separate. Retirement
   requires a rooted custody proof that binds the payload and source bytes.
 - `libhivezilla_direct_agave.so`: Agave Geyser plugin. The interface and transaction
-  status crates use revision `825efd18292aff6ffcf9daa0f7612f21b3531a72` (4.3.0).
+  status crates use revision `a203300045b405f86c9c84308b2eae76af69ac3b` (v4.3.2).
 - `hivezilla-direct-agave build SESSION OUTPUT --blockzilla PATH --follow`:
   independent compact worker. The default batch is 32 blocks; the worker also
   limits source bytes per batch. It changes output directories at epoch boundaries.
@@ -139,7 +139,7 @@ first bounded load and compare live rooted blocks before extending the run.
 
 ## Tested build and integration
 
-The live Agave 4.3.0 executable uses Rust 1.97.1. This crate has its own workspace
+The live Agave v4.3.2 executable uses Rust 1.97.1. This crate has its own workspace
 and lock file because the main CLI pins a different short-vec version. Build on
 the server with `cargo +1.97.1 build --release --features plugin --locked
 --ignore-rust-version`. The last flag permits shared internal crates that declare
