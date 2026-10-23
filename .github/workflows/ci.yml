@@ -99,9 +99,17 @@ jobs:
             hivezilla/stream-relay/examples/rust-consumer/Cargo.toml; do
             cargo test --locked --manifest-path "$manifest"
           done
+      - name: Build the shared consensus Wasm reader
+        env:
+          RUSTFLAGS: ""
+          CARGO_TARGET_DIR: target/consensus-wasm
+        run: |
+          rustup target add wasm32-unknown-unknown
+          cargo build --locked --release --target wasm32-unknown-unknown --manifest-path hivezilla/stream-relay/decoder/Cargo.toml
+          cp target/consensus-wasm/wasm32-unknown-unknown/release/blockzilla_stream_decoder.wasm hivezilla/stream-relay/client/decoder-consensus-v1.wasm
       - name: Test JavaScript SDK and Wasm fixtures
         working-directory: hivezilla/stream-relay/client
-        run: node --test test.mjs sdk-test.mjs banks-test.mjs
+        run: node --test test.mjs sdk-test.mjs banks-test.mjs consensus-test.mjs
       - name: Test release graph inspection
         run: python3 scripts/test_check_crate_release.py
 

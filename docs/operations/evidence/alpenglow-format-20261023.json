@@ -1,0 +1,249 @@
+{
+  "schema": "blockzilla-alpenglow-format-acceptance-v1",
+  "saved_utc": "2026-10-23T08:43:53.353584+00:00",
+  "state": "IMPLEMENTED_TESTED_NOT_DEPLOYED",
+  "base_commit": "b01231ce80c740730478198e521eac9367a11495",
+  "branch": "codex/alpenglow-footer-facts",
+  "profile": "native-consensus-fact-v1",
+  "owner_legacy_policy": "Remove obsolete fields from the new format; keep existing archives",
+  "implemented": [
+    "Bounded portable source/bank/execution/event-bound native footer codec",
+    "Immutable offline native bank-v2 footer exporter and receipt inspection",
+    "Strict shared Rust/Wasm and JavaScript reader with exact decimal nanoseconds",
+    "CI source rebuild and SDK tests configured",
+    "Versioned wire contract and controlled live migration plan"
+  ],
+  "validation": {
+    "rustc": "1.99.0 (b940084d7 2026-09-28)",
+    "node": "26.12.0",
+    "build_jobs": 2,
+    "codec": {
+      "command": "cargo test --manifest-path crates/blockzilla-bank-stream-v2/Cargo.toml --locked --offline",
+      "passed": 21,
+      "failed": 0
+    },
+    "native": {
+      "command": "cargo test --manifest-path hivezilla/direct-agave/Cargo.toml --locked --offline --lib --bins",
+      "passed": 41,
+      "failed": 0,
+      "ignored": 3
+    },
+    "execution_decoder": {
+      "command": "cargo test --manifest-path hivezilla/stream-relay/decoder/Cargo.toml --locked --lib",
+      "passed": 13,
+      "failed": 0,
+      "ignored": 1
+    },
+    "wasm": {
+      "command": "cargo build --manifest-path hivezilla/stream-relay/decoder/Cargo.toml --locked --offline --release --target wasm32-unknown-unknown",
+      "result": "PASS",
+      "artifact": "hivezilla/stream-relay/client/decoder-consensus-v1.wasm"
+    },
+    "javascript": {
+      "command": "node --test test.mjs sdk-test.mjs banks-test.mjs consensus-test.mjs",
+      "working_directory": "hivezilla/stream-relay/client",
+      "passed": 29,
+      "failed": 0
+    },
+    "total_passed": 104,
+    "ignored_reasons": [
+      "Two existing native tests require the real compact writer",
+      "One native helper is invoked by the relative-output test in a subprocess",
+      "One decoder helper exports fixtures on explicit request"
+    ],
+    "cli_smoke": {
+      "commands": [
+        "--help",
+        "inspect-consensus-fact"
+      ],
+      "result": "PASS",
+      "historical_execution_payload_binding_proven": false
+    },
+    "formatting": "PASS",
+    "staged_diff_check": "PASS",
+    "ci_yaml_parse": "PASS",
+    "independent_protocol_and_code_review": "PASS",
+    "ci_when_saved": "CONFIGURED_NOT_RUN_YET"
+  },
+  "native_fixture": {
+    "bank_hash_hex": "c512cdbd4355a9c06d96696f63057b7fde6b113dac7a7b444a52c69d507ca5da",
+    "carrier_bank_id": 2403404,
+    "carrier_slot": 460170404,
+    "finalization_target_slot": 460170403,
+    "fixture_kind": "captured_retained_native_footer",
+    "native_footer_bytes": 556,
+    "native_footer_sha256": "b06c226b404ca15bf6c6b982e88dc951a453aefe7e27358088af04b0beb267d7",
+    "producer_time_nanos": "1792700777706079707",
+    "source": {
+      "agave_revision": "87167f3906bdf5111e99ead64d8f4098b7874e33",
+      "genesis_hash": "5eykt4UsFv8P8NJdTREpY1vzqKqZKvdpKuc147dw2N9d",
+      "node_identity": "J7qpvCEWhdBgPdYRV3s3btWPrRVXa2qnAzgvxWTvtbrQ",
+      "session_id": "000000000000000018df884b2474cf8e-20b258"
+    },
+    "source_coverage": "Retained event from failed source; not a complete-history or execution-payload binding proof.",
+    "source_event_sequence": 3384311167,
+    "source_event_sha256": "82c851a4521b9cb334bf86573cfa2b7a124bc9445db3ec66e483ed52e0ab8f7c",
+    "user_agent_hex": "61676176652f342e332e3220287372633a36616131393564613b20666561743a63396164333464322c20636c69656e743a4861726d6f6e6963416761766529",
+    "verification": "captured_not_verified"
+  },
+  "limits": [
+    "Offline per-bank export; no continuous late-evidence cursor or cloud custody",
+    "No source-retirement authority",
+    "No BLS, stake/quorum, producer clock or independent finality verification",
+    "Footer has no carrier consensus BlockId or parent BlockId",
+    "Retained failed-source evidence does not prove complete historical coverage",
+    "Existing v1/v2 execution contracts and archives stay separate",
+    "Local tests do not prove the validator plugin ABI or production recovery"
+  ],
+  "production_mutations_by_this_change": false,
+  "archives_deleted_by_this_change": false,
+  "files": [
+    {
+      "path": ".github/workflows/ci.yml",
+      "bytes": 8663,
+      "sha256": "afdac19eeb620475d6dbec22e6f16f0b9d450d6a56f46f75e958529f91ededec"
+    },
+    {
+      "path": "crates/blockzilla-bank-stream-v2/src/consensus.rs",
+      "bytes": 11607,
+      "sha256": "616dec11ce823a5c3a62b9e4403007d0fdb2b90ee11d0b6df6563ba9278b72dd"
+    },
+    {
+      "path": "crates/blockzilla-bank-stream-v2/src/lib.rs",
+      "bytes": 23611,
+      "sha256": "2445e6f829ffb2e6b4091b75205b886f2a8a342fe7407e4eb0c96212609bce18"
+    },
+    {
+      "path": "crates/blockzilla-bank-stream-v2/tests/consensus.rs",
+      "bytes": 13550,
+      "sha256": "ebda662e6f40ae49cc562287ff60266f5e53bbcde78b698e6e311f82147eeba1"
+    },
+    {
+      "path": "crates/blockzilla-bank-stream-v2/tests/fixtures/agave-4.3.2-footer-v1.wincode",
+      "bytes": 207,
+      "sha256": "32c22ddb2fc144203ebe60c1e87226443d019b103ea798ada38e413f79f98817"
+    },
+    {
+      "path": "crates/blockzilla-bank-stream-v2/tests/fixtures/captured-footer-3384311167.json",
+      "bytes": 1140,
+      "sha256": "a8390deab450d66055f048257829f1040c3319453c1566093e600abb42b8cf9a"
+    },
+    {
+      "path": "crates/blockzilla-bank-stream-v2/tests/fixtures/captured-footer-3384311167.wincode",
+      "bytes": 556,
+      "sha256": "b06c226b404ca15bf6c6b982e88dc951a453aefe7e27358088af04b0beb267d7"
+    },
+    {
+      "path": "docs/architecture/alpenglow-consensus-facts.md",
+      "bytes": 11358,
+      "sha256": "48bb0e30bcf588edb4cd56f9d3da507357c20d83edb4f48a25ef87a073c1e723"
+    },
+    {
+      "path": "hivezilla/direct-agave/README.md",
+      "bytes": 10571,
+      "sha256": "25ff1cad5c920bb3e0f1f7d44e2c891f139f2eb6f915304b169f6de847b5a689"
+    },
+    {
+      "path": "hivezilla/direct-agave/src/consensus.rs",
+      "bytes": 22061,
+      "sha256": "91a78b8c1cd27451226aff44313c8eee69ed72ebfd2ffa7bee0afcb5f8bc11cb"
+    },
+    {
+      "path": "hivezilla/direct-agave/src/consensus_tests.rs",
+      "bytes": 23982,
+      "sha256": "c1a554b7fd58726da8f0f4f592bcc310ed690c8bfb347ffbd811fa0a882e90ff"
+    },
+    {
+      "path": "hivezilla/direct-agave/src/lib.rs",
+      "bytes": 259,
+      "sha256": "4a055aac1e22aa051359e59cf8d47528eb697de01691fc2844784cf4d740252b"
+    },
+    {
+      "path": "hivezilla/direct-agave/src/main.rs",
+      "bytes": 6399,
+      "sha256": "a037d59b20ddb5d93303f815b70574e76e2ea4a5704edb6ccbb6b149511820fd"
+    },
+    {
+      "path": "hivezilla/stream-relay/client/README.md",
+      "bytes": 6298,
+      "sha256": "28cfde1cbf4b2d0b671fde37f11b3ed1f9af8979a109f41b4a5da470fc7520bc"
+    },
+    {
+      "path": "hivezilla/stream-relay/client/consensus-test.mjs",
+      "bytes": 5236,
+      "sha256": "95c01a09b8048f26fd683ea931cdeaed31d3b7fe141df5350ddc41a85f3e7ed8"
+    },
+    {
+      "path": "hivezilla/stream-relay/client/consensus.d.mts",
+      "bytes": 1876,
+      "sha256": "cb64926e7e1b04473cc18743d383b855d7f3ff9acd0215b421b2f3957885ae2f"
+    },
+    {
+      "path": "hivezilla/stream-relay/client/consensus.mjs",
+      "bytes": 3940,
+      "sha256": "feb41a0b5e7ae6d948ca1c99e728eb1377bf364547ced3f6b1035f93020b1e14"
+    },
+    {
+      "path": "hivezilla/stream-relay/client/decoder-consensus-v1.wasm",
+      "bytes": 821314,
+      "sha256": "4d8e99c58c7d2eb9ff1c4f977e6cdc0deab8180c9c4d41d00ee36ad9f3865451"
+    },
+    {
+      "path": "hivezilla/stream-relay/client/package.json",
+      "bytes": 557,
+      "sha256": "03b44a952ae8b5976cb31e046053a2032f735ded18d968ef9b446355b1f3ebee"
+    },
+    {
+      "path": "hivezilla/stream-relay/decoder/README.md",
+      "bytes": 2449,
+      "sha256": "aba1b97c1bebb168e2b15b8bc7b82bd3f49df13eed9964b6b40c1569cd91878d"
+    },
+    {
+      "path": "hivezilla/stream-relay/decoder/src/consensus.rs",
+      "bytes": 1692,
+      "sha256": "022308d747998929326f4970109f7845be52138999748f920830fe721d7b6808"
+    },
+    {
+      "path": "hivezilla/stream-relay/decoder/src/lib.rs",
+      "bytes": 29739,
+      "sha256": "0f222c908ae694bfbb508b7516748bb1ce697cc5f72ae7d8bedd6ed961125d5a"
+    }
+  ],
+  "local_evidence_logs": [
+    {
+      "local_evidence": "format-review-agent/TEST-FINAL.log",
+      "bytes": 2435,
+      "sha256": "fa2f49bcae9a01e8ea74928ea4548ee45a27b52fdbe2e3f23c30086d0671305d"
+    },
+    {
+      "local_evidence": "native-tests.log",
+      "bytes": 11588,
+      "sha256": "c2261dfb45f0a05e919153a697705532039c92acb466e36b6ef4718bb9947841"
+    },
+    {
+      "local_evidence": "native-tests-final.log",
+      "bytes": 5873,
+      "sha256": "5596f17d628e9898900ee8a48fbb3d845285c0341927e45465567f10ef432162"
+    },
+    {
+      "local_evidence": "wasm-build-final.log",
+      "bytes": 1720,
+      "sha256": "e9feb245df588e592b745bb64896e0e9425e38ec89f0e765830994c7136f83d0"
+    },
+    {
+      "local_evidence": "client-tests-final.log",
+      "bytes": 2505,
+      "sha256": "c3b7ad4ab89c4180f71565fb69304277fdcb30f267b65e9db8d24536d27eff61"
+    },
+    {
+      "local_evidence": "native-cli-build.log",
+      "bytes": 1559,
+      "sha256": "d045eebf557ba38175eda1d36ab4bba31a0e92f31e143dbd8d591d719e2d2e49"
+    },
+    {
+      "local_evidence": "cli-smoke/inspection.json",
+      "bytes": 3290,
+      "sha256": "7f65e3b7dde56b5fc1baddeec869b3b96f36cc62ddcd44c625e3e926d2c2bfc4"
+    }
+  ]
+}

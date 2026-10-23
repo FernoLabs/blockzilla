@@ -654,6 +654,7 @@ impl Notice {
     }
 }
 
+pub mod consensus;
 #[cfg(not(target_arch = "wasm32"))]
 pub mod artifact;
 pub mod chain;

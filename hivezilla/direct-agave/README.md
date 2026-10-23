@@ -28,6 +28,25 @@ A plugin must use the same Rust compiler and dependency types as its validator.
 A successful build alone does not establish dynamic ABI compatibility. Test a
 bounded load beside Yellowstone before continuous use.
 
+## Offline Alpenglow footer export
+
+The separate `native-consensus-fact-v1` profile stores exact retained Agave 4.3.2
+footer bytes with a source, bank, execution frame digest, and source event
+binding. It derives leader nanoseconds, user-agent bytes, and optional finality
+and reward aggregates. Their state is `captured_not_verified`. It does not
+rewrite execution blocks or grant source retirement authority.
+
+Use `export-consensus`, `export-consensus-source-events`,
+`inspect-consensus-export`, and `inspect-consensus-fact` for offline export and
+inspection. Export requires a matching complete native bank v2 execution frame.
+The source-events input can be uncompressed JSON or Zstandard JSON. Existing
+archives stay unchanged. Read the [wire contract, commands, field policy and
+production plan](../../docs/architecture/alpenglow-consensus-facts.md).
+
+Continuous late-footer export, cloud custody and a new live profile are later
+steps. The current first rooted custody receipt does not cover callbacks that
+arrive after it. Offline export does not restore a failed capture session.
+
 ## Durability and failure contract
 
 Callbacks copy the transaction wire bytes, all native status metadata fields,

@@ -5,6 +5,13 @@ locally. It runs the same Rust decoder in Node.js and browsers through
 `decoder.wasm`. There are no JavaScript package dependencies or generated
 Wasm bindings. This package is private and has not been published to npm.
 
+The separate `./consensus` entry point reads immutable retained Alpenglow footer
+facts with `decoder-consensus-v1.wasm`. It preserves leader nanoseconds and
+certificate target slots as decimal strings. It checks the complete fact digest
+and caller-supplied source/bank/execution binding. Certificates remain
+`captured_not_verified`; this API does not set a bank's finality state. Read
+the [format and delivery plan](../../../docs/architecture/alpenglow-consensus-facts.md).
+
 Start with [Live stream](../../../docs/start/live-stream.md) for connection and
 transport examples, or [Program dumper](../../../docs/start/program-dumper.md)
 for a program watch list. The separate [token indexer](../../../docs/start/token-indexer.md)

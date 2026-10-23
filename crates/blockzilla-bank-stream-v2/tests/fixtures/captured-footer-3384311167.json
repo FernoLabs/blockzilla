@@ -1,0 +1,21 @@
+{
+  "bank_hash_hex": "c512cdbd4355a9c06d96696f63057b7fde6b113dac7a7b444a52c69d507ca5da",
+  "carrier_bank_id": 2403404,
+  "carrier_slot": 460170404,
+  "finalization_target_slot": 460170403,
+  "fixture_kind": "captured_retained_native_footer",
+  "native_footer_bytes": 556,
+  "native_footer_sha256": "b06c226b404ca15bf6c6b982e88dc951a453aefe7e27358088af04b0beb267d7",
+  "producer_time_nanos": "1792700777706079707",
+  "source": {
+    "agave_revision": "87167f3906bdf5111e99ead64d8f4098b7874e33",
+    "genesis_hash": "5eykt4UsFv8P8NJdTREpY1vzqKqZKvdpKuc147dw2N9d",
+    "node_identity": "J7qpvCEWhdBgPdYRV3s3btWPrRVXa2qnAzgvxWTvtbrQ",
+    "session_id": "000000000000000018df884b2474cf8e-20b258"
+  },
+  "source_coverage": "Retained event from failed source; not a complete-history or execution-payload binding proof.",
+  "source_event_sequence": 3384311167,
+  "source_event_sha256": "82c851a4521b9cb334bf86573cfa2b7a124bc9445db3ec66e483ed52e0ab8f7c",
+  "user_agent_hex": "61676176652f342e332e3220287372633a36616131393564613b20666561743a63396164333464322c20636c69656e743a4861726d6f6e6963416761766529",
+  "verification": "captured_not_verified"
+}

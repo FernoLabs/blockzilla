@@ -12,10 +12,14 @@
     "./banks": {
       "types": "./banks.d.mts",
       "default": "./banks.mjs"
+    },
+    "./consensus": {
+      "types": "./consensus.d.mts",
+      "default": "./consensus.mjs"
     }
   },
   "scripts": {
-    "test": "node --test test.mjs sdk-test.mjs banks-test.mjs"
+    "test": "node --test test.mjs sdk-test.mjs banks-test.mjs consensus-test.mjs"
   },
   "engines": {
     "node": ">=22"
