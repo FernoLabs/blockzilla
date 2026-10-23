@@ -1,6 +1,9 @@
-use anyhow::Result;
+use anyhow::{Result, ensure};
 use clap::{Parser, Subcommand};
-use std::path::PathBuf;
+use std::{
+    io::Read,
+    path::{Path, PathBuf},
+};
 #[derive(Parser)]
 struct Args {
     #[command(subcommand)]
@@ -8,6 +11,24 @@ struct Args {
 }
 #[derive(Subcommand)]
 enum Command {
+    /// Export one captured native Footer as a separate immutable consensus fact.
+    ExportConsensus {
+        binding: PathBuf,
+        event: PathBuf,
+        execution_payload: PathBuf,
+        output: PathBuf,
+    },
+    /// Export captured footers from one bank's retained source-events JSON or Zstd JSON.
+    ExportConsensusSourceEvents {
+        binding: PathBuf,
+        source_events: PathBuf,
+        execution_payload: PathBuf,
+        output: PathBuf,
+    },
+    /// Validate an export receipt and all referenced immutable consensus facts.
+    InspectConsensusExport { directory: PathBuf },
+    /// Read a consensus fact with an independently supplied source/bank/payload binding.
+    InspectConsensusFact { fact: PathBuf, binding: PathBuf },
     /// Build v2 controls and frames from already committed compact banks and native observations.
     BuildConfirmed {
         processed: PathBuf,
@@ -43,6 +64,59 @@ enum Command {
 }
 fn main() -> Result<()> {
     match Args::parse().command {
+        Command::ExportConsensus {
+            binding,
+            event,
+            execution_payload,
+            output,
+        } => {
+            let binding = serde_json::from_slice(&read_bounded(&binding, 4096)?)?;
+            let receipt = hivezilla_direct_agave::consensus::export_event(
+                &binding,
+                &event,
+                &execution_payload,
+                &output,
+            )?;
+            println!("{}", serde_json::to_string(&receipt)?);
+            Ok(())
+        }
+        Command::ExportConsensusSourceEvents {
+            binding,
+            source_events,
+            execution_payload,
+            output,
+        } => {
+            let binding = serde_json::from_slice(&read_bounded(&binding, 4096)?)?;
+            let receipt = hivezilla_direct_agave::consensus::export_source_events(
+                &binding,
+                &source_events,
+                &execution_payload,
+                &output,
+            )?;
+            println!("{}", serde_json::to_string(&receipt)?);
+            Ok(())
+        }
+        Command::InspectConsensusExport { directory } => {
+            let report = hivezilla_direct_agave::consensus::inspect_export(&directory)?;
+            println!("{}", serde_json::to_string(&report)?);
+            Ok(())
+        }
+        Command::InspectConsensusFact { fact, binding } => {
+            use blockzilla_bank_stream_v2::consensus as c;
+            let binding =
+                serde_json::from_slice(&read_bounded(&binding, c::MAX_BINDING_BYTES as u64)?)?;
+            let bytes = read_bounded(&fact, c::MAX_FACT_BYTES as u64)?;
+            let value = c::decode_bound(&bytes, &binding)?;
+            println!(
+                "{}",
+                serde_json::json!({
+                    "profile": c::PROFILE, "binding": value.binding,
+                    "verification": c::VERIFICATION, "carrier_consensus_block_id": null,
+                    "footer": value.footer()?,
+                })
+            );
+            Ok(())
+        }
         Command::BuildConfirmed {
             processed,
             output,
@@ -97,4 +171,13 @@ fn main() -> Result<()> {
             Ok(())
         }
     }
+}
+
+fn read_bounded(path: &Path, limit: u64) -> Result<Vec<u8>> {
+    let mut bytes = Vec::new();
+    std::fs::File::open(path)?
+        .take(limit + 1)
+        .read_to_end(&mut bytes)?;
+    ensure!(bytes.len() as u64 <= limit, "input_file_too_large");
+    Ok(bytes)
 }

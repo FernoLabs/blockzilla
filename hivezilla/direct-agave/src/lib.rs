@@ -1,5 +1,6 @@
 //! Bank-aware Agave execution capture. Queue acceptance is not a durable acknowledgement.
 pub mod confirmed;
+pub mod consensus;
 pub mod event;
 pub mod journal;
 #[cfg(feature = "plugin")]

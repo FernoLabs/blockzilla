@@ -13,6 +13,8 @@ use std::{
     io::{Read, Write},
 };
 
+pub mod consensus;
+
 const MAX_FRAME: usize = 16 * 1024 * 1024 + 65_536 + 16;
 const MAX_BLOCK: usize = 64 * 1024 * 1024;
 const MAX_OUTPUT: usize = 32 * 1024 * 1024;

@@ -30,3 +30,16 @@ The supported result is semantic compact transaction data. Exact signed wire
 reconstruction, full RPC rendering, portable log expansion, and a shared stable
 live dictionary are separate work. Do not present this projection as canonical
 archive data or interpret absent inner metadata as proved absence of CPI calls.
+
+## Native consensus facts
+
+The separate `bz_decode_consensus` export reads `native-consensus-fact-v1`
+through the shared Rust codec. Its configuration is the full expected
+`FactBinding`, supplied independently by the caller. It returns exact leader
+nanoseconds as a decimal string. Captured certificate targets remain separate
+from the carrying block. This reader does not verify BLS signatures or change
+the existing execution decoder's admission rules.
+
+Copy the Wasm output to `../client/decoder-consensus-v1.wasm` for the opt-in
+`consensus.mjs` reader. Keep the existing v1/v2 decoder files separate. See the
+[format and delivery plan](../../../docs/architecture/alpenglow-consensus-facts.md).
