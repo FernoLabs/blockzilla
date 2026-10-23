@@ -62,6 +62,20 @@ test('SDK rejects altered bytes and a different source, bank, payload or event b
   }
 });
 
+test('SDK keeps Buffer bytes private while the digest is pending', async () => {
+  const wire = frame(), original = Buffer.from(wire), expectedDigest = sha(original);
+  const pending = decodeConsensusFact(wire, expectedDigest, binding, decoder);
+  // Change a valid footer field after hashing starts and before decoding resumes.
+  wire[wire.length - footer.length + 1] ^= 1;
+  assert.notEqual(sha(wire), expectedDigest);
+  const result = await pending;
+  assert.equal(result.digest, expectedDigest);
+  assert.equal(sha(result.wire), expectedDigest);
+  assert.deepEqual(Buffer.from(result.wire), original);
+  assert.equal(result.decoded.footer_sha256, provenance.native_footer_sha256);
+  assert.equal(Buffer.from(result.decoded.footer.bank_hash).toString('hex'), provenance.bank_hash_hex);
+});
+
 test('shared parser rejects an unknown grammar, invalid option and every truncated footer', async () => {
   const good = frame();
   for (const at of [0, 8, 10]) {

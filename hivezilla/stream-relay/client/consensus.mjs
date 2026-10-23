@@ -63,7 +63,7 @@ export async function decodeConsensusFact(wire, expectedDigest, binding, decoder
   check(wire instanceof Uint8Array && wire.length >= 20 && wire.length <= MAX_CONSENSUS_FACT_BYTES,
     'invalid_consensus_fact_size');
   check(typeof expectedDigest === 'string' && /^[a-f0-9]{64}$/.test(expectedDigest), 'invalid_consensus_digest');
-  const copy = wire.slice(), expected = structuredClone(binding);
+  const copy = new Uint8Array(wire), expected = structuredClone(binding);
   const digest = await sha(copy);
   check(digest === expectedDigest, 'consensus_digest_mismatch');
   const decoded = decoder.decode(copy, expected);
