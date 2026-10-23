@@ -189,7 +189,7 @@ a subprocess. The WebAssembly release build passed. A real retained 556-byte
 footer and an independent Wincode fixture test the native grammar. These tests
 do not establish full historical coverage or production progress.
 
-CI now builds the consensus WebAssembly reader from source and tests it with
-the v1/v2/consensus JavaScript suites. Read the
+The CI job is configured to build the consensus WebAssembly reader from source
+and test it with the v1/v2/consensus JavaScript suites. Read the
 [acceptance receipt](../operations/evidence/alpenglow-format-20261023.json)
 for artifact hashes, commands and limits.

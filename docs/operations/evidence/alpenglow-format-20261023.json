@@ -59,11 +59,24 @@
       "result": "PASS",
       "historical_execution_payload_binding_proven": false
     },
-    "formatting": "PASS",
+    "formatting": "Changed files PASS; whole manifests also report pre-existing processed.rs and publisher.rs formatting failures",
     "staged_diff_check": "PASS",
     "ci_yaml_parse": "PASS",
     "independent_protocol_and_code_review": "PASS",
-    "ci_when_saved": "CONFIGURED_NOT_RUN_YET"
+    "ci_when_saved": "INITIAL_RUN_FAILED; own module-order issue corrected; pre-existing main failures remain visible",
+    "ci_baseline": {
+      "main_commit": "b01231ce80c740730478198e521eac9367a11495",
+      "main_run": "https://github.com/FernoLabs/blockzilla/actions/runs/39429692313",
+      "pr_initial_run": "https://github.com/FernoLabs/blockzilla/actions/runs/39926960388",
+      "baseline_failure_categories": [
+        "processed.rs formatting",
+        "publisher.rs formatting",
+        "Missing local hivezilla/deploy/validator-tunnel/access-application.json link target",
+        "Reachable-history scanner:135 findings on main and initial PR run"
+      ],
+      "individual_history_findings_compared": false,
+      "checks_weakened": false
+    }
   },
   "native_fixture": {
     "bank_hash_hex": "c512cdbd4355a9c06d96696f63057b7fde6b113dac7a7b444a52c69d507ca5da",
@@ -111,7 +124,7 @@
     {
       "path": "crates/blockzilla-bank-stream-v2/src/lib.rs",
       "bytes": 23611,
-      "sha256": "2445e6f829ffb2e6b4091b75205b886f2a8a342fe7407e4eb0c96212609bce18"
+      "sha256": "35cf5ce103f4ee7e0196ed59db2e85671ce9ac153168a07fa8ed95ae484d23d4"
     },
     {
       "path": "crates/blockzilla-bank-stream-v2/tests/consensus.rs",
@@ -135,8 +148,8 @@
     },
     {
       "path": "docs/architecture/alpenglow-consensus-facts.md",
-      "bytes": 11358,
-      "sha256": "48bb0e30bcf588edb4cd56f9d3da507357c20d83edb4f48a25ef87a073c1e723"
+      "bytes": 11377,
+      "sha256": "8586ce678a0c4d9abc9659c7fdf8ed501b3b88e1cef15fb6dda0a99f73e1ac55"
     },
     {
       "path": "hivezilla/direct-agave/README.md",
@@ -244,6 +257,37 @@
       "local_evidence": "cli-smoke/inspection.json",
       "bytes": 3290,
       "sha256": "7f65e3b7dde56b5fc1baddeec869b3b96f36cc62ddcd44c625e3e926d2c2bfc4"
+    },
+    {
+      "local_evidence": "wasm-build-after-ci.log",
+      "bytes": 1871,
+      "sha256": "3ef7fdcbdd9b81a724e21d244961d0ad38fa370fca3d137dce8ef5f92f1a37e6"
+    },
+    {
+      "local_evidence": "client-tests-after-ci.log",
+      "bytes": 2489,
+      "sha256": "da41c42b860cd7231a12bcda3565b18ff425135515a4e536f46e6877b6b13a45"
+    },
+    {
+      "local_evidence": "ci-stream-39926960388.log",
+      "bytes": 17184,
+      "sha256": "1271feaaccfaca33ae8093a212e4010dd7f89b682e6e1979bfacbd4fc5039960"
+    },
+    {
+      "local_evidence": "ci-rust-39926960388.log",
+      "bytes": 51574,
+      "sha256": "f26105281b48320bfb8192a93c577b89ba1b6c18e152de504b846f7f1c32196b"
+    },
+    {
+      "local_evidence": "ci-docs-39926960388.log",
+      "bytes": 25294,
+      "sha256": "ad1a68f3de7b7b3ce834525cc99ff4c82ec34044ffe88c9687914221b257a06a"
+    },
+    {
+      "local_evidence": "ci-secrets-39926960388.log",
+      "bytes": 18036,
+      "sha256": "2939a9d0645b668f2294f599c8b00d848176dcf504b2b030d188ea8748f8e6bb"
     }
-  ]
+  ],
+  "updated_utc": "2026-10-23T08:54:03.772317+00:00"
 }

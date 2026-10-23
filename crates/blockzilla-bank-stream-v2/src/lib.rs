@@ -654,11 +654,11 @@ impl Notice {
     }
 }
 
-pub mod consensus;
 #[cfg(not(target_arch = "wasm32"))]
 pub mod artifact;
 pub mod chain;
 pub mod client;
+pub mod consensus;
 #[cfg(any(test, feature = "test-fixtures"))]
 pub mod fixtures;
 #[cfg(test)]
