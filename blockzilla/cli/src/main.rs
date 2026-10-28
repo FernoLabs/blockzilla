@@ -28,6 +28,7 @@ mod index_tokens;
 mod pre_hot;
 mod predecessor_tail_seed;
 mod scheduler;
+mod show_archive_v2_block_markers;
 mod split_compact;
 mod stream;
 mod token_events;
@@ -1175,6 +1176,9 @@ enum Commands {
         #[arg(long)]
         entry: Option<usize>,
     },
+
+    /// Print consensus block ids and Alpenglow block markers from a hot-block Archive V2.
+    ShowArchiveV2BlockMarkers(show_archive_v2_block_markers::ShowArchiveV2BlockMarkersArgs),
 }
 
 /// Archive V3 candidate construction, taken from the former `ia-*` binaries.
@@ -2147,6 +2151,7 @@ fn main() -> Result<()> {
         Commands::DumpCarPohEntry { input, slot, entry } => {
             car_debug::dump_car_poh_entry(&input, slot, entry)
         }
+        Commands::ShowArchiveV2BlockMarkers(args) => show_archive_v2_block_markers::run(args),
         Commands::VerifyArchiveV2Poh {
             archive_dir,
             threads,
@@ -3570,6 +3575,30 @@ mod cli_tests {
             } => {
                 assert_eq!(repair_dir, Path::new("repair-view"));
                 assert_eq!(hot_output, Path::new("hot"));
+            }
+            _ => panic!("unexpected command"),
+        }
+    }
+
+    #[test]
+    fn show_archive_v2_block_markers_command_parses() {
+        let cli = Cli::try_parse_from([
+            "blockzilla",
+            "show-archive-v2-block-markers",
+            "epoch-out",
+            "--slot",
+            "460512004",
+            "--max-blocks",
+            "8",
+            "--check-parent-chain",
+        ])
+        .unwrap();
+        match cli.command {
+            Commands::ShowArchiveV2BlockMarkers(args) => {
+                assert_eq!(args.archive_dir, Path::new("epoch-out"));
+                assert_eq!(args.slot, Some(460512004));
+                assert_eq!(args.max_blocks, Some(8));
+                assert!(args.check_parent_chain);
             }
             _ => panic!("unexpected command"),
         }
