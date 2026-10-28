@@ -8118,6 +8118,11 @@ mod tests {
                 tx_rows: vec![tx_row(message_bytes.len(), metadata_bytes.len(), flags, 1)],
                 message_bytes,
                 metadata_bytes,
+
+                consensus_magic: blockzilla_archive_v2::ARCHIVE_V2_HOT_CONSENSUS_MAGIC,
+                consensus_block_id: None,
+                parent_consensus_block_id: None,
+                block_markers: Vec::new(),
             };
             let uncompressed = serialize(&block);
             let compressed = zstd::bulk::compress(&uncompressed, 1).unwrap();

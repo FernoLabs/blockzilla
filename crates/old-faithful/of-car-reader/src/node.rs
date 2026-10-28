@@ -190,15 +190,233 @@ impl<'a> From<&DataFrame<'a>> for OwnedDataFrame {
     }
 }
 
-#[derive(Debug, Decode, Encode, Clone, PartialEq, Eq, Serialize, Deserialize)]
-#[cbor(array)]
+/// Block metadata from an Old Faithful CAR block node.
+///
+/// A Tower-era array has three elements. An Alpenglow array adds the raw block
+/// markers and the 32-byte consensus block id. `meta_len` is the CBOR array
+/// length, so a null tail still counts as Alpenglow.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct SlotMeta {
-    #[n(0)]
     pub parent_slot: Option<u64>,
-    #[n(1)]
     pub blocktime: Option<i64>,
-    #[n(2)]
     pub block_height: Option<u64>,
+    /// `None` when the field is absent or CBOR null. `Some` is the marker array,
+    /// in source order. Each marker is the raw `VersionedBlockMarker` bytes.
+    #[serde(default)]
+    pub block_markers: Option<Vec<Vec<u8>>>,
+    /// Consensus block id. Absent or CBOR null on a Tower block.
+    #[serde(default)]
+    pub block_id: Option<[u8; 32]>,
+    /// CBOR array length. Three means Tower. More than three means Alpenglow.
+    #[serde(default = "tower_slot_meta_len")]
+    pub meta_len: u64,
+}
+
+const fn tower_slot_meta_len() -> u64 {
+    3
+}
+
+impl SlotMeta {
+    /// Parent consensus block id from the last header or update-parent marker.
+    ///
+    /// Other markers, including the footer and its certificates, stay raw.
+    pub fn parent_consensus_block_id(&self) -> Option<[u8; 32]> {
+        self.block_markers
+            .as_deref()
+            .and_then(parent_consensus_block_id_from_markers)
+    }
+
+    pub fn alpenglow(&self) -> bool {
+        self.meta_len > 3
+    }
+}
+
+fn parent_consensus_block_id_from_markers(markers: &[Vec<u8>]) -> Option<[u8; 32]> {
+    markers.iter().rev().find_map(|marker| {
+        let bytes = marker.as_slice();
+        if bytes.len() < 46 {
+            return None;
+        }
+        let version = u16::from_le_bytes([bytes[0], bytes[1]]);
+        let variant = bytes[2];
+        let payload_len = u16::from_le_bytes([bytes[3], bytes[4]]);
+        if version != 1 || (variant != 1 && variant != 2) || payload_len != 41 {
+            return None;
+        }
+        if bytes.len() != 46 || bytes[5] != 1 {
+            return None;
+        }
+        let mut parent_block_id = [0u8; 32];
+        parent_block_id.copy_from_slice(&bytes[14..46]);
+        Some(parent_block_id)
+    })
+}
+
+impl<'b, C> Decode<'b, C> for SlotMeta {
+    fn decode(d: &mut Decoder<'b>, _ctx: &mut C) -> core::result::Result<Self, CborError> {
+        let len = d
+            .array()?
+            .ok_or_else(|| CborError::message("indefinite slot meta array not supported"))?;
+        let parent_slot = if len >= 1 {
+            decode_optional_u64(d)?
+        } else {
+            None
+        };
+        let blocktime = if len >= 2 {
+            decode_optional_i64(d)?
+        } else {
+            None
+        };
+        let block_height = if len >= 3 {
+            decode_optional_u64(d)?
+        } else {
+            None
+        };
+        let block_markers = if len >= 4 {
+            Some(decode_block_markers(d)?)
+        } else {
+            None
+        };
+        let block_id = if len >= 5 {
+            Some(decode_consensus_block_id(d)?)
+        } else {
+            None
+        };
+        for _ in 5..len {
+            d.skip()?;
+        }
+        Ok(Self {
+            parent_slot,
+            blocktime,
+            block_height,
+            block_markers: block_markers.flatten(),
+            block_id: block_id.flatten(),
+            meta_len: len,
+        })
+    }
+}
+
+fn decode_optional_i64(d: &mut Decoder<'_>) -> core::result::Result<Option<i64>, CborError> {
+    match d.datatype()? {
+        Type::Null => {
+            d.null()?;
+            Ok(None)
+        }
+        Type::U8 | Type::U16 | Type::U32 | Type::U64 => {
+            let value = d.u64()?;
+            i64::try_from(value)
+                .map(Some)
+                .map_err(|_| CborError::message("slot meta integer does not fit in i64"))
+        }
+        Type::I8 | Type::I16 | Type::I32 | Type::I64 => Ok(Some(d.i64()?)),
+        other => Err(CborError::type_mismatch(other)),
+    }
+}
+
+fn decode_block_markers(
+    d: &mut Decoder<'_>,
+) -> core::result::Result<Option<Vec<Vec<u8>>>, CborError> {
+    match d.datatype()? {
+        Type::Null => {
+            d.null()?;
+            Ok(None)
+        }
+        Type::Array => {
+            let count = d
+                .array()?
+                .ok_or_else(|| CborError::message("indefinite block marker array not supported"))?;
+            let mut markers = Vec::with_capacity(usize::try_from(count).unwrap_or(0));
+            for _ in 0..count {
+                let bytes = d.bytes()?;
+                markers.push(bytes.to_vec());
+            }
+            Ok(Some(markers))
+        }
+        other => Err(CborError::type_mismatch(other)),
+    }
+}
+
+fn decode_consensus_block_id(
+    d: &mut Decoder<'_>,
+) -> core::result::Result<Option<[u8; 32]>, CborError> {
+    match d.datatype()? {
+        Type::Null => {
+            d.null()?;
+            Ok(None)
+        }
+        Type::Bytes => {
+            let bytes = d.bytes()?;
+            let id: [u8; 32] = bytes
+                .try_into()
+                .map_err(|_| CborError::message("consensus block id must be 32 bytes"))?;
+            Ok(Some(id))
+        }
+        other => Err(CborError::type_mismatch(other)),
+    }
+}
+
+impl<C> Encode<C> for SlotMeta {
+    fn encode<W: minicbor::encode::Write>(
+        &self,
+        e: &mut minicbor::Encoder<W>,
+        _ctx: &mut C,
+    ) -> core::result::Result<(), minicbor::encode::Error<W::Error>> {
+        let len = self.meta_len.min(5);
+        e.array(len)?;
+        if len >= 1 {
+            encode_option_u64(e, self.parent_slot)?;
+        }
+        if len >= 2 {
+            encode_option_i64(e, self.blocktime)?;
+        }
+        if len >= 3 {
+            encode_option_u64(e, self.block_height)?;
+        }
+        if len >= 4 {
+            match &self.block_markers {
+                None => {
+                    e.null()?;
+                }
+                Some(markers) => {
+                    e.array(markers.len() as u64)?;
+                    for marker in markers {
+                        e.bytes(marker)?;
+                    }
+                }
+            }
+        }
+        if len >= 5 {
+            match self.block_id {
+                None => {
+                    e.null()?;
+                }
+                Some(id) => {
+                    e.bytes(&id)?;
+                }
+            }
+        }
+        Ok(())
+    }
+}
+
+fn encode_option_u64<W: minicbor::encode::Write>(
+    e: &mut minicbor::Encoder<W>,
+    value: Option<u64>,
+) -> core::result::Result<(), minicbor::encode::Error<W::Error>> {
+    match value {
+        None => e.null().map(|_| ()),
+        Some(value) => e.u64(value).map(|_| ()),
+    }
+}
+
+fn encode_option_i64<W: minicbor::encode::Write>(
+    e: &mut minicbor::Encoder<W>,
+    value: Option<i64>,
+) -> core::result::Result<(), minicbor::encode::Error<W::Error>> {
+    match value {
+        None => e.null().map(|_| ()),
+        Some(value) => e.i64(value).map(|_| ()),
+    }
 }
 
 #[derive(Debug, Decode, Encode, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -633,8 +851,8 @@ pub fn decode_entry_summary(data: &[u8]) -> crate::node::Result<(u64, &[u8], usi
 
 #[cfg(test)]
 mod tests {
-    use super::{DataFrame, Node, decode_node};
-    use minicbor::{Decode, Decoder, Encoder};
+    use super::{DataFrame, Node, SlotMeta, decode_node};
+    use minicbor::{Decode, Decoder, Encode, Encoder};
 
     #[test]
     fn dataframe_rejects_unsupported_next_array_shapes() {
@@ -695,5 +913,121 @@ mod tests {
 
         assert_eq!(frame.hash, Some(42));
         assert!(!frame.hash_was_negative);
+    }
+
+    fn header_marker(variant: u8, parent_slot: u64, parent_id: [u8; 32]) -> Vec<u8> {
+        let mut marker = Vec::new();
+        marker.extend_from_slice(&1u16.to_le_bytes());
+        marker.push(variant);
+        marker.extend_from_slice(&41u16.to_le_bytes());
+        marker.push(1);
+        marker.extend_from_slice(&parent_slot.to_le_bytes());
+        marker.extend_from_slice(&parent_id);
+        marker
+    }
+
+    #[test]
+    fn slot_meta_keeps_three_fields_and_round_trips() {
+        let mut e = Encoder::new(Vec::new());
+        e.array(3).unwrap();
+        e.u64(41).unwrap();
+        e.i64(1_700_000_000).unwrap();
+        e.u64(99).unwrap();
+        let bytes = e.into_writer();
+
+        let meta = SlotMeta::decode(&mut Decoder::new(&bytes), &mut ()).unwrap();
+        assert!(!meta.alpenglow());
+        assert_eq!(meta.parent_slot, Some(41));
+        assert_eq!(meta.blocktime, Some(1_700_000_000));
+        assert_eq!(meta.block_height, Some(99));
+        assert_eq!(meta.block_markers, None);
+        assert_eq!(meta.block_id, None);
+        assert_eq!(meta.parent_consensus_block_id(), None);
+
+        let mut encoded = Vec::new();
+        meta.encode(&mut Encoder::new(&mut encoded), &mut ())
+            .unwrap();
+        assert_eq!(encoded, bytes);
+    }
+
+    #[test]
+    fn slot_meta_keeps_a_short_parent_only_array() {
+        let mut e = Encoder::new(Vec::new());
+        e.array(1).unwrap();
+        e.u64(40).unwrap();
+        let bytes = e.into_writer();
+
+        let meta = SlotMeta::decode(&mut Decoder::new(&bytes), &mut ()).unwrap();
+        assert!(!meta.alpenglow());
+        assert_eq!(meta.meta_len, 1);
+        assert_eq!(meta.parent_slot, Some(40));
+        assert_eq!(meta.blocktime, None);
+        assert_eq!(meta.block_height, None);
+
+        let mut encoded = Vec::new();
+        meta.encode(&mut Encoder::new(&mut encoded), &mut ())
+            .unwrap();
+        assert_eq!(encoded, bytes);
+    }
+
+    #[test]
+    fn slot_meta_keeps_raw_markers_and_block_id() {
+        let parent_id = [0x11; 32];
+        let updated_parent = [0x22; 32];
+        let block_id = [0x33; 32];
+        let header = header_marker(1, 40, parent_id);
+        let update = header_marker(2, 39, updated_parent);
+        let footer = vec![1, 0, 0, 4, 0, 9, 9, 9];
+        let mut e = Encoder::new(Vec::new());
+        e.array(5).unwrap();
+        e.u64(41).unwrap();
+        e.null().unwrap();
+        e.u64(99).unwrap();
+        e.array(3).unwrap();
+        e.bytes(&header).unwrap();
+        e.bytes(&footer).unwrap();
+        e.bytes(&update).unwrap();
+        e.bytes(&block_id).unwrap();
+        let bytes = e.into_writer();
+
+        let meta = SlotMeta::decode(&mut Decoder::new(&bytes), &mut ()).unwrap();
+        assert!(meta.alpenglow());
+        assert_eq!(meta.blocktime, None);
+        assert_eq!(
+            meta.block_markers.as_ref().unwrap(),
+            &vec![header, footer, update.clone()]
+        );
+        assert_eq!(meta.block_id, Some(block_id));
+        assert_eq!(meta.parent_consensus_block_id(), Some(updated_parent));
+
+        let mut encoded = Vec::new();
+        meta.encode(&mut Encoder::new(&mut encoded), &mut ())
+            .unwrap();
+        let again = SlotMeta::decode(&mut Decoder::new(&encoded), &mut ()).unwrap();
+        assert_eq!(again, meta);
+    }
+
+    #[test]
+    fn slot_meta_rejects_a_short_block_id_and_keeps_null_tail() {
+        let mut e = Encoder::new(Vec::new());
+        e.array(5).unwrap();
+        e.u64(1).unwrap();
+        e.u64(2).unwrap();
+        e.u64(3).unwrap();
+        e.null().unwrap();
+        e.bytes(&[1, 2, 3]).unwrap();
+        assert!(SlotMeta::decode(&mut Decoder::new(&e.into_writer()), &mut ()).is_err());
+
+        let mut e = Encoder::new(Vec::new());
+        e.array(5).unwrap();
+        e.null().unwrap();
+        e.null().unwrap();
+        e.null().unwrap();
+        e.null().unwrap();
+        e.null().unwrap();
+        let meta = SlotMeta::decode(&mut Decoder::new(&e.into_writer()), &mut ()).unwrap();
+        assert!(meta.alpenglow());
+        assert_eq!(meta.block_markers, None);
+        assert_eq!(meta.block_id, None);
     }
 }

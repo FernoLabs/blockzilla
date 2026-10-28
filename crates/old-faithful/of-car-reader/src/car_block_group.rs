@@ -89,6 +89,12 @@ pub struct CarBlockGroup {
     pub parent_slot: Option<u64>,
     pub block_time: Option<i64>,
     pub block_height: Option<u64>,
+    /// Consensus block id from a five-element SlotMeta. Empty on a Tower block.
+    pub block_id: Option<[u8; 32]>,
+    /// Raw Alpenglow block markers. Empty when the SlotMeta has no marker array.
+    pub block_markers: Vec<Vec<u8>>,
+    /// True when the SlotMeta array has the Alpenglow tail, including a null tail.
+    pub alpenglow: bool,
 
     // blockhash (from Entry.hash - last seen)
     pub blockhash: [u8; 32],
@@ -162,6 +168,9 @@ impl CarBlockGroup {
             parent_slot: None,
             block_time: None,
             block_height: None,
+            block_id: None,
+            block_markers: Vec::new(),
+            alpenglow: false,
 
             blockhash: [0; 32],
             has_blockhash: false,
@@ -213,6 +222,9 @@ impl CarBlockGroup {
         self.parent_slot = None;
         self.block_time = None;
         self.block_height = None;
+        self.block_id = None;
+        self.block_markers.clear();
+        self.alpenglow = false;
 
         self.blockhash = [0; 32];
         self.has_blockhash = false;
@@ -584,6 +596,9 @@ impl CarBlockGroup {
             self.parent_slot = block.meta.parent_slot;
             self.block_time = block.meta.blocktime;
             self.block_height = block.meta.block_height;
+            self.block_id = block.meta.block_id;
+            self.block_markers = block.meta.block_markers.clone().unwrap_or_default();
+            self.alpenglow = block.meta.alpenglow();
 
             return Ok(true);
         }
@@ -826,6 +841,9 @@ mod tests {
         assert_eq!(group.parent_slot, Some(41));
         assert_eq!(group.block_time, Some(1_700_000_000));
         assert_eq!(group.block_height, Some(99));
+        assert!(!group.alpenglow);
+        assert_eq!(group.block_id, None);
+        assert!(group.block_markers.is_empty());
 
         assert_eq!(group.get_len().0, 2);
         assert_eq!(group.entry_count(), 2);
@@ -855,6 +873,43 @@ mod tests {
         assert_eq!(rewards.index, Some(0));
         assert_eq!(rewards.total, Some(1));
         assert_eq!(rewards.data, vec![0xaa, 0xbb, 0xcc]);
+    }
+
+    #[test]
+    fn reads_alpenglow_slot_meta_onto_the_group() {
+        let marker = vec![9, 8, 7];
+        let block_id = [0x44; 32];
+        let mut car = Vec::new();
+        push_uvarint(&mut car, 1);
+        car.push(0);
+        push_car_entry(&mut car, &[0x01; 36], &transaction_node(42, &[0x10]));
+        push_car_entry(&mut car, &[0x02; 36], &transaction_node(42, &[0x20]));
+        push_car_entry(&mut car, &[0x03; 36], &entry_node(3, [0x11; 32], 1));
+        push_car_entry(&mut car, &[0x04; 36], &entry_node(4, [0x22; 32], 1));
+        push_car_entry(
+            &mut car,
+            &[0x05; 36],
+            &rewards_node(42, Some(7), Some(0), Some(1), &[0xaa, 0xbb, 0xcc]),
+        );
+        push_car_entry(
+            &mut car,
+            &[0x06; 36],
+            &block_node_alpenglow(42, 41, 1_700_000_000, 99, &marker, &block_id),
+        );
+
+        let mut reader = CarBlockReader::with_capacity(Cursor::new(car), 1024);
+        reader.skip_header().expect("skip header");
+        let mut group = CarBlockGroup::new();
+        assert!(reader.read_until_block_into(&mut group).expect("read"));
+        assert!(group.alpenglow);
+        assert_eq!(group.block_id, Some(block_id));
+        assert_eq!(group.block_markers, vec![marker]);
+        assert_eq!(group.parent_slot, Some(41));
+
+        group.clear();
+        assert!(!group.alpenglow);
+        assert_eq!(group.block_id, None);
+        assert!(group.block_markers.is_empty());
     }
 
     #[test]
@@ -1468,6 +1523,42 @@ mod tests {
         e.u64(parent_slot).expect("parent_slot");
         e.i64(block_time).expect("block_time");
         e.u64(block_height).expect("block_height");
+
+        encode_cid_ref(&mut e, 0x50);
+        e.into_writer()
+    }
+
+    fn block_node_alpenglow(
+        slot: u64,
+        parent_slot: u64,
+        block_time: i64,
+        block_height: u64,
+        marker: &[u8],
+        block_id: &[u8; 32],
+    ) -> Vec<u8> {
+        let mut e = Encoder::new(Vec::new());
+        e.array(6).expect("block array").u64(2).expect("kind");
+        e.u64(slot).expect("slot");
+
+        e.array(2).expect("shredding");
+        e.array(2).expect("shred 0");
+        e.i64(10).expect("entry_end_idx 0");
+        e.i64(11).expect("shred_end_idx 0");
+        e.array(2).expect("shred 1");
+        e.i64(20).expect("entry_end_idx 1");
+        e.i64(21).expect("shred_end_idx 1");
+
+        e.array(2).expect("entries");
+        encode_cid_ref(&mut e, 0x40);
+        encode_cid_ref(&mut e, 0x41);
+
+        e.array(5).expect("meta");
+        e.u64(parent_slot).expect("parent_slot");
+        e.i64(block_time).expect("block_time");
+        e.u64(block_height).expect("block_height");
+        e.array(1).expect("markers");
+        e.bytes(marker).expect("marker");
+        e.bytes(block_id).expect("block id");
 
         encode_cid_ref(&mut e, 0x50);
         e.into_writer()

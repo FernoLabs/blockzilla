@@ -3823,6 +3823,11 @@ mod tests {
                     tx_rows: rows,
                     message_bytes: messages,
                     metadata_bytes: metadata,
+
+                    consensus_magic: blockzilla_archive_v2::ARCHIVE_V2_HOT_CONSENSUS_MAGIC,
+                    consensus_block_id: None,
+                    parent_consensus_block_id: None,
+                    block_markers: Vec::new(),
                 };
                 let uncompressed =
                     wincode::config::serialize(&blob, wincode_leb128_config()).unwrap();
