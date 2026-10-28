@@ -5024,9 +5024,7 @@ mod tests {
             message_bytes: vec![],
             metadata_bytes: vec![],
 
-            consensus_magic: blockzilla_archive_v2::ARCHIVE_V2_HOT_CONSENSUS_MAGIC,
             consensus_block_id: None,
-            parent_consensus_block_id: None,
             block_markers: Vec::new(),
         };
         let raw = wincode::config::serialize(&blob, blockzilla_primitives::wincode_leb128_config())
@@ -5244,9 +5242,7 @@ mod tests {
                 message_bytes: Vec::new(),
                 metadata_bytes: Vec::new(),
 
-                consensus_magic: blockzilla_archive_v2::ARCHIVE_V2_HOT_CONSENSUS_MAGIC,
                 consensus_block_id: None,
-                parent_consensus_block_id: None,
                 block_markers: Vec::new(),
             },
             ArchiveV2HotBlockBlob {
@@ -5273,9 +5269,7 @@ mod tests {
                 message_bytes: Vec::new(),
                 metadata_bytes: Vec::new(),
 
-                consensus_magic: blockzilla_archive_v2::ARCHIVE_V2_HOT_CONSENSUS_MAGIC,
                 consensus_block_id: None,
-                parent_consensus_block_id: None,
                 block_markers: Vec::new(),
             },
         ];
@@ -5573,9 +5567,7 @@ mod tests {
             message_bytes: Vec::new(),
             metadata_bytes: Vec::new(),
 
-            consensus_magic: blockzilla_archive_v2::ARCHIVE_V2_HOT_CONSENSUS_MAGIC,
             consensus_block_id: None,
-            parent_consensus_block_id: None,
             block_markers: Vec::new(),
         };
         let uncompressed =
@@ -5935,9 +5927,7 @@ mod tests {
                 message_bytes: Vec::new(),
                 metadata_bytes: Vec::new(),
 
-                consensus_magic: blockzilla_archive_v2::ARCHIVE_V2_HOT_CONSENSUS_MAGIC,
                 consensus_block_id: None,
-                parent_consensus_block_id: None,
                 block_markers: Vec::new(),
             };
             let uncompressed = wincode::config::serialize(
@@ -7537,9 +7527,7 @@ mod tests {
             message_bytes: vec![10, 11, 12, 13, 14],
             metadata_bytes: vec![20, 21, 22],
 
-            consensus_magic: blockzilla_archive_v2::ARCHIVE_V2_HOT_CONSENSUS_MAGIC,
             consensus_block_id: None,
-            parent_consensus_block_id: None,
             block_markers: Vec::new(),
         };
         let uncompressed =
@@ -7561,9 +7549,7 @@ mod tests {
             message_bytes: Vec::new(),
             metadata_bytes: Vec::new(),
 
-            consensus_magic: blockzilla_archive_v2::ARCHIVE_V2_HOT_CONSENSUS_MAGIC,
             consensus_block_id: None,
-            parent_consensus_block_id: None,
             block_markers: Vec::new(),
         };
         let empty_uncompressed = wincode::config::serialize(
@@ -7719,9 +7705,7 @@ mod tests {
             message_bytes: Vec::new(),
             metadata_bytes: Vec::new(),
 
-            consensus_magic: blockzilla_archive_v2::ARCHIVE_V2_HOT_CONSENSUS_MAGIC,
             consensus_block_id: None,
-            parent_consensus_block_id: None,
             block_markers: Vec::new(),
         };
         let uncompressed =

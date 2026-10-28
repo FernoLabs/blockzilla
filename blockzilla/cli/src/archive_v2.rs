@@ -6335,9 +6335,7 @@ fn hot_block_from_archive_block_with_signatures(
             message_bytes,
             metadata_bytes,
 
-            consensus_magic: blockzilla_archive_v2::ARCHIVE_V2_HOT_CONSENSUS_MAGIC,
             consensus_block_id: None,
-            parent_consensus_block_id: None,
             block_markers: Vec::new(),
         },
         block_signature_count,
@@ -6508,9 +6506,7 @@ fn hot_block_from_live_no_registry_block(
             message_bytes,
             metadata_bytes,
 
-            consensus_magic: blockzilla_archive_v2::ARCHIVE_V2_HOT_CONSENSUS_MAGIC,
             consensus_block_id: None,
-            parent_consensus_block_id: None,
             block_markers: Vec::new(),
         },
         block_signature_count,
@@ -6709,9 +6705,7 @@ fn hot_block_from_live_no_registry_block_signature_counts(
             message_bytes,
             metadata_bytes,
 
-            consensus_magic: blockzilla_archive_v2::ARCHIVE_V2_HOT_CONSENSUS_MAGIC,
             consensus_block_id: None,
-            parent_consensus_block_id: None,
             block_markers: Vec::new(),
         },
         block_signature_count,
@@ -17793,7 +17787,6 @@ fn build_block_record(
 
 fn apply_hot_consensus(block: &mut ArchiveV2HotBlockBlob, consensus: ArchiveV2HotConsensus) {
     block.consensus_block_id = consensus.block_id;
-    block.parent_consensus_block_id = consensus.parent_block_id;
     block.block_markers = consensus.markers;
 }
 

@@ -715,9 +715,7 @@ mod tests {
             message_bytes,
             metadata_bytes: Vec::new(),
 
-            consensus_magic: blockzilla_archive_v2::ARCHIVE_V2_HOT_CONSENSUS_MAGIC,
             consensus_block_id: None,
-            parent_consensus_block_id: None,
             block_markers: Vec::new(),
         };
         let uncompressed = wincode::config::serialize(&block, wincode_leb128_config()).unwrap();

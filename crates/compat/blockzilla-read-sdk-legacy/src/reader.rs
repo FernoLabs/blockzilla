@@ -4516,9 +4516,7 @@ mod tests {
                 message_bytes: first_messages,
                 metadata_bytes: Vec::new(),
 
-                consensus_magic: blockzilla_archive_v2::ARCHIVE_V2_HOT_CONSENSUS_MAGIC,
                 consensus_block_id: None,
-                parent_consensus_block_id: None,
                 block_markers: Vec::new(),
             };
 
@@ -4575,9 +4573,7 @@ mod tests {
                 message_bytes: second_message,
                 metadata_bytes: second_metadata,
 
-                consensus_magic: blockzilla_archive_v2::ARCHIVE_V2_HOT_CONSENSUS_MAGIC,
                 consensus_block_id: None,
-                parent_consensus_block_id: None,
                 block_markers: Vec::new(),
             };
 
@@ -5117,9 +5113,7 @@ mod tests {
                 message_bytes: message,
                 metadata_bytes: vec![],
 
-                consensus_magic: blockzilla_archive_v2::ARCHIVE_V2_HOT_CONSENSUS_MAGIC,
                 consensus_block_id: None,
-                parent_consensus_block_id: None,
                 block_markers: Vec::new(),
             },
         };
@@ -6820,9 +6814,7 @@ mod tests {
                 message_bytes,
                 metadata_bytes: vec![0xaa],
 
-                consensus_magic: blockzilla_archive_v2::ARCHIVE_V2_HOT_CONSENSUS_MAGIC,
                 consensus_block_id: None,
-                parent_consensus_block_id: None,
                 block_markers: Vec::new(),
             },
         };
@@ -7056,9 +7048,7 @@ mod tests {
             message_bytes: Vec::new(),
             metadata_bytes,
 
-            consensus_magic: blockzilla_archive_v2::ARCHIVE_V2_HOT_CONSENSUS_MAGIC,
             consensus_block_id: None,
-            parent_consensus_block_id: None,
             block_markers: Vec::new(),
         };
 

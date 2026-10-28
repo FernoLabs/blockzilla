@@ -1784,9 +1784,7 @@ impl From<LegacyHotBlockWithShredding> for ArchiveV2HotBlockBlob {
             tx_rows: value.tx_rows,
             message_bytes: value.message_bytes,
             metadata_bytes: value.metadata_bytes,
-            consensus_magic: blockzilla_archive_v2::ARCHIVE_V2_HOT_CONSENSUS_MAGIC,
             consensus_block_id: None,
-            parent_consensus_block_id: None,
             block_markers: Vec::new(),
         }
     }
@@ -1812,9 +1810,7 @@ impl From<LegacyHotBlockWithRewardsVec> for ArchiveV2HotBlockBlob {
             tx_rows: value.tx_rows,
             message_bytes: value.message_bytes,
             metadata_bytes: value.metadata_bytes,
-            consensus_magic: blockzilla_archive_v2::ARCHIVE_V2_HOT_CONSENSUS_MAGIC,
             consensus_block_id: None,
-            parent_consensus_block_id: None,
             block_markers: Vec::new(),
         }
     }
@@ -6850,9 +6846,7 @@ fn rewrite_source_block_with_scratch(
                 message_bytes: std::mem::take(&mut scratch.target_messages),
                 metadata_bytes: std::mem::take(&mut scratch.target_metadata),
 
-                consensus_magic: blockzilla_archive_v2::ARCHIVE_V2_HOT_CONSENSUS_MAGIC,
                 consensus_block_id: None,
-                parent_consensus_block_id: None,
                 block_markers: Vec::new(),
             };
             (block, HotBlockOuterSchema::Current, access_references)
@@ -12657,9 +12651,7 @@ mod tests {
             message_bytes,
             metadata_bytes: Vec::new(),
 
-            consensus_magic: blockzilla_archive_v2::ARCHIVE_V2_HOT_CONSENSUS_MAGIC,
             consensus_block_id: None,
-            parent_consensus_block_id: None,
             block_markers: Vec::new(),
         };
         let encoded = wincode::config::serialize(&block, wincode_leb128_config()).unwrap();
@@ -13485,9 +13477,7 @@ mod tests {
             message_bytes: Vec::new(),
             metadata_bytes,
 
-            consensus_magic: blockzilla_archive_v2::ARCHIVE_V2_HOT_CONSENSUS_MAGIC,
             consensus_block_id: None,
-            parent_consensus_block_id: None,
             block_markers: Vec::new(),
         };
         let encoded = wincode::config::serialize(&block, wincode_leb128_config()).unwrap();
@@ -13513,9 +13503,7 @@ mod tests {
             message_bytes: Vec::new(),
             metadata_bytes: Vec::new(),
 
-            consensus_magic: blockzilla_archive_v2::ARCHIVE_V2_HOT_CONSENSUS_MAGIC,
             consensus_block_id: None,
-            parent_consensus_block_id: None,
             block_markers: Vec::new(),
         };
         let mut encoded = wincode::config::serialize(&block, wincode_leb128_config()).unwrap();
@@ -13702,9 +13690,7 @@ mod tests {
             ],
             message_bytes: [first_message, second_message, raw_message].concat(),
             metadata_bytes: [successful, failed, raw_metadata].concat(),
-            consensus_magic: blockzilla_archive_v2::ARCHIVE_V2_HOT_CONSENSUS_MAGIC,
             consensus_block_id: None,
-            parent_consensus_block_id: None,
             block_markers: Vec::new(),
         }
     }
@@ -14252,9 +14238,7 @@ mod tests {
             message_bytes: raw_messages.to_vec(),
             metadata_bytes: [encoded_metadata, raw_metadata.to_vec()].concat(),
 
-            consensus_magic: blockzilla_archive_v2::ARCHIVE_V2_HOT_CONSENSUS_MAGIC,
             consensus_block_id: None,
-            parent_consensus_block_id: None,
             block_markers: Vec::new(),
         };
         let encoded = wincode::config::serialize(&block, wincode_leb128_config()).unwrap();
@@ -14383,9 +14367,7 @@ mod tests {
             message_bytes: [message_bytes, raw_message.to_vec()].concat(),
             metadata_bytes: [metadata_bytes, raw_metadata.to_vec()].concat(),
 
-            consensus_magic: blockzilla_archive_v2::ARCHIVE_V2_HOT_CONSENSUS_MAGIC,
             consensus_block_id: None,
-            parent_consensus_block_id: None,
             block_markers: Vec::new(),
         };
         let mut references = AccessReferenceSet::default();
@@ -14506,9 +14488,7 @@ mod tests {
             message_bytes: [first, second].concat(),
             metadata_bytes: Vec::new(),
 
-            consensus_magic: blockzilla_archive_v2::ARCHIVE_V2_HOT_CONSENSUS_MAGIC,
             consensus_block_id: None,
-            parent_consensus_block_id: None,
             block_markers: Vec::new(),
         };
         let mut access = AccessReferenceSet::default();
@@ -14600,9 +14580,7 @@ mod tests {
             message_bytes: Vec::new(),
             metadata_bytes: Vec::new(),
 
-            consensus_magic: blockzilla_archive_v2::ARCHIVE_V2_HOT_CONSENSUS_MAGIC,
             consensus_block_id: None,
-            parent_consensus_block_id: None,
             block_markers: Vec::new(),
         };
         let mut classes = Vec::new();

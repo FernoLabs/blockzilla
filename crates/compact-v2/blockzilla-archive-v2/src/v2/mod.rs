@@ -23,9 +23,8 @@ use blockzilla_compact::{
     SplitCompactIndexRecord,
 };
 use blockzilla_primitives::{
-    CompactPubkey, HistoricalSourceWincodeLeb128Config,
-    bounded_historical_source_wincode_leb128_config, historical_source_wincode_leb128_config,
-    wincode_leb128_config,
+    BoundedHistoricalSourceWincodeLeb128Config, CompactPubkey, HistoricalSourceWincodeLeb128Config,
+    historical_source_wincode_leb128_config, wincode_leb128_config,
 };
 
 mod archive;
@@ -64,15 +63,6 @@ pub const WINCODE_ARCHIVE_V2_FLAG_FIRST_SEEN_REGISTRY: u32 = 1 << 2;
 /// Registry counts include every typed `CompactPubkey` reference, including rewards and logs.
 pub const WINCODE_ARCHIVE_V2_FLAG_ALL_PUBKEY_REF_COUNTS: u32 = 1 << 3;
 pub const ARCHIVE_V2_HOT_TX_ROW_LEN: usize = 28;
-/// Marks the consensus tail appended after the historical hot-block payload.
-///
-/// A block written before this tail has no bytes here. The value is not a
-/// transaction count, so a historical payload cannot be read as a consensus tail.
-pub const ARCHIVE_V2_HOT_CONSENSUS_MAGIC: u32 = 0xA7B1_0C4D;
-
-fn default_consensus_magic() -> u32 {
-    ARCHIVE_V2_HOT_CONSENSUS_MAGIC
-}
 
 /// Header for the log-only wincode benchmark format.
 ///
@@ -384,17 +374,11 @@ pub struct ArchiveV2HotBlockBlob {
     pub tx_rows: Vec<ArchiveV2HotTxRow>,
     pub message_bytes: Vec<u8>,
     pub metadata_bytes: Vec<u8>,
-    /// Present on every newly written block. Historical bytes omit this tail.
-    #[serde(default = "default_consensus_magic")]
-    pub consensus_magic: u32,
     /// Consensus block id of this block. Absent on a Tower block.
     #[serde(default)]
     pub consensus_block_id: Option<[u8; 32]>,
-    /// Consensus block id of the parent, taken from the last header or
-    /// update-parent marker. Absent when that marker is not present.
-    #[serde(default)]
-    pub parent_consensus_block_id: Option<[u8; 32]>,
-    /// Raw `VersionedBlockMarker` bytes, in source order.
+    /// Raw `VersionedBlockMarker` bytes, in source order. The parent consensus
+    /// block id stays inside the last header or update-parent marker.
     #[serde(default)]
     pub block_markers: Vec<Vec<u8>>,
 }
@@ -403,7 +387,6 @@ pub struct ArchiveV2HotBlockBlob {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ArchiveV2HotConsensus {
     pub block_id: Option<[u8; 32]>,
-    pub parent_block_id: Option<[u8; 32]>,
     pub markers: Vec<Vec<u8>>,
 }
 
@@ -411,7 +394,6 @@ impl ArchiveV2HotConsensus {
     pub fn from_slot_meta(meta: &SlotMeta) -> Self {
         Self {
             block_id: meta.block_id,
-            parent_block_id: meta.parent_consensus_block_id(),
             markers: meta.block_markers.clone().unwrap_or_default(),
         }
     }
@@ -435,9 +417,7 @@ impl From<ArchiveV2HotBlockBlobLegacyPlain> for ArchiveV2HotBlockBlob {
             tx_rows: value.tx_rows,
             message_bytes: value.message_bytes,
             metadata_bytes: value.metadata_bytes,
-            consensus_magic: ARCHIVE_V2_HOT_CONSENSUS_MAGIC,
             consensus_block_id: None,
-            parent_consensus_block_id: None,
             block_markers: Vec::new(),
         }
     }
@@ -459,7 +439,6 @@ pub struct BorrowedArchiveV2HotBlockBlob<'a> {
     pub message_bytes: &'a [u8],
     pub metadata_bytes: &'a [u8],
     pub consensus_block_id: Option<[u8; 32]>,
-    pub parent_consensus_block_id: Option<[u8; 32]>,
     pub block_markers: Vec<Vec<u8>>,
 }
 
@@ -478,7 +457,6 @@ pub struct BorrowedArchiveV2HotBlockBlobWithoutRewards<'a> {
     pub metadata_bytes: &'a [u8],
     rewards_field_bytes: &'a [u8],
     pub consensus_block_id: Option<[u8; 32]>,
-    pub parent_consensus_block_id: Option<[u8; 32]>,
     pub block_markers: Vec<Vec<u8>>,
 }
 
@@ -597,9 +575,7 @@ impl From<ArchiveV2HotBlockBlobLegacyShredding> for ArchiveV2HotBlockBlob {
             tx_rows: value.tx_rows,
             message_bytes: value.message_bytes,
             metadata_bytes: value.metadata_bytes,
-            consensus_magic: ARCHIVE_V2_HOT_CONSENSUS_MAGIC,
             consensus_block_id: None,
-            parent_consensus_block_id: None,
             block_markers: Vec::new(),
         }
     }
@@ -645,9 +621,7 @@ impl From<ArchiveV2HotBlockBlobLegacyRewardsVec> for ArchiveV2HotBlockBlob {
             tx_rows: value.tx_rows,
             message_bytes: value.message_bytes,
             metadata_bytes: value.metadata_bytes,
-            consensus_magic: ARCHIVE_V2_HOT_CONSENSUS_MAGIC,
             consensus_block_id: None,
-            parent_consensus_block_id: None,
             block_markers: Vec::new(),
         }
     }
@@ -686,32 +660,21 @@ pub fn deserialize_archive_v2_hot_block_slot_time(bytes: &[u8]) -> ReadResult<(u
 /// A newly written block carries a consensus tail after the historical payload.
 /// A block without that tail decodes as the previous schema and has an empty tail.
 pub fn deserialize_archive_v2_hot_block_blob(bytes: &[u8]) -> ReadResult<ArchiveV2HotBlockBlob> {
-    if let Ok(block) = wincode::config::deserialize_exact::<ArchiveV2HotBlockBlob, _>(
-        bytes,
-        historical_source_wincode_leb128_config(),
-    ) && block.consensus_magic == ARCHIVE_V2_HOT_CONSENSUS_MAGIC
-    {
-        return Ok(block);
-    }
     let mut remaining = bytes;
     if let Ok(block) = <ArchiveV2HotBlockBlobLegacyPlain as SchemaRead<
         HistoricalSourceWincodeLeb128Config,
     >>::get(remaining.by_ref())
     {
-        if remaining.is_empty() {
-            return Ok(block.into());
-        }
         // The historical payload matched. Bytes after it are a consensus tail, including a
         // truncated one. Do not try the older schemas: they can accept this prefix and hide
         // the broken tail.
-        let (consensus_block_id, parent_consensus_block_id, block_markers) =
+        let (consensus_block_id, block_markers) =
             read_optional_consensus_tail::<HistoricalSourceWincodeLeb128Config>(&mut remaining)?;
         if !remaining.is_empty() {
             return Err(wincode::error::trailing_bytes());
         }
         let mut block = ArchiveV2HotBlockBlob::from(block);
         block.consensus_block_id = consensus_block_id;
-        block.parent_consensus_block_id = parent_consensus_block_id;
         block.block_markers = block_markers;
         return Ok(block);
     }
@@ -743,60 +706,7 @@ pub fn deserialize_archive_v2_hot_block_blob(bytes: &[u8]) -> ReadResult<Archive
 pub fn deserialize_archive_v2_hot_block_blob_borrowed_current(
     bytes: &[u8],
 ) -> ReadResult<BorrowedArchiveV2HotBlockBlob<'_>> {
-    if let Ok((
-        header,
-        tx_count,
-        tx_rows,
-        message_bytes,
-        metadata_bytes,
-        consensus_magic,
-        consensus_block_id,
-        parent_consensus_block_id,
-        block_markers,
-    )) = wincode::config::deserialize_exact::<
-        (
-            ArchiveV2HotBlockHeader,
-            u32,
-            &[[u8; ARCHIVE_V2_HOT_TX_ROW_LEN]],
-            &[u8],
-            &[u8],
-            u32,
-            Option<[u8; 32]>,
-            Option<[u8; 32]>,
-            Vec<Vec<u8>>,
-        ),
-        _,
-    >(bytes, historical_source_wincode_leb128_config())
-        && consensus_magic == ARCHIVE_V2_HOT_CONSENSUS_MAGIC
-    {
-        return Ok(BorrowedArchiveV2HotBlockBlob {
-            header,
-            tx_count,
-            tx_rows,
-            message_bytes,
-            metadata_bytes,
-            consensus_block_id,
-            parent_consensus_block_id,
-            block_markers,
-        });
-    }
-    let (header, tx_count, tx_rows, message_bytes, metadata_bytes): (
-        ArchiveV2HotBlockHeader,
-        u32,
-        &[[u8; ARCHIVE_V2_HOT_TX_ROW_LEN]],
-        &[u8],
-        &[u8],
-    ) = wincode::config::deserialize_exact(bytes, historical_source_wincode_leb128_config())?;
-    Ok(BorrowedArchiveV2HotBlockBlob {
-        header,
-        tx_count,
-        tx_rows,
-        message_bytes,
-        metadata_bytes,
-        consensus_block_id: None,
-        parent_consensus_block_id: None,
-        block_markers: Vec::new(),
-    })
+    read_borrowed_hot_block::<HistoricalSourceWincodeLeb128Config>(bytes)
 }
 
 /// Decode exactly one current hot block with an explicit per-sequence allocation limit.
@@ -809,60 +719,35 @@ pub fn deserialize_archive_v2_hot_block_blob_borrowed_current_with_preallocation
 >(
     bytes: &[u8],
 ) -> ReadResult<BorrowedArchiveV2HotBlockBlob<'_>> {
-    let config = bounded_historical_source_wincode_leb128_config::<PREALLOCATION_LIMIT_BYTES>();
-    if let Ok((
-        header,
-        tx_count,
-        tx_rows,
-        message_bytes,
-        metadata_bytes,
-        consensus_magic,
-        consensus_block_id,
-        parent_consensus_block_id,
-        block_markers,
-    )) = wincode::config::deserialize_exact::<
-        (
+    read_borrowed_hot_block::<BoundedHistoricalSourceWincodeLeb128Config<PREALLOCATION_LIMIT_BYTES>>(
+        bytes,
+    )
+}
+
+fn read_borrowed_hot_block<'a, C: Config>(
+    bytes: &'a [u8],
+) -> ReadResult<BorrowedArchiveV2HotBlockBlob<'a>> {
+    let mut remaining = bytes;
+    let (header, tx_count, tx_rows, message_bytes, metadata_bytes) =
+        <(
             ArchiveV2HotBlockHeader,
             u32,
             &[[u8; ARCHIVE_V2_HOT_TX_ROW_LEN]],
             &[u8],
             &[u8],
-            u32,
-            Option<[u8; 32]>,
-            Option<[u8; 32]>,
-            Vec<Vec<u8>>,
-        ),
-        _,
-    >(bytes, config)
-        && consensus_magic == ARCHIVE_V2_HOT_CONSENSUS_MAGIC
-    {
-        return Ok(BorrowedArchiveV2HotBlockBlob {
-            header,
-            tx_count,
-            tx_rows,
-            message_bytes,
-            metadata_bytes,
-            consensus_block_id,
-            parent_consensus_block_id,
-            block_markers,
-        });
+        ) as SchemaRead<C>>::get(remaining.by_ref())?;
+    let (consensus_block_id, block_markers) = read_optional_consensus_tail::<C>(&mut remaining)?;
+    if !remaining.is_empty() {
+        return Err(wincode::error::trailing_bytes());
     }
-    let (header, tx_count, tx_rows, message_bytes, metadata_bytes): (
-        ArchiveV2HotBlockHeader,
-        u32,
-        &[[u8; ARCHIVE_V2_HOT_TX_ROW_LEN]],
-        &[u8],
-        &[u8],
-    ) = wincode::config::deserialize_exact(bytes, config)?;
     Ok(BorrowedArchiveV2HotBlockBlob {
         header,
         tx_count,
         tx_rows,
         message_bytes,
         metadata_bytes,
-        consensus_block_id: None,
-        parent_consensus_block_id: None,
-        block_markers: Vec::new(),
+        consensus_block_id,
+        block_markers,
     })
 }
 
@@ -934,7 +819,7 @@ pub fn deserialize_archive_v2_hot_block_blob_borrowed_current_without_rewards(
     ) = <(u32, &[[u8; ARCHIVE_V2_HOT_TX_ROW_LEN]], &[u8], &[u8]) as SchemaRead<
         HistoricalSourceWincodeLeb128Config,
     >>::get(remaining.by_ref())?;
-    let (consensus_block_id, parent_consensus_block_id, block_markers) =
+    let (consensus_block_id, block_markers) =
         read_optional_consensus_tail::<HistoricalSourceWincodeLeb128Config>(&mut remaining)?;
     if !remaining.is_empty() {
         return Err(wincode::error::trailing_bytes());
@@ -955,25 +840,19 @@ pub fn deserialize_archive_v2_hot_block_blob_borrowed_current_without_rewards(
         metadata_bytes,
         rewards_field_bytes,
         consensus_block_id,
-        parent_consensus_block_id,
         block_markers,
     })
 }
 
 fn read_optional_consensus_tail<'a, C: Config>(
     bytes: &mut &'a [u8],
-) -> ReadResult<(Option<[u8; 32]>, Option<[u8; 32]>, Vec<Vec<u8>>)> {
+) -> ReadResult<(Option<[u8; 32]>, Vec<Vec<u8>>)> {
     if bytes.is_empty() {
-        return Ok((None, None, Vec::new()));
-    }
-    let magic = <u32 as SchemaRead<'a, C>>::get(bytes.by_ref())?;
-    if magic != ARCHIVE_V2_HOT_CONSENSUS_MAGIC {
-        return Err(wincode::error::invalid_tag_encoding(magic as usize));
+        return Ok((None, Vec::new()));
     }
     let consensus_block_id = <Option<[u8; 32]> as SchemaRead<'a, C>>::get(bytes.by_ref())?;
-    let parent_consensus_block_id = <Option<[u8; 32]> as SchemaRead<'a, C>>::get(bytes.by_ref())?;
     let block_markers = <Vec<Vec<u8>> as SchemaRead<'a, C>>::get(bytes.by_ref())?;
-    Ok((consensus_block_id, parent_consensus_block_id, block_markers))
+    Ok((consensus_block_id, block_markers))
 }
 
 #[cfg(test)]
@@ -1016,9 +895,7 @@ mod hot_block_slot_time_tests {
             ],
             message_bytes: vec![10, 11, 12, 13, 14],
             metadata_bytes: vec![20, 21, 22],
-            consensus_magic: ARCHIVE_V2_HOT_CONSENSUS_MAGIC,
             consensus_block_id: None,
-            parent_consensus_block_id: None,
             block_markers: Vec::new(),
         }
     }
@@ -1052,10 +929,6 @@ mod hot_block_slot_time_tests {
         assert_eq!(replay.message_bytes, owned.message_bytes);
         assert_eq!(replay.metadata_bytes, owned.metadata_bytes);
         assert_eq!(replay.consensus_block_id, owned.consensus_block_id);
-        assert_eq!(
-            replay.parent_consensus_block_id,
-            owned.parent_consensus_block_id
-        );
         assert_eq!(replay.block_markers, owned.block_markers);
     }
 
@@ -1086,30 +959,47 @@ mod hot_block_slot_time_tests {
         );
     }
 
+    fn header_marker(variant: u8, parent_block_id: [u8; 32]) -> Vec<u8> {
+        let mut marker = vec![0u8; 46];
+        marker[0] = 1;
+        marker[2] = variant;
+        marker[3] = 41;
+        marker[5] = 1;
+        marker[14..46].copy_from_slice(&parent_block_id);
+        marker
+    }
+
     #[test]
     fn consensus_tail_round_trips_and_legacy_bytes_stay_empty() {
         let mut block = current_hot_block_fixture();
+        let header_parent = [0x43; 32];
+        let updated_parent = [0x44; 32];
         block.consensus_block_id = Some([0x21; 32]);
-        block.parent_consensus_block_id = Some([0x43; 32]);
-        block.block_markers = vec![vec![1, 0, 1, 4, 0], vec![9, 9]];
+        block.block_markers = vec![
+            header_marker(1, header_parent),
+            header_marker(2, updated_parent),
+        ];
         let bytes =
             wincode::config::serialize(&block, historical_source_wincode_leb128_config()).unwrap();
         let decoded = deserialize_archive_v2_hot_block_blob(&bytes).unwrap();
         assert_eq!(decoded.consensus_block_id, block.consensus_block_id);
-        assert_eq!(
-            decoded.parent_consensus_block_id,
-            block.parent_consensus_block_id
-        );
         assert_eq!(decoded.block_markers, block.block_markers);
+        let recovered = SlotMeta {
+            parent_slot: None,
+            blocktime: None,
+            block_height: None,
+            block_markers: Some(decoded.block_markers.clone()),
+            block_id: decoded.consensus_block_id,
+            meta_len: 5,
+        };
+        assert_eq!(recovered.parent_consensus_block_id(), Some(updated_parent));
         assert_eq!(decoded.tx_count, block.tx_count);
         let borrowed = deserialize_archive_v2_hot_block_blob_borrowed_current(&bytes).unwrap();
         assert_eq!(borrowed.consensus_block_id, Some([0x21; 32]));
-        assert_eq!(borrowed.parent_consensus_block_id, Some([0x43; 32]));
         assert_eq!(borrowed.block_markers, block.block_markers);
         let replay =
             deserialize_archive_v2_hot_block_blob_borrowed_current_without_rewards(&bytes).unwrap();
         assert_eq!(replay.consensus_block_id, Some([0x21; 32]));
-        assert_eq!(replay.parent_consensus_block_id, Some([0x43; 32]));
         assert_eq!(replay.block_markers, block.block_markers);
         let exact =
             deserialize_archive_v2_hot_block_blob_borrowed_current_with_preallocation_limit::<
@@ -1118,6 +1008,12 @@ mod hot_block_slot_time_tests {
             .unwrap();
         assert_eq!(exact.consensus_block_id, Some([0x21; 32]));
         assert_eq!(exact.block_markers, block.block_markers);
+        let tail = wincode::config::serialize(
+            &(block.consensus_block_id, block.block_markers.clone()),
+            historical_source_wincode_leb128_config(),
+        )
+        .unwrap();
+        assert!(bytes.ends_with(&tail));
 
         let legacy = ArchiveV2HotBlockBlobLegacyPlain {
             header: block.header,
@@ -1130,7 +1026,6 @@ mod hot_block_slot_time_tests {
             wincode::config::serialize(&legacy, historical_source_wincode_leb128_config()).unwrap();
         let decoded = deserialize_archive_v2_hot_block_blob(&legacy_bytes).unwrap();
         assert_eq!(decoded.consensus_block_id, None);
-        assert_eq!(decoded.parent_consensus_block_id, None);
         assert!(decoded.block_markers.is_empty());
         assert_eq!(decoded.tx_count, 0);
         let borrowed =
