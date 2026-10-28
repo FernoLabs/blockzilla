@@ -3,7 +3,7 @@
 use std::{
     fs::File,
     io::{Read, Seek, SeekFrom, Write},
-    path::{Path, PathBuf},
+    path::PathBuf,
 };
 
 use anyhow::{Context, Result, anyhow, ensure};
@@ -216,6 +216,8 @@ fn hex(bytes: Option<[u8; 32]>) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::path::Path;
+
     use blockzilla_archive_v2::{ArchiveV2HotBlockHeader, write_archive_v2_hot_block_index};
     use blockzilla_primitives::historical_source_wincode_leb128_config;
 
