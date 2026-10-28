@@ -219,37 +219,17 @@ const fn tower_slot_meta_len() -> u64 {
 impl SlotMeta {
     /// Parent consensus block id from the last header or update-parent marker.
     ///
-    /// Other markers, including the footer and its certificates, stay raw.
+    /// A footer or genesis marker does not carry this id. A marker that does
+    /// not parse is skipped.
     pub fn parent_consensus_block_id(&self) -> Option<[u8; 32]> {
         self.block_markers
             .as_deref()
-            .and_then(parent_consensus_block_id_from_markers)
+            .and_then(crate::blockmarker::parent_consensus_block_id)
     }
 
     pub fn alpenglow(&self) -> bool {
         self.meta_len > 3
     }
-}
-
-fn parent_consensus_block_id_from_markers(markers: &[Vec<u8>]) -> Option<[u8; 32]> {
-    markers.iter().rev().find_map(|marker| {
-        let bytes = marker.as_slice();
-        if bytes.len() < 46 {
-            return None;
-        }
-        let version = u16::from_le_bytes([bytes[0], bytes[1]]);
-        let variant = bytes[2];
-        let payload_len = u16::from_le_bytes([bytes[3], bytes[4]]);
-        if version != 1 || (variant != 1 && variant != 2) || payload_len != 41 {
-            return None;
-        }
-        if bytes.len() != 46 || bytes[5] != 1 {
-            return None;
-        }
-        let mut parent_block_id = [0u8; 32];
-        parent_block_id.copy_from_slice(&bytes[14..46]);
-        Some(parent_block_id)
-    })
 }
 
 impl<'b, C> Decode<'b, C> for SlotMeta {
