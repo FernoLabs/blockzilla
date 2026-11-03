@@ -1,0 +1,39 @@
+[package]
+name = "hivezilla-ledger-archive"
+version = "0.2.0"
+edition = "2024"
+rust-version = "1.98.1"
+license = "MIT"
+publish = false
+description = "Build Compact V2 hot archives from an Agave validator ledger"
+
+[[bin]]
+name = "hivezilla-ledger-archive"
+path = "src/main.rs"
+
+[dependencies]
+anyhow = "1.0.104"
+blockzilla-archive-v2 = { path = "../../crates/compact-v2/blockzilla-archive-v2", default-features = false }
+blockzilla-compact = { path = "../../crates/compact-v2/blockzilla-compact", default-features = false }
+blockzilla-primitives = { path = "../../crates/blockzilla-primitives", default-features = false }
+blockzilla-registry = { path = "../../crates/compact-v2/blockzilla-registry" }
+bs58 = "0.5.1"
+clap = { version = "4.6.6", features = ["derive"] }
+of-car-reader = { path = "../../crates/old-faithful/of-car-reader", default-features = false }
+# Agave 4.4.0-rc.1, commit b6149a719f8fa84123ac3ce1e5f201af64bca8ee.
+# The local reference checkout is branch v4.4.0-rc.1 at that tag.
+solana-entry = { git = "https://github.com/anza-xyz/agave", tag = "v4.4.0-rc.1" }
+solana-hash = "=4.6.0"
+solana-instruction-error = "=3.0.0"
+solana-ledger = { git = "https://github.com/anza-xyz/agave", tag = "v4.4.0-rc.1", features = ["agave-unstable-api"] }
+solana-message = "=5.0.0"
+solana-reward-info = "=7.0.0"
+solana-transaction-error = "=4.0.0"
+solana-transaction-status = { git = "https://github.com/anza-xyz/agave", tag = "v4.4.0-rc.1", features = ["agave-unstable-api"] }
+wincode = { version = "=0.6.1", features = ["derive"] }
+zstd = "0.13.3"
+
+[dev-dependencies]
+tempfile = "3.27.0"
+
+[workspace]
