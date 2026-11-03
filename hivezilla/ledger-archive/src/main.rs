@@ -68,7 +68,7 @@ fn run() -> Result<()> {
             let (view, inspected) = load_and_inspect(&ledger, start_slot, end_slot)?;
             write_archive(&output, &view, &inspected)?;
             print_report(&inspected);
-            println!("Sortie : {}", output.display());
+            println!("Output: {}", output.display());
             Ok(())
         }
     }
@@ -94,9 +94,9 @@ fn load_and_inspect(
 fn print_report(inspected: &check::Inspected) {
     let first = inspected.block_slots.first().copied().unwrap_or(0);
     let last = inspected.block_slots.last().copied().unwrap_or(0);
-    println!("Blocs : {}", inspected.block_slots.len());
-    println!("Sauts prouvés : {}", inspected.skips.len());
-    println!("Premier bloc : {first}");
-    println!("Dernier bloc : {last}");
-    println!("Hash de frontière : {}", bs58::encode(inspected.boundary_hash).into_string());
+    println!("Blocks: {}", inspected.block_slots.len());
+    println!("Proven skips: {}", inspected.skips.len());
+    println!("First block: {first}");
+    println!("Last block: {last}");
+    println!("Boundary hash: {}", bs58::encode(inspected.boundary_hash).into_string());
 }
