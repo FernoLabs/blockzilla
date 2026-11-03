@@ -18,11 +18,11 @@ use blockzilla_archive_v2::{
 };
 use blockzilla_compact::{
     CompactInnerInstruction, CompactInnerInstructions, CompactMessageHeader, CompactMetaV1,
-    CompactPohEntry, CompactPubkey, CompactReturnData, CompactReward, CompactShredding,
+    CompactPohEntry, CompactReturnData, CompactReward, CompactShredding,
     CompactTokenBalance, CompactTransactionConfig, OwnedCompactAddressTableLookup,
     OwnedCompactRecentBlockhash,
 };
-use blockzilla_primitives::{wincode_leb128_config, WincodeLeb128FramedWriter};
+use blockzilla_primitives::{wincode_leb128_config, CompactPubkey, WincodeLeb128FramedWriter};
 use blockzilla_registry::RawPubkeyCompactor;
 use blockzilla_compact::parse_logs_with_compactor;
 
@@ -205,7 +205,7 @@ pub(crate) fn encode_hot_block(block: &SlotData, block_id: u32) -> Result<Vec<u8
             .checked_add(entry.tx_count)
             .context("entry transaction count overflows")
     })?;
-    if usize::from(entry_txs) != block.transactions.len() {
+    if entry_txs as usize != block.transactions.len() {
         bail!(
             "slot {} entry transaction count {entry_txs} does not match {}",
             block.slot,

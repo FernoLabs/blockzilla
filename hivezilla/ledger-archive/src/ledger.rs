@@ -411,7 +411,7 @@ fn map_status(slot: u64, index: usize, meta: &TransactionStatusMeta) -> Result<S
         return_data: meta
             .return_data
             .as_ref()
-            .map(|data| {
+            .map(|data| -> Result<SourceReturnData> {
                 Ok(SourceReturnData {
                     program_id: copy32(data.program_id.as_ref())?,
                     data: data.data.clone(),
@@ -739,16 +739,16 @@ mod tests {
 
     #[test]
     fn known_transaction_error_maps_and_bailout_fails() {
-        assert_eq!(
+        assert!(matches!(
             map_transaction_error(&TransactionError::AccountInUse).unwrap(),
             CompactTransactionError::AccountInUse
-        );
+        ));
         assert!(map_transaction_error(&TransactionError::BailOut).is_err());
         assert!(map_instruction_error(&InstructionError::BailOut).is_err());
-        assert_eq!(
+        assert!(matches!(
             map_instruction_error(&InstructionError::BorshIoError).unwrap(),
-            CompactInstructionError::BorshIoError(String::new())
-        );
+            CompactInstructionError::BorshIoError(ref message) if message.is_empty()
+        ));
     }
 
     #[test]

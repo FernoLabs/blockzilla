@@ -37,3 +37,12 @@ zstd = "0.13.3"
 tempfile = "3.27.0"
 
 [workspace]
+
+# Same crates.io replacements as Agave v4.4.0-rc.1. Cargo applies
+# [patch] only from this workspace, not from the Agave git dependency.
+[patch.crates-io]
+blstrs = { git = "https://github.com/anza-xyz/blstrs", rev = "a1faffa3420bdaf4102425c43f00cdd815d4f145" }
+# for details, see https://github.com/anza-xyz/crossbeam/commit/5ee1c6ec671d94db14ed9238eb99e59a84555aad
+crossbeam-epoch = { git = "https://github.com/anza-xyz/crossbeam", rev = "5ee1c6ec671d94db14ed9238eb99e59a84555aad" }
+librocksdb-sys = { git = "https://github.com/anza-xyz/rust-rocksdb", rev = "4dba80dfe9434e595a971f5b2985ff9ba4fb31e7" }
+rocksdb = { git = "https://github.com/anza-xyz/rust-rocksdb", rev = "4dba80dfe9434e595a971f5b2985ff9ba4fb31e7" }

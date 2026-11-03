@@ -984,8 +984,7 @@ dependencies = [
 [[package]]
 name = "blstrs"
 version = "0.7.1"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "7a8a8ed6fefbeef4a8c7b460e4110e12c5e22a5b7cf32621aae6ad650c4dcf29"
+source = "git+https://github.com/anza-xyz/blstrs?rev=a1faffa3420bdaf4102425c43f00cdd815d4f145#a1faffa3420bdaf4102425c43f00cdd815d4f145"
 dependencies = [
  "blst",
  "byte-slice-cast",
@@ -1482,9 +1481,8 @@ dependencies = [
 
 [[package]]
 name = "crossbeam-epoch"
-version = "0.9.21"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "dc74980687109a3b14c72fd458107bf0baa1da1a1a805e178d15501ba9b86d9d"
+version = "0.9.20"
+source = "git+https://github.com/anza-xyz/crossbeam?rev=5ee1c6ec671d94db14ed9238eb99e59a84555aad#5ee1c6ec671d94db14ed9238eb99e59a84555aad"
 dependencies = [
  "crossbeam-utils",
 ]
@@ -3071,8 +3069,7 @@ checksum = "b6d2cec3eae94f9f509c767b45932f1ada8350c4bdb85af2fcab4a3c14807981"
 [[package]]
 name = "librocksdb-sys"
 version = "0.17.3+10.4.2"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "cef2a00ee60fe526157c9023edab23943fae1ce2ab6f4abb2a807c1746835de9"
+source = "git+https://github.com/anza-xyz/rust-rocksdb?rev=4dba80dfe9434e595a971f5b2985ff9ba4fb31e7#4dba80dfe9434e595a971f5b2985ff9ba4fb31e7"
 dependencies = [
  "bindgen",
  "bzip2-sys",
@@ -4512,8 +4509,7 @@ dependencies = [
 [[package]]
 name = "rocksdb"
 version = "0.24.0"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "ddb7af00d2b17dbd07d82c0063e25411959748ff03e8d4f96134c2ff41fce34f"
+source = "git+https://github.com/anza-xyz/rust-rocksdb?rev=4dba80dfe9434e595a971f5b2985ff9ba4fb31e7#4dba80dfe9434e595a971f5b2985ff9ba4fb31e7"
 dependencies = [
  "libc",
  "librocksdb-sys",
@@ -8122,7 +8118,7 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "32497e9a4c7b38532efcdebeef879707aa9f794296a4f0244f6f69e9bc8574bd"
 dependencies = [
  "fastrand",
- "getrandom 0.4.3",
+ "getrandom 0.3.4",
  "once_cell",
  "rustix",
  "windows-sys 0.61.2",
