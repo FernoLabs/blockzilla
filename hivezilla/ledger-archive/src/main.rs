@@ -6,12 +6,11 @@ mod source;
 
 use std::path::PathBuf;
 
-use anyhow::{bail, Result};
+use anyhow::Result;
 use clap::{Parser, Subcommand};
 
-use crate::check::inspect;
-use crate::convert::write_archive;
-use crate::ledger::load_range;
+use crate::convert::build_archive;
+use crate::ledger::{open_read_only, scan_range};
 
 #[derive(Parser)]
 #[command(name = "hivezilla-ledger-archive")]
@@ -55,7 +54,8 @@ fn run() -> Result<()> {
             start_slot,
             end_slot,
         } => {
-            let inspected = inspect_ledger(&ledger, start_slot, end_slot)?;
+            let blockstore = open_read_only(&ledger)?;
+            let inspected = scan_range(&blockstore, start_slot, end_slot, |_| Ok(()))?;
             print_report(&inspected);
             Ok(())
         }
@@ -65,30 +65,12 @@ fn run() -> Result<()> {
             start_slot,
             end_slot,
         } => {
-            let (view, inspected) = load_and_inspect(&ledger, start_slot, end_slot)?;
-            write_archive(&output, &view, &inspected)?;
+            let inspected = build_archive(&ledger, &output, start_slot, end_slot)?;
             print_report(&inspected);
             println!("Output: {}", output.display());
             Ok(())
         }
     }
-}
-
-fn inspect_ledger(ledger: &std::path::Path, start_slot: u64, end_slot: u64) -> Result<check::Inspected> {
-    Ok(load_and_inspect(ledger, start_slot, end_slot)?.1)
-}
-
-fn load_and_inspect(
-    ledger: &std::path::Path,
-    start_slot: u64,
-    end_slot: u64,
-) -> Result<(source::LedgerView, check::Inspected)> {
-    if start_slot > end_slot {
-        bail!("start slot {start_slot} is after end slot {end_slot}");
-    }
-    let view = load_range(ledger, start_slot, end_slot)?;
-    let inspected = inspect(&view)?;
-    Ok((view, inspected))
 }
 
 fn print_report(inspected: &check::Inspected) {
@@ -98,5 +80,8 @@ fn print_report(inspected: &check::Inspected) {
     println!("Proven skips: {}", inspected.skips.len());
     println!("First block: {first}");
     println!("Last block: {last}");
-    println!("Boundary hash: {}", bs58::encode(inspected.boundary_hash).into_string());
+    println!(
+        "Boundary hash: {}",
+        bs58::encode(inspected.boundary_hash).into_string()
+    );
 }

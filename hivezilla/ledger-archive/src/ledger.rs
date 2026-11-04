@@ -1,25 +1,27 @@
+use std::io::{self, Write};
 use std::path::Path;
 
-use anyhow::{anyhow, bail, Context, Result};
+use anyhow::{Context, Result, anyhow, bail};
 use blockzilla_compact::{CompactInstructionError, CompactTransactionError};
 use solana_entry::block_component::BlockComponent;
 use solana_instruction_error::InstructionError;
-use solana_ledger::blockstore::error::BlockstoreError;
 use solana_ledger::blockstore::Blockstore;
+use solana_ledger::blockstore::error::BlockstoreError;
 use solana_ledger::blockstore_meta::BlockLocation;
 use solana_ledger::blockstore_options::{
-    AccessType, BlockstoreOptions, BLOCKSTORE_DIRECTORY_ROCKS_LEVEL,
+    AccessType, BLOCKSTORE_DIRECTORY_ROCKS_LEVEL, BlockstoreOptions,
 };
 use solana_message::VersionedMessage;
 use solana_reward_info::RewardType;
 use solana_transaction_error::TransactionError;
 use solana_transaction_status::{Reward, TransactionStatusMeta};
 
+use crate::check::{accept_block_against, classify_hole, Inspected, PreviousBlock};
 use crate::source::{
-    LedgerView, RawComponent, SlotData, SourceEntry, SourceHeader, SourceInnerGroup,
+    REWARD_SLOT_DISTANCE, RawComponent, SlotData, SourceEntry, SourceHeader, SourceInnerGroup,
     SourceInnerInstruction, SourceInstruction, SourceLookup, SourceMessage, SourceMessageBody,
     SourceReturnData, SourceReward, SourceStatus, SourceTokenBalance, SourceTx, SourceTxConfig,
-    SourceV1Message, REWARD_SLOT_DISTANCE,
+    SourceV1Message,
 };
 
 /// Open a ledger only in `AccessType::ReadOnly`.
@@ -45,45 +47,156 @@ pub(crate) fn reject_non_readonly(access: &AccessType) -> Result<()> {
     }
 }
 
-pub(crate) fn load_range(ledger: &Path, start_slot: u64, end_slot: u64) -> Result<LedgerView> {
+pub(crate) fn open_read_only(ledger: &Path) -> Result<Blockstore> {
+    let options = read_only_options(ledger)?;
+    Blockstore::open_with_options(ledger, options)
+        .with_context(|| format!("open ledger {}", ledger.display()))
+}
+
+/// Read each slot once. A rooted full block is checked, passed to `on_block`,
+/// then dropped. A hole is proved from the footer of slot N+8.
+///
+/// When that footer belongs to a later block in the window, the block is kept
+/// until the scan reaches it, so its shreds are not read a second time.
+pub(crate) fn scan_range<F>(
+    blockstore: &Blockstore,
+    start_slot: u64,
+    end_slot: u64,
+    mut on_block: F,
+) -> Result<Inspected>
+where
+    F: FnMut(&SlotData) -> Result<()>,
+{
     if start_slot > end_slot {
         bail!("start slot {start_slot} is after end slot {end_slot}");
     }
-    let options = read_only_options(ledger)?;
-    let blockstore = Blockstore::open_with_options(ledger, options)
-        .with_context(|| format!("open ledger {}", ledger.display()))?;
-    load_blockstore(&blockstore, start_slot, end_slot)
-}
-
-fn load_blockstore(blockstore: &Blockstore, start_slot: u64, end_slot: u64) -> Result<LedgerView> {
-    let last_carrier = end_slot
-        .checked_add(REWARD_SLOT_DISTANCE)
-        .context("end slot + 8 overflows")?;
-    let mut slots = std::collections::BTreeMap::new();
-    for slot in start_slot..=last_carrier {
-        let Some(meta) = blockstore
+    progress(format!("reading slots {start_slot} to {end_slot}"));
+    let mut ahead = std::collections::BTreeMap::<u64, SlotData>::new();
+    let mut block_slots = Vec::new();
+    let mut skips = Vec::new();
+    let mut previous = None;
+    let mut boundary_hash = None;
+    let mut scanned = 0u64;
+    for slot in start_slot..=end_slot {
+        scanned += 1;
+        if let Some(data) = ahead.remove(&slot) {
+            accept_one(
+                data,
+                start_slot,
+                end_slot,
+                &mut previous,
+                &mut boundary_hash,
+                &mut block_slots,
+                &mut on_block,
+            )?;
+        } else if let Some(meta) = blockstore
             .meta(slot)
             .with_context(|| format!("read SlotMeta for slot {slot}"))?
-        else {
-            continue;
-        };
-        let is_root = blockstore.is_root(slot);
-        let data = if slot <= end_slot && is_root && meta.is_full() {
-            load_rooted_block(blockstore, slot)?
-        } else if slot > end_slot {
-            let mut data = empty_slot(slot, meta.parent_slot, is_root, meta.is_full());
-            data.markers = read_markers(blockstore, slot)?;
-            data
+        {
+            let is_root = blockstore.is_root(slot);
+            if !is_root {
+                bail!("slot {slot} has data and is not rooted");
+            }
+            if !meta.is_full() {
+                bail!("slot {slot} is rooted and is not full");
+            }
+            let data = load_rooted_block(blockstore, slot)?;
+            accept_one(
+                data,
+                start_slot,
+                end_slot,
+                &mut previous,
+                &mut boundary_hash,
+                &mut block_slots,
+                &mut on_block,
+            )?;
         } else {
-            empty_slot(slot, meta.parent_slot, is_root, meta.is_full())
-        };
-        slots.insert(slot, data);
+            let markers = proof_markers(blockstore, slot, end_slot, &mut ahead)?;
+            classify_hole(slot, markers.as_deref(), &mut skips)?;
+        }
+        if scanned % 1000 == 0 {
+            progress(format!(
+                "read {scanned} slots, latest slot {slot}, {} blocks accepted",
+                block_slots.len()
+            ));
+        }
     }
-    Ok(LedgerView {
-        start_slot,
-        end_slot,
-        slots,
+    progress(format!(
+        "read finished: {scanned} slots scanned, {} blocks accepted",
+        block_slots.len()
+    ));
+    let Some(boundary_hash) = boundary_hash else {
+        bail!("slots {start_slot} to {end_slot} have no block");
+    };
+    Ok(Inspected {
+        block_slots,
+        skips,
+        boundary_hash,
     })
+}
+
+fn accept_one<F>(
+    data: SlotData,
+    start_slot: u64,
+    end_slot: u64,
+    previous: &mut Option<PreviousBlock>,
+    boundary_hash: &mut Option<[u8; 32]>,
+    block_slots: &mut Vec<u64>,
+    on_block: &mut F,
+) -> Result<()>
+where
+    F: FnMut(&SlotData) -> Result<()>,
+{
+    accept_block_against(&data, start_slot, end_slot, previous.as_ref())?;
+    if boundary_hash.is_none() {
+        *boundary_hash = data.previous_blockhash;
+    }
+    on_block(&data)?;
+    *previous = Some(PreviousBlock {
+        slot: data.slot,
+        blockhash: data.blockhash,
+    });
+    block_slots.push(data.slot);
+    Ok(())
+}
+
+fn proof_markers(
+    blockstore: &Blockstore,
+    slot: u64,
+    end_slot: u64,
+    ahead: &mut std::collections::BTreeMap<u64, SlotData>,
+) -> Result<Option<Vec<Vec<u8>>>> {
+    let carrier = slot
+        .checked_add(REWARD_SLOT_DISTANCE)
+        .context("slot + 8 overflows")?;
+    if let Some(data) = ahead.get(&carrier) {
+        return Ok(Some(data.markers.clone()));
+    }
+    let Some(meta) = blockstore
+        .meta(carrier)
+        .with_context(|| format!("read SlotMeta for slot {carrier}"))?
+    else {
+        return Ok(None);
+    };
+    let is_root = blockstore.is_root(carrier);
+    if carrier > end_slot {
+        return Ok(Some(read_markers(blockstore, carrier)?));
+    }
+    if is_root && meta.is_full() {
+        let data = load_rooted_block(blockstore, carrier)?;
+        let markers = data.markers.clone();
+        ahead.insert(carrier, data);
+        return Ok(Some(markers));
+    }
+    Ok(Some(Vec::new()))
+}
+
+fn progress(message: impl std::fmt::Display) {
+    if cfg!(test) {
+        return;
+    }
+    eprintln!("{message}");
+    let _ = io::stderr().flush();
 }
 
 fn load_rooted_block(blockstore: &Blockstore, slot: u64) -> Result<SlotData> {
@@ -139,9 +252,12 @@ fn load_rooted_block(blockstore: &Blockstore, slot: u64) -> Result<SlotData> {
     let mut entries = Vec::with_capacity(raw_entries.len());
     for entry in &raw_entries {
         let tx_count = entry.transactions.len();
-        let rooted = block.transactions.get(tx_cursor..tx_cursor + tx_count).with_context(|| {
-            format!("slot {slot} entry transactions do not match the rooted block")
-        })?;
+        let rooted = block
+            .transactions
+            .get(tx_cursor..tx_cursor + tx_count)
+            .with_context(|| {
+                format!("slot {slot} entry transactions do not match the rooted block")
+            })?;
         let mut signature_count = 0u32;
         for (entry_tx, rooted_tx) in entry.transactions.iter().zip(rooted) {
             if entry_tx.signatures != rooted_tx.transaction.signatures {
@@ -230,26 +346,6 @@ fn read_markers(blockstore: &Blockstore, slot: u64) -> Result<Vec<Vec<u8>>> {
     Ok(markers)
 }
 
-fn empty_slot(slot: u64, parent_slot: Option<u64>, is_root: bool, is_full: bool) -> SlotData {
-    SlotData {
-        slot,
-        is_root,
-        is_full,
-        parent_slot,
-        previous_blockhash: None,
-        blockhash: [0; 32],
-        block_time: None,
-        block_height: None,
-        num_partitions: None,
-        rewards: Vec::new(),
-        consensus_block_id: None,
-        markers: Vec::new(),
-        entries: Vec::new(),
-        shredding: Vec::new(),
-        transactions: Vec::new(),
-    }
-}
-
 fn map_transaction(
     slot: u64,
     index: usize,
@@ -281,11 +377,7 @@ fn map_message(message: &VersionedMessage) -> Result<SourceMessage> {
                 .map(|key| copy32(key.as_ref()))
                 .collect::<Result<Vec<_>>>()?,
             recent_blockhash: copy32(message.recent_blockhash.as_ref())?,
-            instructions: message
-                .instructions
-                .iter()
-                .map(map_instruction)
-                .collect(),
+            instructions: message.instructions.iter().map(map_instruction).collect(),
             lookups: Vec::new(),
         })),
         VersionedMessage::V0(message) => Ok(SourceMessage::V0(SourceMessageBody {
@@ -296,11 +388,7 @@ fn map_message(message: &VersionedMessage) -> Result<SourceMessage> {
                 .map(|key| copy32(key.as_ref()))
                 .collect::<Result<Vec<_>>>()?,
             recent_blockhash: copy32(message.recent_blockhash.as_ref())?,
-            instructions: message
-                .instructions
-                .iter()
-                .map(map_instruction)
-                .collect(),
+            instructions: message.instructions.iter().map(map_instruction).collect(),
             lookups: message
                 .address_table_lookups
                 .iter()
@@ -327,11 +415,7 @@ fn map_message(message: &VersionedMessage) -> Result<SourceMessage> {
                 .map(|key| copy32(key.as_ref()))
                 .collect::<Result<Vec<_>>>()?,
             recent_blockhash: copy32(message.lifetime_specifier.as_ref())?,
-            instructions: message
-                .instructions
-                .iter()
-                .map(map_instruction)
-                .collect(),
+            instructions: message.instructions.iter().map(map_instruction).collect(),
         })),
     }
 }
@@ -344,7 +428,9 @@ fn map_header(header: &solana_message::MessageHeader) -> SourceHeader {
     }
 }
 
-fn map_instruction(instruction: &solana_message::compiled_instruction::CompiledInstruction) -> SourceInstruction {
+fn map_instruction(
+    instruction: &solana_message::compiled_instruction::CompiledInstruction,
+) -> SourceInstruction {
     SourceInstruction {
         program_id_index: instruction.program_id_index,
         accounts: instruction.accounts.clone(),
@@ -365,27 +451,24 @@ fn map_status(slot: u64, index: usize, meta: &TransactionStatusMeta) -> Result<S
         fee: meta.fee,
         pre_balances: meta.pre_balances.clone(),
         post_balances: meta.post_balances.clone(),
-        inner_instructions: meta
-            .inner_instructions
-            .as_ref()
-            .map(|groups| {
-                groups
-                    .iter()
-                    .map(|group| SourceInnerGroup {
-                        index: u32::from(group.index),
-                        instructions: group
-                            .instructions
-                            .iter()
-                            .map(|instruction| SourceInnerInstruction {
-                                program_id_index: u32::from(instruction.instruction.program_id_index),
-                                accounts: instruction.instruction.accounts.clone(),
-                                data: instruction.instruction.data.clone(),
-                                stack_height: instruction.stack_height,
-                            })
-                            .collect(),
-                    })
-                    .collect()
-            }),
+        inner_instructions: meta.inner_instructions.as_ref().map(|groups| {
+            groups
+                .iter()
+                .map(|group| SourceInnerGroup {
+                    index: u32::from(group.index),
+                    instructions: group
+                        .instructions
+                        .iter()
+                        .map(|instruction| SourceInnerInstruction {
+                            program_id_index: u32::from(instruction.instruction.program_id_index),
+                            accounts: instruction.instruction.accounts.clone(),
+                            data: instruction.instruction.data.clone(),
+                            stack_height: instruction.stack_height,
+                        })
+                        .collect(),
+                })
+                .collect()
+        }),
         logs: meta.log_messages.clone(),
         pre_token_balances: map_token_balances(slot, index, meta.pre_token_balances.as_deref())?,
         post_token_balances: map_token_balances(slot, index, meta.post_token_balances.as_deref())?,
@@ -462,9 +545,7 @@ fn map_reward(slot: u64, reward: &Reward) -> Result<SourceReward> {
     }
     if let (Some(commission), Some(bps)) = (reward.commission, reward.commission_bps) {
         if u16::from(commission).checked_mul(100) != Some(bps) {
-            bail!(
-                "slot {slot} reward commission {commission} does not match commission_bps {bps}"
-            );
+            bail!("slot {slot} reward commission {commission} does not match commission_bps {bps}");
         }
     }
     Ok(SourceReward {
@@ -494,14 +575,15 @@ pub(crate) fn map_transaction_error(err: &TransactionError) -> Result<CompactTra
         TransactionError::AccountLoadedTwice => CompactTransactionError::AccountLoadedTwice,
         TransactionError::AccountNotFound => CompactTransactionError::AccountNotFound,
         TransactionError::ProgramAccountNotFound => CompactTransactionError::ProgramAccountNotFound,
-        TransactionError::InsufficientFundsForFee => CompactTransactionError::InsufficientFundsForFee,
+        TransactionError::InsufficientFundsForFee => {
+            CompactTransactionError::InsufficientFundsForFee
+        }
         TransactionError::InvalidAccountForFee => CompactTransactionError::InvalidAccountForFee,
         TransactionError::AlreadyProcessed => CompactTransactionError::AlreadyProcessed,
         TransactionError::BlockhashNotFound => CompactTransactionError::BlockhashNotFound,
-        TransactionError::InstructionError(index, err) => CompactTransactionError::InstructionError(
-            *index,
-            map_instruction_error(err)?,
-        ),
+        TransactionError::InstructionError(index, err) => {
+            CompactTransactionError::InstructionError(*index, map_instruction_error(err)?)
+        }
         TransactionError::CallChainTooDeep => CompactTransactionError::CallChainTooDeep,
         TransactionError::MissingSignatureForFee => CompactTransactionError::MissingSignatureForFee,
         TransactionError::InvalidAccountIndex => CompactTransactionError::InvalidAccountIndex,
@@ -568,7 +650,9 @@ pub(crate) fn map_transaction_error(err: &TransactionError) -> Result<CompactTra
             }
         }
         TransactionError::UnbalancedTransaction => CompactTransactionError::UnbalancedTransaction,
-        TransactionError::ProgramCacheHitMaxLimit => CompactTransactionError::ProgramCacheHitMaxLimit,
+        TransactionError::ProgramCacheHitMaxLimit => {
+            CompactTransactionError::ProgramCacheHitMaxLimit
+        }
         TransactionError::CommitCancelled => CompactTransactionError::CommitCancelled,
         TransactionError::BailOut => {
             bail!("transaction error BailOut has no compact encoding");
@@ -640,7 +724,9 @@ pub(crate) fn map_instruction_error(err: &InstructionError) -> Result<CompactIns
         InstructionError::ProgramEnvironmentSetupFailure => {
             CompactInstructionError::ProgramEnvironmentSetupFailure
         }
-        InstructionError::ProgramFailedToComplete => CompactInstructionError::ProgramFailedToComplete,
+        InstructionError::ProgramFailedToComplete => {
+            CompactInstructionError::ProgramFailedToComplete
+        }
         InstructionError::ProgramFailedToCompile => CompactInstructionError::ProgramFailedToCompile,
         InstructionError::Immutable => CompactInstructionError::Immutable,
         InstructionError::IncorrectAuthority => CompactInstructionError::IncorrectAuthority,

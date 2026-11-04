@@ -1,202 +1,291 @@
 use std::fs::{self, File};
 use std::io::{BufWriter, Write};
-use std::path::Path;
+use std::path::{Path, PathBuf};
 
-use anyhow::{bail, Context, Result};
+use anyhow::{Context, Result, bail};
 use blockzilla_archive_v2::{
-    write_archive_v2_hot_block_index, ArchiveV2HotBlockBlob, ArchiveV2HotBlockHeader,
-    ArchiveV2HotBlockIndexRow, ArchiveV2HotInstruction, ArchiveV2HotInstructionData,
-    ArchiveV2HotLegacyMessage, ArchiveV2HotMessagePayload, ArchiveV2HotRewards,
-    ArchiveV2HotTxRow, ArchiveV2HotV0Message, ArchiveV2HotV1Message, WincodeArchiveV2PohRecord,
-    WincodeArchiveV2ShreddingRecord, ARCHIVE_V2_BLOCKS_FILE, ARCHIVE_V2_BLOCKHASH_REGISTRY_FILE,
-    ARCHIVE_V2_BLOCK_INDEX_FILE, ARCHIVE_V2_POH_FILE, ARCHIVE_V2_SHREDDING_FILE,
-    ARCHIVE_V2_SIGNATURES_FILE, ARCHIVE_V2_TX_FLAG_HAS_ERROR, ARCHIVE_V2_TX_FLAG_HAS_INNER_IX,
+    ARCHIVE_V2_BLOCK_INDEX_FILE, ARCHIVE_V2_BLOCKHASH_REGISTRY_FILE, ARCHIVE_V2_BLOCKS_FILE,
+    ARCHIVE_V2_POH_FILE, ARCHIVE_V2_SHREDDING_FILE, ARCHIVE_V2_SIGNATURES_FILE,
+    ARCHIVE_V2_TX_FLAG_HAS_ERROR, ARCHIVE_V2_TX_FLAG_HAS_INNER_IX,
     ARCHIVE_V2_TX_FLAG_HAS_LOADED_ADDRESSES, ARCHIVE_V2_TX_FLAG_HAS_LOGS,
     ARCHIVE_V2_TX_FLAG_HAS_METADATA, ARCHIVE_V2_TX_FLAG_HAS_RETURN_DATA,
     ARCHIVE_V2_TX_FLAG_HAS_TOKEN_BALANCES, ARCHIVE_V2_TX_FLAG_MESSAGE_V0,
-    ARCHIVE_V2_VOTE_HASH_REGISTRY_FILE,
+    ARCHIVE_V2_VOTE_HASH_REGISTRY_FILE, ArchiveV2HotBlockBlob, ArchiveV2HotBlockHeader,
+    ArchiveV2HotBlockIndexRow, ArchiveV2HotInstruction, ArchiveV2HotInstructionData,
+    ArchiveV2HotLegacyMessage, ArchiveV2HotMessagePayload, ArchiveV2HotRewards, ArchiveV2HotTxRow,
+    ArchiveV2HotV0Message, ArchiveV2HotV1Message, WincodeArchiveV2PohRecord,
+    WincodeArchiveV2ShreddingRecord, write_archive_v2_hot_block_index,
 };
+use blockzilla_compact::parse_logs_with_compactor;
 use blockzilla_compact::{
     CompactInnerInstruction, CompactInnerInstructions, CompactMessageHeader, CompactMetaV1,
-    CompactPohEntry, CompactReturnData, CompactReward, CompactShredding,
-    CompactTokenBalance, CompactTransactionConfig, OwnedCompactAddressTableLookup,
-    OwnedCompactRecentBlockhash,
+    CompactPohEntry, CompactReturnData, CompactReward, CompactShredding, CompactTokenBalance,
+    CompactTransactionConfig, OwnedCompactAddressTableLookup, OwnedCompactRecentBlockhash,
 };
-use blockzilla_primitives::{wincode_leb128_config, CompactPubkey, WincodeLeb128FramedWriter};
+use blockzilla_primitives::{CompactPubkey, WincodeLeb128FramedWriter, wincode_leb128_config};
 use blockzilla_registry::RawPubkeyCompactor;
-use blockzilla_compact::parse_logs_with_compactor;
 
 use crate::check::Inspected;
+use crate::ledger::{open_read_only, scan_range};
 use crate::markers::footer_bank_hash;
 use crate::source::{
-    LedgerView, SlotData, SourceInnerGroup, SourceMessage, SourceMessageBody, SourceReward,
-    SourceStatus, SourceTokenBalance, SourceTx, SourceV1Message,
+    SlotData, SourceInnerGroup, SourceMessage, SourceMessageBody, SourceReward, SourceStatus,
+    SourceTokenBalance, SourceTx, SourceV1Message,
 };
 
 pub(crate) const ZSTD_LEVEL: i32 = 3;
 const INDEX_FLAGS: u32 = 0;
 const VOTE_HASH_ROW_LEN: usize = 65;
 
-pub(crate) fn write_archive(output: &Path, view: &LedgerView, inspected: &Inspected) -> Result<()> {
-    fs::create_dir_all(output)
-        .with_context(|| format!("create {}", output.display()))?;
-
-    let blocks_tmp = output.join(format!("{ARCHIVE_V2_BLOCKS_FILE}.tmp"));
-    let signatures_tmp = output.join(format!("{ARCHIVE_V2_SIGNATURES_FILE}.tmp"));
-    let blockhash_tmp = output.join(format!("{ARCHIVE_V2_BLOCKHASH_REGISTRY_FILE}.tmp"));
-    let vote_tmp = output.join(format!("{ARCHIVE_V2_VOTE_HASH_REGISTRY_FILE}.tmp"));
-    let poh_tmp = output.join(format!("{ARCHIVE_V2_POH_FILE}.tmp"));
-    let shredding_tmp = output.join(format!("{ARCHIVE_V2_SHREDDING_FILE}.tmp"));
-    let temps = [
-        &blocks_tmp,
-        &signatures_tmp,
-        &blockhash_tmp,
-        &vote_tmp,
-        &poh_tmp,
-        &shredding_tmp,
-    ];
-
-    let write_result = write_archive_files(
-        output,
-        view,
-        inspected,
-        &blocks_tmp,
-        &signatures_tmp,
-        &blockhash_tmp,
-        &vote_tmp,
-        &poh_tmp,
-        &shredding_tmp,
-    );
-    if write_result.is_err() {
-        for path in temps {
-            let _ = fs::remove_file(path);
-        }
+pub(crate) fn build_archive(
+    ledger: &Path,
+    output: &Path,
+    start_slot: u64,
+    end_slot: u64,
+) -> Result<Inspected> {
+    let blockstore = open_read_only(ledger)?;
+    fs::create_dir_all(output).with_context(|| format!("create {}", output.display()))?;
+    let temps = temp_paths(output);
+    let result = (|| {
+        let mut writer = ArchiveWriter::create(&temps)?;
+        let inspected = scan_range(&blockstore, start_slot, end_slot, |block| {
+            writer.write_block(block)
+        })?;
+        writer.finish(output)?;
+        Ok(inspected)
+    })();
+    if result.is_err() {
+        remove_temps(&temps);
     }
-    write_result
+    result
 }
 
-fn write_archive_files(
-    output: &Path,
-    view: &LedgerView,
-    inspected: &Inspected,
-    blocks_tmp: &Path,
-    signatures_tmp: &Path,
-    blockhash_tmp: &Path,
-    vote_tmp: &Path,
-    poh_tmp: &Path,
-    shredding_tmp: &Path,
-) -> Result<()> {
-    let mut blocks = BufWriter::new(
-        File::create(blocks_tmp).with_context(|| format!("create {}", blocks_tmp.display()))?,
-    );
-    let mut signatures = Vec::new();
-    let mut blockhashes = Vec::with_capacity(32 * (inspected.block_slots.len() + 1));
-    blockhashes.extend(inspected.boundary_hash);
-    let mut vote_hashes = Vec::with_capacity(VOTE_HASH_ROW_LEN * inspected.block_slots.len());
-    let mut poh = WincodeLeb128FramedWriter::new(BufWriter::new(
-        File::create(poh_tmp).with_context(|| format!("create {}", poh_tmp.display()))?,
-    ));
-    let mut shredding = WincodeLeb128FramedWriter::new(BufWriter::new(
-        File::create(shredding_tmp)
-            .with_context(|| format!("create {}", shredding_tmp.display()))?,
-    ));
+pub(crate) fn write_archive<F>(output: &Path, inspected: &Inspected, mut load_block: F) -> Result<()>
+where
+    F: FnMut(u64) -> Result<SlotData>,
+{
+    fs::create_dir_all(output).with_context(|| format!("create {}", output.display()))?;
+    let temps = temp_paths(output);
+    let result = (|| {
+        let mut writer = ArchiveWriter::create(&temps)?;
+        for slot in &inspected.block_slots {
+            let block = load_block(*slot)?;
+            writer.write_block(&block)?;
+        }
+        writer.finish(output)
+    })();
+    if result.is_err() {
+        remove_temps(&temps);
+    }
+    result
+}
 
-    let mut rows = Vec::with_capacity(inspected.block_slots.len());
-    let mut compressed_offset = 0u64;
-    let mut next_tx_ordinal = 0u64;
-    let mut next_signature_ordinal = 0u64;
+struct ArchivePaths {
+    blocks: PathBuf,
+    signatures: PathBuf,
+    blockhash: PathBuf,
+    vote: PathBuf,
+    poh: PathBuf,
+    shredding: PathBuf,
+}
 
-    for (ordinal, slot) in inspected.block_slots.iter().copied().enumerate() {
-        let block = &view.slots[&slot];
-        let block_id = u32::try_from(ordinal).context("archive block id exceeds u32")?;
+fn temp_paths(output: &Path) -> ArchivePaths {
+    ArchivePaths {
+        blocks: output.join(format!("{ARCHIVE_V2_BLOCKS_FILE}.tmp")),
+        signatures: output.join(format!("{ARCHIVE_V2_SIGNATURES_FILE}.tmp")),
+        blockhash: output.join(format!("{ARCHIVE_V2_BLOCKHASH_REGISTRY_FILE}.tmp")),
+        vote: output.join(format!("{ARCHIVE_V2_VOTE_HASH_REGISTRY_FILE}.tmp")),
+        poh: output.join(format!("{ARCHIVE_V2_POH_FILE}.tmp")),
+        shredding: output.join(format!("{ARCHIVE_V2_SHREDDING_FILE}.tmp")),
+    }
+}
+
+fn remove_temps(temps: &ArchivePaths) {
+    for path in [
+        &temps.blocks,
+        &temps.signatures,
+        &temps.blockhash,
+        &temps.vote,
+        &temps.poh,
+        &temps.shredding,
+    ] {
+        let _ = fs::remove_file(path);
+    }
+}
+
+struct ArchiveWriter {
+    blocks: BufWriter<File>,
+    signatures: BufWriter<File>,
+    poh: WincodeLeb128FramedWriter<BufWriter<File>>,
+    shredding: WincodeLeb128FramedWriter<BufWriter<File>>,
+    blockhashes: Vec<u8>,
+    vote_hashes: Vec<u8>,
+    rows: Vec<ArchiveV2HotBlockIndexRow>,
+    compressed_offset: u64,
+    next_tx_ordinal: u64,
+    next_signature_ordinal: u64,
+    paths: ArchivePaths,
+}
+
+impl ArchiveWriter {
+    fn create(temps: &ArchivePaths) -> Result<Self> {
+        Ok(Self {
+            blocks: BufWriter::new(
+                File::create(&temps.blocks)
+                    .with_context(|| format!("create {}", temps.blocks.display()))?,
+            ),
+            signatures: BufWriter::new(
+                File::create(&temps.signatures)
+                    .with_context(|| format!("create {}", temps.signatures.display()))?,
+            ),
+            poh: WincodeLeb128FramedWriter::new(BufWriter::new(
+                File::create(&temps.poh)
+                    .with_context(|| format!("create {}", temps.poh.display()))?,
+            )),
+            shredding: WincodeLeb128FramedWriter::new(BufWriter::new(
+                File::create(&temps.shredding)
+                    .with_context(|| format!("create {}", temps.shredding.display()))?,
+            )),
+            blockhashes: Vec::new(),
+            vote_hashes: Vec::new(),
+            rows: Vec::new(),
+            compressed_offset: 0,
+            next_tx_ordinal: 0,
+            next_signature_ordinal: 0,
+            paths: ArchivePaths {
+                blocks: temps.blocks.clone(),
+                signatures: temps.signatures.clone(),
+                blockhash: temps.blockhash.clone(),
+                vote: temps.vote.clone(),
+                poh: temps.poh.clone(),
+                shredding: temps.shredding.clone(),
+            },
+        })
+    }
+
+    fn write_block(&mut self, block: &SlotData) -> Result<()> {
+        let slot = block.slot;
+        let block_id = u32::try_from(self.rows.len()).context("archive block id exceeds u32")?;
+        if self.rows.is_empty() {
+            let boundary = block
+                .previous_blockhash
+                .context("first block is missing parent entries")?;
+            self.blockhashes.extend(boundary);
+        }
         let uncompressed = encode_hot_block(block, block_id)?;
         let compressed = zstd::bulk::compress(&uncompressed, ZSTD_LEVEL)
             .with_context(|| format!("compress slot {slot}"))?;
-        let compressed_len = u32::try_from(compressed.len()).context("compressed block exceeds u32")?;
+        let compressed_len =
+            u32::try_from(compressed.len()).context("compressed block exceeds u32")?;
         let uncompressed_len =
             u32::try_from(uncompressed.len()).context("block bytes exceed u32")?;
-        blocks
+        self.blocks
             .write_all(&compressed)
             .with_context(|| format!("write slot {slot}"))?;
-
-        let signature_count = append_signatures(&mut signatures, block)?;
-        blockhashes.extend(block.blockhash);
-        vote_hashes.extend(vote_hash_row(block)?);
-        poh.write(&poh_record(block, block_id))
+        let signature_count = append_signatures(&mut self.signatures, block)?;
+        self.blockhashes.extend(block.blockhash);
+        self.vote_hashes.extend(vote_hash_row(block)?);
+        self.poh
+            .write(&poh_record(block, block_id))
             .with_context(|| format!("write PoH for slot {slot}"))?;
-        shredding
+        self.shredding
             .write(&shredding_record(block, block_id))
             .with_context(|| format!("write shredding for slot {slot}"))?;
-
-        let tx_count = u32::try_from(block.transactions.len()).context("transaction count exceeds u32")?;
-        rows.push(ArchiveV2HotBlockIndexRow {
+        let tx_count =
+            u32::try_from(block.transactions.len()).context("transaction count exceeds u32")?;
+        self.rows.push(ArchiveV2HotBlockIndexRow {
             block_id,
             slot,
-            compressed_offset,
+            compressed_offset: self.compressed_offset,
             compressed_len,
             uncompressed_len,
             tx_count,
-            first_tx_ordinal: next_tx_ordinal,
-            first_signature_ordinal: next_signature_ordinal,
+            first_tx_ordinal: self.next_tx_ordinal,
+            first_signature_ordinal: self.next_signature_ordinal,
             signature_count,
         });
-        compressed_offset = compressed_offset
+        self.compressed_offset = self
+            .compressed_offset
             .checked_add(u64::from(compressed_len))
             .context("compressed archive exceeds u64")?;
-        next_tx_ordinal = next_tx_ordinal
+        self.next_tx_ordinal = self
+            .next_tx_ordinal
             .checked_add(u64::from(tx_count))
             .context("transaction ordinal exceeds u64")?;
-        next_signature_ordinal = next_signature_ordinal
+        self.next_signature_ordinal = self
+            .next_signature_ordinal
             .checked_add(u64::from(signature_count))
             .context("signature ordinal exceeds u64")?;
+        let written = self.rows.len();
+        if written % 1000 == 0 {
+            progress(format!("wrote {written} blocks, latest slot {slot}"));
+        }
+        Ok(())
     }
 
-    blocks
-        .flush()
-        .with_context(|| format!("flush {}", blocks_tmp.display()))?;
-    drop(blocks);
-    poh.flush().context("flush PoH sidecar")?;
-    let poh_writer = poh.into_inner();
-    poh_writer
-        .into_inner()
-        .map_err(|err| anyhow::anyhow!(err))
-        .context("flush PoH sidecar")?;
-    shredding.flush().context("flush shredding sidecar")?;
-    let shredding_writer = shredding.into_inner();
-    shredding_writer
-        .into_inner()
-        .map_err(|err| anyhow::anyhow!(err))
-        .context("flush shredding sidecar")?;
+    fn finish(mut self, output: &Path) -> Result<()> {
+        progress(format!("writing finished: {} blocks", self.rows.len()));
+        self.blocks
+            .flush()
+            .with_context(|| format!("flush {}", self.paths.blocks.display()))?;
+        self.signatures
+            .flush()
+            .with_context(|| format!("flush {}", self.paths.signatures.display()))?;
+        self.poh.flush().context("flush PoH sidecar")?;
+        let poh_writer = self.poh.into_inner();
+        poh_writer
+            .into_inner()
+            .map_err(|err| anyhow::anyhow!(err))
+            .context("flush PoH sidecar")?;
+        self.shredding.flush().context("flush shredding sidecar")?;
+        let shredding_writer = self.shredding.into_inner();
+        shredding_writer
+            .into_inner()
+            .map_err(|err| anyhow::anyhow!(err))
+            .context("flush shredding sidecar")?;
+        fs::write(&self.paths.blockhash, &self.blockhashes)
+            .with_context(|| format!("write {}", self.paths.blockhash.display()))?;
+        fs::write(&self.paths.vote, &self.vote_hashes)
+            .with_context(|| format!("write {}", self.paths.vote.display()))?;
+        rename_finished(&self.paths.blocks, &output.join(ARCHIVE_V2_BLOCKS_FILE))?;
+        rename_finished(
+            &self.paths.signatures,
+            &output.join(ARCHIVE_V2_SIGNATURES_FILE),
+        )?;
+        rename_finished(
+            &self.paths.blockhash,
+            &output.join(ARCHIVE_V2_BLOCKHASH_REGISTRY_FILE),
+        )?;
+        rename_finished(
+            &self.paths.vote,
+            &output.join(ARCHIVE_V2_VOTE_HASH_REGISTRY_FILE),
+        )?;
+        rename_finished(&self.paths.poh, &output.join(ARCHIVE_V2_POH_FILE))?;
+        rename_finished(
+            &self.paths.shredding,
+            &output.join(ARCHIVE_V2_SHREDDING_FILE),
+        )?;
+        write_archive_v2_hot_block_index(
+            &output.join(ARCHIVE_V2_BLOCK_INDEX_FILE),
+            self.compressed_offset,
+            ZSTD_LEVEL,
+            INDEX_FLAGS,
+            &self.rows,
+        )?;
+        Ok(())
+    }
+}
 
-    fs::write(signatures_tmp, &signatures)
-        .with_context(|| format!("write {}", signatures_tmp.display()))?;
-    fs::write(blockhash_tmp, &blockhashes)
-        .with_context(|| format!("write {}", blockhash_tmp.display()))?;
-    fs::write(vote_tmp, &vote_hashes)
-        .with_context(|| format!("write {}", vote_tmp.display()))?;
-
-    rename_finished(blocks_tmp, &output.join(ARCHIVE_V2_BLOCKS_FILE))?;
-    rename_finished(signatures_tmp, &output.join(ARCHIVE_V2_SIGNATURES_FILE))?;
-    rename_finished(
-        blockhash_tmp,
-        &output.join(ARCHIVE_V2_BLOCKHASH_REGISTRY_FILE),
-    )?;
-    rename_finished(vote_tmp, &output.join(ARCHIVE_V2_VOTE_HASH_REGISTRY_FILE))?;
-    rename_finished(poh_tmp, &output.join(ARCHIVE_V2_POH_FILE))?;
-    rename_finished(shredding_tmp, &output.join(ARCHIVE_V2_SHREDDING_FILE))?;
-    write_archive_v2_hot_block_index(
-        &output.join(ARCHIVE_V2_BLOCK_INDEX_FILE),
-        compressed_offset,
-        ZSTD_LEVEL,
-        INDEX_FLAGS,
-        &rows,
-    )?;
-    Ok(())
+fn progress(message: impl std::fmt::Display) {
+    if cfg!(test) {
+        return;
+    }
+    eprintln!("{message}");
+    let _ = std::io::stderr().flush();
 }
 
 fn rename_finished(from: &Path, to: &Path) -> Result<()> {
-    fs::rename(from, to)
-        .with_context(|| format!("rename {} to {}", from.display(), to.display()))
+    fs::rename(from, to).with_context(|| format!("rename {} to {}", from.display(), to.display()))
 }
 
 pub(crate) fn encode_hot_block(block: &SlotData, block_id: u32) -> Result<Vec<u8>> {
@@ -218,7 +307,10 @@ pub(crate) fn encode_hot_block(block: &SlotData, block_id: u32) -> Result<Vec<u8
     let mut rows = Vec::with_capacity(block.transactions.len());
     for (tx_index, tx) in block.transactions.iter().enumerate() {
         let status = tx.status.as_ref().with_context(|| {
-            format!("slot {} transaction {tx_index} is missing status", block.slot)
+            format!(
+                "slot {} transaction {tx_index} is missing status",
+                block.slot
+            )
         })?;
         let row = encode_tx_row(
             tx,
@@ -252,7 +344,8 @@ pub(crate) fn encode_hot_block(block: &SlotData, block_id: u32) -> Result<Vec<u8
             block_height: block.block_height,
             rewards,
         },
-        tx_count: u32::try_from(block.transactions.len()).context("transaction count exceeds u32")?,
+        tx_count: u32::try_from(block.transactions.len())
+            .context("transaction count exceeds u32")?,
         tx_rows: rows,
         message_bytes,
         metadata_bytes,
@@ -294,15 +387,16 @@ fn encode_tx_row(
         .context("serialize transaction message")?;
     let metadata = wincode::config::serialize(&compact_meta(status), wincode_leb128_config())
         .context("serialize transaction metadata")?;
-    let message_offset = u32::try_from(message_bytes.len()).context("message region exceeds u32")?;
+    let message_offset =
+        u32::try_from(message_bytes.len()).context("message region exceeds u32")?;
     let message_len = u32::try_from(message.len()).context("message exceeds u32")?;
     let metadata_offset =
         u32::try_from(metadata_bytes.len()).context("metadata region exceeds u32")?;
     let metadata_len = u32::try_from(metadata.len()).context("metadata exceeds u32")?;
     message_bytes.extend(message);
     metadata_bytes.extend(metadata);
-    let signature_count = u8::try_from(tx.signatures.len())
-        .context("transaction has more than 255 signatures")?;
+    let signature_count =
+        u8::try_from(tx.signatures.len()).context("transaction has more than 255 signatures")?;
 
     Ok(ArchiveV2HotTxRow {
         tx_index,
@@ -383,7 +477,9 @@ fn raw_keys(keys: &[[u8; 32]]) -> Vec<CompactPubkey> {
     keys.iter().copied().map(CompactPubkey::raw).collect()
 }
 
-fn raw_instructions(instructions: &[crate::source::SourceInstruction]) -> Vec<ArchiveV2HotInstruction> {
+fn raw_instructions(
+    instructions: &[crate::source::SourceInstruction],
+) -> Vec<ArchiveV2HotInstruction> {
     instructions
         .iter()
         .map(|instruction| ArchiveV2HotInstruction {
@@ -467,12 +563,15 @@ fn compact_reward(reward: &SourceReward) -> CompactReward {
     }
 }
 
-fn append_signatures(out: &mut Vec<u8>, block: &SlotData) -> Result<u32> {
+fn append_signatures(out: &mut impl Write, block: &SlotData) -> Result<u32> {
     let mut count = 0u32;
     for tx in &block.transactions {
         for signature in &tx.signatures {
-            out.extend(signature);
-            count = count.checked_add(1).context("signature count exceeds u32")?;
+            out.write_all(signature)
+                .with_context(|| format!("write a signature for slot {}", block.slot))?;
+            count = count
+                .checked_add(1)
+                .context("signature count exceeds u32")?;
         }
     }
     Ok(count)
@@ -528,7 +627,7 @@ fn vote_hash_row(block: &SlotData) -> Result<[u8; VOTE_HASH_ROW_LEN]> {
 mod tests {
     use super::*;
     use crate::check::inspect;
-    use crate::source::{test_block, LedgerView, SourceShredGroup, REWARD_SLOT_DISTANCE};
+    use crate::source::{LedgerView, REWARD_SLOT_DISTANCE, SourceShredGroup, test_block};
     use blockzilla_archive_v2::deserialize_archive_v2_hot_block_blob;
     use blockzilla_primitives::WincodeLeb128FramedReader;
     use of_car_reader::blockmarker::parent_consensus_block_id;
@@ -613,12 +712,24 @@ mod tests {
         };
         let inspected = inspect(&view).unwrap();
         let dir = tempfile::tempdir().unwrap();
-        write_archive(dir.path(), &view, &inspected).unwrap();
+        let mut loaded = Vec::new();
+        write_archive(dir.path(), &inspected, |slot| {
+            loaded.push(slot);
+            view.slots
+                .get(&slot)
+                .cloned()
+                .with_context(|| format!("test block {slot} is missing"))
+        })
+        .unwrap();
+        assert_eq!(loaded, vec![10, 12]);
 
         let index = std::fs::read(dir.path().join(ARCHIVE_V2_BLOCK_INDEX_FILE)).unwrap();
         assert_eq!(&index[..8], b"BZV2HIX1");
         assert_eq!(u64::from_le_bytes(index[12..20].try_into().unwrap()), 2);
-        assert_eq!(i32::from_le_bytes(index[28..32].try_into().unwrap()), ZSTD_LEVEL);
+        assert_eq!(
+            i32::from_le_bytes(index[28..32].try_into().unwrap()),
+            ZSTD_LEVEL
+        );
         assert_eq!(u32::from_le_bytes(index[32..36].try_into().unwrap()), 0);
         let row_len = 52;
         let slots: Vec<u64> = index[36..]
@@ -646,12 +757,52 @@ mod tests {
             .unwrap()
             .unwrap()
             .1;
-        assert!(reader
-            .read::<WincodeArchiveV2ShreddingRecord>()
-            .unwrap()
-            .is_none());
+        assert!(
+            reader
+                .read::<WincodeArchiveV2ShreddingRecord>()
+                .unwrap()
+                .is_none()
+        );
         assert_eq!(first_record.slot, 10);
         assert_eq!(second_record.slot, 12);
+    }
+
+    #[test]
+    fn a_block_load_failure_removes_temp_files_and_skips_the_index() {
+        let first = test_block(10, 9, [4; 32], [3; 32]);
+        let second = test_block(11, 10, [5; 32], [4; 32]);
+        let view = LedgerView {
+            start_slot: 10,
+            end_slot: 11,
+            slots: [first, second]
+                .into_iter()
+                .map(|slot| (slot.slot, slot))
+                .collect(),
+        };
+        let inspected = inspect(&view).unwrap();
+        let dir = tempfile::tempdir().unwrap();
+
+        let error = write_archive(dir.path(), &inspected, |slot| {
+            if slot == 11 {
+                bail!("slot 11 is missing transaction status");
+            }
+            view.slots
+                .get(&slot)
+                .cloned()
+                .with_context(|| format!("test block {slot} is missing"))
+        })
+        .unwrap_err();
+
+        assert!(
+            error.to_string().contains("missing transaction status"),
+            "{error:#}"
+        );
+        assert!(!dir.path().join(ARCHIVE_V2_BLOCK_INDEX_FILE).exists());
+        let names: Vec<_> = std::fs::read_dir(dir.path())
+            .unwrap()
+            .map(|entry| entry.unwrap().file_name().into_string().unwrap())
+            .collect();
+        assert!(names.is_empty(), "{names:?}");
     }
 
     fn skip_footer(skipped_slot: u64) -> Vec<u8> {

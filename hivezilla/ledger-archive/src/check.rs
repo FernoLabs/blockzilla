@@ -5,14 +5,21 @@ use crate::source::{LedgerView, REWARD_SLOT_DISTANCE};
 
 /// Blocks and proven skips for one inclusive slot window.
 ///
-/// `check-ledger-range` and `build-archive-v2-from-ledger` both call this
-/// function. A check that passes on a snapshot will not later stop the build
-/// of that same snapshot for a hole, a missing status, or a missing parent.
+/// The check command and the build command apply the same slot rules. A check
+/// that passes on a snapshot will not later stop the build of that same
+/// snapshot for a hole, a missing status, or a missing parent.
 #[derive(Debug, Clone)]
 pub(crate) struct Inspected {
     pub block_slots: Vec<u64>,
     pub skips: Vec<u64>,
     pub boundary_hash: [u8; 32],
+}
+
+/// The previous produced block. The chain check needs its slot and blockhash.
+#[derive(Debug, Clone, Copy)]
+pub(crate) struct PreviousBlock {
+    pub slot: u64,
+    pub blockhash: [u8; 32],
 }
 
 pub(crate) fn inspect(view: &LedgerView) -> Result<Inspected> {
@@ -26,12 +33,20 @@ pub(crate) fn inspect(view: &LedgerView) -> Result<Inspected> {
 
     let mut block_slots = Vec::new();
     let mut skips = Vec::new();
+    let mut previous = None;
     for slot in view.start_slot..=view.end_slot {
         if view.slots.contains_key(&slot) {
-            accept_block(view, slot, &block_slots)?;
+            let data = &view.slots[&slot];
+            accept_block_against(data, view.start_slot, view.end_slot, previous.as_ref())?;
+            previous = Some(PreviousBlock {
+                slot: data.slot,
+                blockhash: data.blockhash,
+            });
             block_slots.push(slot);
         } else {
-            classify_hole(view, slot, &mut skips)?;
+            let carrier = slot.checked_add(REWARD_SLOT_DISTANCE);
+            let markers = carrier.and_then(|carrier| view.slots.get(&carrier).map(|data| data.markers.as_slice()));
+            classify_hole(slot, markers, &mut skips)?;
         }
     }
 
@@ -53,8 +68,13 @@ pub(crate) fn inspect(view: &LedgerView) -> Result<Inspected> {
     })
 }
 
-fn accept_block(view: &LedgerView, slot: u64, produced: &[u64]) -> Result<()> {
-    let data = &view.slots[&slot];
+pub(crate) fn accept_block_against(
+    data: &crate::source::SlotData,
+    start_slot: u64,
+    end_slot: u64,
+    previous: Option<&PreviousBlock>,
+) -> Result<()> {
+    let slot = data.slot;
     if !data.is_root {
         bail!("slot {slot} has data and is not rooted");
     }
@@ -74,8 +94,7 @@ fn accept_block(view: &LedgerView, slot: u64, produced: &[u64]) -> Result<()> {
         bail!("slot {slot} has block markers and no consensus block id");
     }
 
-    if let Some(previous_slot) = produced.last().copied() {
-        let previous = &view.slots[&previous_slot];
+    if let Some(previous) = previous {
         if parent_slot != previous.slot {
             bail!(
                 "slot {slot} parent {parent_slot} is not the previous block {}",
@@ -88,7 +107,7 @@ fn accept_block(view: &LedgerView, slot: u64, produced: &[u64]) -> Result<()> {
                 previous.slot
             );
         }
-    } else if (view.start_slot..=view.end_slot).contains(&parent_slot) {
+    } else if (start_slot..=end_slot).contains(&parent_slot) {
         bail!("slot {slot} parent {parent_slot} is inside the range and is not a block");
     }
 
@@ -100,14 +119,18 @@ fn accept_block(view: &LedgerView, slot: u64, produced: &[u64]) -> Result<()> {
     Ok(())
 }
 
-fn classify_hole(view: &LedgerView, slot: u64, skips: &mut Vec<u64>) -> Result<()> {
+pub(crate) fn classify_hole(
+    slot: u64,
+    carrier_markers: Option<&[Vec<u8>]>,
+    skips: &mut Vec<u64>,
+) -> Result<()> {
     let carrier = slot
         .checked_add(REWARD_SLOT_DISTANCE)
         .context("slot + 8 overflows")?;
-    let Some(data) = view.slots.get(&carrier) else {
+    let Some(markers) = carrier_markers else {
         bail!("slot {slot} has no SlotMeta and slot {carrier} has no footer proof");
     };
-    let names = reward_names(&data.markers)
+    let names = reward_names(markers)
         .with_context(|| format!("slot {carrier} footer cannot prove slot {slot}"))?;
     if names.notars.contains(&slot) {
         bail!("slot {slot} is missing and slot {carrier} has a notarization reward for it");
