@@ -16,7 +16,10 @@ use solana_reward_info::RewardType;
 use solana_transaction_error::TransactionError;
 use solana_transaction_status::{Reward, TransactionStatusMeta};
 
-use crate::check::{accept_block_against, classify_hole, Inspected, PreviousBlock};
+use crate::check::{
+    accept_block_against, classify_abandoned_fork, classify_hole, parent_chain_relation,
+    ChainRelation, Inspected, PreviousBlock,
+};
 use crate::source::{
     REWARD_SLOT_DISTANCE, RawComponent, SlotData, SourceEntry, SourceHeader, SourceInnerGroup,
     SourceInnerInstruction, SourceInstruction, SourceLookup, SourceMessage, SourceMessageBody,
@@ -54,7 +57,9 @@ pub(crate) fn open_read_only(ledger: &Path) -> Result<Blockstore> {
 }
 
 /// Read each slot once. A rooted full block is checked, passed to `on_block`,
-/// then dropped. A hole is proved from the footer of slot N+8.
+/// then dropped. A non-root slot is left out when the next root jumps over it
+/// and slot N+8 has a skip certificate. A hole is proved from the footer of
+/// slot N+8.
 ///
 /// When that footer belongs to a later block in the window, the block is kept
 /// until the scan reaches it, so its shreds are not read a second time.
@@ -74,6 +79,7 @@ where
     let mut ahead = std::collections::BTreeMap::<u64, SlotData>::new();
     let mut block_slots = Vec::new();
     let mut skips = Vec::new();
+    let mut forks = Vec::new();
     let mut previous = None;
     let mut boundary_hash = None;
     let mut scanned = 0u64;
@@ -93,23 +99,22 @@ where
             .meta(slot)
             .with_context(|| format!("read SlotMeta for slot {slot}"))?
         {
-            let is_root = blockstore.is_root(slot);
-            if !is_root {
-                bail!("slot {slot} has data and is not rooted");
-            }
-            if !meta.is_full() {
+            if !blockstore.is_root(slot) {
+                leave_out_abandoned_fork(blockstore, slot, end_slot, &mut ahead, &mut forks)?;
+            } else if !meta.is_full() {
                 bail!("slot {slot} is rooted and is not full");
+            } else {
+                let data = load_rooted_block(blockstore, slot)?;
+                accept_one(
+                    data,
+                    start_slot,
+                    end_slot,
+                    &mut previous,
+                    &mut boundary_hash,
+                    &mut block_slots,
+                    &mut on_block,
+                )?;
             }
-            let data = load_rooted_block(blockstore, slot)?;
-            accept_one(
-                data,
-                start_slot,
-                end_slot,
-                &mut previous,
-                &mut boundary_hash,
-                &mut block_slots,
-                &mut on_block,
-            )?;
         } else {
             let markers = proof_markers(blockstore, slot, end_slot, &mut ahead)?;
             classify_hole(slot, markers.as_deref(), &mut skips)?;
@@ -131,7 +136,53 @@ where
     Ok(Inspected {
         block_slots,
         skips,
+        forks,
         boundary_hash,
+    })
+}
+
+fn leave_out_abandoned_fork(
+    blockstore: &Blockstore,
+    slot: u64,
+    end_slot: u64,
+    ahead: &mut std::collections::BTreeMap<u64, SlotData>,
+    forks: &mut Vec<u64>,
+) -> Result<()> {
+    let relation = rooted_chain_relation(blockstore, slot)?;
+    let markers = match relation {
+        ChainRelation::JumpsOver { .. } => proof_markers(blockstore, slot, end_slot, ahead)?,
+        ChainRelation::DescendsFrom { .. } => None,
+    };
+    let next_root = match relation {
+        ChainRelation::JumpsOver { next_root } => Some(next_root),
+        ChainRelation::DescendsFrom { .. } => None,
+    };
+    classify_abandoned_fork(slot, relation, markers.as_deref(), forks)?;
+    if let Some(next_root) = next_root {
+        progress(format!(
+            "slot {slot} left out, rooted chain jumps to {next_root}"
+        ));
+    }
+    Ok(())
+}
+
+fn rooted_chain_relation(blockstore: &Blockstore, slot: u64) -> Result<ChainRelation> {
+    let start = slot.checked_add(1).context("slot + 1 overflows")?;
+    let Some(next_root) = blockstore
+        .rooted_slot_iterator(start)
+        .with_context(|| format!("read roots after slot {slot}"))?
+        .next()
+    else {
+        bail!("slot {slot} has data and is not rooted");
+    };
+    parent_chain_relation(slot, next_root, |cursor| {
+        let meta = blockstore
+            .meta(cursor)
+            .with_context(|| format!("read SlotMeta for slot {cursor}"))?;
+        let Some(meta) = meta else {
+            bail!("slot {cursor} has no SlotMeta");
+        };
+        Ok(meta.parent_slot)
     })
 }
 

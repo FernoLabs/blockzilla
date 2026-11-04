@@ -3,7 +3,7 @@ use anyhow::{bail, Context, Result};
 use crate::markers::reward_names;
 use crate::source::{LedgerView, REWARD_SLOT_DISTANCE};
 
-/// Blocks and proven skips for one inclusive slot window.
+/// Blocks, proven skips, and abandoned forks for one inclusive slot window.
 ///
 /// The check command and the build command apply the same slot rules. A check
 /// that passes on a snapshot will not later stop the build of that same
@@ -12,7 +12,19 @@ use crate::source::{LedgerView, REWARD_SLOT_DISTANCE};
 pub(crate) struct Inspected {
     pub block_slots: Vec<u64>,
     pub skips: Vec<u64>,
+    /// Slots that have data, are not root, and are left out of the archive.
+    /// The next root jumps over each one, and slot N+8 has a skip certificate.
+    pub forks: Vec<u64>,
     pub boundary_hash: [u8; 32],
+}
+
+/// Where `slot` sits relative to the next rooted slot.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum ChainRelation {
+    /// `next_root`'s parent chain reaches a slot below `slot` without visiting it.
+    JumpsOver { next_root: u64 },
+    /// `next_root`'s parent chain visits `slot`.
+    DescendsFrom { next_root: u64 },
 }
 
 /// The previous produced block. The chain check needs its slot and blockhash.
@@ -33,19 +45,35 @@ pub(crate) fn inspect(view: &LedgerView) -> Result<Inspected> {
 
     let mut block_slots = Vec::new();
     let mut skips = Vec::new();
+    let mut forks = Vec::new();
     let mut previous = None;
     for slot in view.start_slot..=view.end_slot {
-        if view.slots.contains_key(&slot) {
-            let data = &view.slots[&slot];
-            accept_block_against(data, view.start_slot, view.end_slot, previous.as_ref())?;
-            previous = Some(PreviousBlock {
-                slot: data.slot,
-                blockhash: data.blockhash,
-            });
-            block_slots.push(slot);
+        if let Some(data) = view.slots.get(&slot) {
+            if data.is_root {
+                accept_block_against(data, view.start_slot, view.end_slot, previous.as_ref())?;
+                previous = Some(PreviousBlock {
+                    slot: data.slot,
+                    blockhash: data.blockhash,
+                });
+                block_slots.push(slot);
+            } else {
+                let relation = chain_relation_in_view(view, slot)?;
+                let markers = match relation {
+                    ChainRelation::JumpsOver { .. } => {
+                        let carrier = slot.checked_add(REWARD_SLOT_DISTANCE);
+                        carrier.and_then(|carrier| {
+                            view.slots.get(&carrier).map(|data| data.markers.as_slice())
+                        })
+                    }
+                    ChainRelation::DescendsFrom { .. } => None,
+                };
+                classify_abandoned_fork(slot, relation, markers, &mut forks)?;
+            }
         } else {
             let carrier = slot.checked_add(REWARD_SLOT_DISTANCE);
-            let markers = carrier.and_then(|carrier| view.slots.get(&carrier).map(|data| data.markers.as_slice()));
+            let markers = carrier.and_then(|carrier| {
+                view.slots.get(&carrier).map(|data| data.markers.as_slice())
+            });
             classify_hole(slot, markers, &mut skips)?;
         }
     }
@@ -64,8 +92,87 @@ pub(crate) fn inspect(view: &LedgerView) -> Result<Inspected> {
     Ok(Inspected {
         block_slots,
         skips,
+        forks,
         boundary_hash,
     })
+}
+
+/// Follow parent links from `next_root` until the walk passes `slot`.
+///
+/// The walk stops when a parent is below `slot`. A parent equal to `slot`, or
+/// a cursor equal to `slot`, means the rooted chain includes that slot.
+pub(crate) fn parent_chain_relation<F>(
+    slot: u64,
+    next_root: u64,
+    mut parent_of: F,
+) -> Result<ChainRelation>
+where
+    F: FnMut(u64) -> Result<Option<u64>>,
+{
+    if next_root <= slot {
+        bail!("next root {next_root} is not after slot {slot}");
+    }
+    let mut cursor = next_root;
+    loop {
+        if cursor == slot {
+            return Ok(ChainRelation::DescendsFrom { next_root });
+        }
+        let Some(parent) = parent_of(cursor)? else {
+            bail!("slot {cursor} has no parent slot");
+        };
+        if parent == slot {
+            return Ok(ChainRelation::DescendsFrom { next_root });
+        }
+        if parent < slot {
+            return Ok(ChainRelation::JumpsOver { next_root });
+        }
+        if parent >= cursor {
+            bail!("slot {cursor} parent {parent} is not before the slot");
+        }
+        cursor = parent;
+    }
+}
+
+fn chain_relation_in_view(view: &LedgerView, slot: u64) -> Result<ChainRelation> {
+    let start = slot.checked_add(1).context("slot + 1 overflows")?;
+    let Some(next_root) = view
+        .slots
+        .range(start..)
+        .find(|(_, data)| data.is_root)
+        .map(|(next_root, _)| *next_root)
+    else {
+        bail!("slot {slot} has data and is not rooted");
+    };
+    parent_chain_relation(slot, next_root, |cursor| {
+        Ok(view.slots.get(&cursor).and_then(|data| data.parent_slot))
+    })
+}
+
+/// Leave out a non-root slot when the rooted chain jumps over it and slot N+8
+/// carries a skip certificate. A notarization certificate does not cancel that
+/// skip. A slot the next root descends from stays an error.
+pub(crate) fn classify_abandoned_fork(
+    slot: u64,
+    chain: ChainRelation,
+    carrier_markers: Option<&[Vec<u8>]>,
+    forks: &mut Vec<u64>,
+) -> Result<()> {
+    if let ChainRelation::DescendsFrom { next_root } = chain {
+        bail!("slot {slot} has data and is not rooted, and slot {next_root} descends from it");
+    }
+    let carrier = slot
+        .checked_add(REWARD_SLOT_DISTANCE)
+        .context("slot + 8 overflows")?;
+    let Some(markers) = carrier_markers else {
+        bail!("slot {slot} has data and is not rooted, and slot {carrier} has no footer proof");
+    };
+    let names = reward_names(markers)
+        .with_context(|| format!("slot {carrier} footer cannot prove slot {slot}"))?;
+    if names.skips.contains(&slot) {
+        forks.push(slot);
+        return Ok(());
+    }
+    bail!("slot {slot} has data and is not rooted, and slot {carrier} does not prove a skip");
 }
 
 pub(crate) fn accept_block_against(
@@ -248,7 +355,90 @@ mod tests {
         let inspected = inspect(&view(10, 12, vec![first, second, carrier])).unwrap();
         assert_eq!(inspected.block_slots, vec![10, 12]);
         assert_eq!(inspected.skips, vec![11]);
+        assert_eq!(inspected.forks, Vec::<u64>::new());
         assert_eq!(inspected.boundary_hash, [3; 32]);
+    }
+
+    #[test]
+    fn an_abandoned_fork_with_skip_and_notar_is_omitted() {
+        let first = test_block(10, 9, [4; 32], [3; 32]);
+        let mut fork = test_block(11, 10, [8; 32], [4; 32]);
+        fork.is_root = false;
+        let next = test_block(13, 10, [5; 32], [4; 32]);
+        let mut fork_carrier = test_block(19, 18, [6; 32], [5; 32]);
+        fork_carrier.is_root = false;
+        fork_carrier.markers = vec![skip_footer(11), notar_footer(11)];
+        let mut hole_carrier = test_block(20, 19, [7; 32], [6; 32]);
+        hole_carrier.is_root = false;
+        hole_carrier.markers = vec![skip_footer(12)];
+
+        let inspected = inspect(&view(
+            10,
+            13,
+            vec![first, fork, next, fork_carrier, hole_carrier],
+        ))
+        .unwrap();
+        assert_eq!(inspected.block_slots, vec![10, 13]);
+        assert_eq!(inspected.forks, vec![11]);
+        assert_eq!(inspected.skips, vec![12]);
+        assert_eq!(inspected.boundary_hash, [3; 32]);
+    }
+
+    #[test]
+    fn a_parent_walk_jumps_over_a_slot_after_one_intermediate() {
+        let parents = [(14u64, 13u64), (13, 10)];
+        let relation = parent_chain_relation(11, 14, |cursor| {
+            Ok(parents
+                .iter()
+                .find(|(slot, _)| *slot == cursor)
+                .map(|(_, parent)| *parent))
+        })
+        .unwrap();
+        assert_eq!(relation, ChainRelation::JumpsOver { next_root: 14 });
+    }
+
+    #[test]
+    fn a_parent_walk_finds_the_slot_one_step_down() {
+        let relation = parent_chain_relation(11, 13, |cursor| {
+            Ok(match cursor {
+                13 => Some(12),
+                12 => Some(11),
+                _ => None,
+            })
+        })
+        .unwrap();
+        assert_eq!(relation, ChainRelation::DescendsFrom { next_root: 13 });
+    }
+
+    #[test]
+    fn a_non_root_ancestor_of_the_next_root_is_an_error() {
+        let first = test_block(10, 9, [4; 32], [3; 32]);
+        let mut fork = test_block(11, 10, [8; 32], [4; 32]);
+        fork.is_root = false;
+        let next = test_block(12, 11, [5; 32], [8; 32]);
+        let mut carrier = test_block(19, 18, [6; 32], [5; 32]);
+        carrier.is_root = false;
+        carrier.markers = vec![skip_footer(11)];
+
+        let error = inspect(&view(10, 12, vec![first, fork, next, carrier])).unwrap_err();
+        assert!(error.to_string().contains("descends from it"), "{error:#}");
+    }
+
+    #[test]
+    fn a_chain_jump_without_a_skip_certificate_is_an_error() {
+        let first = test_block(10, 9, [4; 32], [3; 32]);
+        let mut fork = test_block(11, 10, [8; 32], [4; 32]);
+        fork.is_root = false;
+        let next = test_block(12, 10, [5; 32], [4; 32]);
+        let mut carrier = test_block(19, 18, [6; 32], [5; 32]);
+        carrier.is_root = false;
+        carrier.markers = vec![notar_footer(11)];
+
+        let error = inspect(&view(10, 12, vec![first, fork, next, carrier])).unwrap_err();
+        assert!(
+            error.to_string().contains("does not prove a skip"),
+            "{error:#}"
+        );
     }
 
     #[test]

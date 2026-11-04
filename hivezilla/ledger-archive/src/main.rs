@@ -78,6 +78,7 @@ fn print_report(inspected: &check::Inspected) {
     let last = inspected.block_slots.last().copied().unwrap_or(0);
     println!("Blocks: {}", inspected.block_slots.len());
     println!("Proven skips: {}", inspected.skips.len());
+    println!("Abandoned forks: {}", inspected.forks.len());
     println!("First block: {first}");
     println!("Last block: {last}");
     println!(
