@@ -1,4 +1,4 @@
-use std::collections::HashMap;
+use std::collections::{HashMap, VecDeque};
 use std::fs::{self, File};
 use std::io::{BufWriter, Write};
 use std::path::{Path, PathBuf};
@@ -6,17 +6,16 @@ use std::path::{Path, PathBuf};
 use anyhow::{Context, Result, bail};
 use blockzilla_archive_v2::{
     ARCHIVE_V2_BLOCK_INDEX_FILE, ARCHIVE_V2_BLOCKHASH_REGISTRY_FILE, ARCHIVE_V2_BLOCKS_FILE,
-    ARCHIVE_V2_POH_FILE, ARCHIVE_V2_PUBKEY_REGISTRY_FILE, ARCHIVE_V2_SHREDDING_FILE,
-    ARCHIVE_V2_SIGNATURES_FILE,
-    ARCHIVE_V2_TX_FLAG_HAS_ERROR, ARCHIVE_V2_TX_FLAG_HAS_INNER_IX,
-    ARCHIVE_V2_TX_FLAG_HAS_LOADED_ADDRESSES, ARCHIVE_V2_TX_FLAG_HAS_LOGS,
-    ARCHIVE_V2_TX_FLAG_HAS_METADATA, ARCHIVE_V2_TX_FLAG_HAS_RETURN_DATA,
-    ARCHIVE_V2_TX_FLAG_HAS_TOKEN_BALANCES, ARCHIVE_V2_TX_FLAG_MESSAGE_V0,
-    ARCHIVE_V2_VOTE_HASH_REGISTRY_FILE, ArchiveV2HotBlockBlob, ArchiveV2HotBlockHeader,
-    ArchiveV2HotBlockIndexRow, ArchiveV2HotInstruction, ArchiveV2HotInstructionData,
-    ArchiveV2HotLegacyMessage, ArchiveV2HotMessagePayload, ArchiveV2HotRewards, ArchiveV2HotTxRow,
-    ArchiveV2HotV0Message, ArchiveV2HotV1Message, WincodeArchiveV2PohRecord,
-    WincodeArchiveV2ShreddingRecord, write_archive_v2_hot_block_index,
+    ARCHIVE_V2_POH_FILE, ARCHIVE_V2_PREV_BLOCKHASH_TAIL_FILE, ARCHIVE_V2_PUBKEY_REGISTRY_FILE,
+    ARCHIVE_V2_SHREDDING_FILE, ARCHIVE_V2_SIGNATURES_FILE, ARCHIVE_V2_TX_FLAG_HAS_ERROR,
+    ARCHIVE_V2_TX_FLAG_HAS_INNER_IX, ARCHIVE_V2_TX_FLAG_HAS_LOADED_ADDRESSES,
+    ARCHIVE_V2_TX_FLAG_HAS_LOGS, ARCHIVE_V2_TX_FLAG_HAS_METADATA,
+    ARCHIVE_V2_TX_FLAG_HAS_RETURN_DATA, ARCHIVE_V2_TX_FLAG_HAS_TOKEN_BALANCES,
+    ARCHIVE_V2_TX_FLAG_MESSAGE_V0, ARCHIVE_V2_VOTE_HASH_REGISTRY_FILE, ArchiveV2HotBlockBlob,
+    ArchiveV2HotBlockHeader, ArchiveV2HotBlockIndexRow, ArchiveV2HotInstruction,
+    ArchiveV2HotInstructionData, ArchiveV2HotLegacyMessage, ArchiveV2HotMessagePayload,
+    ArchiveV2HotRewards, ArchiveV2HotTxRow, ArchiveV2HotV0Message, ArchiveV2HotV1Message,
+    WincodeArchiveV2PohRecord, WincodeArchiveV2ShreddingRecord, write_archive_v2_hot_block_index,
 };
 use blockzilla_compact::parse_logs_with_compactor;
 use blockzilla_compact::{
@@ -26,6 +25,8 @@ use blockzilla_compact::{
 };
 use blockzilla_primitives::{CompactPubkey, WincodeLeb128FramedWriter, wincode_leb128_config};
 use blockzilla_registry::{KeyIndex, write_registry};
+use solana_entry::block_component::BlockComponent;
+use solana_ledger::blockstore::Blockstore;
 
 use crate::check::Inspected;
 use crate::ledger::{open_read_only, scan_range};
@@ -38,6 +39,8 @@ use crate::source::{
 pub(crate) const ZSTD_LEVEL: i32 = 3;
 const INDEX_FLAGS: u32 = 0;
 const VOTE_HASH_ROW_LEN: usize = 65;
+const RECENT_BLOCKHASH_SLOT_WINDOW: u64 = 150;
+const ROLLING_BLOCKHASH_CAPACITY: usize = 300;
 type PubkeyCounts = HashMap<[u8; 32], u32>;
 
 pub(crate) fn build_archive(
@@ -60,10 +63,26 @@ pub(crate) fn build_archive(
             Ok(())
         })?;
         let key_index = prepare_registry(&temps, counts)?;
+        let first_slot = inspected
+            .block_slots
+            .first()
+            .copied()
+            .context("range has no block")?;
+        progress(format!(
+            "reading previous blockhashes before slot {first_slot}"
+        ));
+        let tail = read_previous_tail(&blockstore, first_slot)?;
+        let newest = tail
+            .last()
+            .context("first block is missing parent entries")?;
+        if newest.hash != inspected.boundary_hash {
+            bail!("slot {first_slot} parent blockhash does not match the rooted block");
+        }
+        progress(format!("read {} previous blockhashes", tail.len()));
         progress(format!(
             "writing blocks for slots {start_slot} to {end_slot}"
         ));
-        let mut writer = ArchiveWriter::create(&temps, key_index)?;
+        let mut writer = ArchiveWriter::create(&temps, key_index, tail, false)?;
         scan_range(&blockstore, start_slot, end_slot, |block| {
             writer.write_block(block)
         })?;
@@ -76,7 +95,11 @@ pub(crate) fn build_archive(
     result
 }
 
-pub(crate) fn write_archive<F>(output: &Path, inspected: &Inspected, mut load_block: F) -> Result<()>
+pub(crate) fn write_archive<F>(
+    output: &Path,
+    inspected: &Inspected,
+    mut load_block: F,
+) -> Result<()>
 where
     F: FnMut(u64) -> Result<SlotData>,
 {
@@ -90,7 +113,7 @@ where
             count_slot_pubkeys(&block, &mut counts);
         }
         let key_index = prepare_registry(&temps, counts)?;
-        let mut writer = ArchiveWriter::create(&temps, key_index)?;
+        let mut writer = ArchiveWriter::create(&temps, key_index, Vec::new(), true)?;
         for slot in &inspected.block_slots {
             let block = load_block(*slot)?;
             writer.write_block(&block)?;
@@ -111,6 +134,7 @@ struct ArchivePaths {
     poh: PathBuf,
     shredding: PathBuf,
     registry: PathBuf,
+    tail: PathBuf,
 }
 
 fn temp_paths(output: &Path) -> ArchivePaths {
@@ -122,10 +146,11 @@ fn temp_paths(output: &Path) -> ArchivePaths {
         poh: output.join(format!("{ARCHIVE_V2_POH_FILE}.tmp")),
         shredding: output.join(format!("{ARCHIVE_V2_SHREDDING_FILE}.tmp")),
         registry: output.join(format!("{ARCHIVE_V2_PUBKEY_REGISTRY_FILE}.tmp")),
+        tail: output.join(format!("{ARCHIVE_V2_PREV_BLOCKHASH_TAIL_FILE}.tmp")),
     }
 }
 
-fn temp_file_list(temps: &ArchivePaths) -> [&Path; 7] {
+fn temp_file_list(temps: &ArchivePaths) -> [&Path; 8] {
     [
         &temps.blocks,
         &temps.signatures,
@@ -134,6 +159,7 @@ fn temp_file_list(temps: &ArchivePaths) -> [&Path; 7] {
         &temps.poh,
         &temps.shredding,
         &temps.registry,
+        &temps.tail,
     ]
 }
 
@@ -157,6 +183,9 @@ struct ArchiveWriter {
     shredding: WincodeLeb128FramedWriter<BufWriter<File>>,
     blockhashes: Vec<u8>,
     vote_hashes: Vec<u8>,
+    tail: Vec<PreviousBlockhash>,
+    rolling: RollingBlockhashes,
+    seed_parent_on_first_block: bool,
     rows: Vec<ArchiveV2HotBlockIndexRow>,
     compressed_offset: u64,
     next_tx_ordinal: u64,
@@ -166,7 +195,14 @@ struct ArchiveWriter {
 }
 
 impl ArchiveWriter {
-    fn create(temps: &ArchivePaths, key_index: KeyIndex) -> Result<Self> {
+    fn create(
+        temps: &ArchivePaths,
+        key_index: KeyIndex,
+        tail: Vec<PreviousBlockhash>,
+        seed_parent_on_first_block: bool,
+    ) -> Result<Self> {
+        let mut rolling = RollingBlockhashes::default();
+        rolling.seed(&tail)?;
         Ok(Self {
             blocks: BufWriter::new(
                 File::create(&temps.blocks)
@@ -186,6 +222,9 @@ impl ArchiveWriter {
             )),
             blockhashes: Vec::new(),
             vote_hashes: Vec::new(),
+            tail,
+            rolling,
+            seed_parent_on_first_block,
             rows: Vec::new(),
             compressed_offset: 0,
             next_tx_ordinal: 0,
@@ -199,6 +238,7 @@ impl ArchiveWriter {
                 poh: temps.poh.clone(),
                 shredding: temps.shredding.clone(),
                 registry: temps.registry.clone(),
+                tail: temps.tail.clone(),
             },
         })
     }
@@ -206,13 +246,21 @@ impl ArchiveWriter {
     fn write_block(&mut self, block: &SlotData) -> Result<()> {
         let slot = block.slot;
         let block_id = u32::try_from(self.rows.len()).context("archive block id exceeds u32")?;
-        if self.rows.is_empty() {
-            let boundary = block
+        if self.seed_parent_on_first_block && self.rows.is_empty() {
+            let parent_slot = block
+                .parent_slot
+                .with_context(|| format!("slot {slot} has no parent slot"))?;
+            let hash = block
                 .previous_blockhash
                 .context("first block is missing parent entries")?;
-            self.blockhashes.extend(boundary);
+            self.tail = vec![PreviousBlockhash {
+                hash,
+                slot: parent_slot,
+            }];
+            self.rolling.seed(&self.tail)?;
         }
-        let uncompressed = encode_hot_block(block, block_id, &self.key_index)?;
+        self.rolling.prune_for_slot(slot)?;
+        let uncompressed = encode_hot_block(block, block_id, &self.key_index, &self.rolling)?;
         let compressed = zstd::bulk::compress(&uncompressed, ZSTD_LEVEL)
             .with_context(|| format!("compress slot {slot}"))?;
         let compressed_len =
@@ -224,6 +272,11 @@ impl ArchiveWriter {
             .with_context(|| format!("write slot {slot}"))?;
         let signature_count = append_signatures(&mut self.signatures, block)?;
         self.blockhashes.extend(block.blockhash);
+        self.rolling.insert(
+            block.blockhash,
+            i32::try_from(block_id).context("blockhash id exceeds i32")?,
+            slot,
+        )?;
         self.vote_hashes.extend(vote_hash_row(block)?);
         self.poh
             .write(&poh_record(block, block_id))
@@ -287,6 +340,8 @@ impl ArchiveWriter {
             .with_context(|| format!("write {}", self.paths.blockhash.display()))?;
         fs::write(&self.paths.vote, &self.vote_hashes)
             .with_context(|| format!("write {}", self.paths.vote.display()))?;
+        fs::write(&self.paths.tail, tail_bytes(&self.tail))
+            .with_context(|| format!("write {}", self.paths.tail.display()))?;
         rename_finished(&self.paths.blocks, &output.join(ARCHIVE_V2_BLOCKS_FILE))?;
         rename_finished(
             &self.paths.signatures,
@@ -295,6 +350,10 @@ impl ArchiveWriter {
         rename_finished(
             &self.paths.blockhash,
             &output.join(ARCHIVE_V2_BLOCKHASH_REGISTRY_FILE),
+        )?;
+        rename_finished(
+            &self.paths.tail,
+            &output.join(ARCHIVE_V2_PREV_BLOCKHASH_TAIL_FILE),
         )?;
         rename_finished(
             &self.paths.vote,
@@ -330,6 +389,213 @@ fn progress(message: impl std::fmt::Display) {
 
 fn rename_finished(from: &Path, to: &Path) -> Result<()> {
     fs::rename(from, to).with_context(|| format!("rename {} to {}", from.display(), to.display()))
+}
+
+#[derive(Clone, Copy)]
+struct PreviousBlockhash {
+    hash: [u8; 32],
+    slot: u64,
+}
+
+#[derive(Clone, Copy)]
+struct RollingBlockhash {
+    hash: [u8; 32],
+    block_id: i32,
+    slot: u64,
+}
+
+struct RollingBlockhashes {
+    map: HashMap<[u8; 32], (i32, u64)>,
+    order: VecDeque<RollingBlockhash>,
+}
+
+impl Default for RollingBlockhashes {
+    fn default() -> Self {
+        Self {
+            map: HashMap::with_capacity(ROLLING_BLOCKHASH_CAPACITY),
+            order: VecDeque::with_capacity(ROLLING_BLOCKHASH_CAPACITY),
+        }
+    }
+}
+
+impl RollingBlockhashes {
+    fn seed(&mut self, tail: &[PreviousBlockhash]) -> Result<()> {
+        for (index, item) in tail.iter().enumerate() {
+            let distance_from_newest =
+                i32::try_from(tail.len() - index).context("previous blockhash tail exceeds i32")?;
+            self.insert(item.hash, -distance_from_newest, item.slot)?;
+        }
+        Ok(())
+    }
+
+    fn insert(&mut self, hash: [u8; 32], block_id: i32, slot: u64) -> Result<()> {
+        if self.map.contains_key(&hash) {
+            bail!(
+                "duplicate blockhash {} at block_id {block_id} slot {slot}",
+                hash_text(&hash)
+            );
+        }
+        self.map.insert(hash, (block_id, slot));
+        self.order.push_back(RollingBlockhash {
+            hash,
+            block_id,
+            slot,
+        });
+        self.enforce_capacity();
+        Ok(())
+    }
+
+    fn prune_for_slot(&mut self, current_slot: u64) -> Result<()> {
+        loop {
+            let Some(entry) = self.order.front().copied() else {
+                return Ok(());
+            };
+            if entry.slot > current_slot {
+                bail!(
+                    "block slots went backwards: rolling blockhash slot {} is ahead of current slot {current_slot}",
+                    entry.slot
+                );
+            }
+            if current_slot - entry.slot <= RECENT_BLOCKHASH_SLOT_WINDOW {
+                return Ok(());
+            }
+            self.remove_front();
+        }
+    }
+
+    fn resolve(
+        &self,
+        hash: &[u8; 32],
+        slot: u64,
+        tx_index: usize,
+    ) -> Result<OwnedCompactRecentBlockhash> {
+        let Some((block_id, hash_slot)) = self.map.get(hash).copied() else {
+            return Ok(OwnedCompactRecentBlockhash::Nonce(*hash));
+        };
+        if hash_slot > slot {
+            bail!(
+                "slot {slot} tx#{tx_index} recent_blockhash {} points at future block slot {hash_slot}",
+                hash_text(hash)
+            );
+        }
+        if slot - hash_slot > RECENT_BLOCKHASH_SLOT_WINDOW {
+            return Ok(OwnedCompactRecentBlockhash::Nonce(*hash));
+        }
+        Ok(OwnedCompactRecentBlockhash::Id(block_id))
+    }
+
+    fn enforce_capacity(&mut self) {
+        while self.order.len() > ROLLING_BLOCKHASH_CAPACITY {
+            self.remove_front();
+        }
+    }
+
+    fn remove_front(&mut self) {
+        if let Some(old) = self.order.pop_front()
+            && self.map.get(&old.hash).copied() == Some((old.block_id, old.slot))
+        {
+            self.map.remove(&old.hash);
+        }
+    }
+}
+
+fn tail_bytes(tail: &[PreviousBlockhash]) -> Vec<u8> {
+    let mut bytes = Vec::with_capacity(tail.len() * 40);
+    for item in tail {
+        bytes.extend_from_slice(&item.hash);
+        bytes.extend_from_slice(&item.slot.to_le_bytes());
+    }
+    bytes
+}
+
+fn hash_text(hash: &[u8; 32]) -> String {
+    bs58::encode(hash).into_string()
+}
+
+fn copy32(bytes: &[u8]) -> Result<[u8; 32]> {
+    <[u8; 32]>::try_from(bytes).context("hash is not 32 bytes")
+}
+
+/// Blockhashes of at most 300 rooted blocks before `first_slot`, oldest first.
+///
+/// The parent of `first_slot` is required. An older missing block ends the walk.
+fn read_previous_tail(blockstore: &Blockstore, first_slot: u64) -> Result<Vec<PreviousBlockhash>> {
+    let meta = blockstore
+        .meta(first_slot)
+        .with_context(|| format!("read SlotMeta for slot {first_slot}"))?;
+    let Some(meta) = meta else {
+        bail!("slot {first_slot} has no SlotMeta");
+    };
+    let Some(mut slot) = meta.parent_slot else {
+        bail!("slot {first_slot} has no parent slot");
+    };
+
+    let mut newest_first = Vec::new();
+    let mut required = true;
+    while newest_first.len() < ROLLING_BLOCKHASH_CAPACITY {
+        let Some(ancestor) = read_ancestor(blockstore, slot)? else {
+            if required {
+                bail!("slot {slot} is missing parent entries");
+            }
+            break;
+        };
+        newest_first.push(PreviousBlockhash {
+            hash: ancestor.hash,
+            slot,
+        });
+        let Some(parent) = ancestor.parent_slot else {
+            break;
+        };
+        if parent >= slot {
+            bail!("slot {slot} parent {parent} does not move backward");
+        }
+        slot = parent;
+        required = false;
+    }
+    newest_first.reverse();
+    Ok(newest_first)
+}
+
+struct AncestorBlock {
+    hash: [u8; 32],
+    parent_slot: Option<u64>,
+}
+
+fn read_ancestor(blockstore: &Blockstore, slot: u64) -> Result<Option<AncestorBlock>> {
+    let Some(meta) = blockstore
+        .meta(slot)
+        .with_context(|| format!("read SlotMeta for slot {slot}"))?
+    else {
+        return Ok(None);
+    };
+    if !blockstore.is_root(slot) || !meta.is_full() {
+        return Ok(None);
+    }
+    let Some(hash) = blockhash_from_shreds(blockstore, slot)? else {
+        return Ok(None);
+    };
+    Ok(Some(AncestorBlock {
+        hash,
+        parent_slot: meta.parent_slot,
+    }))
+}
+
+fn blockhash_from_shreds(blockstore: &Blockstore, slot: u64) -> Result<Option<[u8; 32]>> {
+    let (components, _, is_full) = blockstore
+        .get_slot_components_with_shred_info(slot, 0, false)
+        .with_context(|| format!("read shreds for slot {slot}"))?;
+    if !is_full {
+        return Ok(None);
+    }
+    let mut hash = None;
+    for component in components {
+        if let BlockComponent::EntryBatch(entries) = component
+            && let Some(entry) = entries.last()
+        {
+            hash = Some(copy32(entry.hash.as_ref())?);
+        }
+    }
+    Ok(hash)
 }
 
 fn prepare_registry(temps: &ArchivePaths, counts: PubkeyCounts) -> Result<KeyIndex> {
@@ -421,6 +687,7 @@ pub(crate) fn encode_hot_block(
     block: &SlotData,
     block_id: u32,
     key_index: &KeyIndex,
+    rolling: &RollingBlockhashes,
 ) -> Result<Vec<u8>> {
     let entry_txs = block.entries.iter().try_fold(0u32, |total, entry| {
         total
@@ -448,8 +715,10 @@ pub(crate) fn encode_hot_block(
         let row = encode_tx_row(
             tx,
             status,
-            u32::try_from(tx_index).context("transaction index exceeds u32")?,
+            tx_index,
             key_index,
+            rolling,
+            block.slot,
             &mut message_bytes,
             &mut metadata_bytes,
         )?;
@@ -474,10 +743,8 @@ pub(crate) fn encode_hot_block(
             parent_slot: block
                 .parent_slot
                 .with_context(|| format!("slot {} has no parent slot", block.slot))?,
-            blockhash_id: block_id
-                .checked_add(1)
-                .context("blockhash id exceeds u32")?,
-            previous_blockhash_id: block_id,
+            blockhash_id,
+            previous_blockhash_id: block_id.saturating_sub(1),
             block_time: block.block_time,
             block_height: block.block_height,
             rewards,
@@ -496,12 +763,14 @@ pub(crate) fn encode_hot_block(
 fn encode_tx_row(
     tx: &SourceTx,
     status: &SourceStatus,
-    tx_index: u32,
+    tx_index: usize,
     key_index: &KeyIndex,
+    rolling: &RollingBlockhashes,
+    slot: u64,
     message_bytes: &mut Vec<u8>,
     metadata_bytes: &mut Vec<u8>,
 ) -> Result<ArchiveV2HotTxRow> {
-    let (payload, mut flags) = encode_message(&tx.message, key_index)?;
+    let (payload, mut flags) = encode_message(&tx.message, key_index, rolling, slot, tx_index)?;
     flags |= ARCHIVE_V2_TX_FLAG_HAS_METADATA;
     if status.err.is_some() {
         flags |= ARCHIVE_V2_TX_FLAG_HAS_ERROR;
@@ -526,7 +795,7 @@ fn encode_tx_row(
         .context("serialize transaction message")?;
     let metadata =
         wincode::config::serialize(&compact_meta(status, key_index), wincode_leb128_config())
-        .context("serialize transaction metadata")?;
+            .context("serialize transaction metadata")?;
     let message_offset =
         u32::try_from(message_bytes.len()).context("message region exceeds u32")?;
     let message_len = u32::try_from(message.len()).context("message exceeds u32")?;
@@ -539,7 +808,7 @@ fn encode_tx_row(
         u8::try_from(tx.signatures.len()).context("transaction has more than 255 signatures")?;
 
     Ok(ArchiveV2HotTxRow {
-        tx_index,
+        tx_index: u32::try_from(tx_index).context("transaction index exceeds u32")?,
         flags,
         message_offset,
         message_len,
@@ -553,13 +822,22 @@ fn encode_tx_row(
 fn encode_message(
     message: &SourceMessage,
     key_index: &KeyIndex,
+    rolling: &RollingBlockhashes,
+    slot: u64,
+    tx_index: usize,
 ) -> Result<(ArchiveV2HotMessagePayload, u32)> {
+    let recent_blockhash = match message {
+        SourceMessage::Legacy(body) => body.recent_blockhash,
+        SourceMessage::V0(body) => body.recent_blockhash,
+        SourceMessage::V1(body) => body.recent_blockhash,
+    };
+    let recent_blockhash = rolling.resolve(&recent_blockhash, slot, tx_index)?;
     match message {
         SourceMessage::Legacy(body) => Ok((
             ArchiveV2HotMessagePayload::Legacy(ArchiveV2HotLegacyMessage {
                 header: compact_header(body),
                 account_keys: compact_keys(&body.account_keys, key_index),
-                recent_blockhash: OwnedCompactRecentBlockhash::Nonce(body.recent_blockhash),
+                recent_blockhash,
                 instructions: raw_instructions(&body.instructions),
             }),
             0,
@@ -568,7 +846,7 @@ fn encode_message(
             ArchiveV2HotMessagePayload::V0(ArchiveV2HotV0Message {
                 header: compact_header(body),
                 account_keys: compact_keys(&body.account_keys, key_index),
-                recent_blockhash: OwnedCompactRecentBlockhash::Nonce(body.recent_blockhash),
+                recent_blockhash,
                 instructions: raw_instructions(&body.instructions),
                 address_table_lookups: body
                     .lookups
@@ -592,7 +870,7 @@ fn encode_message(
                     heap_size: body.config.heap_size,
                 },
                 account_keys: compact_keys(&body.account_keys, key_index),
-                recent_blockhash: OwnedCompactRecentBlockhash::Nonce(body.recent_blockhash),
+                recent_blockhash,
                 instructions: raw_instructions(&body.instructions),
             }),
             0,
@@ -689,12 +967,17 @@ fn compact_inner_group(group: &SourceInnerGroup) -> CompactInnerInstructions {
     }
 }
 
-fn compact_token_balance(balance: &SourceTokenBalance, key_index: &KeyIndex) -> CompactTokenBalance {
+fn compact_token_balance(
+    balance: &SourceTokenBalance,
+    key_index: &KeyIndex,
+) -> CompactTokenBalance {
     CompactTokenBalance {
         account_index: balance.account_index,
         mint: Some(key_index.compact(&balance.mint)),
         owner: balance.owner.map(|owner| key_index.compact(&owner)),
-        program_id: balance.program_id.map(|program_id| key_index.compact(&program_id)),
+        program_id: balance
+            .program_id
+            .map(|program_id| key_index.compact(&program_id)),
         amount: balance.amount,
         decimals: balance.decimals,
     }
@@ -798,13 +1081,19 @@ mod tests {
     #[test]
     fn empty_tower_tail_is_two_zero_bytes_and_has_no_consensus_id() {
         let block = test_block(10, 9, [2; 32], [1; 32]);
-        let bytes = encode_hot_block(&block, 0, &index_for(&block)).unwrap();
+        let bytes = encode_hot_block(
+            &block,
+            0,
+            &index_for(&block),
+            &RollingBlockhashes::default(),
+        )
+        .unwrap();
         assert_eq!(&bytes[bytes.len() - 2..], &[0, 0]);
         let decoded = deserialize_archive_v2_hot_block_blob(&bytes).unwrap();
         assert_eq!(decoded.consensus_block_id, None);
         assert!(decoded.block_markers.is_empty());
         assert_eq!(decoded.header.previous_blockhash_id, 0);
-        assert_eq!(decoded.header.blockhash_id, 1);
+        assert_eq!(decoded.header.blockhash_id, 0);
     }
 
     #[test]
@@ -815,7 +1104,13 @@ mod tests {
         block.consensus_block_id = Some(consensus_id);
         block.markers = vec![header_marker(9, parent_id)];
 
-        let bytes = encode_hot_block(&block, 0, &index_for(&block)).unwrap();
+        let bytes = encode_hot_block(
+            &block,
+            0,
+            &index_for(&block),
+            &RollingBlockhashes::default(),
+        )
+        .unwrap();
         let decoded = deserialize_archive_v2_hot_block_blob(&bytes).unwrap();
         assert_eq!(decoded.consensus_block_id, Some(consensus_id));
         assert_eq!(
@@ -889,10 +1184,13 @@ mod tests {
         assert_eq!(slots, vec![10, 12]);
 
         let hashes = std::fs::read(dir.path().join(ARCHIVE_V2_BLOCKHASH_REGISTRY_FILE)).unwrap();
-        assert_eq!(hashes.len(), 96);
-        assert_eq!(&hashes[..32], &[3; 32]);
-        assert_eq!(&hashes[32..64], &[4; 32]);
-        assert_eq!(&hashes[64..], &[5; 32]);
+        assert_eq!(hashes.len(), 64);
+        assert_eq!(&hashes[..32], &[4; 32]);
+        assert_eq!(&hashes[32..], &[5; 32]);
+        let tail = std::fs::read(dir.path().join(ARCHIVE_V2_PREV_BLOCKHASH_TAIL_FILE)).unwrap();
+        assert_eq!(tail.len(), 40);
+        assert_eq!(&tail[..32], &[3; 32]);
+        assert_eq!(u64::from_le_bytes(tail[32..40].try_into().unwrap()), 9);
 
         let registry = std::fs::read(dir.path().join(ARCHIVE_V2_PUBKEY_REGISTRY_FILE)).unwrap();
         assert_eq!(registry.as_slice(), compute_budget_program_id().as_slice());
@@ -962,10 +1260,7 @@ mod tests {
     fn repeated_account_key_gets_the_lowest_counted_id() {
         let repeated = [4u8; 32];
         let once = [9u8; 32];
-        let block = block_with_keys(vec![
-            vec![repeated, repeated],
-            vec![once],
-        ]);
+        let block = block_with_keys(vec![vec![repeated, repeated], vec![once]]);
         let keys = registry_keys_for(&block);
         assert_eq!(keys.len(), 3);
         assert_eq!(keys[0], compute_budget_program_id());
@@ -973,13 +1268,27 @@ mod tests {
         assert_eq!(keys[2], once);
         assert_eq!(keys.len() * 32, 96);
 
-        let (message, _) = encode_message(&block.transactions[0].message, &index_for(&block)).unwrap();
+        let (message, _) = encode_message(
+            &block.transactions[0].message,
+            &index_for(&block),
+            &RollingBlockhashes::default(),
+            block.slot,
+            0,
+        )
+        .unwrap();
         let ArchiveV2HotMessagePayload::Legacy(message) = message else {
             panic!("expected a legacy message");
         };
         assert_eq!(message.account_keys[0], CompactPubkey::id(2));
         assert_eq!(message.account_keys[1], CompactPubkey::id(2));
-        let (other, _) = encode_message(&block.transactions[1].message, &index_for(&block)).unwrap();
+        let (other, _) = encode_message(
+            &block.transactions[1].message,
+            &index_for(&block),
+            &RollingBlockhashes::default(),
+            block.slot,
+            1,
+        )
+        .unwrap();
         let ArchiveV2HotMessagePayload::Legacy(other) = other else {
             panic!("expected a legacy message");
         };
@@ -1009,7 +1318,13 @@ mod tests {
         let keys = registry_keys_for(&block);
         assert_eq!(keys, vec![compute_budget_program_id()]);
         let decoded = deserialize_archive_v2_hot_block_blob(
-            &encode_hot_block(&block, 0, &index_for(&block)).unwrap(),
+            &encode_hot_block(
+                &block,
+                0,
+                &index_for(&block),
+                &RollingBlockhashes::default(),
+            )
+            .unwrap(),
         )
         .unwrap();
         assert_eq!(
@@ -1030,13 +1345,138 @@ mod tests {
             commission: None,
         });
         let decoded = deserialize_archive_v2_hot_block_blob(
-            &encode_hot_block(&block, 0, &index_for(&block)).unwrap(),
+            &encode_hot_block(
+                &block,
+                0,
+                &index_for(&block),
+                &RollingBlockhashes::default(),
+            )
+            .unwrap(),
         )
         .unwrap();
         assert_eq!(
             decoded.header.rewards.unwrap().decoded[0].pubkey,
             CompactPubkey::id(2)
         );
+    }
+
+    #[test]
+    fn a_recent_blockhash_from_the_previous_block_uses_its_id() {
+        let mut rolling = RollingBlockhashes::default();
+        rolling.insert([4; 32], 0, 10).unwrap();
+        let mut block = block_with_keys(vec![vec![[1; 32]]]);
+        block.slot = 11;
+        block.parent_slot = Some(10);
+        set_recent_blockhash(&mut block, [4; 32]);
+        let bytes = encode_hot_block(&block, 1, &index_for(&block), &rolling).unwrap();
+        let decoded = deserialize_archive_v2_hot_block_blob(&bytes).unwrap();
+        assert_eq!(decoded.header.blockhash_id, 1);
+        assert_eq!(decoded.header.previous_blockhash_id, 0);
+        assert_eq!(
+            recent_blockhash_of(&bytes),
+            OwnedCompactRecentBlockhash::Id(0)
+        );
+    }
+
+    #[test]
+    fn an_unknown_recent_blockhash_stays_raw() {
+        let block = block_with_keys(vec![vec![[1; 32]]]);
+        let bytes = encode_hot_block(
+            &block,
+            0,
+            &index_for(&block),
+            &RollingBlockhashes::default(),
+        )
+        .unwrap();
+        assert_eq!(
+            recent_blockhash_of(&bytes),
+            OwnedCompactRecentBlockhash::Nonce([8; 32])
+        );
+    }
+
+    #[test]
+    fn a_blockhash_older_than_the_window_stays_raw() {
+        let mut rolling = RollingBlockhashes::default();
+        rolling.insert([8; 32], 0, 10).unwrap();
+        let mut block = block_with_keys(vec![vec![[1; 32]]]);
+        block.slot = 160;
+        block.parent_slot = Some(159);
+        let bytes = encode_hot_block(&block, 1, &index_for(&block), &rolling).unwrap();
+        assert_eq!(
+            recent_blockhash_of(&bytes),
+            OwnedCompactRecentBlockhash::Id(0)
+        );
+
+        block.slot = 161;
+        block.parent_slot = Some(160);
+        let bytes = encode_hot_block(&block, 1, &index_for(&block), &rolling).unwrap();
+        assert_eq!(
+            recent_blockhash_of(&bytes),
+            OwnedCompactRecentBlockhash::Nonce([8; 32])
+        );
+    }
+
+    #[test]
+    fn a_parent_hash_before_the_window_uses_a_negative_id() {
+        let mut block = block_with_keys(vec![vec![[1; 32]]]);
+        set_recent_blockhash(&mut block, [1; 32]);
+        let view = LedgerView {
+            start_slot: 10,
+            end_slot: 10,
+            slots: [(block.slot, block.clone())].into_iter().collect(),
+        };
+        let inspected = inspect(&view).unwrap();
+        let dir = tempfile::tempdir().unwrap();
+        write_archive(dir.path(), &inspected, |_| Ok(block.clone())).unwrap();
+
+        let tail = std::fs::read(dir.path().join(ARCHIVE_V2_PREV_BLOCKHASH_TAIL_FILE)).unwrap();
+        assert_eq!(tail.len(), 40);
+        assert_eq!(&tail[..32], &[1; 32]);
+        assert_eq!(u64::from_le_bytes(tail[32..40].try_into().unwrap()), 9);
+        let hashes = std::fs::read(dir.path().join(ARCHIVE_V2_BLOCKHASH_REGISTRY_FILE)).unwrap();
+        assert_eq!(hashes.as_slice(), &[2; 32]);
+        let compressed = std::fs::read(dir.path().join(ARCHIVE_V2_BLOCKS_FILE)).unwrap();
+        let raw = zstd::bulk::decompress(&compressed, 1_000_000).unwrap();
+        assert_eq!(
+            recent_blockhash_of(&raw),
+            OwnedCompactRecentBlockhash::Id(-1)
+        );
+    }
+
+    #[test]
+    fn a_duplicate_blockhash_stops_the_archive() {
+        let first = test_block(10, 9, [4; 32], [3; 32]);
+        let second = test_block(11, 10, [4; 32], [4; 32]);
+        let view = LedgerView {
+            start_slot: 10,
+            end_slot: 11,
+            slots: [(10, first.clone()), (11, second.clone())]
+                .into_iter()
+                .collect(),
+        };
+        let inspected = inspect(&view).unwrap();
+        let dir = tempfile::tempdir().unwrap();
+        let error = write_archive(dir.path(), &inspected, |slot| {
+            Ok(if slot == 10 {
+                first.clone()
+            } else {
+                second.clone()
+            })
+        })
+        .unwrap_err();
+        assert!(
+            error.to_string().contains("duplicate blockhash"),
+            "{error:#}"
+        );
+    }
+
+    #[test]
+    fn a_recent_blockhash_from_a_future_slot_is_an_error() {
+        let mut rolling = RollingBlockhashes::default();
+        rolling.insert([8; 32], 1, 20).unwrap();
+        let block = block_with_keys(vec![vec![[1; 32]]]);
+        let error = encode_hot_block(&block, 0, &index_for(&block), &rolling).unwrap_err();
+        assert!(error.to_string().contains("future block slot"), "{error:#}");
     }
 
     fn registry_keys_for(block: &SlotData) -> Vec<[u8; 32]> {
@@ -1072,6 +1512,30 @@ mod tests {
         block.entries[0].tx_count = u32::try_from(block.transactions.len()).unwrap();
         block.entries[0].signature_count = block.entries[0].tx_count;
         block
+    }
+
+    fn set_recent_blockhash(block: &mut SlotData, hash: [u8; 32]) {
+        let SourceMessage::Legacy(body) = &mut block.transactions[0].message else {
+            panic!("expected a legacy message");
+        };
+        body.recent_blockhash = hash;
+    }
+
+    fn recent_blockhash_of(bytes: &[u8]) -> OwnedCompactRecentBlockhash {
+        let decoded = deserialize_archive_v2_hot_block_blob(bytes).unwrap();
+        let row = &decoded.tx_rows[0];
+        let start = row.message_offset as usize;
+        let end = start + row.message_len as usize;
+        let message: ArchiveV2HotMessagePayload = wincode::config::deserialize(
+            &decoded.message_bytes[start..end],
+            wincode_leb128_config(),
+        )
+        .unwrap();
+        match message {
+            ArchiveV2HotMessagePayload::Legacy(message) => message.recent_blockhash,
+            ArchiveV2HotMessagePayload::V0(message) => message.recent_blockhash,
+            ArchiveV2HotMessagePayload::V1(message) => message.recent_blockhash,
+        }
     }
 
     fn skip_footer(skipped_slot: u64) -> Vec<u8> {

@@ -1,4 +1,4 @@
-use anyhow::{bail, Context, Result};
+use anyhow::{Context, Result, bail};
 
 use crate::markers::reward_names;
 use crate::source::{LedgerView, REWARD_SLOT_DISTANCE};
@@ -71,9 +71,8 @@ pub(crate) fn inspect(view: &LedgerView) -> Result<Inspected> {
             }
         } else {
             let carrier = slot.checked_add(REWARD_SLOT_DISTANCE);
-            let markers = carrier.and_then(|carrier| {
-                view.slots.get(&carrier).map(|data| data.markers.as_slice())
-            });
+            let markers = carrier
+                .and_then(|carrier| view.slots.get(&carrier).map(|data| data.markers.as_slice()));
             classify_hole(slot, markers, &mut skips)?;
         }
     }
@@ -252,7 +251,7 @@ pub(crate) fn classify_hole(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::source::{test_block, SlotData};
+    use crate::source::{SlotData, test_block};
 
     fn view(start: u64, end: u64, slots: Vec<SlotData>) -> LedgerView {
         LedgerView {
@@ -326,10 +325,7 @@ mod tests {
         block.entries[0].tx_count = 1;
 
         let error = inspect(&view(10, 10, vec![block])).unwrap_err();
-        assert!(
-            error.to_string().contains("missing status"),
-            "{error:#}"
-        );
+        assert!(error.to_string().contains("missing status"), "{error:#}");
     }
 
     #[test]
@@ -459,7 +455,11 @@ mod tests {
     fn an_unproven_hole_is_an_error() {
         let block = test_block(10, 9, [4; 32], [3; 32]);
         let error = inspect(&view(10, 11, vec![block])).unwrap_err();
-        assert!(error.to_string().contains("does not prove a skip") || error.to_string().contains("no footer proof"), "{error:#}");
+        assert!(
+            error.to_string().contains("does not prove a skip")
+                || error.to_string().contains("no footer proof"),
+            "{error:#}"
+        );
     }
 
     #[test]
@@ -488,5 +488,4 @@ mod tests {
             "{error:#}"
         );
     }
-
 }

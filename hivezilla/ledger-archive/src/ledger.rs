@@ -17,8 +17,8 @@ use solana_transaction_error::TransactionError;
 use solana_transaction_status::{Reward, TransactionStatusMeta};
 
 use crate::check::{
-    accept_block_against, classify_abandoned_fork, classify_hole, parent_chain_relation,
-    ChainRelation, Inspected, PreviousBlock,
+    ChainRelation, Inspected, PreviousBlock, accept_block_against, classify_abandoned_fork,
+    classify_hole, parent_chain_relation,
 };
 use crate::source::{
     REWARD_SLOT_DISTANCE, RawComponent, SlotData, SourceEntry, SourceHeader, SourceInnerGroup,
