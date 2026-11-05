@@ -743,7 +743,7 @@ pub(crate) fn encode_hot_block(
             parent_slot: block
                 .parent_slot
                 .with_context(|| format!("slot {} has no parent slot", block.slot))?,
-            blockhash_id,
+            blockhash_id: block_id,
             previous_blockhash_id: block_id.saturating_sub(1),
             block_time: block.block_time,
             block_height: block.block_height,
@@ -1372,10 +1372,7 @@ mod tests {
         let decoded = deserialize_archive_v2_hot_block_blob(&bytes).unwrap();
         assert_eq!(decoded.header.blockhash_id, 1);
         assert_eq!(decoded.header.previous_blockhash_id, 0);
-        assert_eq!(
-            recent_blockhash_of(&bytes),
-            OwnedCompactRecentBlockhash::Id(0)
-        );
+        assert_recent_id(&bytes, 0);
     }
 
     #[test]
@@ -1388,10 +1385,7 @@ mod tests {
             &RollingBlockhashes::default(),
         )
         .unwrap();
-        assert_eq!(
-            recent_blockhash_of(&bytes),
-            OwnedCompactRecentBlockhash::Nonce([8; 32])
-        );
+        assert_recent_nonce(&bytes, [8; 32]);
     }
 
     #[test]
@@ -1402,18 +1396,12 @@ mod tests {
         block.slot = 160;
         block.parent_slot = Some(159);
         let bytes = encode_hot_block(&block, 1, &index_for(&block), &rolling).unwrap();
-        assert_eq!(
-            recent_blockhash_of(&bytes),
-            OwnedCompactRecentBlockhash::Id(0)
-        );
+        assert_recent_id(&bytes, 0);
 
         block.slot = 161;
         block.parent_slot = Some(160);
         let bytes = encode_hot_block(&block, 1, &index_for(&block), &rolling).unwrap();
-        assert_eq!(
-            recent_blockhash_of(&bytes),
-            OwnedCompactRecentBlockhash::Nonce([8; 32])
-        );
+        assert_recent_nonce(&bytes, [8; 32]);
     }
 
     #[test]
@@ -1437,10 +1425,7 @@ mod tests {
         assert_eq!(hashes.as_slice(), &[2; 32]);
         let compressed = std::fs::read(dir.path().join(ARCHIVE_V2_BLOCKS_FILE)).unwrap();
         let raw = zstd::bulk::decompress(&compressed, 1_000_000).unwrap();
-        assert_eq!(
-            recent_blockhash_of(&raw),
-            OwnedCompactRecentBlockhash::Id(-1)
-        );
+        assert_recent_id(&raw, -1);
     }
 
     #[test]
@@ -1519,6 +1504,22 @@ mod tests {
             panic!("expected a legacy message");
         };
         body.recent_blockhash = hash;
+    }
+
+    fn assert_recent_id(bytes: &[u8], id: i32) {
+        match recent_blockhash_of(bytes) {
+            OwnedCompactRecentBlockhash::Id(found) => assert_eq!(found, id),
+            OwnedCompactRecentBlockhash::Nonce(_) => panic!("expected recent blockhash id {id}"),
+        }
+    }
+
+    fn assert_recent_nonce(bytes: &[u8], hash: [u8; 32]) {
+        match recent_blockhash_of(bytes) {
+            OwnedCompactRecentBlockhash::Nonce(found) => assert_eq!(found, hash),
+            OwnedCompactRecentBlockhash::Id(id) => {
+                panic!("expected a raw recent blockhash, found id {id}")
+            }
+        }
     }
 
     fn recent_blockhash_of(bytes: &[u8]) -> OwnedCompactRecentBlockhash {
