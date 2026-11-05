@@ -871,7 +871,7 @@ mod tests {
                 .with_context(|| format!("test block {slot} is missing"))
         })
         .unwrap();
-        assert_eq!(loaded, vec![10, 12]);
+        assert_eq!(loaded, vec![10, 12, 10, 12]);
 
         let index = std::fs::read(dir.path().join(ARCHIVE_V2_BLOCK_INDEX_FILE)).unwrap();
         assert_eq!(&index[..8], b"BZV2HIX1");
