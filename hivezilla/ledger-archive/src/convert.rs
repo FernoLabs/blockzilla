@@ -1,3 +1,4 @@
+use std::collections::HashMap;
 use std::fs::{self, File};
 use std::io::{BufWriter, Write};
 use std::path::{Path, PathBuf};
@@ -5,7 +6,8 @@ use std::path::{Path, PathBuf};
 use anyhow::{Context, Result, bail};
 use blockzilla_archive_v2::{
     ARCHIVE_V2_BLOCK_INDEX_FILE, ARCHIVE_V2_BLOCKHASH_REGISTRY_FILE, ARCHIVE_V2_BLOCKS_FILE,
-    ARCHIVE_V2_POH_FILE, ARCHIVE_V2_SHREDDING_FILE, ARCHIVE_V2_SIGNATURES_FILE,
+    ARCHIVE_V2_POH_FILE, ARCHIVE_V2_PUBKEY_REGISTRY_FILE, ARCHIVE_V2_SHREDDING_FILE,
+    ARCHIVE_V2_SIGNATURES_FILE,
     ARCHIVE_V2_TX_FLAG_HAS_ERROR, ARCHIVE_V2_TX_FLAG_HAS_INNER_IX,
     ARCHIVE_V2_TX_FLAG_HAS_LOADED_ADDRESSES, ARCHIVE_V2_TX_FLAG_HAS_LOGS,
     ARCHIVE_V2_TX_FLAG_HAS_METADATA, ARCHIVE_V2_TX_FLAG_HAS_RETURN_DATA,
@@ -23,7 +25,7 @@ use blockzilla_compact::{
     CompactTransactionConfig, OwnedCompactAddressTableLookup, OwnedCompactRecentBlockhash,
 };
 use blockzilla_primitives::{CompactPubkey, WincodeLeb128FramedWriter, wincode_leb128_config};
-use blockzilla_registry::RawPubkeyCompactor;
+use blockzilla_registry::{KeyIndex, write_registry};
 
 use crate::check::Inspected;
 use crate::ledger::{open_read_only, scan_range};
@@ -36,6 +38,7 @@ use crate::source::{
 pub(crate) const ZSTD_LEVEL: i32 = 3;
 const INDEX_FLAGS: u32 = 0;
 const VOTE_HASH_ROW_LEN: usize = 65;
+type PubkeyCounts = HashMap<[u8; 32], u32>;
 
 pub(crate) fn build_archive(
     ledger: &Path,
@@ -47,8 +50,21 @@ pub(crate) fn build_archive(
     fs::create_dir_all(output).with_context(|| format!("create {}", output.display()))?;
     let temps = temp_paths(output);
     let result = (|| {
-        let mut writer = ArchiveWriter::create(&temps)?;
+        create_temp_files(&temps)?;
+        progress(format!(
+            "counting pubkeys in slots {start_slot} to {end_slot}"
+        ));
+        let mut counts = PubkeyCounts::new();
         let inspected = scan_range(&blockstore, start_slot, end_slot, |block| {
+            count_slot_pubkeys(block, &mut counts);
+            Ok(())
+        })?;
+        let key_index = prepare_registry(&temps, counts)?;
+        progress(format!(
+            "writing blocks for slots {start_slot} to {end_slot}"
+        ));
+        let mut writer = ArchiveWriter::create(&temps, key_index)?;
+        scan_range(&blockstore, start_slot, end_slot, |block| {
             writer.write_block(block)
         })?;
         writer.finish(output)?;
@@ -67,7 +83,14 @@ where
     fs::create_dir_all(output).with_context(|| format!("create {}", output.display()))?;
     let temps = temp_paths(output);
     let result = (|| {
-        let mut writer = ArchiveWriter::create(&temps)?;
+        create_temp_files(&temps)?;
+        let mut counts = PubkeyCounts::new();
+        for slot in &inspected.block_slots {
+            let block = load_block(*slot)?;
+            count_slot_pubkeys(&block, &mut counts);
+        }
+        let key_index = prepare_registry(&temps, counts)?;
+        let mut writer = ArchiveWriter::create(&temps, key_index)?;
         for slot in &inspected.block_slots {
             let block = load_block(*slot)?;
             writer.write_block(&block)?;
@@ -87,6 +110,7 @@ struct ArchivePaths {
     vote: PathBuf,
     poh: PathBuf,
     shredding: PathBuf,
+    registry: PathBuf,
 }
 
 fn temp_paths(output: &Path) -> ArchivePaths {
@@ -97,18 +121,31 @@ fn temp_paths(output: &Path) -> ArchivePaths {
         vote: output.join(format!("{ARCHIVE_V2_VOTE_HASH_REGISTRY_FILE}.tmp")),
         poh: output.join(format!("{ARCHIVE_V2_POH_FILE}.tmp")),
         shredding: output.join(format!("{ARCHIVE_V2_SHREDDING_FILE}.tmp")),
+        registry: output.join(format!("{ARCHIVE_V2_PUBKEY_REGISTRY_FILE}.tmp")),
     }
 }
 
-fn remove_temps(temps: &ArchivePaths) {
-    for path in [
+fn temp_file_list(temps: &ArchivePaths) -> [&Path; 7] {
+    [
         &temps.blocks,
         &temps.signatures,
         &temps.blockhash,
         &temps.vote,
         &temps.poh,
         &temps.shredding,
-    ] {
+        &temps.registry,
+    ]
+}
+
+fn create_temp_files(temps: &ArchivePaths) -> Result<()> {
+    for path in temp_file_list(temps) {
+        File::create(path).with_context(|| format!("create {}", path.display()))?;
+    }
+    Ok(())
+}
+
+fn remove_temps(temps: &ArchivePaths) {
+    for path in temp_file_list(temps) {
         let _ = fs::remove_file(path);
     }
 }
@@ -124,11 +161,12 @@ struct ArchiveWriter {
     compressed_offset: u64,
     next_tx_ordinal: u64,
     next_signature_ordinal: u64,
+    key_index: KeyIndex,
     paths: ArchivePaths,
 }
 
 impl ArchiveWriter {
-    fn create(temps: &ArchivePaths) -> Result<Self> {
+    fn create(temps: &ArchivePaths, key_index: KeyIndex) -> Result<Self> {
         Ok(Self {
             blocks: BufWriter::new(
                 File::create(&temps.blocks)
@@ -152,6 +190,7 @@ impl ArchiveWriter {
             compressed_offset: 0,
             next_tx_ordinal: 0,
             next_signature_ordinal: 0,
+            key_index,
             paths: ArchivePaths {
                 blocks: temps.blocks.clone(),
                 signatures: temps.signatures.clone(),
@@ -159,6 +198,7 @@ impl ArchiveWriter {
                 vote: temps.vote.clone(),
                 poh: temps.poh.clone(),
                 shredding: temps.shredding.clone(),
+                registry: temps.registry.clone(),
             },
         })
     }
@@ -172,7 +212,7 @@ impl ArchiveWriter {
                 .context("first block is missing parent entries")?;
             self.blockhashes.extend(boundary);
         }
-        let uncompressed = encode_hot_block(block, block_id)?;
+        let uncompressed = encode_hot_block(block, block_id, &self.key_index)?;
         let compressed = zstd::bulk::compress(&uncompressed, ZSTD_LEVEL)
             .with_context(|| format!("compress slot {slot}"))?;
         let compressed_len =
@@ -265,6 +305,10 @@ impl ArchiveWriter {
             &self.paths.shredding,
             &output.join(ARCHIVE_V2_SHREDDING_FILE),
         )?;
+        rename_finished(
+            &self.paths.registry,
+            &output.join(ARCHIVE_V2_PUBKEY_REGISTRY_FILE),
+        )?;
         write_archive_v2_hot_block_index(
             &output.join(ARCHIVE_V2_BLOCK_INDEX_FILE),
             self.compressed_offset,
@@ -288,7 +332,96 @@ fn rename_finished(from: &Path, to: &Path) -> Result<()> {
     fs::rename(from, to).with_context(|| format!("rename {} to {}", from.display(), to.display()))
 }
 
-pub(crate) fn encode_hot_block(block: &SlotData, block_id: u32) -> Result<Vec<u8>> {
+fn prepare_registry(temps: &ArchivePaths, counts: PubkeyCounts) -> Result<KeyIndex> {
+    let keys = ordered_registry_keys(counts);
+    write_registry(&temps.registry, &keys)
+        .with_context(|| format!("write {}", temps.registry.display()))?;
+    Ok(KeyIndex::build_from_slice_low_memory(&keys))
+}
+
+fn ordered_registry_keys(counts: PubkeyCounts) -> Vec<[u8; 32]> {
+    let mut items: Vec<([u8; 32], u32)> = counts.into_iter().collect();
+    items.sort_unstable_by(|(left_key, left_count), (right_key, right_count)| {
+        right_count
+            .cmp(left_count)
+            .then_with(|| left_key.cmp(right_key))
+    });
+    let compute_budget = compute_budget_program_id();
+    let mut keys = Vec::with_capacity(items.len() + 1);
+    if !items.iter().any(|(key, _)| *key == compute_budget) {
+        keys.push(compute_budget);
+    }
+    keys.extend(items.into_iter().map(|(key, _)| key));
+    keys
+}
+
+fn compute_budget_program_id() -> [u8; 32] {
+    let bytes = bs58::decode("ComputeBudget111111111111111111111111111111")
+        .into_vec()
+        .expect("ComputeBudget program id is valid base58");
+    bytes
+        .as_slice()
+        .try_into()
+        .expect("ComputeBudget program id is 32 bytes")
+}
+
+fn count_slot_pubkeys(block: &SlotData, counts: &mut PubkeyCounts) {
+    for tx in &block.transactions {
+        match &tx.message {
+            SourceMessage::Legacy(body) => count_keys(&body.account_keys, counts),
+            SourceMessage::V0(body) => {
+                count_keys(&body.account_keys, counts);
+                for lookup in &body.lookups {
+                    bump_key(counts, lookup.account_key);
+                }
+            }
+            SourceMessage::V1(body) => count_keys(&body.account_keys, counts),
+        }
+        let Some(status) = &tx.status else {
+            continue;
+        };
+        count_keys(&status.loaded_writable, counts);
+        count_keys(&status.loaded_readonly, counts);
+        for balance in status
+            .pre_token_balances
+            .iter()
+            .chain(status.post_token_balances.iter())
+        {
+            bump_key(counts, balance.mint);
+            if let Some(owner) = balance.owner {
+                bump_key(counts, owner);
+            }
+            if let Some(program_id) = balance.program_id {
+                bump_key(counts, program_id);
+            }
+        }
+        for reward in &status.rewards {
+            bump_key(counts, reward.pubkey);
+        }
+        if let Some(return_data) = &status.return_data {
+            bump_key(counts, return_data.program_id);
+        }
+    }
+}
+
+fn count_keys(keys: &[[u8; 32]], counts: &mut PubkeyCounts) {
+    for key in keys {
+        bump_key(counts, *key);
+    }
+}
+
+fn bump_key(counts: &mut PubkeyCounts, key: [u8; 32]) {
+    counts
+        .entry(key)
+        .and_modify(|count| *count = count.saturating_add(1))
+        .or_insert(1);
+}
+
+pub(crate) fn encode_hot_block(
+    block: &SlotData,
+    block_id: u32,
+    key_index: &KeyIndex,
+) -> Result<Vec<u8>> {
     let entry_txs = block.entries.iter().try_fold(0u32, |total, entry| {
         total
             .checked_add(entry.tx_count)
@@ -316,6 +449,7 @@ pub(crate) fn encode_hot_block(block: &SlotData, block_id: u32) -> Result<Vec<u8
             tx,
             status,
             u32::try_from(tx_index).context("transaction index exceeds u32")?,
+            key_index,
             &mut message_bytes,
             &mut metadata_bytes,
         )?;
@@ -327,7 +461,11 @@ pub(crate) fn encode_hot_block(block: &SlotData, block_id: u32) -> Result<Vec<u8
     } else {
         Some(ArchiveV2HotRewards {
             num_partitions: block.num_partitions,
-            decoded: block.rewards.iter().map(compact_reward).collect(),
+            decoded: block
+                .rewards
+                .iter()
+                .map(|reward| compact_reward(reward, key_index))
+                .collect(),
         })
     };
     let blob = ArchiveV2HotBlockBlob {
@@ -359,10 +497,11 @@ fn encode_tx_row(
     tx: &SourceTx,
     status: &SourceStatus,
     tx_index: u32,
+    key_index: &KeyIndex,
     message_bytes: &mut Vec<u8>,
     metadata_bytes: &mut Vec<u8>,
 ) -> Result<ArchiveV2HotTxRow> {
-    let (payload, mut flags) = encode_message(&tx.message)?;
+    let (payload, mut flags) = encode_message(&tx.message, key_index)?;
     flags |= ARCHIVE_V2_TX_FLAG_HAS_METADATA;
     if status.err.is_some() {
         flags |= ARCHIVE_V2_TX_FLAG_HAS_ERROR;
@@ -385,7 +524,8 @@ fn encode_tx_row(
 
     let message = wincode::config::serialize(&payload, wincode_leb128_config())
         .context("serialize transaction message")?;
-    let metadata = wincode::config::serialize(&compact_meta(status), wincode_leb128_config())
+    let metadata =
+        wincode::config::serialize(&compact_meta(status, key_index), wincode_leb128_config())
         .context("serialize transaction metadata")?;
     let message_offset =
         u32::try_from(message_bytes.len()).context("message region exceeds u32")?;
@@ -410,12 +550,15 @@ fn encode_tx_row(
     })
 }
 
-fn encode_message(message: &SourceMessage) -> Result<(ArchiveV2HotMessagePayload, u32)> {
+fn encode_message(
+    message: &SourceMessage,
+    key_index: &KeyIndex,
+) -> Result<(ArchiveV2HotMessagePayload, u32)> {
     match message {
         SourceMessage::Legacy(body) => Ok((
             ArchiveV2HotMessagePayload::Legacy(ArchiveV2HotLegacyMessage {
                 header: compact_header(body),
-                account_keys: raw_keys(&body.account_keys),
+                account_keys: compact_keys(&body.account_keys, key_index),
                 recent_blockhash: OwnedCompactRecentBlockhash::Nonce(body.recent_blockhash),
                 instructions: raw_instructions(&body.instructions),
             }),
@@ -424,14 +567,14 @@ fn encode_message(message: &SourceMessage) -> Result<(ArchiveV2HotMessagePayload
         SourceMessage::V0(body) => Ok((
             ArchiveV2HotMessagePayload::V0(ArchiveV2HotV0Message {
                 header: compact_header(body),
-                account_keys: raw_keys(&body.account_keys),
+                account_keys: compact_keys(&body.account_keys, key_index),
                 recent_blockhash: OwnedCompactRecentBlockhash::Nonce(body.recent_blockhash),
                 instructions: raw_instructions(&body.instructions),
                 address_table_lookups: body
                     .lookups
                     .iter()
                     .map(|lookup| OwnedCompactAddressTableLookup {
-                        account_key: CompactPubkey::raw(lookup.account_key),
+                        account_key: key_index.compact(&lookup.account_key),
                         writable_indexes: lookup.writable_indexes.clone(),
                         readonly_indexes: lookup.readonly_indexes.clone(),
                     })
@@ -448,7 +591,7 @@ fn encode_message(message: &SourceMessage) -> Result<(ArchiveV2HotMessagePayload
                     loaded_accounts_data_size_limit: body.config.loaded_accounts_data_size_limit,
                     heap_size: body.config.heap_size,
                 },
-                account_keys: raw_keys(&body.account_keys),
+                account_keys: compact_keys(&body.account_keys, key_index),
                 recent_blockhash: OwnedCompactRecentBlockhash::Nonce(body.recent_blockhash),
                 instructions: raw_instructions(&body.instructions),
             }),
@@ -473,8 +616,8 @@ fn compact_header_v1(body: &SourceV1Message) -> CompactMessageHeader {
     }
 }
 
-fn raw_keys(keys: &[[u8; 32]]) -> Vec<CompactPubkey> {
-    keys.iter().copied().map(CompactPubkey::raw).collect()
+fn compact_keys(keys: &[[u8; 32]], key_index: &KeyIndex) -> Vec<CompactPubkey> {
+    keys.iter().map(|key| key_index.compact(key)).collect()
 }
 
 fn raw_instructions(
@@ -490,7 +633,7 @@ fn raw_instructions(
         .collect()
 }
 
-fn compact_meta(status: &SourceStatus) -> CompactMetaV1 {
+fn compact_meta(status: &SourceStatus, key_index: &KeyIndex) -> CompactMetaV1 {
     CompactMetaV1 {
         err: status.err.clone(),
         fee: status.fee,
@@ -503,22 +646,26 @@ fn compact_meta(status: &SourceStatus) -> CompactMetaV1 {
         logs: status
             .logs
             .as_ref()
-            .map(|lines| parse_logs_with_compactor(lines, &RawPubkeyCompactor)),
+            .map(|lines| parse_logs_with_compactor(lines, key_index)),
         pre_token_balances: status
             .pre_token_balances
             .iter()
-            .map(compact_token_balance)
+            .map(|balance| compact_token_balance(balance, key_index))
             .collect(),
         post_token_balances: status
             .post_token_balances
             .iter()
-            .map(compact_token_balance)
+            .map(|balance| compact_token_balance(balance, key_index))
             .collect(),
-        rewards: status.rewards.iter().map(compact_reward).collect(),
-        loaded_writable_addresses: raw_keys(&status.loaded_writable),
-        loaded_readonly_addresses: raw_keys(&status.loaded_readonly),
+        rewards: status
+            .rewards
+            .iter()
+            .map(|reward| compact_reward(reward, key_index))
+            .collect(),
+        loaded_writable_addresses: compact_keys(&status.loaded_writable, key_index),
+        loaded_readonly_addresses: compact_keys(&status.loaded_readonly, key_index),
         return_data: status.return_data.as_ref().map(|data| CompactReturnData {
-            program_id: CompactPubkey::raw(data.program_id),
+            program_id: key_index.compact(&data.program_id),
             data: data.data.clone(),
         }),
         compute_units_consumed: status.compute_units_consumed,
@@ -542,20 +689,20 @@ fn compact_inner_group(group: &SourceInnerGroup) -> CompactInnerInstructions {
     }
 }
 
-fn compact_token_balance(balance: &SourceTokenBalance) -> CompactTokenBalance {
+fn compact_token_balance(balance: &SourceTokenBalance, key_index: &KeyIndex) -> CompactTokenBalance {
     CompactTokenBalance {
         account_index: balance.account_index,
-        mint: Some(CompactPubkey::raw(balance.mint)),
-        owner: balance.owner.map(CompactPubkey::raw),
-        program_id: balance.program_id.map(CompactPubkey::raw),
+        mint: Some(key_index.compact(&balance.mint)),
+        owner: balance.owner.map(|owner| key_index.compact(&owner)),
+        program_id: balance.program_id.map(|program_id| key_index.compact(&program_id)),
         amount: balance.amount,
         decimals: balance.decimals,
     }
 }
 
-fn compact_reward(reward: &SourceReward) -> CompactReward {
+fn compact_reward(reward: &SourceReward, key_index: &KeyIndex) -> CompactReward {
     CompactReward {
-        pubkey: CompactPubkey::raw(reward.pubkey),
+        pubkey: key_index.compact(&reward.pubkey),
         lamports: reward.lamports,
         post_balance: reward.post_balance,
         reward_type: reward.reward_type,
@@ -627,7 +774,10 @@ fn vote_hash_row(block: &SlotData) -> Result<[u8; VOTE_HASH_ROW_LEN]> {
 mod tests {
     use super::*;
     use crate::check::inspect;
-    use crate::source::{LedgerView, REWARD_SLOT_DISTANCE, SourceShredGroup, test_block};
+    use crate::source::{
+        LedgerView, REWARD_SLOT_DISTANCE, SourceHeader, SourceMessage, SourceMessageBody,
+        SourceReward, SourceShredGroup, SourceStatus, SourceTx, test_block,
+    };
     use blockzilla_archive_v2::deserialize_archive_v2_hot_block_blob;
     use blockzilla_primitives::WincodeLeb128FramedReader;
     use of_car_reader::blockmarker::parent_consensus_block_id;
@@ -648,7 +798,7 @@ mod tests {
     #[test]
     fn empty_tower_tail_is_two_zero_bytes_and_has_no_consensus_id() {
         let block = test_block(10, 9, [2; 32], [1; 32]);
-        let bytes = encode_hot_block(&block, 0).unwrap();
+        let bytes = encode_hot_block(&block, 0, &index_for(&block)).unwrap();
         assert_eq!(&bytes[bytes.len() - 2..], &[0, 0]);
         let decoded = deserialize_archive_v2_hot_block_blob(&bytes).unwrap();
         assert_eq!(decoded.consensus_block_id, None);
@@ -665,7 +815,7 @@ mod tests {
         block.consensus_block_id = Some(consensus_id);
         block.markers = vec![header_marker(9, parent_id)];
 
-        let bytes = encode_hot_block(&block, 0).unwrap();
+        let bytes = encode_hot_block(&block, 0, &index_for(&block)).unwrap();
         let decoded = deserialize_archive_v2_hot_block_blob(&bytes).unwrap();
         assert_eq!(decoded.consensus_block_id, Some(consensus_id));
         assert_eq!(
@@ -744,6 +894,9 @@ mod tests {
         assert_eq!(&hashes[32..64], &[4; 32]);
         assert_eq!(&hashes[64..], &[5; 32]);
 
+        let registry = std::fs::read(dir.path().join(ARCHIVE_V2_PUBKEY_REGISTRY_FILE)).unwrap();
+        assert_eq!(registry.as_slice(), compute_budget_program_id().as_slice());
+
         let mut reader = WincodeLeb128FramedReader::new(Cursor::new(
             std::fs::read(dir.path().join(ARCHIVE_V2_SHREDDING_FILE)).unwrap(),
         ));
@@ -803,6 +956,122 @@ mod tests {
             .map(|entry| entry.unwrap().file_name().into_string().unwrap())
             .collect();
         assert!(names.is_empty(), "{names:?}");
+    }
+
+    #[test]
+    fn repeated_account_key_gets_the_lowest_counted_id() {
+        let repeated = [4u8; 32];
+        let once = [9u8; 32];
+        let block = block_with_keys(vec![
+            vec![repeated, repeated],
+            vec![once],
+        ]);
+        let keys = registry_keys_for(&block);
+        assert_eq!(keys.len(), 3);
+        assert_eq!(keys[0], compute_budget_program_id());
+        assert_eq!(keys[1], repeated);
+        assert_eq!(keys[2], once);
+        assert_eq!(keys.len() * 32, 96);
+
+        let (message, _) = encode_message(&block.transactions[0].message, &index_for(&block)).unwrap();
+        let ArchiveV2HotMessagePayload::Legacy(message) = message else {
+            panic!("expected a legacy message");
+        };
+        assert_eq!(message.account_keys[0], CompactPubkey::id(2));
+        assert_eq!(message.account_keys[1], CompactPubkey::id(2));
+        let (other, _) = encode_message(&block.transactions[1].message, &index_for(&block)).unwrap();
+        let ArchiveV2HotMessagePayload::Legacy(other) = other else {
+            panic!("expected a legacy message");
+        };
+        assert_eq!(other.account_keys[0], CompactPubkey::id(3));
+    }
+
+    #[test]
+    fn a_seen_compute_budget_key_is_not_inserted_again() {
+        let compute_budget = compute_budget_program_id();
+        let other = [5u8; 32];
+        let block = block_with_keys(vec![vec![compute_budget, compute_budget], vec![other]]);
+        let keys = registry_keys_for(&block);
+        assert_eq!(keys, vec![compute_budget, other]);
+    }
+
+    #[test]
+    fn a_block_reward_absent_from_transactions_stays_raw() {
+        let reward_key = [6u8; 32];
+        let mut block = test_block(10, 9, [2; 32], [1; 32]);
+        block.rewards.push(SourceReward {
+            pubkey: reward_key,
+            lamports: 1,
+            post_balance: 2,
+            reward_type: 1,
+            commission: None,
+        });
+        let keys = registry_keys_for(&block);
+        assert_eq!(keys, vec![compute_budget_program_id()]);
+        let decoded = deserialize_archive_v2_hot_block_blob(
+            &encode_hot_block(&block, 0, &index_for(&block)).unwrap(),
+        )
+        .unwrap();
+        assert_eq!(
+            decoded.header.rewards.unwrap().decoded[0].pubkey,
+            CompactPubkey::raw(reward_key)
+        );
+    }
+
+    #[test]
+    fn a_block_reward_seen_in_a_transaction_uses_its_id() {
+        let reward_key = [6u8; 32];
+        let mut block = block_with_keys(vec![vec![reward_key]]);
+        block.rewards.push(SourceReward {
+            pubkey: reward_key,
+            lamports: 1,
+            post_balance: 2,
+            reward_type: 1,
+            commission: None,
+        });
+        let decoded = deserialize_archive_v2_hot_block_blob(
+            &encode_hot_block(&block, 0, &index_for(&block)).unwrap(),
+        )
+        .unwrap();
+        assert_eq!(
+            decoded.header.rewards.unwrap().decoded[0].pubkey,
+            CompactPubkey::id(2)
+        );
+    }
+
+    fn registry_keys_for(block: &SlotData) -> Vec<[u8; 32]> {
+        let mut counts = PubkeyCounts::new();
+        count_slot_pubkeys(block, &mut counts);
+        ordered_registry_keys(counts)
+    }
+
+    fn index_for(block: &SlotData) -> KeyIndex {
+        KeyIndex::build_from_slice_low_memory(&registry_keys_for(block))
+    }
+
+    fn block_with_keys(key_groups: Vec<Vec<[u8; 32]>>) -> SlotData {
+        let mut block = test_block(10, 9, [2; 32], [1; 32]);
+        block.transactions = key_groups
+            .into_iter()
+            .map(|account_keys| SourceTx {
+                signatures: vec![[7; 64]],
+                message: SourceMessage::Legacy(SourceMessageBody {
+                    header: SourceHeader {
+                        num_required_signatures: 1,
+                        num_readonly_signed_accounts: 0,
+                        num_readonly_unsigned_accounts: 0,
+                    },
+                    account_keys,
+                    recent_blockhash: [8; 32],
+                    instructions: Vec::new(),
+                    lookups: Vec::new(),
+                }),
+                status: Some(SourceStatus::success()),
+            })
+            .collect();
+        block.entries[0].tx_count = u32::try_from(block.transactions.len()).unwrap();
+        block.entries[0].signature_count = block.entries[0].tx_count;
+        block
     }
 
     fn skip_footer(skipped_slot: u64) -> Vec<u8> {
