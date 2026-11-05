@@ -1527,7 +1527,7 @@ mod tests {
         let index = std::fs::read(dir.path().join(ARCHIVE_V2_BLOCK_INDEX_FILE)).unwrap();
         assert_eq!(i32::from_le_bytes(index[28..32].try_into().unwrap()), 3);
 
-        let error = write_archive(dir.path(), &inspected, 10_000, |_| Ok(block)).unwrap_err();
+        let error = write_archive(dir.path(), &inspected, 10_000, |_| Ok(block.clone())).unwrap_err();
         assert!(error.to_string().contains("zstd level"));
     }
 
