@@ -30,7 +30,6 @@ use solana_ledger::blockstore::Blockstore;
 
 use crate::check::Inspected;
 use crate::ledger::{open_read_only, scan_range};
-use crate::markers::footer_bank_hash;
 use crate::source::{
     SlotData, SourceInnerGroup, SourceMessage, SourceMessageBody, SourceReward, SourceStatus,
     SourceTokenBalance, SourceTx, SourceV1Message,
@@ -277,7 +276,7 @@ impl ArchiveWriter {
             i32::try_from(block_id).context("blockhash id exceeds i32")?,
             slot,
         )?;
-        self.vote_hashes.extend(vote_hash_row(block)?);
+        self.vote_hashes.extend(empty_vote_hash_row());
         self.poh
             .write(&poh_record(block, block_id))
             .with_context(|| format!("write PoH for slot {slot}"))?;
@@ -1039,18 +1038,8 @@ pub(crate) fn shredding_record(block: &SlotData, block_id: u32) -> WincodeArchiv
     }
 }
 
-fn vote_hash_row(block: &SlotData) -> Result<[u8; VOTE_HASH_ROW_LEN]> {
-    let bank_hash = footer_bank_hash(&block.markers)
-        .with_context(|| format!("slot {} footer does not parse", block.slot))?;
-    let mut row = [0u8; VOTE_HASH_ROW_LEN];
-    row[0] = u8::from(bank_hash.is_some()) | (u8::from(block.consensus_block_id.is_some()) << 1);
-    if let Some(hash) = bank_hash {
-        row[1..33].copy_from_slice(&hash);
-    }
-    if let Some(hash) = block.consensus_block_id {
-        row[33..65].copy_from_slice(&hash);
-    }
-    Ok(row)
+fn empty_vote_hash_row() -> [u8; VOTE_HASH_ROW_LEN] {
+    [0; VOTE_HASH_ROW_LEN]
 }
 
 #[cfg(test)]
@@ -1191,6 +1180,9 @@ mod tests {
         assert_eq!(tail.len(), 40);
         assert_eq!(&tail[..32], &[3; 32]);
         assert_eq!(u64::from_le_bytes(tail[32..40].try_into().unwrap()), 9);
+
+        let votes = std::fs::read(dir.path().join(ARCHIVE_V2_VOTE_HASH_REGISTRY_FILE)).unwrap();
+        assert_eq!(votes, vec![0u8; 65 * 2]);
 
         let registry = std::fs::read(dir.path().join(ARCHIVE_V2_PUBKEY_REGISTRY_FILE)).unwrap();
         assert_eq!(registry.as_slice(), compute_budget_program_id().as_slice());

@@ -26,18 +26,3 @@ pub(crate) fn reward_names(markers: &[Vec<u8>]) -> Result<RewardNames> {
     }
     Ok(names)
 }
-
-/// Bank hash from the last footer. A block with no footer returns `None`.
-pub(crate) fn footer_bank_hash(markers: &[Vec<u8>]) -> Result<Option<[u8; 32]>> {
-    let mut bank_hash = None;
-    for marker in markers {
-        let parsed = blockmarker::parse(marker).context("block marker does not parse")?;
-        let Marker::Footer(footer) = parsed else {
-            continue;
-        };
-        blockmarker::decode_footer_certificates(&footer.certificates)
-            .context("footer certificates do not parse")?;
-        bank_hash = Some(footer.bank_hash);
-    }
-    Ok(bank_hash)
-}
