@@ -37,6 +37,9 @@ enum Command {
         start_slot: u64,
         #[arg(long)]
         end_slot: u64,
+        /// zstd compression level for each independent block frame.
+        #[arg(long, default_value_t = convert::ZSTD_LEVEL)]
+        level: i32,
     },
 }
 
@@ -64,8 +67,9 @@ fn run() -> Result<()> {
             output,
             start_slot,
             end_slot,
+            level,
         } => {
-            let inspected = build_archive(&ledger, &output, start_slot, end_slot)?;
+            let inspected = build_archive(&ledger, &output, start_slot, end_slot, level)?;
             print_report(&inspected);
             println!("Output: {}", output.display());
             Ok(())

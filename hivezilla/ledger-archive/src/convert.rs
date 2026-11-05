@@ -35,7 +35,15 @@ use crate::source::{
     SourceTokenBalance, SourceTx, SourceV1Message,
 };
 
-pub(crate) const ZSTD_LEVEL: i32 = 3;
+pub(crate) const ZSTD_LEVEL: i32 = 1;
+
+fn check_zstd_level(level: i32) -> Result<()> {
+    let range = zstd::compression_level_range();
+    if range.contains(&level) {
+        return Ok(());
+    }
+    bail!("zstd level {level} is outside {} to {}", range.start(), range.end());
+}
 const INDEX_FLAGS: u32 = 0;
 const VOTE_HASH_ROW_LEN: usize = 65;
 const RECENT_BLOCKHASH_SLOT_WINDOW: u64 = 150;
@@ -47,7 +55,9 @@ pub(crate) fn build_archive(
     output: &Path,
     start_slot: u64,
     end_slot: u64,
+    zstd_level: i32,
 ) -> Result<Inspected> {
+    check_zstd_level(zstd_level)?;
     let blockstore = open_read_only(ledger)?;
     fs::create_dir_all(output).with_context(|| format!("create {}", output.display()))?;
     let temps = temp_paths(output);
@@ -79,9 +89,9 @@ pub(crate) fn build_archive(
         }
         progress(format!("read {} previous blockhashes", tail.len()));
         progress(format!(
-            "writing blocks for slots {start_slot} to {end_slot}"
+            "writing blocks for slots {start_slot} to {end_slot} at zstd level {zstd_level}"
         ));
-        let mut writer = ArchiveWriter::create(&temps, key_index, tail, false)?;
+        let mut writer = ArchiveWriter::create(&temps, key_index, tail, false, zstd_level)?;
         scan_range(&blockstore, start_slot, end_slot, |block| {
             writer.write_block(block)
         })?;
@@ -97,11 +107,13 @@ pub(crate) fn build_archive(
 pub(crate) fn write_archive<F>(
     output: &Path,
     inspected: &Inspected,
+    zstd_level: i32,
     mut load_block: F,
 ) -> Result<()>
 where
     F: FnMut(u64) -> Result<SlotData>,
 {
+    check_zstd_level(zstd_level)?;
     fs::create_dir_all(output).with_context(|| format!("create {}", output.display()))?;
     let temps = temp_paths(output);
     let result = (|| {
@@ -112,7 +124,7 @@ where
             count_slot_pubkeys(&block, &mut counts);
         }
         let key_index = prepare_registry(&temps, counts)?;
-        let mut writer = ArchiveWriter::create(&temps, key_index, Vec::new(), true)?;
+        let mut writer = ArchiveWriter::create(&temps, key_index, Vec::new(), true, zstd_level)?;
         for slot in &inspected.block_slots {
             let block = load_block(*slot)?;
             writer.write_block(&block)?;
@@ -185,6 +197,7 @@ struct ArchiveWriter {
     tail: Vec<PreviousBlockhash>,
     rolling: RollingBlockhashes,
     seed_parent_on_first_block: bool,
+    zstd_level: i32,
     rows: Vec<ArchiveV2HotBlockIndexRow>,
     compressed_offset: u64,
     next_tx_ordinal: u64,
@@ -199,6 +212,7 @@ impl ArchiveWriter {
         key_index: KeyIndex,
         tail: Vec<PreviousBlockhash>,
         seed_parent_on_first_block: bool,
+        zstd_level: i32,
     ) -> Result<Self> {
         let mut rolling = RollingBlockhashes::default();
         rolling.seed(&tail)?;
@@ -224,6 +238,7 @@ impl ArchiveWriter {
             tail,
             rolling,
             seed_parent_on_first_block,
+            zstd_level,
             rows: Vec::new(),
             compressed_offset: 0,
             next_tx_ordinal: 0,
@@ -260,7 +275,7 @@ impl ArchiveWriter {
         }
         self.rolling.prune_for_slot(slot)?;
         let uncompressed = encode_hot_block(block, block_id, &self.key_index, &self.rolling)?;
-        let compressed = zstd::bulk::compress(&uncompressed, ZSTD_LEVEL)
+        let compressed = zstd::bulk::compress(&uncompressed, self.zstd_level)
             .with_context(|| format!("compress slot {slot}"))?;
         let compressed_len =
             u32::try_from(compressed.len()).context("compressed block exceeds u32")?;
@@ -370,7 +385,7 @@ impl ArchiveWriter {
         write_archive_v2_hot_block_index(
             &output.join(ARCHIVE_V2_BLOCK_INDEX_FILE),
             self.compressed_offset,
-            ZSTD_LEVEL,
+            self.zstd_level,
             INDEX_FLAGS,
             &self.rows,
         )?;
@@ -1147,7 +1162,7 @@ mod tests {
         let inspected = inspect(&view).unwrap();
         let dir = tempfile::tempdir().unwrap();
         let mut loaded = Vec::new();
-        write_archive(dir.path(), &inspected, |slot| {
+        write_archive(dir.path(), &inspected, ZSTD_LEVEL, |slot| {
             loaded.push(slot);
             view.slots
                 .get(&slot)
@@ -1225,7 +1240,7 @@ mod tests {
         let inspected = inspect(&view).unwrap();
         let dir = tempfile::tempdir().unwrap();
 
-        let error = write_archive(dir.path(), &inspected, |slot| {
+        let error = write_archive(dir.path(), &inspected, ZSTD_LEVEL, |slot| {
             if slot == 11 {
                 bail!("slot 11 is missing transaction status");
             }
@@ -1407,7 +1422,7 @@ mod tests {
         };
         let inspected = inspect(&view).unwrap();
         let dir = tempfile::tempdir().unwrap();
-        write_archive(dir.path(), &inspected, |_| Ok(block.clone())).unwrap();
+        write_archive(dir.path(), &inspected, ZSTD_LEVEL, |_| Ok(block.clone())).unwrap();
 
         let tail = std::fs::read(dir.path().join(ARCHIVE_V2_PREV_BLOCKHASH_TAIL_FILE)).unwrap();
         assert_eq!(tail.len(), 40);
@@ -1433,7 +1448,7 @@ mod tests {
         };
         let inspected = inspect(&view).unwrap();
         let dir = tempfile::tempdir().unwrap();
-        let error = write_archive(dir.path(), &inspected, |slot| {
+        let error = write_archive(dir.path(), &inspected, ZSTD_LEVEL, |slot| {
             Ok(if slot == 10 {
                 first.clone()
             } else {
@@ -1496,6 +1511,24 @@ mod tests {
             panic!("expected a legacy message");
         };
         body.recent_blockhash = hash;
+    }
+
+    #[test]
+    fn the_requested_zstd_level_is_stored_in_the_index() {
+        let block = test_block(10, 9, [2; 32], [1; 32]);
+        let view = LedgerView {
+            start_slot: 10,
+            end_slot: 10,
+            slots: [(block.slot, block.clone())].into_iter().collect(),
+        };
+        let inspected = inspect(&view).unwrap();
+        let dir = tempfile::tempdir().unwrap();
+        write_archive(dir.path(), &inspected, 3, |_| Ok(block.clone())).unwrap();
+        let index = std::fs::read(dir.path().join(ARCHIVE_V2_BLOCK_INDEX_FILE)).unwrap();
+        assert_eq!(i32::from_le_bytes(index[28..32].try_into().unwrap()), 3);
+
+        let error = write_archive(dir.path(), &inspected, 10_000, |_| Ok(block)).unwrap_err();
+        assert!(error.to_string().contains("zstd level"));
     }
 
     fn assert_recent_id(bytes: &[u8], id: i32) {
