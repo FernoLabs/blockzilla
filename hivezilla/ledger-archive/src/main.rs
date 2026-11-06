@@ -40,6 +40,9 @@ enum Command {
         /// zstd compression level for each independent block frame.
         #[arg(long, default_value_t = convert::ZSTD_LEVEL)]
         level: i32,
+        /// Parallel shred reads. 1 reads one slot at a time.
+        #[arg(long, default_value_t = 1)]
+        read_threads: u8,
     },
 }
 
@@ -58,7 +61,7 @@ fn run() -> Result<()> {
             end_slot,
         } => {
             let blockstore = open_read_only(&ledger)?;
-            let inspected = scan_range(&blockstore, start_slot, end_slot, |_| Ok(()))?;
+            let inspected = scan_range(&blockstore, start_slot, end_slot, 1, |_| Ok(()))?;
             print_report(&inspected);
             Ok(())
         }
@@ -68,8 +71,10 @@ fn run() -> Result<()> {
             start_slot,
             end_slot,
             level,
+            read_threads,
         } => {
-            let inspected = build_archive(&ledger, &output, start_slot, end_slot, level)?;
+            let inspected =
+                build_archive(&ledger, &output, start_slot, end_slot, level, read_threads)?;
             print_report(&inspected);
             println!("Output: {}", output.display());
             Ok(())

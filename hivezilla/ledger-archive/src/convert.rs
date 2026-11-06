@@ -56,8 +56,13 @@ pub(crate) fn build_archive(
     start_slot: u64,
     end_slot: u64,
     zstd_level: i32,
+    read_threads: u8,
 ) -> Result<Inspected> {
     check_zstd_level(zstd_level)?;
+    let read_threads = usize::from(read_threads);
+    if !(1..=16).contains(&read_threads) {
+        bail!("read threads {read_threads} is outside 1 to 16");
+    }
     let blockstore = open_read_only(ledger)?;
     fs::create_dir_all(output).with_context(|| format!("create {}", output.display()))?;
     let temps = temp_paths(output);
@@ -67,7 +72,7 @@ pub(crate) fn build_archive(
             "counting pubkeys in slots {start_slot} to {end_slot}"
         ));
         let mut counts = PubkeyCounts::new();
-        let inspected = scan_range(&blockstore, start_slot, end_slot, |block| {
+        let inspected = scan_range(&blockstore, start_slot, end_slot, read_threads, |block| {
             count_slot_pubkeys(block, &mut counts);
             Ok(())
         })?;
@@ -92,9 +97,13 @@ pub(crate) fn build_archive(
             "writing blocks for slots {start_slot} to {end_slot} at zstd level {zstd_level}"
         ));
         let mut writer = ArchiveWriter::create(&temps, key_index, tail, false, zstd_level)?;
-        scan_range(&blockstore, start_slot, end_slot, |block| {
-            writer.write_block(block)
-        })?;
+        scan_range(
+            &blockstore,
+            start_slot,
+            end_slot,
+            read_threads,
+            |block| writer.write_block(block),
+        )?;
         writer.finish(output)?;
         Ok(inspected)
     })();

@@ -1,5 +1,8 @@
+use std::collections::{BTreeMap, HashSet};
 use std::io::{self, Write};
 use std::path::Path;
+use std::sync::{Mutex, mpsc};
+use std::thread;
 
 use anyhow::{Context, Result, anyhow, bail};
 use blockzilla_compact::{CompactInstructionError, CompactTransactionError};
@@ -56,6 +59,201 @@ pub(crate) fn open_read_only(ledger: &Path) -> Result<Blockstore> {
         .with_context(|| format!("open ledger {}", ledger.display()))
 }
 
+const MAX_READ_THREADS: usize = 16;
+
+struct LoadPool<T> {
+    job_tx: mpsc::Sender<Option<u64>>,
+    res_rx: mpsc::Receiver<(u64, Result<T>)>,
+    inflight: HashSet<u64>,
+    ready: BTreeMap<u64, T>,
+    failed: Option<(u64, anyhow::Error)>,
+    threads: usize,
+    stopped: bool,
+}
+
+struct OrderedLoads<'a, T> {
+    inline: Option<&'a dyn Fn(u64) -> Result<T>>,
+    pool: Option<LoadPool<T>>,
+}
+
+impl<T> OrderedLoads<'_, T> {
+    fn submit(&mut self, slot: u64) -> Result<()> {
+        let Some(pool) = &mut self.pool else {
+            return Ok(());
+        };
+        if pool.inflight.contains(&slot) || pool.ready.contains_key(&slot) {
+            return Ok(());
+        }
+        pool.job_tx
+            .send(Some(slot))
+            .context("read thread stopped")?;
+        pool.inflight.insert(slot);
+        Ok(())
+    }
+
+    fn inflight_count(&self) -> usize {
+        self.pool.as_ref().map(|pool| pool.inflight.len()).unwrap_or(0)
+    }
+
+    fn thread_limit(&self) -> usize {
+        self.pool.as_ref().map(|pool| pool.threads).unwrap_or(1)
+    }
+
+    fn is_pending(&self, slot: u64) -> bool {
+        self.pool.as_ref().is_some_and(|pool| {
+            pool.inflight.contains(&slot) || pool.ready.contains_key(&slot)
+        })
+    }
+
+    fn take(&mut self, slot: u64) -> Result<T> {
+        if let Some(load) = self.inline {
+            return load(slot);
+        }
+        let failed_slot = self
+            .pool
+            .as_ref()
+            .and_then(|pool| pool.failed.as_ref().map(|(slot, _)| *slot));
+        if let Some(failed_slot) = failed_slot
+            && failed_slot <= slot
+        {
+            return Err(self.pool.as_mut().unwrap().failed.take().unwrap().1);
+        }
+        if let Some(value) = self.pool.as_mut().unwrap().ready.remove(&slot) {
+            return Ok(value);
+        }
+        if !self.pool.as_ref().unwrap().inflight.contains(&slot) {
+            self.submit(slot)?;
+        }
+        self.wait(slot)
+    }
+
+    fn wait(&mut self, slot: u64) -> Result<T> {
+        loop {
+            if let Some(value) = self.pool.as_mut().unwrap().ready.remove(&slot) {
+                return Ok(value);
+            }
+            if !self.pool.as_ref().unwrap().inflight.contains(&slot) {
+                bail!("slot {slot} was not loaded");
+            }
+            let (done, result) = self.recv()?;
+            match result {
+                Ok(value) if done == slot => return Ok(value),
+                Ok(value) => {
+                    self.pool.as_mut().unwrap().ready.insert(done, value);
+                }
+                Err(err) => {
+                    self.note_failure(done, err);
+                    if done == slot {
+                        return Err(self.pool.as_mut().unwrap().failed.take().unwrap().1);
+                    }
+                }
+            }
+        }
+    }
+
+    fn note_failure(&mut self, slot: u64, err: anyhow::Error) {
+        let pool = self.pool.as_mut().unwrap();
+        match pool.failed.as_ref() {
+            Some((previous, _)) if *previous <= slot => {}
+            _ => pool.failed = Some((slot, err)),
+        }
+    }
+
+    fn recv(&mut self) -> Result<(u64, Result<T>)> {
+        let pool = self.pool.as_mut().unwrap();
+        let (slot, result) = pool.res_rx.recv().context("read thread stopped")?;
+        pool.inflight.remove(&slot);
+        Ok((slot, result))
+    }
+
+    fn stop(&mut self) {
+        let Some(pool) = &mut self.pool else {
+            return;
+        };
+        if pool.stopped {
+            return;
+        }
+        pool.stopped = true;
+        for _ in 0..pool.threads {
+            let _ = pool.job_tx.send(None);
+        }
+        while !pool.inflight.is_empty() {
+            match pool.res_rx.recv() {
+                Ok((slot, _)) => {
+                    pool.inflight.remove(&slot);
+                }
+                Err(_) => break,
+            }
+        }
+    }
+}
+
+impl<T> Drop for OrderedLoads<'_, T> {
+    fn drop(&mut self) {
+        self.stop();
+    }
+}
+
+fn with_ordered_loads<T, R>(
+    threads: usize,
+    load: &(impl Fn(u64) -> Result<T> + Sync),
+    body: impl FnOnce(&mut OrderedLoads<'_, T>) -> Result<R>,
+) -> Result<R>
+where
+    T: Send,
+{
+    if threads == 1 {
+        let mut loads = OrderedLoads {
+            inline: Some(load),
+            pool: None,
+        };
+        return body(&mut loads);
+    }
+    thread::scope(|scope| {
+        let (job_tx, job_rx) = mpsc::channel::<Option<u64>>();
+        let job_rx = Mutex::new(job_rx);
+        let (res_tx, res_rx) = mpsc::channel::<(u64, Result<T>)>();
+        for _ in 0..threads {
+            let res_tx = res_tx.clone();
+            let job_rx = &job_rx;
+            let load = load;
+            scope.spawn(move || {
+                loop {
+                    let job = {
+                        let rx = job_rx.lock().expect("read thread lock");
+                        rx.recv()
+                    };
+                    match job {
+                        Ok(Some(slot)) => {
+                            let result = load(slot);
+                            if res_tx.send((slot, result)).is_err() {
+                                break;
+                            }
+                        }
+                        _ => break,
+                    }
+                }
+            });
+        }
+        drop(res_tx);
+        let mut loads = OrderedLoads {
+            inline: None,
+            pool: Some(LoadPool {
+                job_tx,
+                res_rx,
+                inflight: HashSet::new(),
+                ready: BTreeMap::new(),
+                failed: None,
+                threads,
+                stopped: false,
+            }),
+        };
+        let result = body(&mut loads);
+        loads.stop();
+        result
+    })
+}
+
 /// Read each slot once. A rooted full block is checked, passed to `on_block`,
 /// then dropped. A non-root slot is left out when the next root jumps over it
 /// and slot N+8 has a skip certificate. A hole is proved from the footer of
@@ -63,19 +261,51 @@ pub(crate) fn open_read_only(ledger: &Path) -> Result<Blockstore> {
 ///
 /// When that footer belongs to a later block in the window, the block is kept
 /// until the scan reaches it, so its shreds are not read a second time.
+/// `read_threads` above 1 reconstructs later rooted slots while the current
+/// slot is still checked. Results are accepted in slot order.
 pub(crate) fn scan_range<F>(
     blockstore: &Blockstore,
     start_slot: u64,
     end_slot: u64,
+    read_threads: usize,
     mut on_block: F,
 ) -> Result<Inspected>
 where
     F: FnMut(&SlotData) -> Result<()>,
 {
+    if !(1..=MAX_READ_THREADS).contains(&read_threads) {
+        bail!("read threads {read_threads} is outside 1 to {MAX_READ_THREADS}");
+    }
     if start_slot > end_slot {
         bail!("start slot {start_slot} is after end slot {end_slot}");
     }
-    progress(format!("reading slots {start_slot} to {end_slot}"));
+    progress(format!(
+        "reading slots {start_slot} to {end_slot} with {read_threads} threads"
+    ));
+    let load = |slot: u64| load_rooted_block(blockstore, slot);
+    with_ordered_loads(read_threads, &load, |loads| {
+        scan_loaded(
+            blockstore,
+            loads,
+            start_slot,
+            end_slot,
+            read_threads,
+            &mut on_block,
+        )
+    })
+}
+
+fn scan_loaded<F>(
+    blockstore: &Blockstore,
+    loads: &mut OrderedLoads<SlotData>,
+    start_slot: u64,
+    end_slot: u64,
+    read_threads: usize,
+    on_block: &mut F,
+) -> Result<Inspected>
+where
+    F: FnMut(&SlotData) -> Result<()>,
+{
     let mut ahead = std::collections::BTreeMap::<u64, SlotData>::new();
     let mut block_slots = Vec::new();
     let mut skips = Vec::new();
@@ -85,6 +315,12 @@ where
     let mut scanned = 0u64;
     for slot in start_slot..=end_slot {
         scanned += 1;
+        let prefetch_end = slot
+            .saturating_add(u64::try_from(read_threads).unwrap_or(u64::MAX).saturating_sub(1))
+            .min(end_slot);
+        if slot < end_slot {
+            prefetch_rooted_slots(blockstore, loads, &ahead, slot + 1, prefetch_end)?;
+        }
         if let Some(data) = ahead.remove(&slot) {
             accept_one(
                 data,
@@ -93,18 +329,25 @@ where
                 &mut previous,
                 &mut boundary_hash,
                 &mut block_slots,
-                &mut on_block,
+                on_block,
             )?;
         } else if let Some(meta) = blockstore
             .meta(slot)
             .with_context(|| format!("read SlotMeta for slot {slot}"))?
         {
             if !blockstore.is_root(slot) {
-                leave_out_abandoned_fork(blockstore, slot, end_slot, &mut ahead, &mut forks)?;
+                leave_out_abandoned_fork(
+                    blockstore,
+                    loads,
+                    slot,
+                    end_slot,
+                    &mut ahead,
+                    &mut forks,
+                )?;
             } else if !meta.is_full() {
                 bail!("slot {slot} is rooted and is not full");
             } else {
-                let data = load_rooted_block(blockstore, slot)?;
+                let data = loads.take(slot)?;
                 accept_one(
                     data,
                     start_slot,
@@ -112,11 +355,11 @@ where
                     &mut previous,
                     &mut boundary_hash,
                     &mut block_slots,
-                    &mut on_block,
+                    on_block,
                 )?;
             }
         } else {
-            let markers = proof_markers(blockstore, slot, end_slot, &mut ahead)?;
+            let markers = proof_markers(blockstore, loads, slot, end_slot, &mut ahead)?;
             classify_hole(slot, markers.as_deref(), &mut skips)?;
         }
         if scanned % 1000 == 0 {
@@ -141,16 +384,50 @@ where
     })
 }
 
+fn prefetch_rooted_slots(
+    blockstore: &Blockstore,
+    loads: &mut OrderedLoads<SlotData>,
+    ahead: &BTreeMap<u64, SlotData>,
+    start: u64,
+    end: u64,
+) -> Result<()> {
+    if loads.pool.is_none() {
+        return Ok(());
+    }
+    let mut slot = start;
+    while slot <= end && loads.inflight_count() < loads.thread_limit() {
+        if ahead.contains_key(&slot) || loads.is_pending(slot) {
+            slot += 1;
+            continue;
+        }
+        let Some(meta) = blockstore
+            .meta(slot)
+            .with_context(|| format!("read SlotMeta for slot {slot}"))?
+        else {
+            slot += 1;
+            continue;
+        };
+        if blockstore.is_root(slot) && meta.is_full() {
+            loads.submit(slot)?;
+        }
+        slot += 1;
+    }
+    Ok(())
+}
+
 fn leave_out_abandoned_fork(
     blockstore: &Blockstore,
+    loads: &mut OrderedLoads<SlotData>,
     slot: u64,
     end_slot: u64,
-    ahead: &mut std::collections::BTreeMap<u64, SlotData>,
+    ahead: &mut BTreeMap<u64, SlotData>,
     forks: &mut Vec<u64>,
 ) -> Result<()> {
     let relation = rooted_chain_relation(blockstore, slot)?;
     let markers = match relation {
-        ChainRelation::JumpsOver { .. } => proof_markers(blockstore, slot, end_slot, ahead)?,
+        ChainRelation::JumpsOver { .. } => {
+            proof_markers(blockstore, loads, slot, end_slot, ahead)?
+        }
         ChainRelation::DescendsFrom { .. } => None,
     };
     let next_root = match relation {
@@ -213,9 +490,10 @@ where
 
 fn proof_markers(
     blockstore: &Blockstore,
+    loads: &mut OrderedLoads<SlotData>,
     slot: u64,
     end_slot: u64,
-    ahead: &mut std::collections::BTreeMap<u64, SlotData>,
+    ahead: &mut BTreeMap<u64, SlotData>,
 ) -> Result<Option<Vec<Vec<u8>>>> {
     let carrier = slot
         .checked_add(REWARD_SLOT_DISTANCE)
@@ -234,7 +512,7 @@ fn proof_markers(
         return Ok(Some(read_markers(blockstore, carrier)?));
     }
     if is_root && meta.is_full() {
-        let data = load_rooted_block(blockstore, carrier)?;
+        let data = loads.take(carrier)?;
         let markers = data.markers.clone();
         ahead.insert(carrier, data);
         return Ok(Some(markers));
@@ -839,6 +1117,48 @@ mod tests {
     use super::*;
     use solana_entry::block_component::{BlockHeaderV1, VersionedBlockMarker};
     use solana_hash::Hash;
+
+    #[test]
+    fn parallel_slot_loads_stay_in_order_and_run_once() {
+        use std::sync::Mutex;
+        use std::time::Duration;
+
+        let seen = Mutex::new(Vec::new());
+        let got = with_ordered_loads(
+            4,
+            |slot| {
+                seen.lock().expect("seen").push(slot);
+                std::thread::sleep(Duration::from_millis((slot % 5) * 2));
+                if slot == 9 {
+                    bail!("slot 9 failed");
+                }
+                Ok(slot)
+            },
+            |loads| {
+                for slot in 0..16 {
+                    loads.submit(slot)?;
+                }
+                let mut got = Vec::new();
+                for slot in 0..9 {
+                    got.push(loads.take(slot)?);
+                }
+                let error = loads.take(9).unwrap_err();
+                assert!(error.to_string().contains("slot 9 failed"), "{error:#}");
+                Ok(got)
+            },
+        )
+        .unwrap();
+        assert_eq!(got, (0..9).collect::<Vec<_>>());
+        let mut seen = seen.into_inner().expect("seen");
+        seen.sort();
+        assert_eq!(seen, (0..16).collect::<Vec<_>>());
+    }
+
+    #[test]
+    fn one_read_thread_loads_on_the_caller() {
+        let value = with_ordered_loads(1, |slot| Ok(slot + 1), |loads| loads.take(4)).unwrap();
+        assert_eq!(value, 5);
+    }
 
     #[test]
     fn read_only_options_do_not_create_a_ledger() {
