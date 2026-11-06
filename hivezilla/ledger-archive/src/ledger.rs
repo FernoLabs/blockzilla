@@ -209,13 +209,14 @@ where
         };
         return body(&mut loads);
     }
-    thread::scope(|scope| {
-        let (job_tx, job_rx) = mpsc::channel::<Option<u64>>();
-        let job_rx = Mutex::new(job_rx);
-        let (res_tx, res_rx) = mpsc::channel::<(u64, Result<T>)>();
+    let (job_tx, job_rx) = mpsc::channel::<Option<u64>>();
+    let job_rx = Mutex::new(job_rx);
+    let job_rx = &job_rx;
+    let (res_tx, res_rx) = mpsc::channel::<(u64, Result<T>)>();
+    thread::scope(move |scope| {
         for _ in 0..threads {
             let res_tx = res_tx.clone();
-            let job_rx = &job_rx;
+            let job_rx = job_rx;
             let load = load;
             scope.spawn(move || {
                 loop {
@@ -1124,16 +1125,17 @@ mod tests {
         use std::time::Duration;
 
         let seen = Mutex::new(Vec::new());
+        let load = |slot| {
+            seen.lock().expect("seen").push(slot);
+            std::thread::sleep(Duration::from_millis((slot % 5) * 2));
+            if slot == 9 {
+                bail!("slot 9 failed");
+            }
+            Ok(slot)
+        };
         let got = with_ordered_loads(
             4,
-            |slot| {
-                seen.lock().expect("seen").push(slot);
-                std::thread::sleep(Duration::from_millis((slot % 5) * 2));
-                if slot == 9 {
-                    bail!("slot 9 failed");
-                }
-                Ok(slot)
-            },
+            &load,
             |loads| {
                 for slot in 0..16 {
                     loads.submit(slot)?;
@@ -1156,7 +1158,8 @@ mod tests {
 
     #[test]
     fn one_read_thread_loads_on_the_caller() {
-        let value = with_ordered_loads(1, |slot| Ok(slot + 1), |loads| loads.take(4)).unwrap();
+        let load = |slot| Ok(slot + 1);
+        let value = with_ordered_loads(1, &load, |loads| loads.take(4)).unwrap();
         assert_eq!(value, 5);
     }
 
