@@ -59,7 +59,7 @@ pub(crate) fn open_read_only(ledger: &Path) -> Result<Blockstore> {
         .with_context(|| format!("open ledger {}", ledger.display()))
 }
 
-const MAX_READ_THREADS: usize = 16;
+const MAX_READ_THREADS: usize = 32;
 
 struct LoadPool<T> {
     job_tx: mpsc::Sender<Option<u64>>,

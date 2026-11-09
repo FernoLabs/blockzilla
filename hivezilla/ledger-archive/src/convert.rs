@@ -60,8 +60,8 @@ pub(crate) fn build_archive(
 ) -> Result<Inspected> {
     check_zstd_level(zstd_level)?;
     let read_threads = usize::from(read_threads);
-    if !(1..=16).contains(&read_threads) {
-        bail!("read threads {read_threads} is outside 1 to 16");
+    if !(1..=32).contains(&read_threads) {
+        bail!("read threads {read_threads} is outside 1 to 32");
     }
     let blockstore = open_read_only(ledger)?;
     fs::create_dir_all(output).with_context(|| format!("create {}", output.display()))?;
