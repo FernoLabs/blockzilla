@@ -1187,6 +1187,42 @@ mod tests {
     }
 
     #[test]
+    fn a_skip_and_notar_reward_writes_no_blob() {
+        let first = test_block(10, 9, [4; 32], [3; 32]);
+        let second = test_block(12, 10, [5; 32], [4; 32]);
+        let mut carrier = test_block(11 + REWARD_SLOT_DISTANCE, 18, [6; 32], [5; 32]);
+        carrier.is_root = false;
+        carrier.markers = vec![skip_and_notar_footer(11)];
+        let view = LedgerView {
+            start_slot: 10,
+            end_slot: 12,
+            slots: [first, second, carrier]
+                .into_iter()
+                .map(|slot| (slot.slot, slot))
+                .collect(),
+        };
+        let inspected = inspect(&view).unwrap();
+        assert_eq!(inspected.skips, vec![11]);
+        let dir = tempfile::tempdir().unwrap();
+        let mut loaded = Vec::new();
+        write_archive(dir.path(), &inspected, ZSTD_LEVEL, |slot| {
+            loaded.push(slot);
+            view.slots
+                .get(&slot)
+                .cloned()
+                .with_context(|| format!("test block {slot} is missing"))
+        })
+        .unwrap();
+        assert_eq!(loaded, vec![10, 12, 10, 12]);
+        let index = std::fs::read(dir.path().join(ARCHIVE_V2_BLOCK_INDEX_FILE)).unwrap();
+        let slots: Vec<u64> = index[36..]
+            .chunks_exact(52)
+            .map(|row| u64::from_le_bytes(row[4..12].try_into().unwrap()))
+            .collect();
+        assert_eq!(slots, vec![10, 12]);
+    }
+
+    #[test]
     fn a_proven_skip_writes_no_blob() {
         let first = test_block(10, 9, [4; 32], [3; 32]);
         let second = test_block(12, 10, [5; 32], [4; 32]);
@@ -1604,6 +1640,33 @@ mod tests {
             ArchiveV2HotMessagePayload::V0(message) => message.recent_blockhash,
             ArchiveV2HotMessagePayload::V1(message) => message.recent_blockhash,
         }
+    }
+
+    fn skip_and_notar_footer(slot: u64) -> Vec<u8> {
+        let mut certificates = vec![0, 1];
+        certificates.extend_from_slice(&slot.to_le_bytes());
+        certificates.extend(std::iter::repeat_n(7u8, 96));
+        certificates.push(0);
+        certificates.push(1);
+        certificates.extend_from_slice(&slot.to_le_bytes());
+        certificates.extend(std::iter::repeat_n(9u8, 32));
+        certificates.extend(std::iter::repeat_n(8u8, 96));
+        certificates.push(0);
+        footer_marker(&certificates)
+    }
+
+    fn footer_marker(certificates: &[u8]) -> Vec<u8> {
+        let mut payload = vec![1u8];
+        payload.extend(std::iter::repeat_n(0xabu8, 32));
+        payload.extend_from_slice(&1u64.to_le_bytes());
+        payload.push(0);
+        payload.extend_from_slice(certificates);
+        let mut out = Vec::new();
+        out.extend_from_slice(&1u16.to_le_bytes());
+        out.push(0);
+        out.extend_from_slice(&u16::try_from(payload.len()).unwrap().to_le_bytes());
+        out.extend(payload);
+        out
     }
 
     fn skip_footer(skipped_slot: u64) -> Vec<u8> {

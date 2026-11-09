@@ -21,7 +21,7 @@ use solana_transaction_status::{Reward, TransactionStatusMeta};
 
 use crate::check::{
     ChainRelation, Inspected, PreviousBlock, accept_block_against, classify_abandoned_fork,
-    classify_hole, parent_chain_relation,
+    classify_hole, hole_uses_parent_chain, parent_chain_relation,
 };
 use crate::source::{
     REWARD_SLOT_DISTANCE, RawComponent, SlotData, SourceEntry, SourceHeader, SourceInnerGroup,
@@ -362,12 +362,15 @@ where
             }
         } else {
             let markers = proof_markers(blockstore, loads, slot, end_slot, &mut ahead)?;
-            let chain = if markers.is_none() {
+            let chain = if hole_uses_parent_chain(slot, markers.as_deref())? {
                 full_root_relation(blockstore, slot)?
             } else {
                 None
             };
             classify_hole(slot, markers.as_deref(), chain, &mut skips)?;
+            // A jump is logged when N+8 has no footer, and when that footer
+            // carries both a skip reward and a notarization reward. A
+            // skip-only footer stays silent.
             if let Some(ChainRelation::JumpsOver { next_root }) = chain {
                 progress(format!(
                     "slot {slot} left out, rooted chain jumps to {next_root}"
