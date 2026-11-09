@@ -1154,6 +1154,39 @@ mod tests {
     }
 
     #[test]
+    fn a_parent_jump_skip_writes_no_blob() {
+        let first = test_block(10, 9, [4; 32], [3; 32]);
+        let next = test_block(14, 10, [5; 32], [4; 32]);
+        let view = LedgerView {
+            start_slot: 10,
+            end_slot: 14,
+            slots: [first, next]
+                .into_iter()
+                .map(|slot| (slot.slot, slot))
+                .collect(),
+        };
+        let inspected = inspect(&view).unwrap();
+        assert_eq!(inspected.skips, vec![11, 12, 13]);
+        let dir = tempfile::tempdir().unwrap();
+        let mut loaded = Vec::new();
+        write_archive(dir.path(), &inspected, ZSTD_LEVEL, |slot| {
+            loaded.push(slot);
+            view.slots
+                .get(&slot)
+                .cloned()
+                .with_context(|| format!("test block {slot} is missing"))
+        })
+        .unwrap();
+        assert_eq!(loaded, vec![10, 14, 10, 14]);
+        let index = std::fs::read(dir.path().join(ARCHIVE_V2_BLOCK_INDEX_FILE)).unwrap();
+        let slots: Vec<u64> = index[36..]
+            .chunks_exact(52)
+            .map(|row| u64::from_le_bytes(row[4..12].try_into().unwrap()))
+            .collect();
+        assert_eq!(slots, vec![10, 14]);
+    }
+
+    #[test]
     fn a_proven_skip_writes_no_blob() {
         let first = test_block(10, 9, [4; 32], [3; 32]);
         let second = test_block(12, 10, [5; 32], [4; 32]);

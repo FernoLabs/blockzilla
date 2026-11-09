@@ -73,7 +73,12 @@ pub(crate) fn inspect(view: &LedgerView) -> Result<Inspected> {
             let carrier = slot.checked_add(REWARD_SLOT_DISTANCE);
             let markers = carrier
                 .and_then(|carrier| view.slots.get(&carrier).map(|data| data.markers.as_slice()));
-            classify_hole(slot, markers, &mut skips)?;
+            let chain = if markers.is_none() {
+                full_root_relation_in_view(view, slot)?
+            } else {
+                None
+            };
+            classify_hole(slot, markers, chain, &mut skips)?;
         }
     }
 
@@ -225,16 +230,27 @@ pub(crate) fn accept_block_against(
     Ok(())
 }
 
+/// Prove a slot that has no `SlotMeta`.
+///
+/// The footer of slot N+8 is the first proof. A skip certificate records a
+/// skip. A notarization certificate is an error. A footer that names neither
+/// is an error. `chain` is ignored while that footer exists.
+///
+/// When slot N+8 has no `SlotMeta`, `chain` is the parent walk from the next
+/// full rooted slot. A jump over this slot records a skip. A chain that
+/// includes this slot is an error. `chain == None` keeps the missing-footer
+/// error.
 pub(crate) fn classify_hole(
     slot: u64,
     carrier_markers: Option<&[Vec<u8>]>,
+    chain: Option<ChainRelation>,
     skips: &mut Vec<u64>,
 ) -> Result<()> {
     let carrier = slot
         .checked_add(REWARD_SLOT_DISTANCE)
         .context("slot + 8 overflows")?;
     let Some(markers) = carrier_markers else {
-        bail!("slot {slot} has no SlotMeta and slot {carrier} has no footer proof");
+        return classify_hole_by_parent(slot, carrier, chain, skips);
     };
     let names = reward_names(markers)
         .with_context(|| format!("slot {carrier} footer cannot prove slot {slot}"))?;
@@ -246,6 +262,41 @@ pub(crate) fn classify_hole(
         return Ok(());
     }
     bail!("slot {slot} has no SlotMeta and slot {carrier} does not prove a skip");
+}
+
+fn classify_hole_by_parent(
+    slot: u64,
+    carrier: u64,
+    chain: Option<ChainRelation>,
+    skips: &mut Vec<u64>,
+) -> Result<()> {
+    match chain {
+        Some(ChainRelation::JumpsOver { .. }) => {
+            skips.push(slot);
+            Ok(())
+        }
+        Some(ChainRelation::DescendsFrom { next_root }) => {
+            bail!("slot {slot} has no SlotMeta and slot {next_root} descends from it");
+        }
+        None => bail!("slot {slot} has no SlotMeta and slot {carrier} has no footer proof"),
+    }
+}
+
+/// Parent walk from the first rooted slot after `slot`.
+///
+/// A rooted slot that is not full is an error. No later root returns `None`.
+fn full_root_relation_in_view(view: &LedgerView, slot: u64) -> Result<Option<ChainRelation>> {
+    let start = slot.checked_add(1).context("slot + 1 overflows")?;
+    let Some((next_root, data)) = view.slots.range(start..).find(|(_, data)| data.is_root) else {
+        return Ok(None);
+    };
+    if !data.is_full {
+        bail!("slot {next_root} is rooted and is not full");
+    }
+    parent_chain_relation(slot, *next_root, |cursor| {
+        Ok(view.slots.get(&cursor).and_then(|data| data.parent_slot))
+    })
+    .map(Some)
 }
 
 #[cfg(test)]
@@ -447,6 +498,50 @@ mod tests {
         let error = inspect(&view(10, 12, vec![first, second, carrier])).unwrap_err();
         assert!(
             error.to_string().contains("notarization reward"),
+            "{error:#}"
+        );
+    }
+
+    #[test]
+    fn a_parent_jump_proves_a_run_of_holes() {
+        let first = test_block(10, 9, [4; 32], [3; 32]);
+        let next = test_block(14, 10, [5; 32], [4; 32]);
+        let inspected = inspect(&view(10, 14, vec![first, next])).unwrap();
+        assert_eq!(inspected.block_slots, vec![10, 14]);
+        assert_eq!(inspected.skips, vec![11, 12, 13]);
+        assert_eq!(inspected.forks, Vec::<u64>::new());
+    }
+
+    #[test]
+    fn a_hole_whose_next_block_descends_from_it_is_an_error() {
+        let first = test_block(10, 9, [4; 32], [3; 32]);
+        let next = test_block(12, 11, [5; 32], [4; 32]);
+        let error = inspect(&view(10, 12, vec![first, next])).unwrap_err();
+        assert!(error.to_string().contains("descends from it"), "{error:#}");
+    }
+
+    #[test]
+    fn a_hole_followed_by_a_partial_root_is_an_error() {
+        let first = test_block(10, 9, [4; 32], [3; 32]);
+        let mut next = test_block(12, 10, [5; 32], [4; 32]);
+        next.is_full = false;
+        let error = inspect(&view(10, 12, vec![first, next])).unwrap_err();
+        assert!(
+            error.to_string().contains("rooted and is not full"),
+            "{error:#}"
+        );
+    }
+
+    #[test]
+    fn a_footer_that_does_not_name_the_hole_stays_an_error() {
+        let first = test_block(10, 9, [4; 32], [3; 32]);
+        let next = test_block(12, 10, [5; 32], [4; 32]);
+        let mut carrier = test_block(19, 18, [6; 32], [5; 32]);
+        carrier.is_root = false;
+        carrier.markers = vec![skip_footer(99)];
+        let error = inspect(&view(10, 12, vec![first, next, carrier])).unwrap_err();
+        assert!(
+            error.to_string().contains("does not prove a skip"),
             "{error:#}"
         );
     }

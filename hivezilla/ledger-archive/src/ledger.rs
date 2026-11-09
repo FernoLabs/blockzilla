@@ -258,7 +258,8 @@ where
 /// Read each slot once. A rooted full block is checked, passed to `on_block`,
 /// then dropped. A non-root slot is left out when the next root jumps over it
 /// and slot N+8 has a skip certificate. A hole is proved from the footer of
-/// slot N+8.
+/// slot N+8. When that slot has no `SlotMeta`, the parent chain of the next
+/// full rooted block can prove the skip.
 ///
 /// When that footer belongs to a later block in the window, the block is kept
 /// until the scan reaches it, so its shreds are not read a second time.
@@ -361,7 +362,17 @@ where
             }
         } else {
             let markers = proof_markers(blockstore, loads, slot, end_slot, &mut ahead)?;
-            classify_hole(slot, markers.as_deref(), &mut skips)?;
+            let chain = if markers.is_none() {
+                full_root_relation(blockstore, slot)?
+            } else {
+                None
+            };
+            classify_hole(slot, markers.as_deref(), chain, &mut skips)?;
+            if let Some(ChainRelation::JumpsOver { next_root }) = chain {
+                progress(format!(
+                    "slot {slot} left out, rooted chain jumps to {next_root}"
+                ));
+            }
         }
         if scanned % 1000 == 0 {
             progress(format!(
@@ -444,6 +455,27 @@ fn leave_out_abandoned_fork(
     Ok(())
 }
 
+fn full_root_relation(blockstore: &Blockstore, slot: u64) -> Result<Option<ChainRelation>> {
+    let start = slot.checked_add(1).context("slot + 1 overflows")?;
+    let Some(next_root) = blockstore
+        .rooted_slot_iterator(start)
+        .with_context(|| format!("read roots after slot {slot}"))?
+        .next()
+    else {
+        return Ok(None);
+    };
+    let meta = blockstore
+        .meta(next_root)
+        .with_context(|| format!("read SlotMeta for slot {next_root}"))?;
+    let Some(meta) = meta else {
+        bail!("slot {next_root} has no SlotMeta");
+    };
+    if !meta.is_full() {
+        bail!("slot {next_root} is rooted and is not full");
+    }
+    parent_chain_relation(slot, next_root, |cursor| parent_slot(blockstore, cursor)).map(Some)
+}
+
 fn rooted_chain_relation(blockstore: &Blockstore, slot: u64) -> Result<ChainRelation> {
     let start = slot.checked_add(1).context("slot + 1 overflows")?;
     let Some(next_root) = blockstore
@@ -453,15 +485,17 @@ fn rooted_chain_relation(blockstore: &Blockstore, slot: u64) -> Result<ChainRela
     else {
         bail!("slot {slot} has data and is not rooted");
     };
-    parent_chain_relation(slot, next_root, |cursor| {
-        let meta = blockstore
-            .meta(cursor)
-            .with_context(|| format!("read SlotMeta for slot {cursor}"))?;
-        let Some(meta) = meta else {
-            bail!("slot {cursor} has no SlotMeta");
-        };
-        Ok(meta.parent_slot)
-    })
+    parent_chain_relation(slot, next_root, |cursor| parent_slot(blockstore, cursor))
+}
+
+fn parent_slot(blockstore: &Blockstore, slot: u64) -> Result<Option<u64>> {
+    let meta = blockstore
+        .meta(slot)
+        .with_context(|| format!("read SlotMeta for slot {slot}"))?;
+    let Some(meta) = meta else {
+        bail!("slot {slot} has no SlotMeta");
+    };
+    Ok(meta.parent_slot)
 }
 
 fn accept_one<F>(
