@@ -320,10 +320,10 @@ where
 
 /// Read each slot once. A rooted full block is checked, passed to `on_block`,
 /// then dropped. A non-root slot is left out when the next root jumps over it
-/// and slot N+8 has a skip certificate. When slot N+8 has no `SlotMeta`, that
-/// parent jump is enough. A hole is proved from the footer of slot N+8. When
-/// that slot has no `SlotMeta`, the parent chain of the next full rooted block
-/// can prove the skip.
+/// and slot N+8 has a skip certificate. When slot N+8 has no `SlotMeta` or is
+/// not root, that parent jump is enough. A hole is proved from the footer of
+/// slot N+8. When that slot has no `SlotMeta` or is not root, the parent chain
+/// of the next full rooted block can prove the skip.
 ///
 /// When that footer belongs to a later block in the window, the block is kept
 /// until the scan reaches it, so its shreds are not read a second time.
@@ -613,13 +613,24 @@ fn proof_markers(
     if carrier > end_slot {
         return Ok(Some(read_markers(blockstore, carrier)?));
     }
-    if is_root && meta.is_full() {
-        let data = loads.take(carrier)?;
-        let markers = data.markers.clone();
-        ahead.insert(carrier, data);
-        return Ok(Some(markers));
+    // A slot that is not root has no usable footer. An empty list would mean
+    // the footer was read and does not prove the skip.
+    if !in_window_footer_is_readable(is_root, meta.is_full()) {
+        if !is_root {
+            return Ok(None);
+        }
+        return Ok(Some(Vec::new()));
     }
-    Ok(Some(Vec::new()))
+    let data = loads.take(carrier)?;
+    let markers = data.markers.clone();
+    ahead.insert(carrier, data);
+    Ok(Some(markers))
+}
+
+/// Inside the window, only a full root provides a footer. A slot that is not
+/// root provides none, so the parent jump decides.
+pub(crate) fn in_window_footer_is_readable(is_root: bool, is_full: bool) -> bool {
+    is_root && is_full
 }
 
 fn progress(message: impl std::fmt::Display) {
@@ -1310,6 +1321,14 @@ mod tests {
             map_instruction_error(&InstructionError::BorshIoError).unwrap(),
             CompactInstructionError::BorshIoError(ref message) if message.is_empty()
         ));
+    }
+
+    #[test]
+    fn a_slot_that_is_not_root_has_no_readable_footer() {
+        assert!(!in_window_footer_is_readable(false, false));
+        assert!(!in_window_footer_is_readable(false, true));
+        assert!(!in_window_footer_is_readable(true, false));
+        assert!(in_window_footer_is_readable(true, true));
     }
 
     #[test]

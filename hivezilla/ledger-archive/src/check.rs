@@ -14,7 +14,7 @@ pub(crate) struct Inspected {
     pub skips: Vec<u64>,
     /// Slots that have data, are not root, and are left out of the archive.
     /// The next root jumps over each one. Slot N+8 has a skip certificate, or
-    /// it has no `SlotMeta`.
+    /// it has no `SlotMeta`, or it is not root.
     pub forks: Vec<u64>,
     pub boundary_hash: [u8; 32],
 }
@@ -156,9 +156,9 @@ fn chain_relation_in_view(view: &LedgerView, slot: u64) -> Result<ChainRelation>
 /// Leave out a non-root slot when the rooted chain jumps over it.
 ///
 /// A skip certificate in slot N+8 is enough. A notarization certificate does
-/// not cancel that skip. When slot N+8 has no `SlotMeta`, the certificate
-/// cannot exist, and the parent jump is the proof. A slot the next root
-/// descends from stays an error.
+/// not cancel that skip. When slot N+8 has no `SlotMeta` or is not root, the
+/// certificate cannot be read, and the parent jump is the proof. A slot the
+/// next root descends from stays an error.
 pub(crate) fn classify_abandoned_fork(
     slot: u64,
     chain: ChainRelation,
@@ -258,10 +258,10 @@ pub(crate) fn hole_uses_parent_chain(slot: u64, markers: Option<&[Vec<u8>]>) -> 
 /// A footer that carries both rewards uses `chain`. A jump records a skip. A
 /// chain that includes this slot is an error. No later root is an error.
 ///
-/// When slot N+8 has no `SlotMeta`, `chain` is the parent walk from the next
-/// full rooted slot. A jump over this slot records a skip. A chain that
-/// includes this slot is an error. `chain == None` keeps the missing-footer
-/// error.
+/// When slot N+8 has no `SlotMeta` or is not root, `chain` is the parent walk
+/// from the next full rooted slot. A jump over this slot records a skip. A
+/// chain that includes this slot is an error. `chain == None` keeps the
+/// missing-footer error.
 pub(crate) fn classify_hole(
     slot: u64,
     carrier_markers: Option<&[Vec<u8>]>,
