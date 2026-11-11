@@ -10,7 +10,10 @@ use anyhow::Result;
 use clap::{Parser, Subcommand};
 
 use crate::convert::build_archive;
-use crate::ledger::{open_read_only, scan_range};
+use crate::ledger::{
+    ensure_epoch_is_stored, ensure_no_published_archive_file, epoch_output_dir, epoch_slot_range,
+    open_read_only, scan_range,
+};
 
 #[derive(Parser)]
 #[command(name = "hivezilla-ledger-archive")]
@@ -37,6 +40,23 @@ enum Command {
         start_slot: u64,
         #[arg(long)]
         end_slot: u64,
+        /// zstd compression level for each independent block frame.
+        #[arg(long, default_value_t = convert::ZSTD_LEVEL)]
+        level: i32,
+        /// Parallel shred reads. 1 reads one slot at a time.
+        #[arg(long, default_value_t = 1)]
+        read_threads: u8,
+    },
+    /// Write one epoch under OUTPUT/epoch-N.
+    ///
+    /// The epoch uses 432000 slots. The directory is created only when the
+    /// ledger still stores the first slot and a root has reached the last slot.
+    BuildEpochArchive {
+        ledger: PathBuf,
+        /// Parent directory. The archive is written to epoch-N inside it.
+        output: PathBuf,
+        #[arg(long)]
+        epoch: u64,
         /// zstd compression level for each independent block frame.
         #[arg(long, default_value_t = convert::ZSTD_LEVEL)]
         level: i32,
@@ -73,6 +93,31 @@ fn run() -> Result<()> {
             level,
             read_threads,
         } => {
+            let inspected =
+                build_archive(&ledger, &output, start_slot, end_slot, level, read_threads)?;
+            print_report(&inspected);
+            println!("Output: {}", output.display());
+            Ok(())
+        }
+        Command::BuildEpochArchive {
+            ledger,
+            output,
+            epoch,
+            level,
+            read_threads,
+        } => {
+            let (start_slot, end_slot) = epoch_slot_range(epoch)?;
+            let blockstore = open_read_only(&ledger)?;
+            ensure_epoch_is_stored(
+                epoch,
+                start_slot,
+                end_slot,
+                blockstore.lowest_slot(),
+                blockstore.max_root(),
+            )?;
+            drop(blockstore);
+            let output = epoch_output_dir(&output, epoch);
+            ensure_no_published_archive_file(&output)?;
             let inspected =
                 build_archive(&ledger, &output, start_slot, end_slot, level, read_threads)?;
             print_report(&inspected);

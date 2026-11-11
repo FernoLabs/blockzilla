@@ -6,9 +6,11 @@ Reads one inclusive slot range from an Agave ledger and writes a Compact V2 arch
 hivezilla-ledger-archive check-ledger-range <LEDGER> --start-slot N --end-slot M
 hivezilla-ledger-archive build-archive-v2-from-ledger <LEDGER> <OUTPUT> \
   --start-slot N --end-slot M --level 1 --read-threads 1
+hivezilla-ledger-archive build-epoch-archive <LEDGER> <OUTPUT-PARENT> \
+  --epoch N --level 1 --read-threads 1
 ```
 
-`check-ledger-range` applies the slot rules and prints a report. `build-archive-v2-from-ledger` writes one independent zstd frame per rooted block, then the index. `--level` is the zstd effort (default 1). `--read-threads` is the number of parallel shred reads, from 1 to 32. A failure removes the temporary files and does not publish the index.
+`check-ledger-range` applies the slot rules and prints a report. `build-archive-v2-from-ledger` writes one independent zstd frame per rooted block, then the index. `build-epoch-archive` writes epoch N, 432000 slots, into `<OUTPUT-PARENT>/epoch-N`. It creates that directory only when the ledger still stores the epoch's first slot and a root has reached its last slot. An existing final archive file in that directory stops the command. `--level` is the zstd effort (default 1). `--read-threads` is the number of parallel shred reads, from 1 to 32. A failure removes the temporary files and does not publish the index.
 
 A slot is written only when it is rooted and its shreds are complete. The tool then checks that every transaction has a status, and that the parent slot and parent blockhash chain to the previous written block.
 

@@ -1,10 +1,15 @@
 use std::collections::{BTreeMap, HashSet};
 use std::io::{self, Write};
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use std::sync::{Mutex, mpsc};
 use std::thread;
 
 use anyhow::{Context, Result, anyhow, bail};
+use blockzilla_archive_v2::{
+    ARCHIVE_V2_BLOCK_INDEX_FILE, ARCHIVE_V2_BLOCKHASH_REGISTRY_FILE, ARCHIVE_V2_BLOCKS_FILE,
+    ARCHIVE_V2_POH_FILE, ARCHIVE_V2_PREV_BLOCKHASH_TAIL_FILE, ARCHIVE_V2_PUBKEY_REGISTRY_FILE,
+    ARCHIVE_V2_SHREDDING_FILE, ARCHIVE_V2_SIGNATURES_FILE, ARCHIVE_V2_VOTE_HASH_REGISTRY_FILE,
+};
 use blockzilla_compact::{CompactInstructionError, CompactTransactionError};
 use solana_entry::block_component::BlockComponent;
 use solana_instruction_error::InstructionError;
@@ -57,6 +62,64 @@ pub(crate) fn open_read_only(ledger: &Path) -> Result<Blockstore> {
     let options = read_only_options(ledger)?;
     Blockstore::open_with_options(ledger, options)
         .with_context(|| format!("open ledger {}", ledger.display()))
+}
+
+pub(crate) const SLOTS_PER_EPOCH: u64 = 432_000;
+
+const EPOCH_ARCHIVE_FILES: [&str; 9] = [
+    ARCHIVE_V2_BLOCKS_FILE,
+    ARCHIVE_V2_SIGNATURES_FILE,
+    ARCHIVE_V2_BLOCKHASH_REGISTRY_FILE,
+    ARCHIVE_V2_VOTE_HASH_REGISTRY_FILE,
+    ARCHIVE_V2_POH_FILE,
+    ARCHIVE_V2_SHREDDING_FILE,
+    ARCHIVE_V2_PUBKEY_REGISTRY_FILE,
+    ARCHIVE_V2_PREV_BLOCKHASH_TAIL_FILE,
+    ARCHIVE_V2_BLOCK_INDEX_FILE,
+];
+
+pub(crate) fn epoch_slot_range(epoch: u64) -> Result<(u64, u64)> {
+    let start_slot = epoch
+        .checked_mul(SLOTS_PER_EPOCH)
+        .context("epoch start overflows")?;
+    let end_slot = start_slot
+        .checked_add(SLOTS_PER_EPOCH - 1)
+        .context("epoch end overflows")?;
+    Ok((start_slot, end_slot))
+}
+
+pub(crate) fn epoch_output_dir(parent: &Path, epoch: u64) -> PathBuf {
+    parent.join(format!("epoch-{epoch}"))
+}
+
+/// The epoch is stored when its first slot is still present and a root has
+/// reached its last slot. This does not prove that every root in the range is full.
+pub(crate) fn ensure_epoch_is_stored(
+    epoch: u64,
+    start_slot: u64,
+    end_slot: u64,
+    lowest_slot: u64,
+    max_root: u64,
+) -> Result<()> {
+    if start_slot < lowest_slot {
+        bail!(
+            "epoch {epoch} starts at slot {start_slot} and the ledger starts at slot {lowest_slot}"
+        );
+    }
+    if end_slot > max_root {
+        bail!("epoch {epoch} ends at slot {end_slot} and the last root is slot {max_root}");
+    }
+    Ok(())
+}
+
+pub(crate) fn ensure_no_published_archive_file(output: &Path) -> Result<()> {
+    for name in EPOCH_ARCHIVE_FILES {
+        let path = output.join(name);
+        if path.exists() {
+            bail!("archive file {} already exists", path.display());
+        }
+    }
+    Ok(())
 }
 
 const MAX_READ_THREADS: usize = 32;
@@ -1246,6 +1309,80 @@ mod tests {
             map_instruction_error(&InstructionError::BorshIoError).unwrap(),
             CompactInstructionError::BorshIoError(ref message) if message.is_empty()
         ));
+    }
+
+    #[test]
+    fn epoch_zero_and_epoch_1079_have_fixed_slot_ranges() {
+        assert_eq!(epoch_slot_range(0).unwrap(), (0, 431_999));
+        assert_eq!(
+            epoch_slot_range(1079).unwrap(),
+            (466_128_000, 466_559_999)
+        );
+        assert_eq!(
+            epoch_output_dir(Path::new("/home/sol/ledger-archive-out"), 0),
+            PathBuf::from("/home/sol/ledger-archive-out/epoch-0")
+        );
+        assert_eq!(
+            epoch_output_dir(Path::new("/home/sol/ledger-archive-out"), 1079),
+            PathBuf::from("/home/sol/ledger-archive-out/epoch-1079")
+        );
+    }
+
+    #[test]
+    fn an_epoch_that_overflows_u64_is_refused() {
+        let error = epoch_slot_range(u64::MAX).unwrap_err();
+        assert!(error.to_string().contains("epoch start overflows"), "{error:#}");
+
+        let epoch = u64::MAX / SLOTS_PER_EPOCH;
+        let start_slot = epoch * SLOTS_PER_EPOCH;
+        let result = epoch_slot_range(epoch);
+        if start_slot <= u64::MAX - (SLOTS_PER_EPOCH - 1) {
+            assert_eq!(
+                result.unwrap(),
+                (start_slot, start_slot + SLOTS_PER_EPOCH - 1)
+            );
+        } else {
+            let error = result.unwrap_err();
+            assert!(error.to_string().contains("epoch end overflows"), "{error:#}");
+        }
+    }
+
+    #[test]
+    fn an_epoch_must_sit_between_the_first_stored_slot_and_the_last_root() {
+        let error = ensure_epoch_is_stored(1078, 465_696_000, 466_127_999, 465_818_301, 468_118_000)
+            .unwrap_err();
+        assert!(
+            error.to_string().contains("starts at slot 465696000")
+                && error.to_string().contains("ledger starts at slot 465818301"),
+            "{error:#}"
+        );
+
+        let error = ensure_epoch_is_stored(1083, 467_856_000, 468_287_999, 465_818_301, 468_118_000)
+            .unwrap_err();
+        assert!(
+            error.to_string().contains("ends at slot 468287999")
+                && error.to_string().contains("last root is slot 468118000"),
+            "{error:#}"
+        );
+
+        ensure_epoch_is_stored(1079, 466_128_000, 466_559_999, 465_818_301, 468_118_000).unwrap();
+        ensure_epoch_is_stored(1079, 466_128_000, 466_559_999, 466_128_000, 466_559_999).unwrap();
+    }
+
+    #[test]
+    fn a_published_archive_file_blocks_a_new_epoch_directory() {
+        let dir = tempfile::tempdir().unwrap();
+        let output = epoch_output_dir(dir.path(), 1079);
+        ensure_no_published_archive_file(&output).unwrap();
+        std::fs::create_dir_all(&output).unwrap();
+        std::fs::write(output.join(format!("{ARCHIVE_V2_BLOCKS_FILE}.tmp")), b"partial").unwrap();
+        ensure_no_published_archive_file(&output).unwrap();
+        std::fs::write(output.join(ARCHIVE_V2_BLOCKS_FILE), b"x").unwrap();
+        let error = ensure_no_published_archive_file(&output).unwrap_err();
+        assert!(
+            error.to_string().contains("archive-v2-blocks.zstd"),
+            "{error:#}"
+        );
     }
 
     #[test]
