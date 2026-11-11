@@ -320,9 +320,10 @@ where
 
 /// Read each slot once. A rooted full block is checked, passed to `on_block`,
 /// then dropped. A non-root slot is left out when the next root jumps over it
-/// and slot N+8 has a skip certificate. A hole is proved from the footer of
-/// slot N+8. When that slot has no `SlotMeta`, the parent chain of the next
-/// full rooted block can prove the skip.
+/// and slot N+8 has a skip certificate. When slot N+8 has no `SlotMeta`, that
+/// parent jump is enough. A hole is proved from the footer of slot N+8. When
+/// that slot has no `SlotMeta`, the parent chain of the next full rooted block
+/// can prove the skip.
 ///
 /// When that footer belongs to a later block in the window, the block is kept
 /// until the scan reaches it, so its shreds are not read a second time.

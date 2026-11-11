@@ -13,7 +13,8 @@ pub(crate) struct Inspected {
     pub block_slots: Vec<u64>,
     pub skips: Vec<u64>,
     /// Slots that have data, are not root, and are left out of the archive.
-    /// The next root jumps over each one, and slot N+8 has a skip certificate.
+    /// The next root jumps over each one. Slot N+8 has a skip certificate, or
+    /// it has no `SlotMeta`.
     pub forks: Vec<u64>,
     pub boundary_hash: [u8; 32],
 }
@@ -152,9 +153,12 @@ fn chain_relation_in_view(view: &LedgerView, slot: u64) -> Result<ChainRelation>
     })
 }
 
-/// Leave out a non-root slot when the rooted chain jumps over it and slot N+8
-/// carries a skip certificate. A notarization certificate does not cancel that
-/// skip. A slot the next root descends from stays an error.
+/// Leave out a non-root slot when the rooted chain jumps over it.
+///
+/// A skip certificate in slot N+8 is enough. A notarization certificate does
+/// not cancel that skip. When slot N+8 has no `SlotMeta`, the certificate
+/// cannot exist, and the parent jump is the proof. A slot the next root
+/// descends from stays an error.
 pub(crate) fn classify_abandoned_fork(
     slot: u64,
     chain: ChainRelation,
@@ -168,7 +172,8 @@ pub(crate) fn classify_abandoned_fork(
         .checked_add(REWARD_SLOT_DISTANCE)
         .context("slot + 8 overflows")?;
     let Some(markers) = carrier_markers else {
-        bail!("slot {slot} has data and is not rooted, and slot {carrier} has no footer proof");
+        forks.push(slot);
+        return Ok(());
     };
     let names = reward_names(markers)
         .with_context(|| format!("slot {carrier} footer cannot prove slot {slot}"))?;
@@ -511,6 +516,20 @@ mod tests {
 
         let error = inspect(&view(10, 12, vec![first, fork, next, carrier])).unwrap_err();
         assert!(error.to_string().contains("descends from it"), "{error:#}");
+    }
+
+    #[test]
+    fn a_parent_jump_omits_a_fork_when_the_footer_slot_is_absent() {
+        let first = test_block(10, 9, [4; 32], [3; 32]);
+        let mut fork = test_block(11, 10, [8; 32], [4; 32]);
+        fork.is_root = false;
+        let next = test_block(14, 10, [5; 32], [4; 32]);
+
+        let inspected = inspect(&view(10, 14, vec![first, fork, next])).unwrap();
+        assert_eq!(inspected.block_slots, vec![10, 14]);
+        assert_eq!(inspected.forks, vec![11]);
+        assert_eq!(inspected.skips, vec![12, 13]);
+        assert_eq!(inspected.boundary_hash, [3; 32]);
     }
 
     #[test]
