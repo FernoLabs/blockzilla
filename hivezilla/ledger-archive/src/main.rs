@@ -2,6 +2,7 @@ mod check;
 mod convert;
 mod ledger;
 mod markers;
+mod notify;
 mod source;
 
 use std::path::PathBuf;
@@ -41,6 +42,8 @@ enum Command {
     /// after the frames. `--level` is the zstd effort, default 1.
     /// `--read-threads` is the number of parallel shred reads, from 1 to 32.
     /// A failure removes the temporary files and does not publish the index.
+    /// A published epoch sends one Telegram line when the bot token and the
+    /// chat id are both set. A Telegram failure still exits 0.
     BuildEpochArchive {
         ledger: PathBuf,
         /// Parent directory. The archive is written to epoch-N inside it.
@@ -53,6 +56,16 @@ enum Command {
         /// Parallel shred reads. 1 reads one slot at a time.
         #[arg(long, default_value_t = 1)]
         read_threads: u8,
+        /// Telegram bot token. The default is empty and sends nothing.
+        #[arg(long, default_value = notify::DEFAULT_TELEGRAM_BOT_TOKEN)]
+        telegram_bot_token: String,
+        /// Telegram channel id. The default is empty and sends nothing.
+        #[arg(
+            long,
+            default_value = notify::DEFAULT_TELEGRAM_CHAT_ID,
+            allow_hyphen_values = true
+        )]
+        telegram_chat_id: String,
     },
 }
 
@@ -81,6 +94,8 @@ fn run() -> Result<()> {
             epoch,
             level,
             read_threads,
+            telegram_bot_token,
+            telegram_chat_id,
         } => {
             let (start_slot, end_slot) = epoch_slot_range(epoch)?;
             let blockstore = open_read_only(&ledger)?;
@@ -98,6 +113,12 @@ fn run() -> Result<()> {
                 build_archive(&ledger, &output, start_slot, end_slot, level, read_threads)?;
             print_report(&inspected);
             println!("Output: {}", output.display());
+            notify::notify_published_epoch(
+                epoch,
+                &output,
+                &telegram_bot_token,
+                &telegram_chat_id,
+            )?;
             Ok(())
         }
     }
