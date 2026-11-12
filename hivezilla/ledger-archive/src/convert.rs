@@ -6,8 +6,10 @@ use std::path::{Path, PathBuf};
 use anyhow::{Context, Result, bail};
 use blockzilla_archive_v2::{
     ARCHIVE_V2_BLOCK_INDEX_FILE, ARCHIVE_V2_BLOCKHASH_REGISTRY_FILE, ARCHIVE_V2_BLOCKS_FILE,
-    ARCHIVE_V2_POH_FILE, ARCHIVE_V2_PREV_BLOCKHASH_TAIL_FILE, ARCHIVE_V2_PUBKEY_REGISTRY_FILE,
-    ARCHIVE_V2_SHREDDING_FILE, ARCHIVE_V2_SIGNATURES_FILE, ARCHIVE_V2_TX_FLAG_HAS_ERROR,
+    ARCHIVE_V2_POH_FILE, ARCHIVE_V2_PREV_BLOCKHASH_TAIL_FILE,
+    ARCHIVE_V2_PUBKEY_REGISTRY_COUNTS_FILE, ARCHIVE_V2_PUBKEY_REGISTRY_FILE,
+    ARCHIVE_V2_PUBKEY_REGISTRY_INDEX_FILE, ARCHIVE_V2_SHREDDING_FILE, ARCHIVE_V2_SIGNATURES_FILE,
+    ARCHIVE_V2_TX_FLAG_HAS_ERROR,
     ARCHIVE_V2_TX_FLAG_HAS_INNER_IX, ARCHIVE_V2_TX_FLAG_HAS_LOADED_ADDRESSES,
     ARCHIVE_V2_TX_FLAG_HAS_LOGS, ARCHIVE_V2_TX_FLAG_HAS_METADATA,
     ARCHIVE_V2_TX_FLAG_HAS_RETURN_DATA, ARCHIVE_V2_TX_FLAG_HAS_TOKEN_BALANCES,
@@ -23,7 +25,9 @@ use blockzilla_compact::{
     CompactPohEntry, CompactReturnData, CompactReward, CompactShredding, CompactTokenBalance,
     CompactTransactionConfig, OwnedCompactAddressTableLookup, OwnedCompactRecentBlockhash,
 };
-use blockzilla_primitives::{CompactPubkey, WincodeLeb128FramedWriter, wincode_leb128_config};
+use blockzilla_primitives::{
+    CompactPubkey, WincodeLeb128FramedWriter, wincode_leb128_config, write_u32_varint,
+};
 use blockzilla_registry::{KeyIndex, write_registry};
 use solana_entry::block_component::BlockComponent;
 use solana_ledger::blockstore::Blockstore;
@@ -154,6 +158,8 @@ struct ArchivePaths {
     poh: PathBuf,
     shredding: PathBuf,
     registry: PathBuf,
+    registry_counts: PathBuf,
+    registry_index: PathBuf,
     tail: PathBuf,
 }
 
@@ -166,11 +172,13 @@ fn temp_paths(output: &Path) -> ArchivePaths {
         poh: output.join(format!("{ARCHIVE_V2_POH_FILE}.tmp")),
         shredding: output.join(format!("{ARCHIVE_V2_SHREDDING_FILE}.tmp")),
         registry: output.join(format!("{ARCHIVE_V2_PUBKEY_REGISTRY_FILE}.tmp")),
+        registry_counts: output.join(format!("{ARCHIVE_V2_PUBKEY_REGISTRY_COUNTS_FILE}.tmp")),
+        registry_index: output.join(format!("{ARCHIVE_V2_PUBKEY_REGISTRY_INDEX_FILE}.tmp")),
         tail: output.join(format!("{ARCHIVE_V2_PREV_BLOCKHASH_TAIL_FILE}.tmp")),
     }
 }
 
-fn temp_file_list(temps: &ArchivePaths) -> [&Path; 8] {
+fn temp_file_list(temps: &ArchivePaths) -> [&Path; 10] {
     [
         &temps.blocks,
         &temps.signatures,
@@ -179,6 +187,8 @@ fn temp_file_list(temps: &ArchivePaths) -> [&Path; 8] {
         &temps.poh,
         &temps.shredding,
         &temps.registry,
+        &temps.registry_counts,
+        &temps.registry_index,
         &temps.tail,
     ]
 }
@@ -390,6 +400,14 @@ impl ArchiveWriter {
         rename_finished(
             &self.paths.registry,
             &output.join(ARCHIVE_V2_PUBKEY_REGISTRY_FILE),
+        )?;
+        rename_finished(
+            &self.paths.registry_counts,
+            &output.join(ARCHIVE_V2_PUBKEY_REGISTRY_COUNTS_FILE),
+        )?;
+        rename_finished(
+            &self.paths.registry_index,
+            &output.join(ARCHIVE_V2_PUBKEY_REGISTRY_INDEX_FILE),
         )?;
         write_archive_v2_hot_block_index(
             &output.join(ARCHIVE_V2_BLOCK_INDEX_FILE),
@@ -621,14 +639,28 @@ fn blockhash_from_shreds(blockstore: &Blockstore, slot: u64) -> Result<Option<[u
     Ok(hash)
 }
 
+struct OrderedRegistry {
+    keys: Vec<[u8; 32]>,
+    counts: Vec<u32>,
+}
+
 fn prepare_registry(temps: &ArchivePaths, counts: PubkeyCounts) -> Result<KeyIndex> {
-    let keys = ordered_registry_keys(counts);
-    write_registry(&temps.registry, &keys)
+    let ordered = ordered_registry(counts);
+    write_registry(&temps.registry, &ordered.keys)
         .with_context(|| format!("write {}", temps.registry.display()))?;
-    Ok(KeyIndex::build_from_slice_low_memory(&keys))
+    write_registry_counts(&temps.registry_counts, &ordered.counts)?;
+    let index = KeyIndex::build_from_slice_low_memory(&ordered.keys);
+    index
+        .write(&temps.registry_index)
+        .with_context(|| format!("write {}", temps.registry_index.display()))?;
+    Ok(index)
 }
 
 fn ordered_registry_keys(counts: PubkeyCounts) -> Vec<[u8; 32]> {
+    ordered_registry(counts).keys
+}
+
+fn ordered_registry(counts: PubkeyCounts) -> OrderedRegistry {
     let mut items: Vec<([u8; 32], u32)> = counts.into_iter().collect();
     items.sort_unstable_by(|(left_key, left_count), (right_key, right_count)| {
         right_count
@@ -637,11 +669,32 @@ fn ordered_registry_keys(counts: PubkeyCounts) -> Vec<[u8; 32]> {
     });
     let compute_budget = compute_budget_program_id();
     let mut keys = Vec::with_capacity(items.len() + 1);
+    let mut counts_in_order = Vec::with_capacity(items.len() + 1);
     if !items.iter().any(|(key, _)| *key == compute_budget) {
         keys.push(compute_budget);
+        counts_in_order.push(0);
     }
-    keys.extend(items.into_iter().map(|(key, _)| key));
-    keys
+    for (key, count) in items {
+        keys.push(key);
+        counts_in_order.push(count);
+    }
+    OrderedRegistry {
+        keys,
+        counts: counts_in_order,
+    }
+}
+
+fn write_registry_counts(path: &Path, counts: &[u32]) -> Result<()> {
+    let file = File::create(path).with_context(|| format!("create {}", path.display()))?;
+    let mut writer = BufWriter::new(file);
+    for count in counts {
+        write_u32_varint(&mut writer, *count)
+            .with_context(|| format!("write {}", path.display()))?;
+    }
+    writer
+        .flush()
+        .with_context(|| format!("flush {}", path.display()))?;
+    Ok(())
 }
 
 fn compute_budget_program_id() -> [u8; 32] {
@@ -1075,7 +1128,7 @@ mod tests {
         SourceReward, SourceShredGroup, SourceStatus, SourceTx, test_block,
     };
     use blockzilla_archive_v2::deserialize_archive_v2_hot_block_blob;
-    use blockzilla_primitives::WincodeLeb128FramedReader;
+    use blockzilla_primitives::{WincodeLeb128FramedReader, read_u32_varint};
     use of_car_reader::blockmarker::parent_consensus_block_id;
     use std::io::Cursor;
 
@@ -1279,6 +1332,12 @@ mod tests {
 
         let registry = std::fs::read(dir.path().join(ARCHIVE_V2_PUBKEY_REGISTRY_FILE)).unwrap();
         assert_eq!(registry.as_slice(), compute_budget_program_id().as_slice());
+        let counts =
+            std::fs::read(dir.path().join(ARCHIVE_V2_PUBKEY_REGISTRY_COUNTS_FILE)).unwrap();
+        assert_eq!(counts, [0]);
+        let key_index =
+            KeyIndex::load(&dir.path().join(ARCHIVE_V2_PUBKEY_REGISTRY_INDEX_FILE)).unwrap();
+        assert_eq!(key_index.lookup(&compute_budget_program_id()), Some(1));
 
         let mut reader = WincodeLeb128FramedReader::new(Cursor::new(
             std::fs::read(dir.path().join(ARCHIVE_V2_SHREDDING_FILE)).unwrap(),
@@ -1318,9 +1377,13 @@ mod tests {
         let inspected = inspect(&view).unwrap();
         let dir = tempfile::tempdir().unwrap();
 
+        let mut slot_11_loads = 0u8;
         let error = write_archive(dir.path(), &inspected, ZSTD_LEVEL, |slot| {
             if slot == 11 {
-                bail!("slot 11 is missing transaction status");
+                slot_11_loads += 1;
+                if slot_11_loads > 1 {
+                    bail!("slot 11 is missing transaction status");
+                }
             }
             view.slots
                 .get(&slot)
@@ -1339,6 +1402,44 @@ mod tests {
             .map(|entry| entry.unwrap().file_name().into_string().unwrap())
             .collect();
         assert!(names.is_empty(), "{names:?}");
+    }
+
+    #[test]
+    fn registry_counts_and_the_index_follow_the_key_order() {
+        let repeated = [4u8; 32];
+        let once = [9u8; 32];
+        let block = block_with_keys(vec![vec![repeated, repeated], vec![once]]);
+        let mut counts = PubkeyCounts::new();
+        count_slot_pubkeys(&block, &mut counts);
+        let ordered = ordered_registry(counts);
+        assert_eq!(
+            ordered.keys,
+            vec![compute_budget_program_id(), repeated, once]
+        );
+        assert_eq!(ordered.counts, vec![0, 2, 1]);
+
+        let dir = tempfile::tempdir().unwrap();
+        let temps = temp_paths(dir.path());
+        let mut counts = PubkeyCounts::new();
+        count_slot_pubkeys(&block, &mut counts);
+        prepare_registry(&temps, counts).unwrap();
+
+        let mut reader = Cursor::new(std::fs::read(&temps.registry_counts).unwrap());
+        let mut stored = Vec::new();
+        while let Some(count) = read_u32_varint(&mut reader).unwrap() {
+            stored.push(count);
+        }
+        assert_eq!(stored, vec![0, 2, 1]);
+
+        let index = KeyIndex::load(&temps.registry_index).unwrap();
+        assert_eq!(index.len(), ordered.keys.len());
+        for (position, key) in ordered.keys.iter().enumerate() {
+            assert_eq!(
+                index.lookup(key),
+                Some(u32::try_from(position).unwrap() + 1)
+            );
+        }
+        assert_eq!(index.lookup(&[3u8; 32]), None);
     }
 
     #[test]
