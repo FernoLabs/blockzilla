@@ -271,6 +271,8 @@ impl ArchiveWriter {
                 poh: temps.poh.clone(),
                 shredding: temps.shredding.clone(),
                 registry: temps.registry.clone(),
+                registry_counts: temps.registry_counts.clone(),
+                registry_index: temps.registry_index.clone(),
                 tail: temps.tail.clone(),
             },
         })
