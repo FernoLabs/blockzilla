@@ -32,25 +32,15 @@ enum Command {
         #[arg(long)]
         end_slot: u64,
     },
-    /// Write a Compact V2 hot archive for one inclusive slot range.
-    BuildArchiveV2FromLedger {
-        ledger: PathBuf,
-        output: PathBuf,
-        #[arg(long)]
-        start_slot: u64,
-        #[arg(long)]
-        end_slot: u64,
-        /// zstd compression level for each independent block frame.
-        #[arg(long, default_value_t = convert::ZSTD_LEVEL)]
-        level: i32,
-        /// Parallel shred reads. 1 reads one slot at a time.
-        #[arg(long, default_value_t = 1)]
-        read_threads: u8,
-    },
     /// Write one epoch under OUTPUT/epoch-N.
     ///
     /// The epoch uses 432000 slots. The directory is created only when the
     /// ledger still stores the first slot and a root has reached the last slot.
+    /// An existing final archive file in that directory stops the command.
+    /// Each rooted block is one independent zstd frame. The index is written
+    /// after the frames. `--level` is the zstd effort, default 1.
+    /// `--read-threads` is the number of parallel shred reads, from 1 to 32.
+    /// A failure removes the temporary files and does not publish the index.
     BuildEpochArchive {
         ledger: PathBuf,
         /// Parent directory. The archive is written to epoch-N inside it.
@@ -83,20 +73,6 @@ fn run() -> Result<()> {
             let blockstore = open_read_only(&ledger)?;
             let inspected = scan_range(&blockstore, start_slot, end_slot, 1, |_| Ok(()))?;
             print_report(&inspected);
-            Ok(())
-        }
-        Command::BuildArchiveV2FromLedger {
-            ledger,
-            output,
-            start_slot,
-            end_slot,
-            level,
-            read_threads,
-        } => {
-            let inspected =
-                build_archive(&ledger, &output, start_slot, end_slot, level, read_threads)?;
-            print_report(&inspected);
-            println!("Output: {}", output.display());
             Ok(())
         }
         Command::BuildEpochArchive {

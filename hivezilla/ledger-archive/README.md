@@ -1,16 +1,35 @@
 # hivezilla-ledger-archive
 
-Reads one inclusive slot range from an Agave ledger and writes a Compact V2 archive of the rooted blocks. The ledger is opened read-only and is not modified.
+`check-ledger-range` checks one inclusive slot range in an Agave ledger and prints a report. `build-epoch-archive` writes a Compact V2 archive of one epoch. The ledger is opened read-only and is not modified.
 
 ```text
 hivezilla-ledger-archive check-ledger-range <LEDGER> --start-slot N --end-slot M
-hivezilla-ledger-archive build-archive-v2-from-ledger <LEDGER> <OUTPUT> \
-  --start-slot N --end-slot M --level 1 --read-threads 1
 hivezilla-ledger-archive build-epoch-archive <LEDGER> <OUTPUT-PARENT> \
   --epoch N --level 1 --read-threads 1
 ```
 
-`check-ledger-range` applies the slot rules and prints a report. `build-archive-v2-from-ledger` writes one independent zstd frame per rooted block, then the index. `build-epoch-archive` writes epoch N, 432000 slots, into `<OUTPUT-PARENT>/epoch-N`. It creates that directory only when the ledger still stores the epoch's first slot and a root has reached its last slot. An existing final archive file in that directory stops the command. `--level` is the zstd effort (default 1). `--read-threads` is the number of parallel shred reads, from 1 to 32. A failure removes the temporary files and does not publish the index.
+`check-ledger-range` applies the slot rules and prints a report.
+
+## build-epoch-archive
+
+Write one epoch from a stopped ledger or a snapshot. The ledger is opened read-only.
+
+The epoch has 432000 slots, from `N * 432000` through `N * 432000 + 431999`. The archive is written to `<OUTPUT-PARENT>/epoch-N`. That directory is created only when the ledger still stores the first slot and a root has reached the last slot. An existing final archive file in that directory stops the command.
+
+`--level` is the zstd effort. The default is 1. `--read-threads` is the number of parallel shred reads, from 1 to 32. The default is 1.
+
+Each rooted block becomes one independent zstd frame in `archive-v2-blocks.zstd`. The command then writes these files in the same directory:
+
+- `archive-v2-blocks.index`
+- `signatures.bin`
+- `blockhash_registry.bin`
+- `vote_hash_registry.bin`
+- `poh.wincode`
+- `shredding.wincode`
+- `registry.bin`
+- `prev_blockhash_tail.bin`
+
+A failure removes the temporary files and does not publish the index. The command prints the block count, the proven skips, the abandoned forks, the first block, the last block, the boundary hash, and the output path.
 
 A slot is written only when it is rooted and its shreds are complete. The tool then checks that every transaction has a status, and that the parent slot and parent blockhash chain to the previous written block.
 
