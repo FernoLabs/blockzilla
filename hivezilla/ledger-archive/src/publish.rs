@@ -12,6 +12,8 @@ use std::fs::File;
 use std::io::Read;
 use std::os::unix::fs::FileExt;
 use std::path::{Path, PathBuf};
+use std::sync::Mutex;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::thread;
 use std::time::Duration;
 
@@ -33,6 +35,7 @@ pub(crate) const R2_PREFIX_ENV: &str = "R2_PREFIX";
 pub(crate) const R2_REGION_ENV: &str = "R2_REGION";
 const DEFAULT_REGION: &str = "auto";
 const PART_SIZE: u64 = 64 * 1024 * 1024;
+const PARALLEL_UPLOADS: usize = 4;
 const UNSIGNED_PAYLOAD: &str = "UNSIGNED-PAYLOAD";
 const MAX_RESPONSE_BYTES: u64 = 1024 * 1024;
 const ATTEMPTS: u32 = 4;
@@ -155,6 +158,63 @@ pub(crate) fn xml_element<'a>(body: &'a str, tag: &str) -> Option<&'a str> {
     Some(body[after..end].trim())
 }
 
+fn ordered_part_etags(mut parts: Vec<(u32, String)>) -> Vec<(u32, String)> {
+    parts.sort_by_key(|(number, _)| *number);
+    parts
+}
+
+fn run_parallel<T, F>(count: usize, workers: usize, task: F) -> Result<Vec<T>>
+where
+    T: Send,
+    F: Fn(usize) -> Result<T> + Sync,
+{
+    if count == 0 {
+        return Ok(Vec::new());
+    }
+    let workers = workers.max(1).min(count);
+    let next = Mutex::new(0usize);
+    let failed = AtomicBool::new(false);
+    let results = Mutex::new((0..count).map(|_| None).collect::<Vec<Option<T>>>());
+    let error = Mutex::new(None);
+    thread::scope(|scope| {
+        for _ in 0..workers {
+            scope.spawn(|| {
+                loop {
+                    let index = {
+                        let mut next = next.lock().expect("part index");
+                        if failed.load(Ordering::SeqCst) || *next >= count {
+                            break;
+                        }
+                        let index = *next;
+                        *next += 1;
+                        index
+                    };
+                    match task(index) {
+                        Ok(value) => results.lock().expect("part results")[index] = Some(value),
+                        Err(err) => {
+                            failed.store(true, Ordering::SeqCst);
+                            let mut saved = error.lock().expect("part error");
+                            if saved.is_none() {
+                                *saved = Some(err);
+                            }
+                            break;
+                        }
+                    }
+                }
+            });
+        }
+    });
+    if let Some(err) = error.into_inner().expect("part error") {
+        return Err(err);
+    }
+    Ok(results
+        .into_inner()
+        .expect("part results")
+        .into_iter()
+        .map(|item| item.expect("part result"))
+        .collect())
+}
+
 pub(crate) fn complete_multipart_body(parts: &[(u32, &str)]) -> String {
     let mut xml = String::from("<CompleteMultipartUpload>");
     for (number, etag) in parts {
@@ -265,14 +325,16 @@ impl R2Client {
         name: &str,
     ) -> Result<()> {
         let ranges = part_ranges(local, PART_SIZE);
-        let mut etags = Vec::with_capacity(ranges.len());
-        for (index, (offset, size)) in ranges.iter().enumerate() {
+        let total = ranges.len();
+        let etags = run_parallel(total, PARALLEL_UPLOADS, |index| {
+            let (offset, size) = ranges[index];
             let part_number = u32::try_from(index + 1).context("part number overflows")?;
-            eprintln!("{name}: part {part_number}/{}", ranges.len());
-            let bytes = read_range(file, *offset, *size)?;
+            eprintln!("{name}: part {part_number}/{total}");
+            let bytes = read_range(file, offset, size)?;
             let etag = self.upload_part(key, upload_id, part_number, &bytes)?;
-            etags.push((part_number, etag));
-        }
+            Ok((part_number, etag))
+        })?;
+        let etags = ordered_part_etags(etags);
         let borrowed = etags
             .iter()
             .map(|(number, etag)| (*number, etag.as_str()))
@@ -634,6 +696,7 @@ fn hmac_sha256(key: &[u8], message: &[u8]) -> [u8; 32] {
 mod tests {
     use super::*;
     use std::io::Write;
+    use std::sync::atomic::AtomicUsize;
 
     fn lookup(values: &[(&str, &str)]) -> impl Fn(&str) -> Option<String> {
         let values = values
@@ -649,6 +712,54 @@ mod tests {
             object_key("compact-v2/blockzilla-20261004", 1084, "registry.bin"),
             "compact-v2/blockzilla-20261004/epoch-1084/registry.bin"
         );
+    }
+
+    #[test]
+    fn part_etags_return_to_part_number_order() {
+        let ordered = ordered_part_etags(vec![
+            (3, "c".to_string()),
+            (1, "a".to_string()),
+            (2, "b".to_string()),
+        ]);
+        assert_eq!(
+            ordered,
+            vec![(1, "a".to_string()), (2, "b".to_string()), (3, "c".to_string())]
+        );
+        let xml = complete_multipart_body(
+            &ordered
+                .iter()
+                .map(|(number, etag)| (*number, etag.as_str()))
+                .collect::<Vec<_>>(),
+        );
+        assert!(xml.find("<PartNumber>1</PartNumber>").unwrap() < xml.find("<PartNumber>3</PartNumber>").unwrap());
+    }
+
+    #[test]
+    fn parallel_uploads_stay_within_four_and_stop_after_a_failure() {
+        let current = AtomicUsize::new(0);
+        let peak = AtomicUsize::new(0);
+        let started = AtomicUsize::new(0);
+        let release = std::sync::Barrier::new(PARALLEL_UPLOADS);
+        let error = run_parallel(8, PARALLEL_UPLOADS, |index| {
+            started.fetch_add(1, Ordering::SeqCst);
+            let now = current.fetch_add(1, Ordering::SeqCst) + 1;
+            peak.fetch_max(now, Ordering::SeqCst);
+            let outcome = (|| {
+                if index < PARALLEL_UPLOADS {
+                    release.wait();
+                }
+                if index == 0 {
+                    bail!("part failed");
+                }
+                thread::sleep(Duration::from_millis(40));
+                Ok(index)
+            })();
+            current.fetch_sub(1, Ordering::SeqCst);
+            outcome
+        });
+        assert!(error.is_err());
+        assert!(peak.load(Ordering::SeqCst) <= PARALLEL_UPLOADS);
+        assert_eq!(started.load(Ordering::SeqCst), PARALLEL_UPLOADS);
     }
 
     #[test]
