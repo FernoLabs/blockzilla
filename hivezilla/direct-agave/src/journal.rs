@@ -1,4 +1,4 @@
-use crate::event::{Event, REVISION, SCHEMA, digest};
+use crate::event::{Event, INTERFACE_VERSION, REVISION, SCHEMA, digest};
 use anyhow::{Context, Result, bail, ensure};
 use crossbeam_channel::{Sender, bounded};
 use rusqlite::{Connection, params};
@@ -143,7 +143,7 @@ impl Journal {
         reserved[4095] = b'\n';
         failure_file.write_all(&reserved)?;
         failure_file.sync_all()?;
-        let session = serde_json::json!({"schema":SCHEMA,"payload_codec":"json-zstd-v1","retirement":"rooted-banks-v1","processed_custody":true,"bank_observations_v2":config.bank_v2,"agave_revision":REVISION,"interface_version":"4.3.0","session_id":session_id,"previous_unclean_sessions":previous_unclean,"config":config,"config_sha256":digest(&serde_json::to_vec(&config)?),"durability":"SQLite WAL synchronous=FULL; only committed rows are durable","unsealed_session_means_gap":true,"shreds":"separate receive hook; no completeness claim"});
+        let session = serde_json::json!({"schema":SCHEMA,"payload_codec":"json-zstd-v1","retirement":"rooted-banks-v1","processed_custody":true,"bank_observations_v2":config.bank_v2,"agave_revision":REVISION,"interface_version":INTERFACE_VERSION,"session_id":session_id,"previous_unclean_sessions":previous_unclean,"config":config,"config_sha256":digest(&serde_json::to_vec(&config)?),"durability":"SQLite WAL synchronous=FULL; only committed rows are durable","unsealed_session_means_gap":true,"shreds":"separate receive hook; no completeness claim"});
         atomic_json(&session_dir.join("SESSION.json"), &session)?;
         let mut db = open_writer(&session_dir.join("events.sqlite"))?;
         db.execute_batch("CREATE TABLE events(sequence INTEGER PRIMARY KEY, slot INTEGER NOT NULL, bank INTEGER, kind TEXT NOT NULL, sha256 TEXT NOT NULL, payload BLOB NOT NULL); CREATE INDEX bank_events ON events(slot,bank,sequence); CREATE INDEX roots ON events(kind,slot); CREATE TABLE status(id INTEGER PRIMARY KEY CHECK(id=1),state TEXT NOT NULL,durable_sequence INTEGER NOT NULL,error TEXT,latest_rooted_slot INTEGER NOT NULL,retired_events INTEGER NOT NULL); INSERT INTO status VALUES(1,'CAPTURING',0,NULL,0,0); CREATE TABLE retire_jobs(id TEXT PRIMARY KEY,bank_index INTEGER NOT NULL,deleted_events INTEGER NOT NULL,marker_sha TEXT NOT NULL);")?;

@@ -1,0 +1,1421 @@
+use std::collections::{BTreeMap, HashSet};
+use std::io::{self, Write};
+use std::path::{Path, PathBuf};
+use std::sync::{Mutex, mpsc};
+use std::thread;
+
+use anyhow::{Context, Result, anyhow, bail};
+use blockzilla_archive_v2::{
+    ARCHIVE_V2_BLOCK_INDEX_FILE, ARCHIVE_V2_BLOCKHASH_REGISTRY_FILE, ARCHIVE_V2_BLOCKS_FILE,
+    ARCHIVE_V2_POH_FILE, ARCHIVE_V2_PREV_BLOCKHASH_TAIL_FILE,
+    ARCHIVE_V2_PUBKEY_REGISTRY_COUNTS_FILE, ARCHIVE_V2_PUBKEY_REGISTRY_FILE,
+    ARCHIVE_V2_PUBKEY_REGISTRY_INDEX_FILE, ARCHIVE_V2_SHREDDING_FILE, ARCHIVE_V2_SIGNATURES_FILE,
+    ARCHIVE_V2_VOTE_HASH_REGISTRY_FILE,
+};
+use blockzilla_compact::{CompactInstructionError, CompactTransactionError};
+use solana_entry::block_component::BlockComponent;
+use solana_instruction_error::InstructionError;
+use solana_ledger::blockstore::Blockstore;
+use solana_ledger::blockstore::error::BlockstoreError;
+use solana_ledger::blockstore_meta::BlockLocation;
+use solana_ledger::blockstore_options::{
+    AccessType, BLOCKSTORE_DIRECTORY_ROCKS_LEVEL, BlockstoreOptions,
+};
+use solana_message::VersionedMessage;
+use solana_reward_info::RewardType;
+use solana_transaction_error::TransactionError;
+use solana_transaction_status::{Reward, TransactionStatusMeta};
+
+use crate::check::{
+    ChainRelation, Inspected, PreviousBlock, accept_block_against, classify_abandoned_fork,
+    classify_hole, hole_uses_parent_chain, parent_chain_relation,
+};
+use crate::source::{
+    REWARD_SLOT_DISTANCE, RawComponent, SlotData, SourceEntry, SourceHeader, SourceInnerGroup,
+    SourceInnerInstruction, SourceInstruction, SourceLookup, SourceMessage, SourceMessageBody,
+    SourceReturnData, SourceReward, SourceStatus, SourceTokenBalance, SourceTx, SourceTxConfig,
+    SourceV1Message,
+};
+
+/// Open a ledger only in `AccessType::ReadOnly`.
+///
+/// `Blockstore::open` creates a missing ledger directory. This function
+/// returns before that call when `rocksdb` is not already a directory.
+pub(crate) fn read_only_options(ledger: &Path) -> Result<BlockstoreOptions> {
+    let rocks = ledger.join(BLOCKSTORE_DIRECTORY_ROCKS_LEVEL);
+    if !rocks.is_dir() {
+        bail!("rocksdb directory {} does not exist", rocks.display());
+    }
+    let mut options = BlockstoreOptions::default();
+    options.access_type = AccessType::ReadOnly;
+    reject_non_readonly(&options.access_type)?;
+    Ok(options)
+}
+
+pub(crate) fn reject_non_readonly(access: &AccessType) -> Result<()> {
+    if *access == AccessType::ReadOnly {
+        Ok(())
+    } else {
+        bail!("ledger archive opens AccessType::ReadOnly only");
+    }
+}
+
+pub(crate) fn open_read_only(ledger: &Path) -> Result<Blockstore> {
+    let options = read_only_options(ledger)?;
+    Blockstore::open_with_options(ledger, options)
+        .with_context(|| format!("open ledger {}", ledger.display()))
+}
+
+pub(crate) const SLOTS_PER_EPOCH: u64 = 432_000;
+
+pub(crate) const EPOCH_ARCHIVE_FILES: [&str; 11] = [
+    ARCHIVE_V2_BLOCKS_FILE,
+    ARCHIVE_V2_SIGNATURES_FILE,
+    ARCHIVE_V2_BLOCKHASH_REGISTRY_FILE,
+    ARCHIVE_V2_VOTE_HASH_REGISTRY_FILE,
+    ARCHIVE_V2_POH_FILE,
+    ARCHIVE_V2_SHREDDING_FILE,
+    ARCHIVE_V2_PUBKEY_REGISTRY_FILE,
+    ARCHIVE_V2_PUBKEY_REGISTRY_COUNTS_FILE,
+    ARCHIVE_V2_PUBKEY_REGISTRY_INDEX_FILE,
+    ARCHIVE_V2_PREV_BLOCKHASH_TAIL_FILE,
+    ARCHIVE_V2_BLOCK_INDEX_FILE,
+];
+
+pub(crate) fn epoch_slot_range(epoch: u64) -> Result<(u64, u64)> {
+    let start_slot = epoch
+        .checked_mul(SLOTS_PER_EPOCH)
+        .context("epoch start overflows")?;
+    let end_slot = start_slot
+        .checked_add(SLOTS_PER_EPOCH - 1)
+        .context("epoch end overflows")?;
+    Ok((start_slot, end_slot))
+}
+
+pub(crate) fn epoch_output_dir(parent: &Path, epoch: u64) -> PathBuf {
+    parent.join(format!("epoch-{epoch}"))
+}
+
+/// The epoch is stored when its first slot is still present and a root has
+/// reached its last slot. This does not prove that every root in the range is full.
+pub(crate) fn ensure_epoch_is_stored(
+    epoch: u64,
+    start_slot: u64,
+    end_slot: u64,
+    lowest_slot: u64,
+    max_root: u64,
+) -> Result<()> {
+    if start_slot < lowest_slot {
+        bail!(
+            "epoch {epoch} starts at slot {start_slot} and the ledger starts at slot {lowest_slot}"
+        );
+    }
+    if end_slot > max_root {
+        bail!("epoch {epoch} ends at slot {end_slot} and the last root is slot {max_root}");
+    }
+    Ok(())
+}
+
+pub(crate) fn ensure_no_published_archive_file(output: &Path) -> Result<()> {
+    for name in EPOCH_ARCHIVE_FILES {
+        let path = output.join(name);
+        if path.exists() {
+            bail!("archive file {} already exists", path.display());
+        }
+    }
+    Ok(())
+}
+
+const MAX_READ_THREADS: usize = 32;
+
+struct LoadPool<T> {
+    job_tx: mpsc::Sender<Option<u64>>,
+    res_rx: mpsc::Receiver<(u64, Result<T>)>,
+    inflight: HashSet<u64>,
+    ready: BTreeMap<u64, T>,
+    failed: Option<(u64, anyhow::Error)>,
+    threads: usize,
+    stopped: bool,
+}
+
+struct OrderedLoads<'a, T> {
+    inline: Option<&'a dyn Fn(u64) -> Result<T>>,
+    pool: Option<LoadPool<T>>,
+}
+
+impl<T> OrderedLoads<'_, T> {
+    fn submit(&mut self, slot: u64) -> Result<()> {
+        let Some(pool) = &mut self.pool else {
+            return Ok(());
+        };
+        if pool.inflight.contains(&slot) || pool.ready.contains_key(&slot) {
+            return Ok(());
+        }
+        pool.job_tx
+            .send(Some(slot))
+            .context("read thread stopped")?;
+        pool.inflight.insert(slot);
+        Ok(())
+    }
+
+    fn inflight_count(&self) -> usize {
+        self.pool.as_ref().map(|pool| pool.inflight.len()).unwrap_or(0)
+    }
+
+    fn thread_limit(&self) -> usize {
+        self.pool.as_ref().map(|pool| pool.threads).unwrap_or(1)
+    }
+
+    fn is_pending(&self, slot: u64) -> bool {
+        self.pool.as_ref().is_some_and(|pool| {
+            pool.inflight.contains(&slot) || pool.ready.contains_key(&slot)
+        })
+    }
+
+    fn take(&mut self, slot: u64) -> Result<T> {
+        if let Some(load) = self.inline {
+            return load(slot);
+        }
+        let failed_slot = self
+            .pool
+            .as_ref()
+            .and_then(|pool| pool.failed.as_ref().map(|(slot, _)| *slot));
+        if let Some(failed_slot) = failed_slot
+            && failed_slot <= slot
+        {
+            return Err(self.pool.as_mut().unwrap().failed.take().unwrap().1);
+        }
+        if let Some(value) = self.pool.as_mut().unwrap().ready.remove(&slot) {
+            return Ok(value);
+        }
+        if !self.pool.as_ref().unwrap().inflight.contains(&slot) {
+            self.submit(slot)?;
+        }
+        self.wait(slot)
+    }
+
+    fn wait(&mut self, slot: u64) -> Result<T> {
+        loop {
+            if let Some(value) = self.pool.as_mut().unwrap().ready.remove(&slot) {
+                return Ok(value);
+            }
+            if !self.pool.as_ref().unwrap().inflight.contains(&slot) {
+                bail!("slot {slot} was not loaded");
+            }
+            let (done, result) = self.recv()?;
+            match result {
+                Ok(value) if done == slot => return Ok(value),
+                Ok(value) => {
+                    self.pool.as_mut().unwrap().ready.insert(done, value);
+                }
+                Err(err) => {
+                    self.note_failure(done, err);
+                    if done == slot {
+                        return Err(self.pool.as_mut().unwrap().failed.take().unwrap().1);
+                    }
+                }
+            }
+        }
+    }
+
+    fn note_failure(&mut self, slot: u64, err: anyhow::Error) {
+        let pool = self.pool.as_mut().unwrap();
+        match pool.failed.as_ref() {
+            Some((previous, _)) if *previous <= slot => {}
+            _ => pool.failed = Some((slot, err)),
+        }
+    }
+
+    fn recv(&mut self) -> Result<(u64, Result<T>)> {
+        let pool = self.pool.as_mut().unwrap();
+        let (slot, result) = pool.res_rx.recv().context("read thread stopped")?;
+        pool.inflight.remove(&slot);
+        Ok((slot, result))
+    }
+
+    fn stop(&mut self) {
+        let Some(pool) = &mut self.pool else {
+            return;
+        };
+        if pool.stopped {
+            return;
+        }
+        pool.stopped = true;
+        for _ in 0..pool.threads {
+            let _ = pool.job_tx.send(None);
+        }
+        while !pool.inflight.is_empty() {
+            match pool.res_rx.recv() {
+                Ok((slot, _)) => {
+                    pool.inflight.remove(&slot);
+                }
+                Err(_) => break,
+            }
+        }
+    }
+}
+
+impl<T> Drop for OrderedLoads<'_, T> {
+    fn drop(&mut self) {
+        self.stop();
+    }
+}
+
+fn with_ordered_loads<T, R>(
+    threads: usize,
+    load: &(impl Fn(u64) -> Result<T> + Sync),
+    body: impl FnOnce(&mut OrderedLoads<'_, T>) -> Result<R>,
+) -> Result<R>
+where
+    T: Send,
+{
+    if threads == 1 {
+        let mut loads = OrderedLoads {
+            inline: Some(load),
+            pool: None,
+        };
+        return body(&mut loads);
+    }
+    let (job_tx, job_rx) = mpsc::channel::<Option<u64>>();
+    let job_rx = Mutex::new(job_rx);
+    let job_rx = &job_rx;
+    let (res_tx, res_rx) = mpsc::channel::<(u64, Result<T>)>();
+    thread::scope(move |scope| {
+        for _ in 0..threads {
+            let res_tx = res_tx.clone();
+            let job_rx = job_rx;
+            let load = load;
+            scope.spawn(move || {
+                loop {
+                    let job = {
+                        let rx = job_rx.lock().expect("read thread lock");
+                        rx.recv()
+                    };
+                    match job {
+                        Ok(Some(slot)) => {
+                            let result = load(slot);
+                            if res_tx.send((slot, result)).is_err() {
+                                break;
+                            }
+                        }
+                        _ => break,
+                    }
+                }
+            });
+        }
+        drop(res_tx);
+        let mut loads = OrderedLoads {
+            inline: None,
+            pool: Some(LoadPool {
+                job_tx,
+                res_rx,
+                inflight: HashSet::new(),
+                ready: BTreeMap::new(),
+                failed: None,
+                threads,
+                stopped: false,
+            }),
+        };
+        let result = body(&mut loads);
+        loads.stop();
+        result
+    })
+}
+
+/// Read each slot once. A rooted full block is checked, passed to `on_block`,
+/// then dropped. A non-root slot is left out when the next root jumps over it
+/// and slot N+8 has a skip certificate. When slot N+8 has no `SlotMeta` or is
+/// not root, that parent jump is enough. A hole is proved from the footer of
+/// slot N+8. When that slot has no `SlotMeta` or is not root, the parent chain
+/// of the next full rooted block can prove the skip.
+///
+/// When that footer belongs to a later block in the window, the block is kept
+/// until the scan reaches it, so its shreds are not read a second time.
+/// `read_threads` above 1 reconstructs later rooted slots while the current
+/// slot is still checked. Results are accepted in slot order.
+pub(crate) fn scan_range<F>(
+    blockstore: &Blockstore,
+    start_slot: u64,
+    end_slot: u64,
+    read_threads: usize,
+    mut on_block: F,
+) -> Result<Inspected>
+where
+    F: FnMut(&SlotData) -> Result<()>,
+{
+    if !(1..=MAX_READ_THREADS).contains(&read_threads) {
+        bail!("read threads {read_threads} is outside 1 to {MAX_READ_THREADS}");
+    }
+    if start_slot > end_slot {
+        bail!("start slot {start_slot} is after end slot {end_slot}");
+    }
+    progress(format!(
+        "reading slots {start_slot} to {end_slot} with {read_threads} threads"
+    ));
+    let load = |slot: u64| load_rooted_block(blockstore, slot);
+    with_ordered_loads(read_threads, &load, |loads| {
+        scan_loaded(
+            blockstore,
+            loads,
+            start_slot,
+            end_slot,
+            read_threads,
+            &mut on_block,
+        )
+    })
+}
+
+fn scan_loaded<F>(
+    blockstore: &Blockstore,
+    loads: &mut OrderedLoads<SlotData>,
+    start_slot: u64,
+    end_slot: u64,
+    read_threads: usize,
+    on_block: &mut F,
+) -> Result<Inspected>
+where
+    F: FnMut(&SlotData) -> Result<()>,
+{
+    let mut ahead = std::collections::BTreeMap::<u64, SlotData>::new();
+    let mut block_slots = Vec::new();
+    let mut skips = Vec::new();
+    let mut forks = Vec::new();
+    let mut previous = None;
+    let mut boundary_hash = None;
+    let mut scanned = 0u64;
+    for slot in start_slot..=end_slot {
+        scanned += 1;
+        let prefetch_end = slot
+            .saturating_add(u64::try_from(read_threads).unwrap_or(u64::MAX).saturating_sub(1))
+            .min(end_slot);
+        if slot < end_slot {
+            prefetch_rooted_slots(blockstore, loads, &ahead, slot + 1, prefetch_end)?;
+        }
+        if let Some(data) = ahead.remove(&slot) {
+            accept_one(
+                data,
+                start_slot,
+                end_slot,
+                &mut previous,
+                &mut boundary_hash,
+                &mut block_slots,
+                on_block,
+            )?;
+        } else if let Some(meta) = blockstore
+            .meta(slot)
+            .with_context(|| format!("read SlotMeta for slot {slot}"))?
+        {
+            if !blockstore.is_root(slot) {
+                leave_out_abandoned_fork(
+                    blockstore,
+                    loads,
+                    slot,
+                    end_slot,
+                    &mut ahead,
+                    &mut forks,
+                )?;
+            } else if !meta.is_full() {
+                bail!("slot {slot} is rooted and is not full");
+            } else {
+                let data = loads.take(slot)?;
+                accept_one(
+                    data,
+                    start_slot,
+                    end_slot,
+                    &mut previous,
+                    &mut boundary_hash,
+                    &mut block_slots,
+                    on_block,
+                )?;
+            }
+        } else {
+            let markers = proof_markers(blockstore, loads, slot, end_slot, &mut ahead)?;
+            let chain = if hole_uses_parent_chain(slot, markers.as_deref())? {
+                full_root_relation(blockstore, slot)?
+            } else {
+                None
+            };
+            classify_hole(slot, markers.as_deref(), chain, &mut skips)?;
+            // A jump is logged when N+8 has no footer, and when that footer
+            // carries both a skip reward and a notarization reward. A
+            // skip-only footer stays silent.
+            if let Some(ChainRelation::JumpsOver { next_root }) = chain {
+                progress(format!(
+                    "slot {slot} left out, rooted chain jumps to {next_root}"
+                ));
+            }
+        }
+        if scanned % 1000 == 0 {
+            progress(format!(
+                "read {scanned} slots, latest slot {slot}, {} blocks accepted",
+                block_slots.len()
+            ));
+        }
+    }
+    progress(format!(
+        "read finished: {scanned} slots scanned, {} blocks accepted",
+        block_slots.len()
+    ));
+    let Some(boundary_hash) = boundary_hash else {
+        bail!("slots {start_slot} to {end_slot} have no block");
+    };
+    Ok(Inspected {
+        block_slots,
+        skips,
+        forks,
+        boundary_hash,
+    })
+}
+
+fn prefetch_rooted_slots(
+    blockstore: &Blockstore,
+    loads: &mut OrderedLoads<SlotData>,
+    ahead: &BTreeMap<u64, SlotData>,
+    start: u64,
+    end: u64,
+) -> Result<()> {
+    if loads.pool.is_none() {
+        return Ok(());
+    }
+    let mut slot = start;
+    while slot <= end && loads.inflight_count() < loads.thread_limit() {
+        if ahead.contains_key(&slot) || loads.is_pending(slot) {
+            slot += 1;
+            continue;
+        }
+        let Some(meta) = blockstore
+            .meta(slot)
+            .with_context(|| format!("read SlotMeta for slot {slot}"))?
+        else {
+            slot += 1;
+            continue;
+        };
+        if blockstore.is_root(slot) && meta.is_full() {
+            loads.submit(slot)?;
+        }
+        slot += 1;
+    }
+    Ok(())
+}
+
+fn leave_out_abandoned_fork(
+    blockstore: &Blockstore,
+    loads: &mut OrderedLoads<SlotData>,
+    slot: u64,
+    end_slot: u64,
+    ahead: &mut BTreeMap<u64, SlotData>,
+    forks: &mut Vec<u64>,
+) -> Result<()> {
+    let relation = rooted_chain_relation(blockstore, slot)?;
+    let markers = match relation {
+        ChainRelation::JumpsOver { .. } => {
+            proof_markers(blockstore, loads, slot, end_slot, ahead)?
+        }
+        ChainRelation::DescendsFrom { .. } => None,
+    };
+    let next_root = match relation {
+        ChainRelation::JumpsOver { next_root } => Some(next_root),
+        ChainRelation::DescendsFrom { .. } => None,
+    };
+    classify_abandoned_fork(slot, relation, markers.as_deref(), forks)?;
+    if let Some(next_root) = next_root {
+        progress(format!(
+            "slot {slot} left out, rooted chain jumps to {next_root}"
+        ));
+    }
+    Ok(())
+}
+
+fn full_root_relation(blockstore: &Blockstore, slot: u64) -> Result<Option<ChainRelation>> {
+    let start = slot.checked_add(1).context("slot + 1 overflows")?;
+    let Some(next_root) = blockstore
+        .rooted_slot_iterator(start)
+        .with_context(|| format!("read roots after slot {slot}"))?
+        .next()
+    else {
+        return Ok(None);
+    };
+    let meta = blockstore
+        .meta(next_root)
+        .with_context(|| format!("read SlotMeta for slot {next_root}"))?;
+    let Some(meta) = meta else {
+        bail!("slot {next_root} has no SlotMeta");
+    };
+    if !meta.is_full() {
+        bail!("slot {next_root} is rooted and is not full");
+    }
+    parent_chain_relation(slot, next_root, |cursor| parent_slot(blockstore, cursor)).map(Some)
+}
+
+fn rooted_chain_relation(blockstore: &Blockstore, slot: u64) -> Result<ChainRelation> {
+    let start = slot.checked_add(1).context("slot + 1 overflows")?;
+    let Some(next_root) = blockstore
+        .rooted_slot_iterator(start)
+        .with_context(|| format!("read roots after slot {slot}"))?
+        .next()
+    else {
+        bail!("slot {slot} has data and is not rooted");
+    };
+    parent_chain_relation(slot, next_root, |cursor| parent_slot(blockstore, cursor))
+}
+
+fn parent_slot(blockstore: &Blockstore, slot: u64) -> Result<Option<u64>> {
+    let meta = blockstore
+        .meta(slot)
+        .with_context(|| format!("read SlotMeta for slot {slot}"))?;
+    let Some(meta) = meta else {
+        bail!("slot {slot} has no SlotMeta");
+    };
+    Ok(meta.parent_slot)
+}
+
+fn accept_one<F>(
+    data: SlotData,
+    start_slot: u64,
+    end_slot: u64,
+    previous: &mut Option<PreviousBlock>,
+    boundary_hash: &mut Option<[u8; 32]>,
+    block_slots: &mut Vec<u64>,
+    on_block: &mut F,
+) -> Result<()>
+where
+    F: FnMut(&SlotData) -> Result<()>,
+{
+    accept_block_against(&data, start_slot, end_slot, previous.as_ref())?;
+    if boundary_hash.is_none() {
+        *boundary_hash = data.previous_blockhash;
+    }
+    on_block(&data)?;
+    *previous = Some(PreviousBlock {
+        slot: data.slot,
+        blockhash: data.blockhash,
+    });
+    block_slots.push(data.slot);
+    Ok(())
+}
+
+fn proof_markers(
+    blockstore: &Blockstore,
+    loads: &mut OrderedLoads<SlotData>,
+    slot: u64,
+    end_slot: u64,
+    ahead: &mut BTreeMap<u64, SlotData>,
+) -> Result<Option<Vec<Vec<u8>>>> {
+    let carrier = slot
+        .checked_add(REWARD_SLOT_DISTANCE)
+        .context("slot + 8 overflows")?;
+    if let Some(data) = ahead.get(&carrier) {
+        return Ok(Some(data.markers.clone()));
+    }
+    let Some(meta) = blockstore
+        .meta(carrier)
+        .with_context(|| format!("read SlotMeta for slot {carrier}"))?
+    else {
+        return Ok(None);
+    };
+    let is_root = blockstore.is_root(carrier);
+    if carrier > end_slot {
+        return Ok(Some(read_markers(blockstore, carrier)?));
+    }
+    // A slot that is not root has no usable footer. An empty list would mean
+    // the footer was read and does not prove the skip.
+    if !in_window_footer_is_readable(is_root, meta.is_full()) {
+        if !is_root {
+            return Ok(None);
+        }
+        return Ok(Some(Vec::new()));
+    }
+    let data = loads.take(carrier)?;
+    let markers = data.markers.clone();
+    ahead.insert(carrier, data);
+    Ok(Some(markers))
+}
+
+/// Inside the window, only a full root provides a footer. A slot that is not
+/// root provides none, so the parent jump decides.
+pub(crate) fn in_window_footer_is_readable(is_root: bool, is_full: bool) -> bool {
+    is_root && is_full
+}
+
+fn progress(message: impl std::fmt::Display) {
+    if cfg!(test) {
+        return;
+    }
+    eprintln!("{message}");
+    let _ = io::stderr().flush();
+}
+
+fn load_rooted_block(blockstore: &Blockstore, slot: u64) -> Result<SlotData> {
+    let (components, ranges, is_full) = blockstore
+        .get_slot_components_with_shred_info(slot, 0, false)
+        .with_context(|| format!("read shreds for slot {slot}"))?;
+    if !is_full {
+        bail!("slot {slot} is not full");
+    }
+    if components.len() != ranges.len() {
+        bail!("slot {slot} component count does not match its shred ranges");
+    }
+
+    let mut markers = Vec::new();
+    let mut raw_entries = Vec::new();
+    let mut raw_components = Vec::with_capacity(components.len());
+    for (component, range) in components.into_iter().zip(ranges) {
+        let entry_count = match component {
+            BlockComponent::EntryBatch(entries) => {
+                let count = u64::try_from(entries.len()).context("entry batch exceeds u64")?;
+                raw_entries.extend(entries);
+                count
+            }
+            BlockComponent::BlockMarker(marker) => {
+                let bytes = wincode::serialize(&marker)
+                    .with_context(|| format!("serialize a block marker in slot {slot}"))?;
+                markers.push(bytes);
+                0
+            }
+        };
+        raw_components.push(RawComponent {
+            entry_count,
+            shred_range_end: range.end,
+        });
+    }
+    let shredding = crate::source::shred_groups(&raw_components)
+        .with_context(|| format!("shred ranges for slot {slot}"))?;
+
+    let block = match blockstore.get_rooted_block(slot, true) {
+        Ok(block) => block,
+        Err(BlockstoreError::ParentEntriesUnavailable) => {
+            bail!("slot {slot} is missing parent entries");
+        }
+        Err(BlockstoreError::MissingTransactionMetadata) => {
+            bail!("slot {slot} is missing transaction status");
+        }
+        Err(err) => return Err(anyhow!(err).context(format!("read rooted block {slot}"))),
+    };
+
+    let has_markers = !markers.is_empty();
+    let consensus_block_id = consensus_block_id(blockstore, slot, has_markers)?;
+    let mut tx_cursor = 0usize;
+    let mut entries = Vec::with_capacity(raw_entries.len());
+    for entry in &raw_entries {
+        let tx_count = entry.transactions.len();
+        let rooted = block
+            .transactions
+            .get(tx_cursor..tx_cursor + tx_count)
+            .with_context(|| {
+                format!("slot {slot} entry transactions do not match the rooted block")
+            })?;
+        let mut signature_count = 0u32;
+        for (entry_tx, rooted_tx) in entry.transactions.iter().zip(rooted) {
+            if entry_tx.signatures != rooted_tx.transaction.signatures {
+                bail!("slot {slot} entry transactions do not match the rooted block");
+            }
+            let count = u32::try_from(entry_tx.signatures.len())
+                .context("entry signature count exceeds u32")?;
+            signature_count = signature_count
+                .checked_add(count)
+                .context("entry signature count overflows")?;
+        }
+        entries.push(SourceEntry {
+            num_hashes: entry.num_hashes,
+            hash: copy32(entry.hash.as_ref())?,
+            tx_count: u32::try_from(tx_count).context("entry has more than u32 transactions")?,
+            signature_count,
+        });
+        tx_cursor += tx_count;
+    }
+    if tx_cursor != block.transactions.len() {
+        bail!("slot {slot} rooted block has transactions that are not in its entries");
+    }
+
+    let transactions = block
+        .transactions
+        .iter()
+        .enumerate()
+        .map(|(index, tx)| map_transaction(slot, index, tx))
+        .collect::<Result<Vec<_>>>()?;
+
+    Ok(SlotData {
+        slot,
+        is_root: true,
+        is_full: true,
+        parent_slot: Some(block.parent_slot),
+        previous_blockhash: Some(decode_hash(
+            &block.previous_blockhash,
+            &format!("slot {slot} previous blockhash"),
+        )?),
+        blockhash: decode_hash(&block.blockhash, &format!("slot {slot} blockhash"))?,
+        block_time: block.block_time,
+        block_height: block.block_height,
+        num_partitions: block.num_partitions,
+        rewards: block
+            .rewards
+            .iter()
+            .map(|reward| map_reward(slot, reward))
+            .collect::<Result<Vec<_>>>()?,
+        consensus_block_id: Some(consensus_block_id),
+        markers,
+        entries,
+        shredding,
+        transactions,
+    })
+}
+
+fn consensus_block_id(blockstore: &Blockstore, slot: u64, has_markers: bool) -> Result<[u8; 32]> {
+    let hash = if has_markers {
+        blockstore
+            .get_double_merkle_root(slot, BlockLocation::Original)
+            .with_context(|| format!("read double merkle root for slot {slot}"))?
+    } else {
+        blockstore
+            .get_last_shred_merkle_root(slot)
+            .with_context(|| format!("read last shred merkle root for slot {slot}"))?
+    };
+    let Some(hash) = hash else {
+        bail!("slot {slot} has no consensus block id");
+    };
+    copy32(hash.as_ref())
+}
+
+fn read_markers(blockstore: &Blockstore, slot: u64) -> Result<Vec<Vec<u8>>> {
+    let (components, _, _) = blockstore
+        .get_slot_components_with_shred_info(slot, 0, false)
+        .with_context(|| format!("read markers for slot {slot}"))?;
+    let mut markers = Vec::new();
+    for component in components {
+        if let BlockComponent::BlockMarker(marker) = component {
+            markers.push(
+                wincode::serialize(&marker)
+                    .with_context(|| format!("serialize a block marker in slot {slot}"))?,
+            );
+        }
+    }
+    Ok(markers)
+}
+
+fn map_transaction(
+    slot: u64,
+    index: usize,
+    tx: &solana_transaction_status::VersionedTransactionWithStatusMeta,
+) -> Result<SourceTx> {
+    if tx.transaction.signatures.len() > usize::from(u8::MAX) {
+        bail!("slot {slot} transaction {index} has more than 255 signatures");
+    }
+    let signatures = tx
+        .transaction
+        .signatures
+        .iter()
+        .map(|signature| copy64(signature.as_ref()))
+        .collect::<Result<Vec<_>>>()?;
+    Ok(SourceTx {
+        signatures,
+        message: map_message(&tx.transaction.message)?,
+        status: Some(map_status(slot, index, &tx.meta)?),
+    })
+}
+
+fn map_message(message: &VersionedMessage) -> Result<SourceMessage> {
+    match message {
+        VersionedMessage::Legacy(message) => Ok(SourceMessage::Legacy(SourceMessageBody {
+            header: map_header(&message.header),
+            account_keys: message
+                .account_keys
+                .iter()
+                .map(|key| copy32(key.as_ref()))
+                .collect::<Result<Vec<_>>>()?,
+            recent_blockhash: copy32(message.recent_blockhash.as_ref())?,
+            instructions: message.instructions.iter().map(map_instruction).collect(),
+            lookups: Vec::new(),
+        })),
+        VersionedMessage::V0(message) => Ok(SourceMessage::V0(SourceMessageBody {
+            header: map_header(&message.header),
+            account_keys: message
+                .account_keys
+                .iter()
+                .map(|key| copy32(key.as_ref()))
+                .collect::<Result<Vec<_>>>()?,
+            recent_blockhash: copy32(message.recent_blockhash.as_ref())?,
+            instructions: message.instructions.iter().map(map_instruction).collect(),
+            lookups: message
+                .address_table_lookups
+                .iter()
+                .map(|lookup| {
+                    Ok(SourceLookup {
+                        account_key: copy32(lookup.account_key.as_ref())?,
+                        writable_indexes: lookup.writable_indexes.clone(),
+                        readonly_indexes: lookup.readonly_indexes.clone(),
+                    })
+                })
+                .collect::<Result<Vec<_>>>()?,
+        })),
+        VersionedMessage::V1(message) => Ok(SourceMessage::V1(SourceV1Message {
+            header: map_header(&message.header),
+            config: SourceTxConfig {
+                priority_fee: message.config.priority_fee,
+                compute_unit_limit: message.config.compute_unit_limit,
+                loaded_accounts_data_size_limit: message.config.loaded_accounts_data_size_limit,
+                heap_size: message.config.heap_size,
+            },
+            account_keys: message
+                .account_keys
+                .iter()
+                .map(|key| copy32(key.as_ref()))
+                .collect::<Result<Vec<_>>>()?,
+            recent_blockhash: copy32(message.lifetime_specifier.as_ref())?,
+            instructions: message.instructions.iter().map(map_instruction).collect(),
+        })),
+    }
+}
+
+fn map_header(header: &solana_message::MessageHeader) -> SourceHeader {
+    SourceHeader {
+        num_required_signatures: header.num_required_signatures,
+        num_readonly_signed_accounts: header.num_readonly_signed_accounts,
+        num_readonly_unsigned_accounts: header.num_readonly_unsigned_accounts,
+    }
+}
+
+fn map_instruction(
+    instruction: &solana_message::compiled_instruction::CompiledInstruction,
+) -> SourceInstruction {
+    SourceInstruction {
+        program_id_index: instruction.program_id_index,
+        accounts: instruction.accounts.clone(),
+        data: instruction.data.clone(),
+    }
+}
+
+fn map_status(slot: u64, index: usize, meta: &TransactionStatusMeta) -> Result<SourceStatus> {
+    let err = match &meta.status {
+        Ok(()) => None,
+        Err(err) => Some(
+            map_transaction_error(err)
+                .with_context(|| format!("slot {slot} transaction {index} error"))?,
+        ),
+    };
+    Ok(SourceStatus {
+        err,
+        fee: meta.fee,
+        pre_balances: meta.pre_balances.clone(),
+        post_balances: meta.post_balances.clone(),
+        inner_instructions: meta.inner_instructions.as_ref().map(|groups| {
+            groups
+                .iter()
+                .map(|group| SourceInnerGroup {
+                    index: u32::from(group.index),
+                    instructions: group
+                        .instructions
+                        .iter()
+                        .map(|instruction| SourceInnerInstruction {
+                            program_id_index: u32::from(instruction.instruction.program_id_index),
+                            accounts: instruction.instruction.accounts.clone(),
+                            data: instruction.instruction.data.clone(),
+                            stack_height: instruction.stack_height,
+                        })
+                        .collect(),
+                })
+                .collect()
+        }),
+        logs: meta.log_messages.clone(),
+        pre_token_balances: map_token_balances(slot, index, meta.pre_token_balances.as_deref())?,
+        post_token_balances: map_token_balances(slot, index, meta.post_token_balances.as_deref())?,
+        rewards: meta
+            .rewards
+            .as_deref()
+            .unwrap_or(&[])
+            .iter()
+            .map(|reward| map_reward(slot, reward))
+            .collect::<Result<Vec<_>>>()?,
+        loaded_writable: meta
+            .loaded_addresses
+            .writable
+            .iter()
+            .map(|key| copy32(key.as_ref()))
+            .collect::<Result<Vec<_>>>()?,
+        loaded_readonly: meta
+            .loaded_addresses
+            .readonly
+            .iter()
+            .map(|key| copy32(key.as_ref()))
+            .collect::<Result<Vec<_>>>()?,
+        return_data: meta
+            .return_data
+            .as_ref()
+            .map(|data| -> Result<SourceReturnData> {
+                Ok(SourceReturnData {
+                    program_id: copy32(data.program_id.as_ref())?,
+                    data: data.data.clone(),
+                })
+            })
+            .transpose()?,
+        compute_units_consumed: meta.compute_units_consumed,
+        cost_units: meta.cost_units,
+    })
+}
+
+fn map_token_balances(
+    slot: u64,
+    index: usize,
+    balances: Option<&[solana_transaction_status::TransactionTokenBalance]>,
+) -> Result<Vec<SourceTokenBalance>> {
+    let Some(balances) = balances else {
+        return Ok(Vec::new());
+    };
+    balances
+        .iter()
+        .map(|balance| {
+            let amount = balance
+                .ui_token_amount
+                .amount
+                .parse::<u64>()
+                .with_context(|| {
+                    format!(
+                        "slot {slot} transaction {index} token amount {}",
+                        balance.ui_token_amount.amount
+                    )
+                })?;
+            Ok(SourceTokenBalance {
+                account_index: u32::from(balance.account_index),
+                mint: decode_key(&balance.mint, "token mint")?,
+                owner: decode_optional_key(&balance.owner, "token owner")?,
+                program_id: decode_optional_key(&balance.program_id, "token program")?,
+                amount,
+                decimals: balance.ui_token_amount.decimals,
+            })
+        })
+        .collect()
+}
+
+fn map_reward(slot: u64, reward: &Reward) -> Result<SourceReward> {
+    if reward.commission.is_none() && reward.commission_bps.is_some() {
+        bail!("slot {slot} reward stores commission_bps without a u8 commission");
+    }
+    if let (Some(commission), Some(bps)) = (reward.commission, reward.commission_bps) {
+        if u16::from(commission).checked_mul(100) != Some(bps) {
+            bail!("slot {slot} reward commission {commission} does not match commission_bps {bps}");
+        }
+    }
+    Ok(SourceReward {
+        pubkey: decode_key(&reward.pubkey, "reward pubkey")?,
+        lamports: reward.lamports,
+        post_balance: reward.post_balance,
+        reward_type: reward_type_code(reward.reward_type),
+        commission: reward.commission,
+    })
+}
+
+pub(crate) fn reward_type_code(kind: Option<RewardType>) -> i32 {
+    match kind {
+        None => 0,
+        Some(RewardType::Fee) => 1,
+        Some(RewardType::Rent) => 2,
+        Some(RewardType::Staking) => 3,
+        Some(RewardType::Voting) => 4,
+        Some(RewardType::DeactivatedStake) => 5,
+        Some(RewardType::VATDebit) => 6,
+    }
+}
+
+pub(crate) fn map_transaction_error(err: &TransactionError) -> Result<CompactTransactionError> {
+    Ok(match err {
+        TransactionError::AccountInUse => CompactTransactionError::AccountInUse,
+        TransactionError::AccountLoadedTwice => CompactTransactionError::AccountLoadedTwice,
+        TransactionError::AccountNotFound => CompactTransactionError::AccountNotFound,
+        TransactionError::ProgramAccountNotFound => CompactTransactionError::ProgramAccountNotFound,
+        TransactionError::InsufficientFundsForFee => {
+            CompactTransactionError::InsufficientFundsForFee
+        }
+        TransactionError::InvalidAccountForFee => CompactTransactionError::InvalidAccountForFee,
+        TransactionError::AlreadyProcessed => CompactTransactionError::AlreadyProcessed,
+        TransactionError::BlockhashNotFound => CompactTransactionError::BlockhashNotFound,
+        TransactionError::InstructionError(index, err) => {
+            CompactTransactionError::InstructionError(*index, map_instruction_error(err)?)
+        }
+        TransactionError::CallChainTooDeep => CompactTransactionError::CallChainTooDeep,
+        TransactionError::MissingSignatureForFee => CompactTransactionError::MissingSignatureForFee,
+        TransactionError::InvalidAccountIndex => CompactTransactionError::InvalidAccountIndex,
+        TransactionError::SignatureFailure => CompactTransactionError::SignatureFailure,
+        TransactionError::InvalidProgramForExecution => {
+            CompactTransactionError::InvalidProgramForExecution
+        }
+        TransactionError::SanitizeFailure => CompactTransactionError::SanitizeFailure,
+        TransactionError::ClusterMaintenance => CompactTransactionError::ClusterMaintenance,
+        TransactionError::AccountBorrowOutstanding => {
+            CompactTransactionError::AccountBorrowOutstanding
+        }
+        TransactionError::WouldExceedMaxBlockCostLimit => {
+            CompactTransactionError::WouldExceedMaxBlockCostLimit
+        }
+        TransactionError::UnsupportedVersion => CompactTransactionError::UnsupportedVersion,
+        TransactionError::InvalidWritableAccount => CompactTransactionError::InvalidWritableAccount,
+        TransactionError::WouldExceedMaxAccountCostLimit => {
+            CompactTransactionError::WouldExceedMaxAccountCostLimit
+        }
+        TransactionError::WouldExceedAccountDataBlockLimit => {
+            CompactTransactionError::WouldExceedAccountDataBlockLimit
+        }
+        TransactionError::TooManyAccountLocks => CompactTransactionError::TooManyAccountLocks,
+        TransactionError::AddressLookupTableNotFound => {
+            CompactTransactionError::AddressLookupTableNotFound
+        }
+        TransactionError::InvalidAddressLookupTableOwner => {
+            CompactTransactionError::InvalidAddressLookupTableOwner
+        }
+        TransactionError::InvalidAddressLookupTableData => {
+            CompactTransactionError::InvalidAddressLookupTableData
+        }
+        TransactionError::InvalidAddressLookupTableIndex => {
+            CompactTransactionError::InvalidAddressLookupTableIndex
+        }
+        TransactionError::InvalidRentPayingAccount => {
+            CompactTransactionError::InvalidRentPayingAccount
+        }
+        TransactionError::WouldExceedMaxVoteCostLimit => {
+            CompactTransactionError::WouldExceedMaxVoteCostLimit
+        }
+        TransactionError::WouldExceedAccountDataTotalLimit => {
+            CompactTransactionError::WouldExceedAccountDataTotalLimit
+        }
+        TransactionError::DuplicateInstruction(index) => {
+            CompactTransactionError::DuplicateInstruction(*index)
+        }
+        TransactionError::InsufficientFundsForRent { account_index } => {
+            CompactTransactionError::InsufficientFundsForRent {
+                account_index: *account_index,
+            }
+        }
+        TransactionError::MaxLoadedAccountsDataSizeExceeded => {
+            CompactTransactionError::MaxLoadedAccountsDataSizeExceeded
+        }
+        TransactionError::InvalidLoadedAccountsDataSizeLimit => {
+            CompactTransactionError::InvalidLoadedAccountsDataSizeLimit
+        }
+        TransactionError::ResanitizationNeeded => CompactTransactionError::ResanitizationNeeded,
+        TransactionError::ProgramExecutionTemporarilyRestricted { account_index } => {
+            CompactTransactionError::ProgramExecutionTemporarilyRestricted {
+                account_index: *account_index,
+            }
+        }
+        TransactionError::UnbalancedTransaction => CompactTransactionError::UnbalancedTransaction,
+        TransactionError::ProgramCacheHitMaxLimit => {
+            CompactTransactionError::ProgramCacheHitMaxLimit
+        }
+        TransactionError::CommitCancelled => CompactTransactionError::CommitCancelled,
+        TransactionError::BailOut => {
+            bail!("transaction error BailOut has no compact encoding");
+        }
+        other => bail!("unsupported transaction error {other:?}"),
+    })
+}
+
+#[allow(deprecated)]
+pub(crate) fn map_instruction_error(err: &InstructionError) -> Result<CompactInstructionError> {
+    Ok(match err {
+        InstructionError::GenericError => CompactInstructionError::GenericError,
+        InstructionError::InvalidArgument => CompactInstructionError::InvalidArgument,
+        InstructionError::InvalidInstructionData => CompactInstructionError::InvalidInstructionData,
+        InstructionError::InvalidAccountData => CompactInstructionError::InvalidAccountData,
+        InstructionError::AccountDataTooSmall => CompactInstructionError::AccountDataTooSmall,
+        InstructionError::InsufficientFunds => CompactInstructionError::InsufficientFunds,
+        InstructionError::IncorrectProgramId => CompactInstructionError::IncorrectProgramId,
+        InstructionError::MissingRequiredSignature => {
+            CompactInstructionError::MissingRequiredSignature
+        }
+        InstructionError::AccountAlreadyInitialized => {
+            CompactInstructionError::AccountAlreadyInitialized
+        }
+        InstructionError::UninitializedAccount => CompactInstructionError::UninitializedAccount,
+        InstructionError::UnbalancedInstruction => CompactInstructionError::UnbalancedInstruction,
+        InstructionError::ModifiedProgramId => CompactInstructionError::ModifiedProgramId,
+        InstructionError::ExternalAccountLamportSpend => {
+            CompactInstructionError::ExternalAccountLamportSpend
+        }
+        InstructionError::ExternalAccountDataModified => {
+            CompactInstructionError::ExternalAccountDataModified
+        }
+        InstructionError::ReadonlyLamportChange => CompactInstructionError::ReadonlyLamportChange,
+        InstructionError::ReadonlyDataModified => CompactInstructionError::ReadonlyDataModified,
+        InstructionError::DuplicateAccountIndex => CompactInstructionError::DuplicateAccountIndex,
+        InstructionError::ExecutableModified => CompactInstructionError::ExecutableModified,
+        InstructionError::RentEpochModified => CompactInstructionError::RentEpochModified,
+        InstructionError::NotEnoughAccountKeys => CompactInstructionError::NotEnoughAccountKeys,
+        InstructionError::AccountDataSizeChanged => CompactInstructionError::AccountDataSizeChanged,
+        InstructionError::AccountNotExecutable => CompactInstructionError::AccountNotExecutable,
+        InstructionError::AccountBorrowFailed => CompactInstructionError::AccountBorrowFailed,
+        InstructionError::AccountBorrowOutstanding => {
+            CompactInstructionError::AccountBorrowOutstanding
+        }
+        InstructionError::DuplicateAccountOutOfSync => {
+            CompactInstructionError::DuplicateAccountOutOfSync
+        }
+        InstructionError::Custom(code) => CompactInstructionError::Custom(*code),
+        InstructionError::InvalidError => CompactInstructionError::InvalidError,
+        InstructionError::ExecutableDataModified => CompactInstructionError::ExecutableDataModified,
+        InstructionError::ExecutableLamportChange => {
+            CompactInstructionError::ExecutableLamportChange
+        }
+        InstructionError::ExecutableAccountNotRentExempt => {
+            CompactInstructionError::ExecutableAccountNotRentExempt
+        }
+        InstructionError::UnsupportedProgramId => CompactInstructionError::UnsupportedProgramId,
+        InstructionError::CallDepth => CompactInstructionError::CallDepth,
+        InstructionError::MissingAccount => CompactInstructionError::MissingAccount,
+        InstructionError::ReentrancyNotAllowed => CompactInstructionError::ReentrancyNotAllowed,
+        InstructionError::MaxSeedLengthExceeded => CompactInstructionError::MaxSeedLengthExceeded,
+        InstructionError::InvalidSeeds => CompactInstructionError::InvalidSeeds,
+        InstructionError::InvalidRealloc => CompactInstructionError::InvalidRealloc,
+        InstructionError::ComputationalBudgetExceeded => {
+            CompactInstructionError::ComputationalBudgetExceeded
+        }
+        InstructionError::PrivilegeEscalation => CompactInstructionError::PrivilegeEscalation,
+        InstructionError::ProgramEnvironmentSetupFailure => {
+            CompactInstructionError::ProgramEnvironmentSetupFailure
+        }
+        InstructionError::ProgramFailedToComplete => {
+            CompactInstructionError::ProgramFailedToComplete
+        }
+        InstructionError::ProgramFailedToCompile => CompactInstructionError::ProgramFailedToCompile,
+        InstructionError::Immutable => CompactInstructionError::Immutable,
+        InstructionError::IncorrectAuthority => CompactInstructionError::IncorrectAuthority,
+        InstructionError::BorshIoError => CompactInstructionError::BorshIoError(String::new()),
+        InstructionError::AccountNotRentExempt => CompactInstructionError::AccountNotRentExempt,
+        InstructionError::InvalidAccountOwner => CompactInstructionError::InvalidAccountOwner,
+        InstructionError::ArithmeticOverflow => CompactInstructionError::ArithmeticOverflow,
+        InstructionError::UnsupportedSysvar => CompactInstructionError::UnsupportedSysvar,
+        InstructionError::IllegalOwner => CompactInstructionError::IllegalOwner,
+        InstructionError::MaxAccountsDataAllocationsExceeded => {
+            CompactInstructionError::MaxAccountsDataAllocationsExceeded
+        }
+        InstructionError::MaxAccountsExceeded => CompactInstructionError::MaxAccountsExceeded,
+        InstructionError::MaxInstructionTraceLengthExceeded => {
+            CompactInstructionError::MaxInstructionTraceLengthExceeded
+        }
+        InstructionError::BuiltinProgramsMustConsumeComputeUnits => {
+            CompactInstructionError::BuiltinProgramsMustConsumeComputeUnits
+        }
+        InstructionError::BailOut => {
+            bail!("instruction error BailOut has no compact encoding");
+        }
+        other => bail!("unsupported instruction error {other:?}"),
+    })
+}
+
+fn decode_hash(text: &str, what: &str) -> Result<[u8; 32]> {
+    decode_key(text, what)
+}
+
+fn decode_key(text: &str, what: &str) -> Result<[u8; 32]> {
+    if text.is_empty() {
+        bail!("{what} is empty");
+    }
+    let bytes = bs58::decode(text)
+        .into_vec()
+        .with_context(|| format!("{what} is not base58"))?;
+    <[u8; 32]>::try_from(bytes).map_err(|_| anyhow!("{what} is not 32 bytes"))
+}
+
+fn decode_optional_key(text: &str, what: &str) -> Result<Option<[u8; 32]>> {
+    if text.is_empty() {
+        Ok(None)
+    } else {
+        decode_key(text, what).map(Some)
+    }
+}
+
+fn copy32(bytes: &[u8]) -> Result<[u8; 32]> {
+    <[u8; 32]>::try_from(bytes).map_err(|_| anyhow!("key is not 32 bytes"))
+}
+
+fn copy64(bytes: &[u8]) -> Result<[u8; 64]> {
+    <[u8; 64]>::try_from(bytes).map_err(|_| anyhow!("signature is not 64 bytes"))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use solana_entry::block_component::{BlockHeaderV1, VersionedBlockMarker};
+    use solana_hash::Hash;
+
+    #[test]
+    fn parallel_slot_loads_stay_in_order_and_run_once() {
+        use std::sync::Mutex;
+        use std::time::Duration;
+
+        let seen = Mutex::new(Vec::new());
+        let load = |slot| {
+            seen.lock().expect("seen").push(slot);
+            std::thread::sleep(Duration::from_millis((slot % 5) * 2));
+            if slot == 9 {
+                bail!("slot 9 failed");
+            }
+            Ok(slot)
+        };
+        let got = with_ordered_loads(
+            4,
+            &load,
+            |loads| {
+                for slot in 0..16 {
+                    loads.submit(slot)?;
+                }
+                let mut got = Vec::new();
+                for slot in 0..9 {
+                    got.push(loads.take(slot)?);
+                }
+                let error = loads.take(9).unwrap_err();
+                assert!(error.to_string().contains("slot 9 failed"), "{error:#}");
+                Ok(got)
+            },
+        )
+        .unwrap();
+        assert_eq!(got, (0..9).collect::<Vec<_>>());
+        let mut seen = seen.into_inner().expect("seen");
+        seen.sort();
+        assert_eq!(seen, (0..16).collect::<Vec<_>>());
+    }
+
+    #[test]
+    fn one_read_thread_loads_on_the_caller() {
+        let load = |slot| Ok(slot + 1);
+        let value = with_ordered_loads(1, &load, |loads| loads.take(4)).unwrap();
+        assert_eq!(value, 5);
+    }
+
+    #[test]
+    fn read_only_options_do_not_create_a_ledger() {
+        let dir = tempfile::tempdir().unwrap();
+        let error = read_only_options(dir.path()).unwrap_err();
+        assert!(error.to_string().contains("does not exist"), "{error:#}");
+        assert!(!dir.path().join(BLOCKSTORE_DIRECTORY_ROCKS_LEVEL).exists());
+    }
+
+    #[test]
+    fn read_only_options_require_readonly_access() {
+        let dir = tempfile::tempdir().unwrap();
+        let rocks = dir.path().join(BLOCKSTORE_DIRECTORY_ROCKS_LEVEL);
+        std::fs::create_dir(&rocks).unwrap();
+        let options = read_only_options(dir.path()).unwrap();
+        assert_eq!(options.access_type, AccessType::ReadOnly);
+        assert!(reject_non_readonly(&AccessType::Primary).is_err());
+        assert!(reject_non_readonly(&AccessType::PrimaryForMaintenance).is_err());
+        assert!(reject_non_readonly(&AccessType::ReadOnly).is_ok());
+    }
+
+    #[test]
+    fn agave_header_marker_roundtrips_the_parent_block_id() {
+        let parent = [0x3c; 32];
+        let marker = VersionedBlockMarker::from_block_header(BlockHeaderV1 {
+            parent_slot: 40,
+            parent_block_id: Hash::new_from_array(parent),
+        });
+        let bytes = wincode::serialize(&marker).unwrap();
+        assert_eq!(
+            of_car_reader::blockmarker::parent_consensus_block_id(&[bytes]),
+            Some(parent)
+        );
+    }
+
+    #[test]
+    fn known_transaction_error_maps_and_bailout_fails() {
+        assert!(matches!(
+            map_transaction_error(&TransactionError::AccountInUse).unwrap(),
+            CompactTransactionError::AccountInUse
+        ));
+        assert!(map_transaction_error(&TransactionError::BailOut).is_err());
+        assert!(map_instruction_error(&InstructionError::BailOut).is_err());
+        assert!(matches!(
+            map_instruction_error(&InstructionError::BorshIoError).unwrap(),
+            CompactInstructionError::BorshIoError(ref message) if message.is_empty()
+        ));
+    }
+
+    #[test]
+    fn a_slot_that_is_not_root_has_no_readable_footer() {
+        assert!(!in_window_footer_is_readable(false, false));
+        assert!(!in_window_footer_is_readable(false, true));
+        assert!(!in_window_footer_is_readable(true, false));
+        assert!(in_window_footer_is_readable(true, true));
+    }
+
+    #[test]
+    fn epoch_zero_and_epoch_1079_have_fixed_slot_ranges() {
+        assert_eq!(epoch_slot_range(0).unwrap(), (0, 431_999));
+        assert_eq!(
+            epoch_slot_range(1079).unwrap(),
+            (466_128_000, 466_559_999)
+        );
+        assert_eq!(
+            epoch_output_dir(Path::new("/home/sol/ledger-archive-out"), 0),
+            PathBuf::from("/home/sol/ledger-archive-out/epoch-0")
+        );
+        assert_eq!(
+            epoch_output_dir(Path::new("/home/sol/ledger-archive-out"), 1079),
+            PathBuf::from("/home/sol/ledger-archive-out/epoch-1079")
+        );
+    }
+
+    #[test]
+    fn an_epoch_that_overflows_u64_is_refused() {
+        let error = epoch_slot_range(u64::MAX).unwrap_err();
+        assert!(error.to_string().contains("epoch start overflows"), "{error:#}");
+
+        let epoch = u64::MAX / SLOTS_PER_EPOCH;
+        let start_slot = epoch * SLOTS_PER_EPOCH;
+        let result = epoch_slot_range(epoch);
+        if start_slot <= u64::MAX - (SLOTS_PER_EPOCH - 1) {
+            assert_eq!(
+                result.unwrap(),
+                (start_slot, start_slot + SLOTS_PER_EPOCH - 1)
+            );
+        } else {
+            let error = result.unwrap_err();
+            assert!(error.to_string().contains("epoch end overflows"), "{error:#}");
+        }
+    }
+
+    #[test]
+    fn an_epoch_must_sit_between_the_first_stored_slot_and_the_last_root() {
+        let error = ensure_epoch_is_stored(1078, 465_696_000, 466_127_999, 465_818_301, 468_118_000)
+            .unwrap_err();
+        assert!(
+            error.to_string().contains("starts at slot 465696000")
+                && error.to_string().contains("ledger starts at slot 465818301"),
+            "{error:#}"
+        );
+
+        let error = ensure_epoch_is_stored(1083, 467_856_000, 468_287_999, 465_818_301, 468_118_000)
+            .unwrap_err();
+        assert!(
+            error.to_string().contains("ends at slot 468287999")
+                && error.to_string().contains("last root is slot 468118000"),
+            "{error:#}"
+        );
+
+        ensure_epoch_is_stored(1079, 466_128_000, 466_559_999, 465_818_301, 468_118_000).unwrap();
+        ensure_epoch_is_stored(1079, 466_128_000, 466_559_999, 466_128_000, 466_559_999).unwrap();
+    }
+
+    #[test]
+    fn a_published_archive_file_blocks_a_new_epoch_directory() {
+        let dir = tempfile::tempdir().unwrap();
+        let output = epoch_output_dir(dir.path(), 1079);
+        ensure_no_published_archive_file(&output).unwrap();
+        std::fs::create_dir_all(&output).unwrap();
+        std::fs::write(output.join(format!("{ARCHIVE_V2_BLOCKS_FILE}.tmp")), b"partial").unwrap();
+        ensure_no_published_archive_file(&output).unwrap();
+        std::fs::write(output.join(ARCHIVE_V2_BLOCKS_FILE), b"x").unwrap();
+        let error = ensure_no_published_archive_file(&output).unwrap_err();
+        assert!(
+            error.to_string().contains("archive-v2-blocks.zstd"),
+            "{error:#}"
+        );
+    }
+
+    #[test]
+    fn reward_type_codes_keep_the_archive_numbers() {
+        assert_eq!(reward_type_code(Some(RewardType::Fee)), 1);
+        assert_eq!(reward_type_code(Some(RewardType::Rent)), 2);
+        assert_eq!(reward_type_code(Some(RewardType::Staking)), 3);
+        assert_eq!(reward_type_code(Some(RewardType::Voting)), 4);
+        assert_eq!(reward_type_code(Some(RewardType::DeactivatedStake)), 5);
+        assert_eq!(reward_type_code(Some(RewardType::VATDebit)), 6);
+    }
+}

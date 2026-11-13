@@ -1,0 +1,20 @@
+{
+  "$schema": "node_modules/wrangler/config-schema.json",
+  "name": "blockzilla-dev-watch",
+  "account_id": "4d69e0b71fb882e3d955c871a84a53c3",
+  "main": "src/index.ts",
+  "compatibility_date": "2026-10-12",
+  "compatibility_flags": ["nodejs_compat"],
+  "workers_dev": true,
+  "vars": {
+    "MACHINE_LABEL": "blockzilla-dev",
+    "TELEGRAM_BOT_USERNAME": "REMPLACER_NOM_DU_BOT",
+    "STREAM_URL": "https://stream.blockzilla.dev/v1/blockhashes"
+  },
+  "durable_objects": {
+    "bindings": [{ "name": "WATCH", "class_name": "FoundationWatch" }]
+  },
+  "migrations": [{ "tag": "v1", "new_sqlite_classes": ["FoundationWatch"] }],
+  "triggers": { "crons": ["* * * * *"] },
+  "observability": { "enabled": true, "head_sampling_rate": 1 }
+}

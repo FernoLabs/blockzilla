@@ -2012,6 +2012,8 @@ mod tests {
             tx_rows: Vec::new(),
             message_bytes,
             metadata_bytes,
+            consensus_block_id: None,
+            block_markers: Vec::new(),
         }
     }
 

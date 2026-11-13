@@ -1784,6 +1784,8 @@ impl From<LegacyHotBlockWithShredding> for ArchiveV2HotBlockBlob {
             tx_rows: value.tx_rows,
             message_bytes: value.message_bytes,
             metadata_bytes: value.metadata_bytes,
+            consensus_block_id: None,
+            block_markers: Vec::new(),
         }
     }
 }
@@ -1808,6 +1810,8 @@ impl From<LegacyHotBlockWithRewardsVec> for ArchiveV2HotBlockBlob {
             tx_rows: value.tx_rows,
             message_bytes: value.message_bytes,
             metadata_bytes: value.metadata_bytes,
+            consensus_block_id: None,
+            block_markers: Vec::new(),
         }
     }
 }
@@ -6841,6 +6845,9 @@ fn rewrite_source_block_with_scratch(
                 tx_rows: std::mem::take(&mut scratch.rows),
                 message_bytes: std::mem::take(&mut scratch.target_messages),
                 metadata_bytes: std::mem::take(&mut scratch.target_metadata),
+
+                consensus_block_id: None,
+                block_markers: Vec::new(),
             };
             (block, HotBlockOuterSchema::Current, access_references)
         }
@@ -12643,6 +12650,9 @@ mod tests {
             }],
             message_bytes,
             metadata_bytes: Vec::new(),
+
+            consensus_block_id: None,
+            block_markers: Vec::new(),
         };
         let encoded = wincode::config::serialize(&block, wincode_leb128_config()).unwrap();
         let compressed = zstd::bulk::compress(&encoded, 1).unwrap();
@@ -13466,6 +13476,9 @@ mod tests {
             }],
             message_bytes: Vec::new(),
             metadata_bytes,
+
+            consensus_block_id: None,
+            block_markers: Vec::new(),
         };
         let encoded = wincode::config::serialize(&block, wincode_leb128_config()).unwrap();
         let analysis = analyze_source_exclusions(compressed_test_input(encoded, 1, 0)).unwrap();
@@ -13489,6 +13502,9 @@ mod tests {
             tx_rows: Vec::new(),
             message_bytes: Vec::new(),
             metadata_bytes: Vec::new(),
+
+            consensus_block_id: None,
+            block_markers: Vec::new(),
         };
         let mut encoded = wincode::config::serialize(&block, wincode_leb128_config()).unwrap();
         encoded.push(0xa5);
@@ -13674,6 +13690,8 @@ mod tests {
             ],
             message_bytes: [first_message, second_message, raw_message].concat(),
             metadata_bytes: [successful, failed, raw_metadata].concat(),
+            consensus_block_id: None,
+            block_markers: Vec::new(),
         }
     }
 
@@ -14219,6 +14237,9 @@ mod tests {
             ],
             message_bytes: raw_messages.to_vec(),
             metadata_bytes: [encoded_metadata, raw_metadata.to_vec()].concat(),
+
+            consensus_block_id: None,
+            block_markers: Vec::new(),
         };
         let encoded = wincode::config::serialize(&block, wincode_leb128_config()).unwrap();
         let mut full: ArchiveV2HotBlockBlob = wincode::config::deserialize_exact(
@@ -14345,6 +14366,9 @@ mod tests {
             ],
             message_bytes: [message_bytes, raw_message.to_vec()].concat(),
             metadata_bytes: [metadata_bytes, raw_metadata.to_vec()].concat(),
+
+            consensus_block_id: None,
+            block_markers: Vec::new(),
         };
         let mut references = AccessReferenceSet::default();
         super::super::collect_access_blockhash_id(
@@ -14463,6 +14487,9 @@ mod tests {
             ],
             message_bytes: [first, second].concat(),
             metadata_bytes: Vec::new(),
+
+            consensus_block_id: None,
+            block_markers: Vec::new(),
         };
         let mut access = AccessReferenceSet::default();
 
@@ -14552,6 +14579,9 @@ mod tests {
             tx_rows: Vec::new(),
             message_bytes: Vec::new(),
             metadata_bytes: Vec::new(),
+
+            consensus_block_id: None,
+            block_markers: Vec::new(),
         };
         let mut classes = Vec::new();
         rewrite_block_pubkeys(&mut block, TEST_WIRE_PROFILE, |_key, class| {

@@ -242,6 +242,8 @@ fn block(slot: u64, message: Vec<u8>, metadata: Vec<u8>, flags: u32) -> ArchiveV
         }],
         message_bytes: message,
         metadata_bytes: metadata,
+        consensus_block_id: None,
+        block_markers: Vec::new(),
     }
 }
 

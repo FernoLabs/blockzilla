@@ -1422,6 +1422,9 @@ mod tests {
             }],
             message_bytes: message,
             metadata_bytes: metadata,
+
+            consensus_block_id: None,
+            block_markers: Vec::new(),
         };
         let uncompressed = wincode::config::serialize(&block, wincode_leb128_config()).unwrap();
         let compressed = zstd::bulk::compress(&uncompressed, 3).unwrap();

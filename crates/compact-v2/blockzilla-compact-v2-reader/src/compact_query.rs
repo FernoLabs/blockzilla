@@ -3823,6 +3823,9 @@ mod tests {
                     tx_rows: rows,
                     message_bytes: messages,
                     metadata_bytes: metadata,
+
+                    consensus_block_id: None,
+                    block_markers: Vec::new(),
                 };
                 let uncompressed =
                     wincode::config::serialize(&blob, wincode_leb128_config()).unwrap();

@@ -2165,6 +2165,9 @@ mod tests {
                 tx_rows,
                 message_bytes: vec![0; 3],
                 metadata_bytes: Vec::new(),
+
+                consensus_block_id: None,
+                block_markers: Vec::new(),
             },
         };
 

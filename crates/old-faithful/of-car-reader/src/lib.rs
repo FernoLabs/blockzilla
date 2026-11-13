@@ -167,6 +167,7 @@
 //!
 //! - `archive` opens a complete local or HTTP CAR epoch through the common
 //!   ordered query interface when the `archive` feature is enabled.
+//! - [`blockmarker`] parses Alpenglow block markers stored in a CAR `SlotMeta`.
 //! - [`node`] decodes Old Faithful CBOR nodes and peeks node kinds.
 //! - [`slot_ranges`] reads and writes worker slot range files.
 //! - [`genesis`] parses Solana genesis archives when the `genesis` feature is
@@ -176,6 +177,7 @@
 
 #[cfg(feature = "archive")]
 pub mod archive;
+pub mod blockmarker;
 pub mod car_block_group;
 pub mod car_stream;
 #[cfg(feature = "compact-index")]

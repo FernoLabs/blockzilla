@@ -423,6 +423,9 @@ mod incremental_pipeline_regressions {
                     .collect(),
                 message_bytes: vec![0; transactions_per_block as usize],
                 metadata_bytes: Vec::new(),
+
+                consensus_block_id: None,
+                block_markers: Vec::new(),
             };
             let uncompressed = wincode::config::serialize(&block, wincode_leb128_config()).unwrap();
             let compressed = zstd::bulk::compress(&uncompressed, 1).unwrap();

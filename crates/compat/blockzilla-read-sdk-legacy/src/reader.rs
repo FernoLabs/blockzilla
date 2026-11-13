@@ -4515,6 +4515,9 @@ mod tests {
                 ],
                 message_bytes: first_messages,
                 metadata_bytes: Vec::new(),
+
+                consensus_block_id: None,
+                block_markers: Vec::new(),
             };
 
             let second_message = ArchiveV2HotMessagePayload::V0(ArchiveV2HotV0Message {
@@ -4569,6 +4572,9 @@ mod tests {
                 }],
                 message_bytes: second_message,
                 metadata_bytes: second_metadata,
+
+                consensus_block_id: None,
+                block_markers: Vec::new(),
             };
 
             let first_uncompressed =
@@ -5106,6 +5112,9 @@ mod tests {
                 tx_rows: vec![row],
                 message_bytes: message,
                 metadata_bytes: vec![],
+
+                consensus_block_id: None,
+                block_markers: Vec::new(),
             },
         };
         let filter = archive.compile_pubkey_filter([RAW_KEY]).unwrap();
@@ -6804,6 +6813,9 @@ mod tests {
                 tx_rows: rows,
                 message_bytes,
                 metadata_bytes: vec![0xaa],
+
+                consensus_block_id: None,
+                block_markers: Vec::new(),
             },
         };
         let scanned = archive.scan_decoded_block(&filter, decoded).unwrap();
@@ -7035,6 +7047,9 @@ mod tests {
             tx_rows: vec![row],
             message_bytes: Vec::new(),
             metadata_bytes,
+
+            consensus_block_id: None,
+            block_markers: Vec::new(),
         };
 
         assert!(matches!(

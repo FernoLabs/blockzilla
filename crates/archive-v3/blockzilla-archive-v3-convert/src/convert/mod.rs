@@ -6385,6 +6385,9 @@ mod tests {
                 tx_rows: vec![tx],
                 message_bytes: Vec::new(),
                 metadata_bytes: Vec::new(),
+
+                consensus_block_id: None,
+                block_markers: Vec::new(),
             },
             transactions: vec![ResolvedSourceTransaction {
                 payload,

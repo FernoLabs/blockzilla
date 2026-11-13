@@ -127,6 +127,9 @@ fn fixture_with_tokens(loaded: bool, failed: bool, id: u32, tokens: bool) -> Vec
         }],
         message_bytes,
         metadata_bytes,
+
+        consensus_block_id: None,
+        block_markers: Vec::new(),
     };
     let raw = wincode::config::serialize(&block, wincode_leb128_config()).unwrap();
     let mut index = b"BZV2HIX1".to_vec();
