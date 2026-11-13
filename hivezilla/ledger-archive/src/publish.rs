@@ -35,7 +35,7 @@ pub(crate) const R2_PREFIX_ENV: &str = "R2_PREFIX";
 pub(crate) const R2_REGION_ENV: &str = "R2_REGION";
 const DEFAULT_REGION: &str = "auto";
 const PART_SIZE: u64 = 64 * 1024 * 1024;
-const PARALLEL_UPLOADS: usize = 4;
+const PARALLEL_UPLOADS: usize = 8;
 const UNSIGNED_PAYLOAD: &str = "UNSIGNED-PAYLOAD";
 const MAX_RESPONSE_BYTES: u64 = 1024 * 1024;
 const ATTEMPTS: u32 = 4;
@@ -735,12 +735,12 @@ mod tests {
     }
 
     #[test]
-    fn parallel_uploads_stay_within_four_and_stop_after_a_failure() {
+    fn parallel_uploads_stay_within_the_limit_and_stop_after_a_failure() {
         let current = AtomicUsize::new(0);
         let peak = AtomicUsize::new(0);
         let started = AtomicUsize::new(0);
         let release = std::sync::Barrier::new(PARALLEL_UPLOADS);
-        let error = run_parallel(8, PARALLEL_UPLOADS, |index| {
+        let error = run_parallel(PARALLEL_UPLOADS * 2, PARALLEL_UPLOADS, |index| {
             started.fetch_add(1, Ordering::SeqCst);
             let now = current.fetch_add(1, Ordering::SeqCst) + 1;
             peak.fetch_max(now, Ordering::SeqCst);
