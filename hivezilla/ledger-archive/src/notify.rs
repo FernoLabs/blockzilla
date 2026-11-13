@@ -1,7 +1,8 @@
 //! One Telegram line after a published epoch.
 //!
-//! Write the two defaults below. An empty token or an empty chat id sends
-//! nothing. The archive command still exits 0 when Telegram fails.
+//! `TELEGRAM_BOT_TOKEN` and `TELEGRAM_CHAT_ID` come from the process
+//! environment. An empty value sends nothing. A Telegram failure still
+//! returns success.
 
 use std::io::Write;
 use std::path::Path;
@@ -9,20 +10,20 @@ use std::process::{Command, Stdio};
 
 use anyhow::{Context, Result};
 
-/// Bot token from BotFather. Leave this empty to send nothing.
-pub(crate) const DEFAULT_TELEGRAM_BOT_TOKEN: &str = "8127218375:AAEP6oECzjqNaLaH2VHY_HA_7VYDuS4SL6Y";
-
-/// Channel id, for example "-100…". Leave this empty to send nothing.
-pub(crate) const DEFAULT_TELEGRAM_CHAT_ID: &str = "-4561803275";
+pub(crate) const TELEGRAM_BOT_TOKEN_ENV: &str = "TELEGRAM_BOT_TOKEN";
+pub(crate) const TELEGRAM_CHAT_ID_ENV: &str = "TELEGRAM_CHAT_ID";
 
 const CURL_ARGS: &[&str] = &["--config", "-"];
 
-pub(crate) fn notify_published_epoch(
-    epoch: u64,
-    output: &Path,
-    bot_token: &str,
-    chat_id: &str,
-) -> Result<()> {
+pub(crate) fn telegram_from_env() -> (String, String) {
+    (
+        std::env::var(TELEGRAM_BOT_TOKEN_ENV).unwrap_or_default(),
+        std::env::var(TELEGRAM_CHAT_ID_ENV).unwrap_or_default(),
+    )
+}
+
+pub(crate) fn notify_published_epoch(epoch: u64, output: &Path) -> Result<()> {
+    let (bot_token, chat_id) = telegram_from_env();
     let token = bot_token.trim();
     let chat = chat_id.trim();
     if !credentials_ready(token, chat) {
@@ -49,6 +50,32 @@ pub(crate) fn credentials_ready(bot_token: &str, chat_id: &str) -> bool {
 
 pub(crate) fn published_line(epoch: u64, size: &str) -> String {
     format!("✅ epoch {epoch} archived, size {size}")
+}
+
+pub(crate) fn sent_to_cf_line(epoch: u64, size: &str) -> String {
+    format!("✅ epoch {epoch} sent to CF, size {size}")
+}
+
+pub(crate) fn notify_sent_to_cf(epoch: u64, output: &Path) -> Result<()> {
+    let (bot_token, chat_id) = telegram_from_env();
+    let token = bot_token.trim();
+    let chat = chat_id.trim();
+    if !credentials_ready(token, chat) {
+        eprintln!("telegram: skipped, bot token or chat id is empty");
+        return Ok(());
+    }
+    let size = match directory_size(output) {
+        Ok(bytes) => format_size(bytes),
+        Err(err) => {
+            eprintln!("telegram: directory size: {err:#}");
+            "unknown".to_string()
+        }
+    };
+    let text = sent_to_cf_line(epoch, &size);
+    if let Err(err) = send_telegram(token, chat, &text) {
+        eprintln!("telegram: {}", redact(&format!("{err:#}"), token));
+    }
+    Ok(())
 }
 
 pub(crate) fn directory_size(path: &Path) -> Result<u64> {
@@ -146,6 +173,13 @@ mod tests {
     }
 
     #[test]
+    fn sent_to_cf_line_names_the_epoch_and_the_size() {
+        assert_eq!(
+            sent_to_cf_line(1084, "66.2 GiB"),
+            "✅ epoch 1084 sent to CF, size 66.2 GiB"
+        );
+    }
+
     fn format_size_uses_binary_units() {
         assert_eq!(format_size(0), "0 B");
         assert_eq!(format_size(1536), "1.5 KiB");

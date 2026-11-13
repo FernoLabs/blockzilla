@@ -68,7 +68,7 @@ pub(crate) fn open_read_only(ledger: &Path) -> Result<Blockstore> {
 
 pub(crate) const SLOTS_PER_EPOCH: u64 = 432_000;
 
-const EPOCH_ARCHIVE_FILES: [&str; 11] = [
+pub(crate) const EPOCH_ARCHIVE_FILES: [&str; 11] = [
     ARCHIVE_V2_BLOCKS_FILE,
     ARCHIVE_V2_SIGNATURES_FILE,
     ARCHIVE_V2_BLOCKHASH_REGISTRY_FILE,
