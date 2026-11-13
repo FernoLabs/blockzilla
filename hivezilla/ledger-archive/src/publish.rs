@@ -18,7 +18,7 @@ use std::time::Duration;
 use anyhow::{Context, Result, bail};
 use chrono::Utc;
 use reqwest::Method;
-use reqwest::blocking::{Body, Client, Response};
+use reqwest::blocking::{Body, Client};
 use reqwest::header::{HeaderMap, HeaderName, HeaderValue};
 use sha2::{Digest, Sha256};
 
@@ -679,7 +679,9 @@ mod tests {
             ("R2_SECRET_ACCESS_KEY", "secret"),
             ("R2_PREFIX", "compact-v2/blockzilla-20261004"),
         ]);
-        let error = resolve_settings(&missing).unwrap_err();
+        let Err(error) = resolve_settings(&missing) else {
+            panic!("missing R2_BUCKET was accepted");
+        };
         assert!(error.to_string().contains(R2_BUCKET_ENV), "{error:#}");
 
         let ready = lookup(&[
